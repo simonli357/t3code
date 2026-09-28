@@ -545,7 +545,56 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         }),
       );
 
-      it.effect("closes the app-server probe scope when provider status times out", () =>
+      it.effect("keeps a successful status when process cleanup crosses the probe deadline", () =>
+        Effect.gen(function* () {
+          const cleanedUp = yield* Ref.make(false);
+          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() =>
+                Effect.sleep("2 seconds").pipe(Effect.andThen(Ref.set(cleanedUp, true))),
+              );
+              yield* Effect.sleep("9 seconds");
+              return makeCodexProbeSnapshot();
+            }),
+          ).pipe(Effect.forkChild);
+
+          yield* TestClock.adjust("12 seconds");
+          const status = yield* Fiber.join(statusFiber);
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.isTrue(yield* Ref.get(cleanedUp));
+        }),
+      );
+
+      it.effect("retries a transient timeout after closing the first probe", () =>
+        Effect.gen(function* () {
+          let attempts = 0;
+          let cleanups = 0;
+          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.gen(function* () {
+              attempts += 1;
+              assert.strictEqual(cleanups, attempts - 1);
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  cleanups += 1;
+                }),
+              );
+              if (attempts === 1) return yield* Effect.never;
+              return makeCodexProbeSnapshot();
+            }),
+          ).pipe(Effect.forkChild);
+
+          yield* TestClock.adjust("11 seconds");
+          const status = yield* Fiber.join(statusFiber);
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.models[0]?.slug, "gpt-live-codex");
+          assert.strictEqual(attempts, 2);
+          assert.strictEqual(cleanups, 2);
+        }),
+      );
+
+      it.effect("closes both app-server probe scopes when provider status keeps timing out", () =>
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
           const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings).pipe(
@@ -554,7 +603,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           );
 
           yield* Effect.yieldNow;
-          yield* TestClock.adjust("11 seconds");
+          yield* TestClock.adjust("21 seconds");
           yield* Effect.yieldNow;
 
           const status = yield* Fiber.join(statusFiber);
@@ -563,7 +612,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             status.message,
             "Timed out while checking Codex app-server provider status.",
           );
-          assert.strictEqual(yield* Ref.get(killCalls), 1);
+          assert.strictEqual(yield* Ref.get(killCalls), 2);
         }),
       );
     });
