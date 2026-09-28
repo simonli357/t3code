@@ -6263,6 +6263,32 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("forks the complete native conversation without switching the original session", () => {
+    const calls: Array<Parameters<NonNullable<ClaudeAdapterLiveOptions["forkSession"]>>> = [];
+    const originalId = "550e8400-e29b-41d4-a716-446655440010";
+    const forkId = "550e8400-e29b-41d4-a716-446655440020";
+    const harness = makeHarness({
+      forkSession: async (...args) => {
+        calls.push(args);
+        return { sessionId: forkId };
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        cwd: "/tmp",
+        resumeCursor: { resume: originalId },
+      });
+      const before = yield* adapter.listSessions();
+      assert.deepEqual(yield* adapter.forkConversation!(THREAD_ID), { resume: forkId });
+      assert.deepEqual(calls, [[originalId, { dir: "/tmp" }]]);
+      assert.deepEqual(yield* adapter.listSessions(), before);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("rewinds a steered Claude turn after recovery and preserves fork boundaries", () => {
     const forkCalls: Array<Parameters<NonNullable<ClaudeAdapterLiveOptions["forkSession"]>>> = [];
     let firstTurnId = "";

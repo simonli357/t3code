@@ -1444,6 +1444,7 @@ const ThreadHistoryImportCommand = Schema.Struct({
       messageId: MessageId,
       role: Schema.Literals(["user", "assistant"]),
       text: Schema.String,
+      attachments: Schema.optional(Schema.Array(ChatAttachment)),
       createdAt: IsoDateTime,
     }),
   ).check(Schema.isNonEmpty()),

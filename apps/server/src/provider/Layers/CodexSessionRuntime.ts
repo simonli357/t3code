@@ -213,6 +213,10 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly forkConversation?: Effect.Effect<
+    { readonly threadId: string },
+    CodexSessionRuntimeError
+  >;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
     numTurns: number,
@@ -1219,6 +1223,23 @@ const readCodexHistoryMode = Effect.fn("readCodexHistoryMode")(function* (
     ),
   );
   return metadata.thread.historyMode;
+});
+
+const decodeForkedCodexThread = Schema.decodeUnknownEffect(
+  Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) }),
+);
+
+export const forkCodexThread = Effect.fn("forkCodexThread")(function* (
+  client: Pick<CodexHistoryClient, "raw">,
+  threadId: string,
+) {
+  const response = yield* client.raw.request("thread/fork", { threadId });
+  const fork = yield* decodeForkedCodexThread(response).pipe(
+    Effect.mapError((error) =>
+      CodexErrors.CodexAppServerRequestError.invalidPayload("thread/fork", "decode-payload", error),
+    ),
+  );
+  return { threadId: fork.thread.id };
 });
 
 export const readCodexThread = Effect.fn("readCodexThread")(function* (
@@ -2524,6 +2545,41 @@ export const makeCodexSessionRuntime = (
             turnId: effectiveTurnId,
           });
         }),
+      forkConversation: Effect.scoped(
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          // A fork owns a writer in the process that creates it. Unsubscribe
+          // only removes notifications; it does not release that writer. Use
+          // a short-lived app-server so its scope closes before the new T3
+          // runtime resumes the fork, without detaching the source session.
+          const forkChild = yield* spawner
+            .spawn(
+              ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+                cwd: options.cwd,
+                env,
+                extendEnv,
+                forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
+                shell: spawnCommand.shell,
+              }),
+            )
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new CodexErrors.CodexAppServerSpawnError({
+                    command: `${options.binaryPath} app-server`,
+                    cause,
+                  }),
+              ),
+            );
+          const forkContext = yield* Layer.build(CodexClient.layerChildProcess(forkChild));
+          const forkClient = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+            Effect.provide(forkContext),
+          );
+          yield* forkClient.request("initialize", buildCodexInitializeParams());
+          yield* forkClient.notify("initialized", undefined);
+          return yield* forkCodexThread(forkClient, providerThreadId);
+        }),
+      ),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
         return yield* readCodexThread(client, providerThreadId);
