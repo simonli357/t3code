@@ -614,17 +614,30 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     });
   }
 
-  const probeResult = yield* probe({
-    binaryPath: codexSettings.binaryPath,
-    homePath: codexSettings.homePath,
-    launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
-    cwd: process.cwd(),
-    customModels: codexSettings.customModels,
-    environment: resolvedEnvironment,
-    ...(managedAuth ? { skipNativeUsage: true } : {}),
-  }).pipe(
-    Effect.scoped,
+  const runProbe = Effect.suspend(() =>
+    probe({
+      binaryPath: codexSettings.binaryPath,
+      homePath: codexSettings.homePath,
+      launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
+      cwd: process.cwd(),
+      customModels: codexSettings.customModels,
+      environment: resolvedEnvironment,
+      ...(managedAuth ? { skipNativeUsage: true } : {}),
+    }),
+  ).pipe(
+    // Process shutdown must finish, but must not turn a successful reply into
+    // a timeout. Each attempt owns and closes its own app-server scope.
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
+    Effect.scoped,
+  );
+  const probeResult = yield* runProbe.pipe(
+    Effect.flatMap((snapshot) =>
+      Option.isNone(snapshot)
+        ? Effect.logDebug("Codex provider probe timed out; retrying with a fresh app-server.").pipe(
+            Effect.andThen(runProbe),
+          )
+        : Effect.succeed(snapshot),
+    ),
     Effect.result,
   );
 
