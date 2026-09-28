@@ -41,6 +41,19 @@ in a new thread's model picker to add or remove them. A regular click returns to
 single model. Choose a base branch and send. Each selection starts a separate thread
 and worktree while you stay in the new thread composer. This requires a Git project.
 
+## Fork a conversation
+
+On web and desktop, open a thread's menu and choose **Fork conversation**.
+For Codex and Claude, this creates and opens a separate conversation named
+**(fork)** with the history through the latest completed turn. Wait for a running
+turn to finish first. The fork keeps the original account, model, and permission
+mode; future messages in either conversation do not change the other.
+
+Both conversations use the same working folder and files. A conversation fork
+does not create a Git branch or worktree. Earlier tool activity cards and
+checkpoint diffs stay in the original thread; the agent retains its native
+conversation context. Delete the fork from its menu when you no longer need it.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

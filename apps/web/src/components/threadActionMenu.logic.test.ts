@@ -35,6 +35,16 @@ function allIds(state: ThreadActionMenuState): string[] {
 }
 
 describe("buildThreadActionMenuItems", () => {
+  it("offers forks only for capable environments and disables them during a turn", () => {
+    expect(ids(baseState)).not.toContain("fork-conversation");
+    const supports = { ...baseState.supports, forking: true };
+    expect(ids({ ...baseState, supports })).toContain("fork-conversation");
+    expect(
+      buildThreadActionMenuItems({ ...baseState, supports, isRunning: true }).find(
+        (item) => item.id === "fork-conversation",
+      )?.disabled,
+    ).toBe(true);
+  });
   it("hides lifecycle items when the environment lacks the capabilities", () => {
     expect(
       ids({

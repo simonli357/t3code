@@ -1,3 +1,4 @@
+import { useForkConversation } from "../hooks/useForkConversation";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -132,6 +133,7 @@ import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
+  readThreadSupportsForking,
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
@@ -2944,6 +2946,7 @@ export default function Sidebar() {
   threadByKeyRef.current = threadByKey;
   // handleNewThread is inherently unstable (depends on the projects list);
   // a ref keeps it out of attemptSettle's dependency array.
+  const forkConversation = useForkConversation();
   const handleNewThreadRef = useRef(newThreadContext.handleNewThread);
   handleNewThreadRef.current = newThreadContext.handleNewThread;
   const settledThreadKeys = useMemo(
@@ -4235,6 +4238,7 @@ export default function Sidebar() {
               isRunning:
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
+                forking: readThreadSupportsForking(threadRef),
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
@@ -4256,6 +4260,9 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "fork-conversation":
+            await forkConversation(threadRef);
+            return;
           case "filter-by-project":
             // This item is the only scope control here, so picking the
             // already-scoped project again is the way back to all projects.
@@ -4432,6 +4439,7 @@ export default function Sidebar() {
       })();
     },
     [
+      forkConversation,
       archiveThread,
       attemptPin,
       attemptSettle,

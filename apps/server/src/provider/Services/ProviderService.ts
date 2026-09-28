@@ -124,6 +124,8 @@ export interface ProviderServiceShape {
   /**
    * Upload a thread and return the provider's shareable feedback identifier.
    */
+  readonly forkConversation: (threadId: ThreadId) => Effect.Effect<unknown, ProviderServiceError>;
+
   readonly uploadFeedback: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, ProviderServiceError>;

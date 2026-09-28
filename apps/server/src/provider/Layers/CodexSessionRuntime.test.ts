@@ -22,12 +22,37 @@ import {
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
   readCodexThread,
+  forkCodexThread,
   rollbackCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("Codex thread history", () => {
+  it.effect("decodes the new native fork identity", () =>
+    Effect.gen(function* () {
+      const client: Parameters<typeof forkCodexThread>[0] = {
+        raw: {
+          request: (method, params) =>
+            Effect.sync(() => {
+              NodeAssert.equal(method, "thread/fork");
+              NodeAssert.deepEqual(params, { threadId: "source" });
+              return { thread: { id: "fork", turns: [] } };
+            }),
+        },
+      };
+      NodeAssert.deepEqual(yield* forkCodexThread(client, "source"), { threadId: "fork" });
+    }),
+  );
+  it.effect("rejects a fork response without a native identity", () =>
+    Effect.gen(function* () {
+      const client: Parameters<typeof forkCodexThread>[0] = {
+        raw: { request: () => Effect.succeed({ thread: {} }) },
+      };
+      const result = yield* Effect.result(forkCodexThread(client, "source"));
+      NodeAssert.equal(result._tag, "Failure");
+    }),
+  );
   for (const numTurns of [1, 2, 3, 5]) {
     it.effect(`reverts ${numTurns} paginated turns at the durable boundary`, () =>
       Effect.gen(function* () {

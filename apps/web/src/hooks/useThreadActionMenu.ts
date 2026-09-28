@@ -1,3 +1,4 @@
+import { useForkConversation } from "./useForkConversation";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { scopeProjectRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
@@ -21,6 +22,7 @@ import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsAutoSettleOptOut,
+  readThreadSupportsForking,
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
@@ -70,6 +72,7 @@ export function useThreadActionMenu(input: {
 }) {
   const { threadRef, projectCwd, onStartRename } = input;
   const router = useRouter();
+  const forkConversation = useForkConversation();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -133,6 +136,7 @@ export function useThreadActionMenu(input: {
         if (!thread) return;
         const now = new Date();
         const supports = {
+          forking: readThreadSupportsForking(threadRef),
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
@@ -181,6 +185,9 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "fork-conversation":
+            await forkConversation(threadRef);
+            return;
           case "project-settings": {
             const project = projects.find(
               (candidate) =>
@@ -335,6 +342,7 @@ export function useThreadActionMenu(input: {
       copyThreadIdToClipboard,
       deleteThread,
       handleNewThread,
+      forkConversation,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,

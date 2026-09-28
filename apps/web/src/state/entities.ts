@@ -228,6 +228,13 @@ export function readEnvironmentSupportsTitleRegeneration(environmentId: Environm
   );
 }
 
+export function readEnvironmentSupportsForking(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadForking === true
+  );
+}
+
 /** Whether the environment's server understands thread.pin.reorder (and
     orderKey on thread.pin). Same version-skew contract as settlement. */
 export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId): boolean {
@@ -261,4 +268,16 @@ export function readEnvironmentThreadRefs(
 
 export function readThreadShells(): ReadonlyArray<EnvironmentThreadShell> {
   return appAtomRegistry.get(environmentThreadShells.threadShellsAtom);
+}
+
+/** Native forks stay in the account that owns the source conversation. */
+export function readThreadSupportsForking(threadRef: ScopedThreadRef): boolean {
+  const thread = readThreadShell(threadRef);
+  if (!thread || !readEnvironmentSupportsForking(threadRef.environmentId)) return false;
+  const instanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+  const provider = appAtomRegistry
+    .get(environmentServerConfigsAtom)
+    .get(threadRef.environmentId)
+    ?.providers.find((entry) => entry.instanceId === instanceId);
+  return provider?.driver === "codex" || provider?.driver === "claudeAgent";
 }

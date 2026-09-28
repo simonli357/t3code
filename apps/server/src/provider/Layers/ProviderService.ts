@@ -2298,6 +2298,38 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (threadId) {
+      let routed = yield* resolveRoutableSession({
+        threadId,
+        operation: "forkConversation",
+        allowRecovery: false,
+      });
+      if (!routed.adapter.forkConversation) {
+        return yield* toValidationError(
+          "forkConversation",
+          "This provider does not support conversation forks.",
+        );
+      }
+      if (!routed.isActive) {
+        routed = yield* resolveRoutableSession({
+          threadId,
+          operation: "forkConversation",
+          allowRecovery: true,
+        });
+      }
+      return yield* routed.adapter.forkConversation!(threadId).pipe(
+        Effect.timeout("60 seconds"),
+        Effect.catchTag("TimeoutError", () =>
+          toValidationError(
+            "forkConversation",
+            "The provider took too long to fork this conversation.",
+          ),
+        ),
+      );
+    },
+  );
+
   const uploadFeedback: ProviderServiceMethod<"uploadFeedback"> = Effect.fn("uploadFeedback")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -2462,6 +2494,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getInstanceInfo,
     assertConversationRollbackSupported,
     rollbackConversation,
+    forkConversation,
     uploadFeedback,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

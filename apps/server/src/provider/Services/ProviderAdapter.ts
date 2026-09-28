@@ -129,6 +129,9 @@ export interface ProviderAdapterShape<TError> {
   /**
    * Read a provider thread snapshot.
    */
+  /** Create an independent native history without sending a turn. */
+  readonly forkConversation?: (threadId: ThreadId) => Effect.Effect<unknown, TError>;
+
   readonly readThread: (threadId: ThreadId) => Effect.Effect<ProviderThreadSnapshot, TError>;
 
   /**

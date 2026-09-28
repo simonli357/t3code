@@ -2809,6 +2809,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     sendTurn,
     compaction: { type: "native", start: compactThread },
     interruptTurn,
+    forkConversation: Effect.fn("CodexAdapter.forkConversation")(function* (threadId: ThreadId) {
+      const session = yield* requireSession(threadId);
+      if (!session.runtime.forkConversation) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/fork",
+          detail: "Codex runtime does not support forks.",
+        });
+      }
+      return yield* session.runtime.forkConversation.pipe(
+        Effect.mapError((cause) => mapCodexRuntimeError(threadId, "thread/fork", cause)),
+      );
+    }),
     readThread,
     rollbackThread,
     uploadFeedback,
