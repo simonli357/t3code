@@ -172,6 +172,21 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         }
 
         if (
+          envelope.command.type === "thread.turn.start" &&
+          envelope.command.expectedThreadSequence !== undefined &&
+          (yield* eventStore.hasEventAfter({
+            aggregateKind: "thread",
+            aggregateId: envelope.command.threadId,
+            sequenceExclusive: envelope.command.expectedThreadSequence,
+          }))
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: "Worker dispatch precondition changed; retry after reading current state.",
+          });
+        }
+
+        if (
           envelope.command.type === "thread.auto-settle" &&
           (yield* eventStore.hasEventAfter({
             aggregateKind: "thread",

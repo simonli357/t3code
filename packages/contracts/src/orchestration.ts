@@ -1335,6 +1335,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  expectedThreadSequence: Schema.optional(NonNegativeInt),
   createdAt: IsoDateTime,
 });
 

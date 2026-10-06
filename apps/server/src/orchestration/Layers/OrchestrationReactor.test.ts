@@ -1,3 +1,4 @@
+import * as WorkerControls from "../WorkerControls.ts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -32,6 +33,7 @@ describe("OrchestrationReactor", () => {
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
+        Layer.provide(Layer.mock(WorkerControls.WorkerControls)({ start: () => Effect.void })),
         Layer.provideMerge(
           Layer.succeed(StorageCleanup, {
             start: () => {

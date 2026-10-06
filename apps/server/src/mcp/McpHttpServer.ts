@@ -1,3 +1,4 @@
+import * as WorkersToolkit from "./toolkits/workers/tools.ts";
 import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -668,6 +669,7 @@ const McpTransportLive = McpServer.layerHttp({
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
 export const layer = Layer.mergeAll(
+  McpServer.toolkit(WorkersToolkit.WorkersToolkit).pipe(Layer.provide(WorkersToolkit.handlers)),
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,

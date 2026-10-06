@@ -54,6 +54,24 @@ does not create a Git branch or worktree. Earlier tool activity cards and
 checkpoint diffs stay in the original thread; the agent retains its native
 conversation context. Delete the fork from its menu when you no longer need it.
 
+## Manage forked workers
+
+In this custom build, an agent running in T3 can create and manage workers through
+T3's worker tools. Ask it to follow your project's worker skill and specify the
+account and model. The skill selects the prepared base and reasoning settings.
+Each worker inherits its base conversation and reports to the agent that created it.
+
+The master can read new output and send corrections to the same worker. Follow-ups
+queue while the worker is busy. Completion and input-request reports wait until
+the master is idle, then start a master turn. Ownership, queued assignments, and
+read positions survive a server restart. A completed turn still needs the master
+to check the task's acceptance criteria.
+
+Ask the master to pause worker reports or cancel a queued assignment when needed.
+Use the worker thread's **Stop** control to stop running work. Workers appear as
+ordinary threads; earlier standalone forks are not automatically assigned to a
+master. Automatic reports require the master to run inside T3.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.
