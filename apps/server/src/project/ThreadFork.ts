@@ -39,8 +39,10 @@ function isBusy(thread: OrchestrationThread) {
   return (
     thread.session?.activeTurnId != null ||
     thread.session?.status === "starting" ||
+    thread.session?.status === "running" ||
     thread.latestTurn?.state === "running" ||
-    thread.messages.some((message) => message.streaming)
+    // Historical streaming flags can survive after a turn has finished.
+    (thread.latestTurn == null && thread.messages.some((message) => message.streaming))
   );
 }
 

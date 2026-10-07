@@ -7,6 +7,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -219,6 +220,59 @@ it.layer(testLayer)("conversation fork", (it) => {
             ),
           );
           expect(rejected._tag).toBe("Failure");
+          const historicalId = ThreadId.make(`historical-${instance}`);
+          const finished = {
+            ...before,
+            latestTurn: {
+              turnId: TurnId.make("finished-turn"),
+              state: "completed" as const,
+              requestedAt: createdAt,
+              startedAt: createdAt,
+              completedAt: createdAt,
+              assistantMessageId: null,
+            },
+            messages: before.messages.map((m) => ({
+              ...m,
+              streaming: true,
+              turnId: TurnId.make("old-turn"),
+            })),
+          };
+          const withSource = (source: typeof finished) => ({
+            ...snapshots,
+            getThreadDetailById: (id: ThreadId) =>
+              id === sourceId
+                ? Effect.succeed(Option.some(source))
+                : snapshots.getThreadDetailById(id),
+          });
+          yield* forkThread({ sourceThreadId: sourceId, threadId: historicalId }).pipe(
+            Effect.provide(providerLayer),
+            Effect.provideService(ProjectionSnapshotQuery, withSource(finished)),
+          );
+          expect(nativeCalls).toBe(2);
+          expect(
+            Option.getOrThrow(yield* snapshots.getThreadDetailById(historicalId)).messages,
+          ).toHaveLength(2);
+          const runningSource = {
+            ...finished,
+            latestTurn: { ...finished.latestTurn, state: "running" as const, completedAt: null },
+          };
+          const runningResult = yield* Effect.result(
+            forkThread({
+              sourceThreadId: sourceId,
+              threadId: ThreadId.make(`running-${instance}`),
+            }).pipe(
+              Effect.provide(providerLayer),
+              Effect.provideService(ProjectionSnapshotQuery, {
+                ...snapshots,
+                getThreadDetailById: (id) =>
+                  id === sourceId
+                    ? Effect.succeed(Option.some(runningSource))
+                    : snapshots.getThreadDetailById(id),
+              }),
+            ),
+          );
+          expect(runningResult._tag).toBe("Failure");
+          expect(nativeCalls).toBe(2);
         }),
     );
   }
