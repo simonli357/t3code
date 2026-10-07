@@ -1,5 +1,6 @@
 import type {
   ModelSelection,
+  OrchestrationSession,
   PreviewAnnotationPayload,
   ProviderInteractionMode,
   RuntimeMode,
@@ -243,6 +244,19 @@ export function latestCompletedToolActivityId(
     }
   }
   return latest?.id ?? null;
+}
+
+/** A provider switch must wait for turn completion, even at a tool boundary. */
+export function queuedProviderSwitchMustWait(
+  message: Pick<QueuedComposerMessage, "sendSettings"> | undefined,
+  session: Pick<OrchestrationSession, "status" | "providerInstanceId"> | null | undefined,
+): boolean {
+  return (
+    message !== undefined &&
+    session?.providerInstanceId != null &&
+    message.sendSettings.modelSelection.instanceId !== session.providerInstanceId &&
+    (session.status === "starting" || session.status === "running")
+  );
 }
 
 /**

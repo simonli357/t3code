@@ -385,12 +385,16 @@ function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
+    readonly pendingContextHandoff?: string;
     readonly continueAfterServerUpdate?: TurnId;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
   },
 ): Record<string, unknown> {
   return {
+    ...(extra?.pendingContextHandoff !== undefined
+      ? { pendingContextHandoff: extra.pendingContextHandoff }
+      : {}),
     cwd: session.cwd ?? null,
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
@@ -1081,6 +1085,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
     extra?: {
       readonly modelSelection?: unknown;
+      readonly pendingContextHandoff?: string;
       readonly continueAfterServerUpdate?: TurnId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
@@ -1097,7 +1102,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         providerInstanceId,
         runtimeMode: session.runtimeMode,
         status: toRuntimeStatus(session),
-        ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+        ...(extra?.pendingContextHandoff !== undefined
+          ? { resumeCursor: session.resumeCursor ?? null }
+          : session.resumeCursor !== undefined
+            ? { resumeCursor: session.resumeCursor }
+            : {}),
         runtimePayload: toRuntimePayloadFromSession(session, extra),
       });
     });
@@ -1462,6 +1471,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         if (
+          input.contextHandoff === undefined &&
           persistedBinding?.provider === resolvedProvider &&
           persistedBinding.providerInstanceId !== resolvedInstanceId &&
           (input.resumeCursor != null || persistedBinding.resumeCursor != null)
@@ -1482,10 +1492,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
         }
         const effectiveResumeCursor =
-          input.resumeCursor ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? persistedBinding.resumeCursor
-            : undefined);
+          input.contextHandoff !== undefined
+            ? undefined
+            : (input.resumeCursor ??
+              (persistedBinding?.provider === resolvedProvider
+                ? persistedBinding.resumeCursor
+                : undefined));
         const effectiveCwd =
           input.cwd ??
           (persistedBinding?.providerInstanceId === resolvedInstanceId
@@ -1525,6 +1537,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        // Compatible accounts share the native transcript. Release the old
+        // writer before opening it through the destination account.
+        if (
+          effectiveResumeCursor != null &&
+          persistedBinding?.providerInstanceId != null &&
+          persistedBinding.providerInstanceId !== resolvedInstanceId
+        ) {
+          const previousAdapter = yield* registry.getByInstance(
+            persistedBinding.providerInstanceId,
+          );
+          if (yield* previousAdapter.hasSession(threadId))
+            yield* previousAdapter.stopSession(threadId);
+        }
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
@@ -1532,7 +1557,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...input,
             providerInstanceId: resolvedInstanceId,
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
-            ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
+            resumeCursor: effectiveResumeCursor,
           })
           .pipe(Effect.onError(() => clearMcpSession(threadId)));
 
@@ -1554,6 +1579,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(input.contextHandoff !== undefined
+            ? { pendingContextHandoff: input.contextHandoff }
+            : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,
@@ -1735,6 +1763,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           allowRecovery: true,
         });
       }
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      const payload = binding?.runtimePayload;
+      const handoff =
+        payload &&
+        typeof payload === "object" &&
+        "pendingContextHandoff" in payload &&
+        typeof payload.pendingContextHandoff === "string"
+          ? payload.pendingContextHandoff
+          : undefined;
+      if (handoff) {
+        const withHistory = `${handoff}\n\n[Current user request]\n${input.input ?? "Continue with the attached request."}`;
+        if (withHistory.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+          return yield* toValidationError(
+            "ProviderService.sendTurn",
+            "Current request plus conversation handoff is too large. Shorten the request and resend.",
+          );
+        }
+        input.input = withHistory;
+      }
       metricProvider = routed.adapter.provider;
       metricModel = input.modelSelection?.model;
       yield* Effect.annotateCurrentSpan({
@@ -1804,6 +1851,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           // Admission and marker consumption must survive the same restart.
           continueAfterServerUpdate: null,
           continueAfterServerUpdatePrepared: null,
+          pendingContextHandoff: null,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
         },

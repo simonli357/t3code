@@ -2604,12 +2604,16 @@ export default function ChatView(props: ChatViewProps) {
     activeThread?.modelSelection.instanceId ??
     activeProjectDefaultModelSelection?.instanceId ??
     null;
-  const lockedProvider = deriveLockedProvider({
-    thread: activeThread,
-    selectedProvider: selectedProviderByThreadId,
-    threadProvider,
-    providers: providerStatuses,
-  });
+  const supportsProviderSwitching =
+    serverConfig?.environment.capabilities.providerSwitching === true;
+  const lockedProvider = supportsProviderSwitching
+    ? null
+    : deriveLockedProvider({
+        thread: activeThread,
+        selectedProvider: selectedProviderByThreadId,
+        threadProvider,
+        providers: providerStatuses,
+      });
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
   const attachmentEnvironmentConfig = environmentById.get(environmentId)?.serverConfig ?? null;
@@ -2857,13 +2861,14 @@ export default function ChatView(props: ChatViewProps) {
           activeProjectDefaultModelSelection?.instanceId,
         ],
         lockedProvider,
+        hasStartedSession: activeThread?.session != null,
         lockedInstanceId:
           activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId,
       }),
     [
       activeProjectDefaultModelSelection?.instanceId,
       activeThread?.modelSelection.instanceId,
-      activeThread?.session?.providerInstanceId,
+      activeThread?.session,
       lockedProvider,
       providerInstanceEntries,
       selectedProviderByThreadId,
@@ -6397,7 +6402,11 @@ export default function ChatView(props: ChatViewProps) {
     activeThread?.messages.some(
       (message) => message.role === "user" && !isCompactCommandMessage(message),
     ) ?? false;
+  const pendingProviderSwitch =
+    activeThread?.session?.providerInstanceId != null &&
+    activeProviderInstanceId !== activeThread.session.providerInstanceId;
   const compactThreadUnavailable =
+    pendingProviderSwitch ||
     !activeThread ||
     !activeThreadHasCompactableConversation ||
     !activeProject ||
@@ -6413,11 +6422,13 @@ export default function ChatView(props: ChatViewProps) {
     showPlanFollowUpPrompt;
   const compactDisabled = compactThreadUnavailable;
   const compactDisabledReason = compactDisabled
-    ? !activeProject
-      ? "Choose a project before compacting"
-      : !manualCompactionProviderAvailable
-        ? "Compaction is unavailable for this provider"
-        : "Compacting is unavailable right now"
+    ? pendingProviderSwitch
+      ? "Send a message to switch providers before compacting"
+      : !activeProject
+        ? "Choose a project before compacting"
+        : !manualCompactionProviderAvailable
+          ? "Compaction is unavailable for this provider"
+          : "Compacting is unavailable right now"
     : null;
   const resumeCompactionBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (
@@ -7668,7 +7679,9 @@ export default function ChatView(props: ChatViewProps) {
       activeThreadKey &&
       (queueStillSending ||
         (phase === "running" &&
-          (settings.followUpBehavior === "queue") !== (submissionIntent === "alternate")))
+          ((activeThread.session?.providerInstanceId != null &&
+            ctxSelectedModelSelection.instanceId !== activeThread.session.providerInstanceId) ||
+            (settings.followUpBehavior === "queue") !== (submissionIntent === "alternate"))))
     ) {
       const sendSettings = readComposerSendSettings(sendCtx);
       if (
@@ -9285,11 +9298,32 @@ export default function ChatView(props: ChatViewProps) {
         { explicit: true },
       );
       setStickyComposerModelSelection(nextModelSelection);
+      if (
+        supportsProviderSwitching &&
+        activeThread.session?.providerInstanceId &&
+        activeThread.session.providerInstanceId !== instanceId
+      ) {
+        const current = providerStatuses.find(
+          (p) => p.instanceId === activeThread.session?.providerInstanceId,
+        );
+        const nativeResume =
+          current?.driver === entry?.driver &&
+          current?.continuation?.groupKey != null &&
+          current.continuation.groupKey === entry?.continuation?.groupKey;
+        toastManager.add({
+          type: "info",
+          title: "Switch applies to your next message",
+          description: nativeResume
+            ? "The new account will continue the native conversation."
+            : "The new session receives bounded chat history. Earlier tool state, reasoning and attachments stay with the previous session.",
+        });
+      }
       if (options?.focusComposer !== false) scheduleComposerFocus();
     },
     [
       activeThread,
       lockedProvider,
+      supportsProviderSwitching,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
       setStickyComposerModelSelection,

@@ -49,6 +49,22 @@ the oldest queued message now. Change `thread.steerQueuedMessage` in
 **Settings → Keybindings** to use another shortcut. It leaves the current draft
 in the composer and waits if the agent needs an approval or an answer.
 
+## Switch accounts or providers in a chat
+
+On web and desktop, choose another account, provider or model in the composer's
+model picker, then send your next message. An account or provider change waits
+for the current turn to finish, including when you use **Send now**.
+
+Compatible accounts continue the native conversation. A different provider or an
+account with separate session storage starts a fresh native session with bounded
+chat history: the initial request and recent messages are favored. Earlier tool
+state, reasoning and attachments are not transferred. The visible chat stays
+intact, and the agent can read omitted messages with `t3_thread_read`.
+
+Some providers require a new chat to change models within their native session.
+Managed workers retain the account/model specified by their spawning plan;
+changing one manually does not rewrite that plan or reroute queued assignments.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

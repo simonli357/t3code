@@ -1101,6 +1101,33 @@ describe("resolveComposerProviderSelection", () => {
     ])[0]!;
   }
 
+  it("allows an explicitly selected different provider for an unlocked existing chat", () => {
+    const old = entry("codex");
+    const next = entry("claudeAgent", "claude_eol");
+    expect(
+      resolveComposerProviderSelection({
+        entries: [old, next],
+        candidateInstanceIds: [next.instanceId, old.instanceId],
+        lockedProvider: null,
+        lockedInstanceId: old.instanceId,
+        hasStartedSession: true,
+      }).selectedProviderEntry?.instanceId,
+    ).toBe(next.instanceId);
+  });
+  it("does not silently switch an existing chat away from an unavailable account", () => {
+    const old = entry("codex", "codex", { enabled: false });
+    const next = entry("claudeAgent");
+    expect(
+      resolveComposerProviderSelection({
+        entries: [old, next],
+        candidateInstanceIds: [old.instanceId, next.instanceId],
+        lockedProvider: null,
+        lockedInstanceId: old.instanceId,
+        hasStartedSession: true,
+      }).selectedProviderEntry,
+    ).toBeUndefined();
+  });
+
   function importedThread(instanceId: ProviderInstanceId) {
     return makeThread({
       modelSelection: { instanceId, model: "default" },
@@ -1601,14 +1628,14 @@ describe("getStartedThreadModelChangeBlockReason", () => {
     ).toBeNull();
   });
 
-  it("blocks started-session model changes when either provider requires a new thread", () => {
+  it("blocks started-session model changes within a restricted native session", () => {
     expect(
       getStartedThreadModelChangeBlockReason({
         providers,
         hasStartedSession: true,
         currentModelSelection: {
-          instanceId: ProviderInstanceId.make("codex"),
-          model: "gpt-5.4",
+          instanceId: ProviderInstanceId.make("grok"),
+          model: "grok-other",
         },
         nextModelSelection: {
           instanceId: ProviderInstanceId.make("grok"),
@@ -1620,6 +1647,16 @@ describe("getStartedThreadModelChangeBlockReason", () => {
       description:
         "This provider does not allow switching models after a conversation has started.",
     });
+  });
+  it("allows a restricted provider to receive a fresh conversation handoff", () => {
+    expect(
+      getStartedThreadModelChangeBlockReason({
+        providers,
+        hasStartedSession: true,
+        currentModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        nextModelSelection: { instanceId: ProviderInstanceId.make("grok"), model: "grok-build" },
+      }),
+    ).toBeNull();
   });
 });
 

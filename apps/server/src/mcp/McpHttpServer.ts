@@ -1,3 +1,5 @@
+import * as HistoryToolkit from "./toolkits/history/tools.ts";
+import * as ThreadHistory from "../orchestration/ContextHandoff.ts";
 import * as WorkersToolkit from "./toolkits/workers/tools.ts";
 import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
@@ -669,6 +671,10 @@ const McpTransportLive = McpServer.layerHttp({
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
 export const layer = Layer.mergeAll(
+  McpServer.toolkit(HistoryToolkit.HistoryToolkit).pipe(
+    Layer.provide(HistoryToolkit.handlers),
+    Layer.provide(ThreadHistory.layer),
+  ),
   McpServer.toolkit(WorkersToolkit.WorkersToolkit).pipe(Layer.provide(WorkersToolkit.handlers)),
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,

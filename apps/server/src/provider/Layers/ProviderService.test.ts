@@ -365,6 +365,7 @@ function makeRecordingAnalytics() {
 
 function makeStaticInstanceRegistry(
   entries: ReadonlyArray<readonly [ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>]>,
+  sharedNativeState = false,
 ): ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] {
   const adapters = new Map(entries);
   const unsupported = (instanceId: ProviderInstanceId) =>
@@ -387,7 +388,9 @@ function makeStaticInstanceRegistry(
             enabled: true,
             continuationIdentity: {
               driverKind: adapter.provider,
-              continuationKey: `${adapter.provider}:instance:${instanceId}`,
+              continuationKey: sharedNativeState
+                ? `${adapter.provider}:shared`
+                : `${adapter.provider}:instance:${instanceId}`,
             },
           })
         : Effect.fail(unsupported(instanceId));
@@ -475,6 +478,136 @@ function makeProviderServiceLayer(
     layer,
   };
 }
+
+describe("compatible account switches", () => {
+  const first = makeFakeCodexAdapter();
+  const second = makeFakeCodexAdapter();
+  const targetId = ProviderInstanceId.make("codex_shared_account");
+  const harness = makeProviderServiceLayer({
+    registry: makeStaticInstanceRegistry(
+      [
+        [codexInstanceId, first.adapter],
+        [targetId, second.adapter],
+      ],
+      true,
+    ),
+  });
+  harness.layer("native continuation", (it) => {
+    it.effect("releases the native writer before another account resumes its cursor", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("shared-native-switch");
+        yield* service.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          resumeCursor: { nativeId: "existing-native" },
+        });
+        yield* service.startSession(threadId, {
+          threadId,
+          providerInstanceId: targetId,
+          runtimeMode: "full-access",
+        });
+        assert.deepEqual(second.startSession.mock.calls.at(-1)?.[0].resumeCursor, {
+          nativeId: "existing-native",
+        });
+        assert.isBelow(
+          first.stopSession.mock.invocationCallOrder.at(-1)!,
+          second.startSession.mock.invocationCallOrder.at(-1)!,
+        );
+        yield* service.sendTurn({ threadId, input: "continue" });
+        assert.strictEqual(second.sendTurn.mock.calls.at(-1)?.[0].input, "continue");
+      }),
+    );
+  });
+});
+
+describe("portable provider switches", () => {
+  const first = makeFakeCodexAdapter();
+  const second = makeFakeCodexAdapter();
+  const targetId = ProviderInstanceId.make("codex_other_home");
+  const harness = makeProviderServiceLayer({
+    registry: makeStaticInstanceRegistry([
+      [codexInstanceId, first.adapter],
+      [targetId, second.adapter],
+    ]),
+  });
+  harness.layer("handoff persistence", (it) => {
+    it.effect(
+      "fresh incompatible account retains handoff through failed send and session recovery",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("portable-switch");
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+          });
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: targetId,
+            runtimeMode: "full-access",
+            contextHandoff: "Saved history: oranges",
+          });
+          assert.isUndefined(second.startSession.mock.calls.at(-1)?.[0].resumeCursor);
+          assert.strictEqual(first.stopSession.mock.calls.at(-1)?.[0], threadId);
+          second.sendTurn.mockImplementationOnce(() =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: CODEX_DRIVER,
+                method: "sendTurn",
+                detail: "temporary failure",
+              }),
+            ),
+          );
+          const failed = yield* service
+            .sendTurn({ threadId, input: "Question one" })
+            .pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(failed));
+          yield* service.stopSession({ threadId });
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: targetId,
+            runtimeMode: "full-access",
+          });
+          yield* service.sendTurn({ threadId, input: "Retry question" });
+          assert.include(
+            second.sendTurn.mock.calls.at(-1)?.[0].input ?? "",
+            "Saved history: oranges",
+          );
+          assert.include(
+            second.sendTurn.mock.calls.at(-1)?.[0].input ?? "",
+            "[Current user request]\nRetry question",
+          );
+          const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+          assert.deepInclude(binding.runtimePayload, { pendingContextHandoff: null });
+          yield* service.sendTurn({ threadId, input: "Next question" });
+          assert.strictEqual(second.sendTurn.mock.calls.at(-1)?.[0].input, "Next question");
+        }),
+    );
+    it.effect("rejects incompatible native resume without a handoff", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("incompatible-native-resume");
+        yield* service.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        const result = yield* service
+          .startSession(threadId, {
+            threadId,
+            providerInstanceId: targetId,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(result));
+      }),
+    );
+  });
+});
 
 for (const [enabled, completed] of [
   [false, false],

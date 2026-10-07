@@ -17,7 +17,11 @@ import {
   startAttachmentUpload,
 } from "../../lib/attachmentUploadQueue";
 import { newMessageId } from "../../lib/utils";
-import { latestCompletedToolActivityId, useQueuedMessageStore } from "../../queuedMessageStore";
+import {
+  queuedProviderSwitchMustWait,
+  latestCompletedToolActivityId,
+  useQueuedMessageStore,
+} from "../../queuedMessageStore";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { readThread, readThreadShell } from "../../state/entities";
 import { environmentServerConfigsAtom } from "../../state/server";
@@ -52,6 +56,8 @@ export async function sendQueuedMessage(
   const { environmentId, threadId } = threadRef;
   const threadKey = scopedThreadKey(threadRef);
   const queue = useQueuedMessageStore.getState();
+  const pending = queue.queuesByThreadKey[threadKey]?.find((entry) => entry.id === messageId);
+  if (queuedProviderSwitchMustWait(pending, readThreadShell(threadRef)?.session)) return;
   const message = queue.beginSend(
     threadKey,
     messageId,

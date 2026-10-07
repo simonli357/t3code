@@ -144,6 +144,24 @@ describe("QueuedMessageSender", () => {
     expect(queue()).toBeUndefined();
   });
 
+  it("keeps an account switch queued through tool boundaries and Send now", async () => {
+    const message = enqueue();
+    io.thread = {
+      ...thread("running", { toolActivityIds: ["finished-tool"] }),
+      session: { status: "running", providerInstanceId: "claudeAgent", activeTurnId: "active" },
+    };
+    io.shell = { ...io.shell, session: { status: "running", providerInstanceId: "claudeAgent" } };
+    await render();
+    await sendQueuedMessage(threadRef, message.id);
+    expect(commandsRun()).toEqual([]);
+    expect(queue()?.[0]?.id).toBe(message.id);
+    io.thread = thread("ready");
+    io.shell = { ...io.shell, session: { status: "ready", providerInstanceId: "claudeAgent" } };
+    await render();
+    expect(commandsRun()).toEqual(["start"]);
+    expect(queue()).toBeUndefined();
+  });
+
   it("holds the next message until the server picks up the one before it", async () => {
     enqueue({ prompt: "first" });
     enqueue({ prompt: "second" });

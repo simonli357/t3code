@@ -1399,6 +1399,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.modelSelection !== undefined &&
+        targetThread.session?.providerInstanceId != null &&
+        command.modelSelection.instanceId !== targetThread.session.providerInstanceId &&
+        (targetThread.session.status === "running" || targetThread.session.activeTurnId !== null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Wait for the current turn to finish before switching accounts or providers.",
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({

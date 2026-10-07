@@ -6,6 +6,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useComposerDraftStore } from "../composerDraftStore";
 import {
   isQueuedMessageDue,
+  queuedProviderSwitchMustWait,
   latestCompletedToolActivityId,
   useQueuedMessageStore,
   useQueuedMessages,
@@ -85,6 +86,7 @@ function ThreadQueueSender({ threadKey }: { threadKey: string }) {
     rewinding ||
     sending ||
     waitingForServer ||
+    queuedProviderSwitchMustWait(next, thread?.session) ||
     pendingRequests.approvals.length > 0 ||
     pendingRequests.userInputs.length > 0;
   const due =
