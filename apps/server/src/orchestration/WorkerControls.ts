@@ -327,6 +327,22 @@ const make = Effect.gen(function* () {
   });
 
   const refreshJobs = Effect.fn(function* () {
+    // Adopt direct input without replaying superseded historical turns on upgrade.
+    // Persist it as already submitted: observing a turn must never send it again.
+    yield* sql`INSERT INTO custom_worker_jobs
+      (id, worker_id, target_id, kind, prompt, created_at, state, turn_id, dispatched_at)
+      SELECT 'direct:' || w.thread_id || ':' || t.turn_id, w.thread_id, w.thread_id,
+        'work', m.text, t.requested_at, 'submitted', t.turn_id, t.requested_at
+      FROM custom_workers w
+      JOIN projection_threads p ON p.thread_id = w.thread_id
+      JOIN projection_turns t ON t.thread_id = w.thread_id
+      JOIN projection_thread_messages m ON m.thread_id = t.thread_id AND m.message_id = t.pending_message_id
+      WHERE w.state = 'ready' AND t.turn_id IS NOT NULL
+        AND p.deleted_at IS NULL AND p.archived_at IS NULL AND p.settled_at IS NULL
+        AND t.row_id = (SELECT MAX(row_id) FROM projection_turns WHERE thread_id = w.thread_id AND turn_id IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs j WHERE j.worker_id = w.thread_id
+          AND (j.turn_id = t.turn_id OR 'worker-job:' || j.id = t.pending_message_id))
+      ON CONFLICT(id) DO NOTHING`;
     const jobs = yield* sql<Job>`SELECT * FROM custom_worker_jobs
       WHERE kind = 'work' AND (state = 'submitted' OR (reported = 0 AND state IN ('completed', 'error', 'interrupted')))
       ORDER BY rowid`;
@@ -339,7 +355,9 @@ const make = Effect.gen(function* () {
         state: string;
         turn_id: string | null;
       }>`SELECT state, turn_id FROM projection_turns
-        WHERE thread_id = ${job.target_id} AND pending_message_id = ${`worker-job:${job.id}`} ORDER BY row_id DESC LIMIT 1`;
+        WHERE thread_id = ${job.target_id}
+          AND (pending_message_id = ${`worker-job:${job.id}`} OR turn_id = ${job.turn_id})
+        ORDER BY row_id DESC LIMIT 1`;
       const turn = turns[0];
       if (turn?.turn_id && turn.turn_id !== job.turn_id)
         yield* sql`UPDATE custom_worker_jobs SET turn_id = ${turn.turn_id} WHERE id = ${job.id}`;

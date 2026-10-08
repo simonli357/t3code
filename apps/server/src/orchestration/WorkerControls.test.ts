@@ -223,6 +223,24 @@ const reply = Effect.fn(function* (threadId: ThreadId, turn: string, text: strin
     createdAt: timestamp,
   });
 });
+const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
+  const engine = yield* OrchestrationEngineService;
+  yield* engine.dispatch({
+    type: "thread.turn.start",
+    commandId: CommandId.make(`direct-${suffix}`),
+    threadId,
+    message: {
+      messageId: MessageId.make(`human-${suffix}`),
+      role: "user",
+      text: "continue directly",
+      attachments: [],
+    },
+    modelSelection: selections[0]!,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    createdAt: timestamp,
+  });
+});
 it.layer(testLayer)("persistent workers", (it) => {
   it.effect("automatically wakes the master for a newly registered worker", () =>
     Effect.gen(function* () {
@@ -323,6 +341,117 @@ it.layer(testLayer)("persistent workers", (it) => {
       ).toHaveLength(2);
       yield* service.drain();
       expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("completed");
+    }),
+  );
+  it.effect("automatically reports direct worker turns without repeating assignment reports", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("direct");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "assigned-turn");
+      yield* reply(worker, "assigned-turn", "assigned result");
+      yield* session(worker, "ready", "assigned-finished");
+      yield* service.drain();
+      yield* session(owner, "running", "assigned-report");
+      yield* session(owner, "ready", "assigned-report-finished");
+      const events = yield* engine.subscribeDomainEvents;
+      yield* service.start();
+      yield* directInput(worker, "automatic");
+      yield* session(worker, "running", "direct-turn");
+      yield* reply(worker, "direct-turn", "direct result");
+      yield* session(worker, "ready", "direct-finished");
+      yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.turn-start-requested" && event.payload.threadId === owner,
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+      );
+      yield* service.drain();
+      const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(messages.filter((m) => m.text.includes("assigned result"))).toHaveLength(1);
+      expect(messages.filter((m) => m.text.includes("direct result"))).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+  it.effect("recovers direct worker results after restart and respects paused notifications", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("direct-restart");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "before-direct");
+      yield* session(worker, "error", "original-failed");
+      yield* service.drain();
+      yield* session(owner, "running", "error-report");
+      yield* session(owner, "ready", "error-report-finished");
+      yield* service.control(owner, { threadId: worker, notifications: false });
+      yield* directInput(worker, "restart");
+      yield* session(worker, "running", "restart-direct-turn");
+      yield* reply(worker, "restart-direct-turn", "recovered direct result");
+      yield* session(worker, "ready", "restart-direct-finished");
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      yield* restarted.drain();
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.filter((m) =>
+          m.text.includes("recovered direct result"),
+        ),
+      ).toHaveLength(0);
+      yield* restarted.control(owner, { threadId: worker, notifications: true });
+      yield* restarted.drain();
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.filter((m) =>
+          m.text.includes("recovered direct result"),
+        ),
+      ).toHaveLength(1);
+      const again = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      yield* again.drain();
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.filter((m) =>
+          m.text.includes("recovered direct result"),
+        ),
+      ).toHaveLength(1);
+    }),
+  );
+  it.effect("does not replay superseded direct turns or settled workers on upgrade", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("superseded");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "superseded-assignment");
+      yield* session(worker, "ready", "superseded-assignment-finished");
+      yield* service.drain();
+      yield* session(owner, "running", "superseded-report");
+      yield* session(owner, "ready", "superseded-report-finished");
+      for (const name of ["old-direct", "latest-direct"]) {
+        yield* directInput(worker, name);
+        yield* session(worker, "running", name);
+        yield* reply(worker, name, name);
+        yield* session(worker, "ready", `${name}-finished`);
+      }
+      yield* engine.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle-direct"),
+        threadId: worker,
+      });
+      yield* service.drain();
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
+        1,
+      );
+      yield* engine.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("unsettle-direct"),
+        threadId: worker,
+        reason: "user",
+      });
+      yield* service.drain();
+      const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(messages.filter((m) => m.text.includes("latest-direct"))).toHaveLength(1);
+      expect(messages.filter((m) => m.text.includes("old-direct"))).toHaveLength(0);
     }),
   );
   it.effect("rejects other masters and reports provider errors without substituting models", () =>
