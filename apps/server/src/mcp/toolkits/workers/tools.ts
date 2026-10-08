@@ -32,7 +32,7 @@ const read = Tool.make("t3_worker_read", {
 });
 const send = Tool.make("t3_worker_send", {
   description:
-    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Queues durably if busy. Use a new clientRequestId per assignment, stable across retries with identical prompt. Each assignment gets its own completion notification. Does not interrupt or steer active work.",
+    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Rejects changed settings immediately; queues durably if busy and settings still match. Use a new clientRequestId per assignment, stable across retries with identical prompt. Each assignment gets its own completion notification. Does not interrupt or steer active work.",
   parameters: Workers.SendInput,
   success: Workers.JobResult,
   failure,
@@ -48,7 +48,7 @@ const wait = Tool.make("t3_worker_wait", {
 });
 const control = Tool.make("t3_worker_control", {
   description:
-    "Enable/disable automatic reports for an owned worker or cancel a queued assignment by its requestId. Disabling reports leaves worker work intact. Running work is stopped using T3's existing stop control.",
+    "Enable/disable reports, cancel a queued assignment, or adopt an owned worker's current settings with adoptCurrentSettings=true after an intentional user-authorized change. Adoption validates the provider/model/options and permission ceiling, then updates the saved profile for queued and future assignments. It does not change the thread or retry failed assignments. Disabling reports leaves work intact. Stop running work with T3's existing stop control.",
   parameters: Workers.ControlInput,
   success: Workers.WorkerResult,
   failure,

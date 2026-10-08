@@ -454,6 +454,132 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(messages.filter((m) => m.text.includes("old-direct"))).toHaveLength(0);
     }),
   );
+  it.effect(
+    "rejects changed settings before enqueue and explicitly adopts an intentional account switch",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("adopt");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "adopt-active");
+        const follow = {
+          threadId: worker,
+          clientRequestId: "accepted",
+          prompt: "queued correction",
+        };
+        yield* service.send(owner, follow);
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("switch-account"),
+          threadId: worker,
+          modelSelection: selections[1]!,
+        });
+        expect((yield* service.send(owner, follow)).state).toBe("queued");
+        const rejected = yield* service
+          .send(owner, { ...follow, clientRequestId: "rejected" })
+          .pipe(Effect.flip);
+        expect(rejected.message).toContain("adoptCurrentSettings");
+        expect(
+          yield* sql`SELECT id FROM custom_worker_jobs WHERE id = ${`${worker}:rejected`}`,
+        ).toHaveLength(0);
+        const adopted = yield* service.control(owner, {
+          threadId: worker,
+          adoptCurrentSettings: true,
+        });
+        expect(adopted.modelSelection).toEqual(selections[1]);
+        yield* session(worker, "ready", "adopt-finished");
+        yield* service.drain();
+        expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("submitted");
+        const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+        expect(detail.modelSelection).toEqual(selections[1]);
+        expect(detail.messages.filter((m) => m.text === follow.prompt)).toHaveLength(1);
+        const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+        expect((yield* restarted.list(owner))[0]!.modelSelection).toEqual(selections[1]);
+      }),
+  );
+  it.effect("keeps delivery checks when settings change after enqueue", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("late-switch");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "late-active");
+      const follow = { threadId: worker, clientRequestId: "queued", prompt: "must not deliver" };
+      yield* service.send(owner, follow);
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("late-account"),
+        threadId: worker,
+        modelSelection: selections[1]!,
+      });
+      yield* session(worker, "ready", "late-finished");
+      yield* service.drain();
+      expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("error");
+      yield* service.control(owner, { threadId: worker, adoptCurrentSettings: true });
+      expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("error");
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(worker)).messages.some(
+          (m) => m.text === follow.prompt,
+        ),
+      ).toBe(false);
+    }),
+  );
+  it.effect("restricts adoption to the owner, valid profiles, and the master's permissions", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const { owner, worker, source, input } = yield* seed("adopt-invalid");
+      yield* service.spawn(owner, input);
+      expect(
+        (yield* service
+          .control(source, { threadId: worker, adoptCurrentSettings: true })
+          .pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("invalid-effort"),
+        threadId: worker,
+        modelSelection: {
+          ...selections[1]!,
+          options: [{ id: "reasoningEffort", value: "invalid" }],
+        },
+      });
+      expect(
+        (yield* service
+          .control(owner, { threadId: worker, adoptCurrentSettings: true })
+          .pipe(Effect.flip)).message,
+      ).toContain("does not support");
+      expect((yield* service.list(owner))[0]!.modelSelection).toEqual(input.modelSelection);
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("valid-profile"),
+        threadId: worker,
+        modelSelection: selections[1]!,
+      });
+      yield* engine.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("restrict-master"),
+        threadId: owner,
+        runtimeMode: "approval-required",
+        createdAt: timestamp,
+      });
+      expect(
+        (yield* service
+          .control(owner, { threadId: worker, adoptCurrentSettings: true })
+          .pipe(Effect.flip)).message,
+      ).toContain("broader permissions");
+      expect(
+        (yield* service
+          .send(owner, { threadId: worker, clientRequestId: "unsafe", prompt: "work" })
+          .pipe(Effect.flip)).message,
+      ).toContain("broader permissions");
+      expect((yield* service.list(owner))[0]!.modelSelection).toEqual(input.modelSelection);
+    }),
+  );
   it.effect("rejects other masters and reports provider errors without substituting models", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;

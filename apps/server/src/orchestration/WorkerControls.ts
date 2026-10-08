@@ -54,6 +54,7 @@ export const ControlInput = Schema.Struct({
   threadId: ThreadId,
   notifications: Schema.optional(Schema.Boolean),
   cancelRequestId: Schema.optional(TrimmedNonEmptyString),
+  adoptCurrentSettings: Schema.optional(Schema.Boolean),
 });
 const JobState = Schema.Literals([
   "queued",
@@ -314,6 +315,30 @@ const make = Effect.gen(function* () {
         });
     }
   });
+  const checkPermissions = Effect.fn(function* (ownerId: string, target: OrchestrationThreadShell) {
+    const owner = yield* thread(ownerId);
+    if (target.runtimeMode === "full-access" && owner.runtimeMode !== "full-access")
+      return yield* new WorkerError({
+        message: "The worker has broader permissions than the master.",
+      });
+  });
+  const checkWorkerSettings = Effect.fn(function* (
+    worker: Worker,
+    target: OrchestrationThreadShell,
+  ) {
+    yield* checkPermissions(worker.owner_id, target);
+    const plan = decodePlan(worker.plan_json);
+    if (
+      selectionKey(target.modelSelection) !== selectionKey(plan.modelSelection) ||
+      target.runtimeMode !== plan.runtimeMode ||
+      target.interactionMode !== plan.interactionMode
+    )
+      return yield* new WorkerError({
+        message:
+          "Worker settings changed. If the change was intentional, use t3_worker_control with adoptCurrentSettings=true; otherwise restore the saved provider/model/effort and modes.",
+      });
+    yield* checkSelection(plan.modelSelection);
+  });
   const report = Effect.fn(function* (worker: Worker, job: Job, suffix: string, detail: string) {
     if (!worker.notify) return;
     const plan = decodePlan(worker.plan_json);
@@ -456,24 +481,7 @@ const make = Effect.gen(function* () {
             blocked.add(job.target_id);
             return;
           }
-          if (job.kind === "work") {
-            const owner = yield* thread(worker.owner_id);
-            if (target.runtimeMode === "full-access" && owner.runtimeMode !== "full-access")
-              return yield* new WorkerError({
-                message: "The worker has broader permissions than the master.",
-              });
-            const plan = decodePlan(worker.plan_json);
-            if (
-              selectionKey(target.modelSelection) !== selectionKey(plan.modelSelection) ||
-              target.runtimeMode !== plan.runtimeMode ||
-              target.interactionMode !== plan.interactionMode
-            )
-              return yield* new WorkerError({
-                message:
-                  "Worker settings changed outside this workflow. Restore its original provider/model/effort and modes before sending more work.",
-              });
-            yield* checkSelection(plan.modelSelection);
-          }
+          if (job.kind === "work") yield* checkWorkerSettings(worker, target);
           const dispatchedAt = job.dispatched_at ?? (yield* now);
           yield* sql`UPDATE custom_worker_jobs SET dispatched_at = ${dispatchedAt} WHERE id = ${job.id}`;
           yield* engine.dispatch({
@@ -601,6 +609,9 @@ const make = Effect.gen(function* () {
   const send = Effect.fn("WorkerControls.send")(
     function* (owner: ThreadId, input: typeof SendInput.Type) {
       const worker = yield* owned(owner, input.threadId);
+      const requestId = `${input.threadId}:${input.clientRequestId}`;
+      const existing = yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${requestId}`;
+      if (!existing[0]) yield* checkWorkerSettings(worker, yield* thread(input.threadId));
       return jobResult(
         yield* enqueue(
           `${input.threadId}:${input.clientRequestId}`,
@@ -709,6 +720,19 @@ const make = Effect.gen(function* () {
   const control = Effect.fn("WorkerControls.control")(
     function* (owner: ThreadId, input: typeof ControlInput.Type) {
       const worker = yield* owned(owner, input.threadId);
+      if (input.adoptCurrentSettings) {
+        const target = yield* thread(input.threadId);
+        yield* checkPermissions(owner, target);
+        yield* checkSelection(target.modelSelection);
+        const plan = decodePlan(worker.plan_json);
+        const adopted = encodePlan({
+          ...plan,
+          modelSelection: target.modelSelection,
+          runtimeMode: target.runtimeMode,
+          interactionMode: target.interactionMode,
+        });
+        yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
+      }
       if (input.notifications !== undefined)
         yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
       if (input.cancelRequestId) {
@@ -722,6 +746,7 @@ const make = Effect.gen(function* () {
       }
       return yield* describe(yield* owned(owner, input.threadId));
     },
+    sql.withTransaction,
     lock.withPermit,
     Effect.mapError(failure),
   );
