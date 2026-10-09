@@ -48,7 +48,7 @@ const wait = Tool.make("t3_worker_wait", {
 });
 const control = Tool.make("t3_worker_control", {
   description:
-    "Enable/disable reports, cancel a queued assignment, or adopt an owned worker's current settings with adoptCurrentSettings=true after an intentional user-authorized change. Adoption validates the provider/model/options and permission ceiling, then updates the saved profile for queued and future assignments. It does not change the thread or retry failed assignments. Disabling reports leaves work intact. Stop running work with T3's existing stop control.",
+    "Control an owned worker: set modelSelection {instanceId, model, options} to explicitly change its account/provider/model and saved profile, or use adoptCurrentSettings=true to accept an intentional UI change (not both). Validate the choice against available profiles and the user's constraints. Switching preserves the T3 thread and permission modes; a running turn continues, and queued/future assignments use the new selection. Cross-provider switches use T3's conversation handoff. Ownership, profile validity, and permission checks still apply. Failed work is never retried automatically. Also supports notifications and cancelRequestId; stop running work with T3's stop control.",
   parameters: Workers.ControlInput,
   success: Workers.WorkerResult,
   failure,

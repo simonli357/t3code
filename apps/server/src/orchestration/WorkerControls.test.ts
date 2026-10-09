@@ -500,6 +500,109 @@ it.layer(testLayer)("persistent workers", (it) => {
         expect((yield* restarted.list(owner))[0]!.modelSelection).toEqual(selections[1]);
       }),
   );
+  for (const index of [1, 2]) {
+    it.effect(
+      `master switches an active worker to ${instances[index]![0]} for its next assignment`,
+      () =>
+        Effect.gen(function* () {
+          const service = yield* Workers.WorkerControls;
+          const snapshots = yield* ProjectionSnapshotQuery;
+          const sql = yield* SqlClient.SqlClient;
+          const { owner, worker, source, input } = yield* seed(`master-switch-${index}`);
+          yield* service.spawn(owner, input);
+          yield* session(worker, "running", `switch-active-${index}`);
+          const follow = {
+            threadId: worker,
+            clientRequestId: "next",
+            prompt: "continue on chosen account",
+          };
+          yield* service.send(owner, follow);
+          const changed = yield* service.control(owner, {
+            threadId: worker,
+            modelSelection: selections[index]!,
+          });
+          expect(changed.modelSelection).toEqual(selections[index]);
+          const active = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+          expect(active.session?.activeTurnId).toBe(`switch-active-${index}`);
+          expect(active.messages.some((m) => m.text === follow.prompt)).toBe(false);
+          expect(
+            Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).modelSelection,
+          ).toEqual(input.modelSelection);
+          const before =
+            yield* sql`SELECT sequence FROM orchestration_events WHERE stream_id = ${worker} AND event_type = 'thread.meta-updated'`;
+          yield* service.control(owner, { threadId: worker, modelSelection: selections[index]! });
+          expect(
+            yield* sql`SELECT sequence FROM orchestration_events WHERE stream_id = ${worker} AND event_type = 'thread.meta-updated'`,
+          ).toHaveLength(before.length);
+          yield* session(worker, "ready", `switch-finished-${index}`);
+          yield* service.drain();
+          expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("submitted");
+          const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+          expect(detail.modelSelection).toEqual(selections[index]);
+          expect(detail.messages.filter((m) => m.text === follow.prompt)).toHaveLength(1);
+          const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+          expect((yield* restarted.list(owner))[0]!.modelSelection).toEqual(selections[index]);
+        }),
+    );
+  }
+  it.effect(
+    "rejects unauthorized and invalid switches without changing worker or saved profile",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, source, input } = yield* seed("switch-rejected");
+        yield* service.spawn(owner, input);
+        expect(
+          (yield* service
+            .control(source, { threadId: worker, modelSelection: selections[1]! })
+            .pipe(Effect.flip)).message,
+        ).toContain("not a worker owned");
+        expect(
+          (yield* service
+            .control(owner, {
+              threadId: worker,
+              modelSelection: { ...selections[1]!, model: "missing" },
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("unavailable");
+        expect(
+          (yield* service
+            .control(owner, {
+              threadId: worker,
+              modelSelection: selections[1]!,
+              adoptCurrentSettings: true,
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("not both");
+        expect(
+          (yield* service
+            .control(owner, {
+              threadId: worker,
+              modelSelection: selections[1]!,
+              cancelRequestId: `spawn:${worker}`,
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("Only queued");
+        yield* engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("switch-permissions"),
+          threadId: owner,
+          runtimeMode: "approval-required",
+          createdAt: timestamp,
+        });
+        expect(
+          (yield* service
+            .control(owner, { threadId: worker, modelSelection: selections[1]! })
+            .pipe(Effect.flip)).message,
+        ).toContain("broader permissions");
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(worker)).modelSelection,
+        ).toEqual(input.modelSelection);
+        expect((yield* service.list(owner))[0]!.modelSelection).toEqual(input.modelSelection);
+      }),
+  );
   it.effect("keeps delivery checks when settings change after enqueue", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
@@ -787,6 +890,16 @@ it.layer(mcpLayer)("worker MCP", (it) => {
           );
       const spawned = yield* call("t3_worker_spawn", { ...input, ownerThreadId: "forged" });
       expect(spawned.isError).not.toBe(true);
+      const switched = yield* call("t3_worker_control", {
+        threadId: worker,
+        modelSelection: selections[1]!,
+      });
+      expect(switched.isError).not.toBe(true);
+      expect(switched.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "text", text: expect.stringContaining("codex_antoine") }),
+        ]),
+      );
       const listed = yield* call("t3_worker_list", {});
       expect(listed.content).toEqual(
         expect.arrayContaining([

@@ -8,6 +8,7 @@ import {
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -55,6 +56,7 @@ export const ControlInput = Schema.Struct({
   notifications: Schema.optional(Schema.Boolean),
   cancelRequestId: Schema.optional(TrimmedNonEmptyString),
   adoptCurrentSettings: Schema.optional(Schema.Boolean),
+  modelSelection: Schema.optional(ModelSelection),
 });
 const JobState = Schema.Literals([
   "queued",
@@ -189,6 +191,7 @@ export class WorkerControls extends Context.Service<
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const engine = yield* OrchestrationEngineService;
+  const crypto = yield* Crypto.Crypto;
   const snapshots = yield* ProjectionSnapshotQuery;
   const provider = yield* ProviderService;
   const directory = yield* ProviderSessionDirectory;
@@ -720,33 +723,67 @@ const make = Effect.gen(function* () {
   const control = Effect.fn("WorkerControls.control")(
     function* (owner: ThreadId, input: typeof ControlInput.Type) {
       const worker = yield* owned(owner, input.threadId);
-      if (input.adoptCurrentSettings) {
+      if (input.modelSelection && input.adoptCurrentSettings)
+        return yield* new WorkerError({
+          message: "Choose modelSelection or adoptCurrentSettings, not both.",
+        });
+      const cancelled = input.cancelRequestId
+        ? yield* getJob(worker, input.cancelRequestId)
+        : undefined;
+      if (cancelled && cancelled.state !== "queued")
+        return yield* new WorkerError({
+          message:
+            "Only queued assignments can be cancelled here. Stop a running worker through T3.",
+        });
+      let adopted: string | undefined;
+      if (input.adoptCurrentSettings || input.modelSelection) {
         const target = yield* thread(input.threadId);
         yield* checkPermissions(owner, target);
-        yield* checkSelection(target.modelSelection);
         const plan = decodePlan(worker.plan_json);
-        const adopted = encodePlan({
+        const selection = input.modelSelection ?? target.modelSelection;
+        yield* checkSelection(selection);
+        if (input.modelSelection) {
+          if (worker.state !== "ready")
+            return yield* new WorkerError({
+              message: "Finish creating the worker before changing its provider or account.",
+            });
+          if (
+            target.runtimeMode !== plan.runtimeMode ||
+            target.interactionMode !== plan.interactionMode
+          )
+            return yield* new WorkerError({
+              message:
+                "Worker modes changed. Restore them or explicitly adoptCurrentSettings before changing its provider/model.",
+            });
+          if (selectionKey(selection) !== selectionKey(target.modelSelection))
+            yield* engine.dispatch({
+              type: "thread.meta.update",
+              commandId: CommandId.make(`worker-settings:${yield* crypto.randomUUIDv4}`),
+              threadId: input.threadId,
+              modelSelection: selection,
+            });
+        }
+        adopted = encodePlan({
           ...plan,
-          modelSelection: target.modelSelection,
+          modelSelection: selection,
           runtimeMode: target.runtimeMode,
           interactionMode: target.interactionMode,
         });
-        yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
       }
-      if (input.notifications !== undefined)
-        yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
-      if (input.cancelRequestId) {
-        const job = yield* getJob(worker, input.cancelRequestId);
-        if (job.state !== "queued")
-          return yield* new WorkerError({
-            message:
-              "Only queued assignments can be cancelled here. Stop a running worker through T3.",
-          });
-        yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${job.id}`;
-      }
+      // Dispatch uses the engine's own transaction; never hold a SQL transaction
+      // while awaiting it. A retry repairs a crash between metadata and plan writes.
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          if (adopted !== undefined)
+            yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
+          if (input.notifications !== undefined)
+            yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
+          if (cancelled)
+            yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${cancelled.id}`;
+        }),
+      );
       return yield* describe(yield* owned(owner, input.threadId));
     },
-    sql.withTransaction,
     lock.withPermit,
     Effect.mapError(failure),
   );
