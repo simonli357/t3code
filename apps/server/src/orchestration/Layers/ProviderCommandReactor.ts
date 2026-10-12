@@ -1534,9 +1534,30 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const send = providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+    const send = providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.flatMap((turn) =>
+        turn.turnId === thread.session?.activeTurnId
+          ? Effect.gen(function* () {
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: yield* serverCommandId("provider-turn-steered"),
+                threadId: thread.id,
+                activity: {
+                  id: yield* serverEventId(),
+                  tone: "info",
+                  kind: "provider.turn.steered",
+                  summary: "Message delivered to the active turn",
+                  payload: { requestId: event.payload.messageId },
+                  turnId: turn.turnId,
+                  createdAt: event.payload.createdAt,
+                },
+                createdAt: event.payload.createdAt,
+              });
+            })
+          : Effect.void,
+      ),
+      Effect.catchCause(recoverTurnStartFailure),
+    );
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
     yield* send.pipe(

@@ -741,6 +741,70 @@ describe("ProviderCommandReactor", () => {
       }),
   );
 
+  effectIt.effect("consumes a message accepted into the existing active turn", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+      harness.runtimeSessions.push({
+        threadId,
+        cwd: "/tmp/provider-project",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        status: "running",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId("turn-1"),
+        createdAt: now,
+        updatedAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("running-before-steer"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      const events = yield* harness.engine.subscribeDomainEvents;
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("steer-request"),
+        threadId,
+        message: {
+          messageId: asMessageId("steer-message"),
+          role: "user",
+          text: "Use ES Opus",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      });
+      yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.activity.kind === "provider.turn.steered",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+      expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([]);
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: "turn-1" });
+    }).pipe(Effect.scoped),
+  );
+
   effectIt.effect("clears a failed sign-out request without sending it as a prompt", () =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("antigravity-personal");

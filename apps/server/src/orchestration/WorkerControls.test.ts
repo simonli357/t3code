@@ -7,6 +7,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -263,6 +264,54 @@ it.layer(testLayer)("persistent workers", (it) => {
       );
       expect(reports).toHaveLength(1);
     }).pipe(Effect.scoped),
+  );
+  it.effect(
+    "delivers a queued report after an accepted steer finishes without another prompt",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("steered-master");
+        yield* service.spawn(owner, input);
+        yield* session(owner, "running", "master-active");
+        yield* directInput(owner, "master-steer");
+        yield* session(owner, "ready", "master-completed");
+        yield* session(worker, "running", "worker-result");
+        yield* reply(worker, "worker-result", "Finished the assignment");
+        yield* session(worker, "ready", "worker-completed");
+        yield* service.drain();
+        expect((yield* service.list(owner))[0]!.pendingReports).toBe(1);
+        const events = yield* engine.subscribeDomainEvents;
+        yield* service.start();
+        yield* engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("master-steer-accepted"),
+          threadId: owner,
+          activity: {
+            id: EventId.make("master-steer-accepted"),
+            tone: "info",
+            kind: "provider.turn.steered",
+            summary: "Message delivered to the active turn",
+            payload: { requestId: "human-master-steer" },
+            turnId: TurnId.make("master-active"),
+            createdAt: timestamp,
+          },
+          createdAt: timestamp,
+        });
+        yield* events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "thread.turn-start-requested" && event.payload.threadId === owner,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        const master = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner));
+        expect(
+          master.messages.filter((message) => message.text.includes("T3 worker report")),
+        ).toHaveLength(1);
+      }).pipe(Effect.scoped),
   );
   for (const [index, instance] of instances.entries()) {
     it.effect(

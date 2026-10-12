@@ -801,6 +801,7 @@ const make = Effect.gen(function* () {
               "approval.requested",
               "approval.resolved",
               "provider.turn.start.failed",
+              "provider.turn.steered",
             ].includes(event.payload.activity.kind)),
       ),
       Stream.runForEach(() =>

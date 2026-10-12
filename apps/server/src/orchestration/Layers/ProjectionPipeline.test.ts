@@ -4220,68 +4220,70 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
       }),
     );
 
-    it.effect("only clears the compact request that produced the compaction activity", () =>
-      Effect.gen(function* () {
-        const projectionPipeline = yield* OrchestrationProjectionPipeline;
-        const eventStore = yield* OrchestrationEventStore;
-        const sql = yield* SqlClient.SqlClient;
-        const threadId = ThreadId.make("thread-compaction-correlation");
+    for (const kind of ["context-compaction", "provider.turn.steered"]) {
+      it.effect(`does not clear a newer pending request after ${kind}`, () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.make(`thread-${kind}-correlation`);
 
-        for (const [index, messageId] of ["compact-request", "new-message"].entries()) {
-          const createdAt = `2026-02-26T15:00:0${index}.000Z`;
+          for (const [index, messageId] of ["compact-request", "new-message"].entries()) {
+            const createdAt = `2026-02-26T15:00:0${index}.000Z`;
+            yield* eventStore.append({
+              type: "thread.turn-start-requested",
+              eventId: EventId.make(`evt-${kind}-pending-${index}`),
+              aggregateKind: "thread",
+              aggregateId: threadId,
+              occurredAt: createdAt,
+              commandId: CommandId.make(`cmd-${kind}-pending-${index}`),
+              causationEventId: null,
+              correlationId: CorrelationId.make(`cmd-${kind}-pending-${index}`),
+              metadata: {},
+              payload: {
+                threadId,
+                messageId: MessageId.make(messageId),
+                runtimeMode: "full-access",
+                createdAt,
+              },
+            });
+          }
           yield* eventStore.append({
-            type: "thread.turn-start-requested",
-            eventId: EventId.make(`evt-compaction-pending-${index}`),
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-${kind}-stale`),
             aggregateKind: "thread",
             aggregateId: threadId,
-            occurredAt: createdAt,
-            commandId: CommandId.make(`cmd-compaction-pending-${index}`),
+            occurredAt: "2026-02-26T15:00:02.000Z",
+            commandId: CommandId.make(`cmd-${kind}-stale`),
             causationEventId: null,
-            correlationId: CorrelationId.make(`cmd-compaction-pending-${index}`),
+            correlationId: CorrelationId.make(`cmd-${kind}-stale`),
             metadata: {},
             payload: {
               threadId,
-              messageId: MessageId.make(messageId),
-              runtimeMode: "full-access",
-              createdAt,
+              activity: {
+                id: EventId.make(`activity-${kind}-stale`),
+                tone: "info",
+                kind,
+                summary: "Context compacted",
+                payload: { requestId: "compact-request" },
+                turnId: null,
+                createdAt: "2026-02-26T15:00:02.000Z",
+              },
             },
           });
-        }
-        yield* eventStore.append({
-          type: "thread.activity-appended",
-          eventId: EventId.make("evt-compaction-stale"),
-          aggregateKind: "thread",
-          aggregateId: threadId,
-          occurredAt: "2026-02-26T15:00:02.000Z",
-          commandId: CommandId.make("cmd-compaction-stale"),
-          causationEventId: null,
-          correlationId: CorrelationId.make("cmd-compaction-stale"),
-          metadata: {},
-          payload: {
-            threadId,
-            activity: {
-              id: EventId.make("activity-compaction-stale"),
-              tone: "info",
-              kind: "context-compaction",
-              summary: "Context compacted",
-              payload: { requestId: "compact-request" },
-              turnId: null,
-              createdAt: "2026-02-26T15:00:02.000Z",
-            },
-          },
-        });
-        yield* projectionPipeline.bootstrap;
+          yield* projectionPipeline.bootstrap;
 
-        const pendingRows = yield* sql<{ readonly messageId: string }>`
+          const pendingRows = yield* sql<{ readonly messageId: string }>`
           SELECT pending_message_id AS "messageId"
           FROM projection_turns
           WHERE thread_id = ${threadId}
             AND turn_id IS NULL
             AND state = 'pending'
         `;
-        assert.deepEqual(pendingRows, [{ messageId: "new-message" }]);
-      }),
-    );
+          assert.deepEqual(pendingRows, [{ messageId: "new-message" }]);
+        }),
+      );
+    }
   },
 );
 
