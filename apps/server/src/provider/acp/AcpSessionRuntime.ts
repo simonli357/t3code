@@ -20,6 +20,7 @@ import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./AcpStderr.ts";
@@ -460,7 +461,13 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
+    const launch = yield* (yield* AgentScope).wrap({
+      command: options.spawn.command,
+      args: options.spawn.args,
+      name: "acp",
+      env: options.spawn.env,
+    });
+    const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, {
       ...(options.spawn.env ? { env: options.spawn.env } : {}),
       extendEnv: options.spawn.extendEnv ?? true,
     });

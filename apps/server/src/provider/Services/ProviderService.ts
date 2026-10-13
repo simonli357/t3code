@@ -1,3 +1,4 @@
+import type { AgentTaskStopInput } from "@t3tools/contracts";
 /**
  * ProviderService - Service interface for provider sessions, turns, and checkpoints.
  *
@@ -63,6 +64,7 @@ export interface ProviderServiceShape {
   /**
    * Interrupt a running provider turn.
    */
+  readonly stopTask: (input: AgentTaskStopInput) => Effect.Effect<void, ProviderServiceError>;
   readonly interruptTurn: (
     input: ProviderInterruptTurnInput,
   ) => Effect.Effect<void, ProviderServiceError>;

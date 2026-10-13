@@ -119,6 +119,7 @@ function createProviderServiceHarness(
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
+    stopTask: () => Effect.die("unused stopTask"),
     forkConversation: () => Effect.die("Unexpected fork"),
     compactThread: () => unsupported(),
     interruptTurn: () => unsupported(),

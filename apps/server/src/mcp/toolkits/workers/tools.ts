@@ -1,3 +1,5 @@
+import { AgentTaskStopError } from "@t3tools/contracts";
+import * as ProviderService from "../../../provider/Services/ProviderService.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Tool from "effect/unstable/ai/Tool";
@@ -54,12 +56,28 @@ const control = Tool.make("t3_worker_control", {
   failure,
   dependencies,
 });
-export const WorkersToolkit = Toolkit.make(spawn, list, read, send, wait, control);
+const stopSubagent = Tool.make("t3_subagent_stop", {
+  description:
+    "Request a stop for one native Claude task belonging to THIS session, without stopping its owner. Supply its task_id. Acknowledgement is not completion; read its actual task notification for the outcome. Does not stop separate T3 worker sessions.",
+  parameters: Schema.Struct({ taskId: Schema.String }),
+  success: Schema.Void,
+  failure: AgentTaskStopError,
+  dependencies: [ProviderService.ProviderService, Invocation.McpInvocationContext],
+});
+export const WorkersToolkit = Toolkit.make(spawn, list, read, send, wait, control, stopSubagent);
 export const handlers = WorkersToolkit.toLayer(
   Effect.gen(function* () {
     const service = yield* Workers.WorkerControls;
+    const providerService = yield* ProviderService.ProviderService;
     const owner = Effect.map(Invocation.McpInvocationContext, (scope) => scope.threadId);
     return {
+      t3_subagent_stop: (input) =>
+        owner.pipe(
+          Effect.flatMap((threadId) =>
+            providerService.stopTask({ threadId, taskId: input.taskId }),
+          ),
+          Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message })),
+        ),
       t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => service.spawn(id, input))),
       t3_worker_list: () => owner.pipe(Effect.flatMap((id) => service.list(id))),
       t3_worker_read: (input) => owner.pipe(Effect.flatMap((id) => service.read(id, input))),

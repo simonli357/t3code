@@ -24,6 +24,8 @@ import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { agentTaskStop } from "~/state/agentSessions";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
@@ -137,7 +139,15 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
 }
 
 /** Flat, non-interactive agent status line. No unfold. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+function AgentRow({
+  agent,
+  onStop,
+  stopping = false,
+}: {
+  agent: RuntimeSubagent;
+  onStop?: () => void;
+  stopping?: boolean;
+}) {
   const visuals = STATUS_VISUALS[agent.status];
   const statusLabel =
     agent.kind === "subagent_batch" && agent.status === "idle" ? "Idle" : visuals.label;
@@ -170,6 +180,18 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
       <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-2xs text-muted-foreground/80">
         <span className="inline-flex items-center gap-1">
           <AgentElapsed agent={agent} />
+          {onStop ? (
+            <Button
+              size="icon-micro"
+              variant="ghost-muted"
+              disabled={stopping}
+              onClick={onStop}
+              aria-label={`Stop ${agent.title}`}
+              title={stopping ? "Stop requested; awaiting Claude's result" : "Stop this subagent"}
+            >
+              <X aria-hidden className="size-3" />
+            </Button>
+          ) : null}
           {agent.status === "completed" ? (
             <Check aria-hidden className="size-3 text-success" />
           ) : null}
@@ -525,11 +547,30 @@ export function AgentsPanel({
   model,
   environmentId = null,
   threadId = null,
+  canStopSubagents = false,
 }: {
   model: AgentPanelModel;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
+  canStopSubagents?: boolean;
 }) {
+  const stop = useAtomCommand(agentTaskStop);
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const stopKey = (taskId: string) => `${environmentId}:${threadId}:${taskId}`;
+  const stopAgent = async (agent: RuntimeSubagent) => {
+    const key = stopKey(agent.id);
+    if (!environmentId || !threadId || pending.has(key)) return;
+    setPending((ids) => new Set([...ids, key]));
+    try {
+      await stop({ environmentId, input: { threadId, taskId: agent.id } });
+    } finally {
+      setPending((ids) => {
+        const next = new Set(ids);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
   if (!model.hasAgents) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
@@ -561,7 +602,20 @@ export function AgentsPanel({
                 Direct spawns
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
+                <AgentRow
+                  key={agent.id}
+                  agent={agent}
+                  stopping={pending.has(stopKey(agent.id))}
+                  {...(canStopSubagents &&
+                  agent.kind === "subagent" &&
+                  (agent.status === "running" || agent.status === "waiting")
+                    ? {
+                        onStop: () => {
+                          void stopAgent(agent);
+                        },
+                      }
+                    : {})}
+                />
               ))}
             </section>
           ) : null}

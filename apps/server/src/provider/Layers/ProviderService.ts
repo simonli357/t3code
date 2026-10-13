@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  AgentTaskStopInput,
   EventId,
   MessageId,
   ModelSelection,
@@ -35,6 +36,7 @@ import {
   type ProviderSession,
   type ServerSettings as ServerSettingsValue,
 } from "@t3tools/contracts";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
@@ -481,6 +483,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   options?: ProviderServiceLiveOptions,
 ) {
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
+  const agentScope = yield* AgentScope;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
@@ -1119,8 +1122,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
     Effect.gen(function* () {
+      const scopedEvent =
+        event.type === "runtime.error" && (yield* agentScope.oomKilled(event.threadId))
+          ? {
+              ...event,
+              payload: { ...event.payload, message: "Killed: out of memory.", code: "oom_kill" },
+            }
+          : event;
       const canonicalEvent = yield* Effect.sync(() =>
-        correlateRuntimeEventWithInstance(source, event),
+        correlateRuntimeEventWithInstance(source, scopedEvent),
       );
       yield* increment(providerRuntimeEventsTotal, {
         provider: canonicalEvent.provider,
@@ -1304,6 +1314,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      yield* agentScope.clear(input.binding.threadId);
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
         .startSession({
@@ -1551,6 +1562,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             yield* previousAdapter.stopSession(threadId);
         }
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
+        yield* agentScope.clear(threadId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
           .startSession({
@@ -2008,6 +2020,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     },
   );
+
+  const stopTask: ProviderServiceMethod<"stopTask"> = Effect.fn("stopTask")(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.stopTask",
+      schema: AgentTaskStopInput,
+      payload: rawInput,
+    });
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.stopTask",
+      allowRecovery: false,
+    });
+    if (!routed.isActive || !routed.adapter.stopTask)
+      return yield* toValidationError(
+        "stopTask",
+        "This session has no live provider that supports stopping individual tasks.",
+      );
+    yield* routed.adapter.stopTask(routed.threadId, input.taskId);
+  });
 
   const interruptTurn: ProviderServiceMethod<"interruptTurn"> = Effect.fn("interruptTurn")(
     function* (rawInput) {
@@ -2534,6 +2565,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     sendTurn,
     compactThread,
     interruptTurn,
+    stopTask,
     respondToRequest,
     respondToUserInput,
     stopSession,

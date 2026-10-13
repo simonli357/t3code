@@ -9667,6 +9667,10 @@ export default function ChatView(props: ChatViewProps) {
     ) : renderedRightPanelSurface?.kind === "agents" ? (
       <AgentsPanel
         model={agentPanelModel}
+        canStopSubagents={
+          serverConfig?.environment.capabilities.claudeSubagentStop === true &&
+          conversationProviderStatus?.driver === "claudeAgent"
+        }
         environmentId={activeThreadRef?.environmentId ?? null}
         threadId={activeThreadRef?.threadId ?? null}
       />

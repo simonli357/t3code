@@ -363,6 +363,7 @@ describe("ProviderCommandReactor", () => {
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      stopTask: unsupported,
       forkConversation: unsupported,
       compactThread,
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],

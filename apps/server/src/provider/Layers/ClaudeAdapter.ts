@@ -8,9 +8,11 @@
  * @module ClaudeAdapterLive
  */
 
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as NodeUtil from "node:util";
 import {
   type CanUseTool,
+  type Query,
   query,
   getSessionMessages,
   forkSession,
@@ -393,11 +395,7 @@ const CLAUDE_INTERRUPT_GRACE = "3 seconds";
  * snapshot model, or a subagent's tool_use owner). task_started consumes the
  * entry when it registers the task.
  */
-function rememberPendingTaskEntry(
-  pending: Map<string, string>,
-  toolUseId: string,
-  value: string,
-): void {
+function rememberPendingTaskEntry<A>(pending: Map<string, A>, toolUseId: string, value: A): void {
   pending.set(toolUseId, value);
   if (pending.size > PENDING_TASK_ENTRY_CAP) {
     const oldest = pending.keys().next();
@@ -437,6 +435,7 @@ interface ClaudeSessionContext {
    * Written through `rememberPendingTaskEntry`, consumed by task_started.
    */
   readonly pendingTaskModels: Map<string, string>;
+  readonly pendingTaskLaunchInputs: Map<string, Record<string, unknown>>;
   /**
    * tool_use_id → parent_tool_use_id for tool calls made inside a subagent.
    * The SDK forwards those calls only as assistant snapshots, never as stream
@@ -470,6 +469,8 @@ interface ClaudeSessionContext {
 interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   /** SDK Query.interrupt — present on real queries; optional for test doubles. */
   readonly interrupt?: () => Promise<unknown>;
+  readonly setMcpServers: Query["setMcpServers"];
+  readonly stopTask: Query["stopTask"];
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
@@ -2111,6 +2112,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const serverConfig = yield* ServerConfig;
   const crypto = yield* Crypto.Crypto;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const agentScope = yield* AgentScope;
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
@@ -3381,6 +3383,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       for (const block of snapshotContent) {
         if (block.type === "tool_use") {
           rememberPendingTaskEntry(context.subagentToolParents, block.id, assistantParentToolUseId);
+          if (block.name === "Agent" && typeof block.input === "object" && block.input !== null) {
+            rememberPendingTaskEntry(
+              context.pendingTaskLaunchInputs,
+              block.id,
+              block.input as Record<string, unknown>,
+            );
+          }
         }
       }
       if (snapshotModel && owningAgent) {
@@ -3801,14 +3810,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // with the authoritative API id: one that already arrived is buffered
         // and outranks the seed here, later ones refine the record in place.
         // AgentInput.effort may be a named level or an integer.
-        const launchInput = launchingTool?.input;
+        const launchInput =
+          launchingTool?.input ??
+          (toolUseId ? context.pendingTaskLaunchInputs.get(toolUseId) : undefined);
+        if (toolUseId) context.pendingTaskLaunchInputs.delete(toolUseId);
+        const requestedModel = trimmedString(launchInput?.model);
         const bufferedModel = toolUseId ? context.pendingTaskModels.get(toolUseId) : undefined;
         if (toolUseId) {
           context.pendingTaskModels.delete(toolUseId);
         }
         const model =
           bufferedModel ??
-          trimmedString(launchInput?.model) ??
+          (requestedModel === "inherit" ? undefined : requestedModel) ??
           (owningAgentId ? context.taskAgents.get(owningAgentId)?.model : undefined) ??
           trimmedString(context.session.model ?? undefined);
         const rawLaunchEffort = launchInput?.effort;
@@ -3816,7 +3829,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           trimmedString(rawLaunchEffort) ??
           (typeof rawLaunchEffort === "number" && Number.isFinite(rawLaunchEffort)
             ? String(rawLaunchEffort)
-            : context.currentEffort);
+            : ((owningAgentId ? context.taskAgents.get(owningAgentId)?.effort : undefined) ??
+              context.currentEffort));
         // Remember the agent identity so every later task.* payload for this
         // taskId is self-describing (identity must survive activity retention).
         context.taskAgents.set(message.task_id, {
@@ -4513,6 +4527,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const claudeTasks = new Map<string, ClaudeTaskState>();
       const taskAgents = new Map<string, ClaudeTaskAgentState>();
       const pendingTaskModels = new Map<string, string>();
+      const pendingTaskLaunchInputs = new Map<string, Record<string, unknown>>();
       const subagentToolParents = new Map<string, string>();
       const workflowMemberFingerprints = new Map<string, string>();
       const liveTaskIds = new Set<string>();
@@ -5063,20 +5078,78 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.path_to_executable": claudeBinaryPath,
       });
 
-      const queryRuntime = yield* Effect.try({
-        try: () =>
-          createQuery({
-            prompt,
-            options: queryOptions,
-          }),
-        catch: (cause) =>
-          new ProviderAdapterProcessError({
-            provider: PROVIDER,
+      // Query options become CLI arguments. Register MCP over stdin so bearer
+      // credentials never appear in argv or the environment of agent commands.
+      const { mcpServers, ...launchOptions } = queryOptions;
+      const launch = [".js", ".mjs", ".tsx", ".ts", ".jsx"].some((ext) =>
+        claudeBinaryPath.endsWith(ext),
+      )
+        ? undefined
+        : yield* agentScope.wrap({
+            command: claudeBinaryPath,
+            args: [],
+            name: "claude",
             threadId,
-            detail: "Failed to start Claude runtime session.",
-            cause,
-          }),
-      });
+            env: launchOptions.env,
+          });
+      const scopedOptions =
+        launch === undefined || launch.args.length === 0
+          ? launchOptions
+          : {
+              ...launchOptions,
+              pathToClaudeCodeExecutable: launch.command,
+              executableArgs: [...launch.args, ...(launchOptions.executableArgs ?? [])],
+            };
+      const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
+        Effect.try({
+          try: () => createQuery({ prompt, options: scopedOptions }),
+          catch: (cause) =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId,
+              detail: "Failed to start Claude runtime session.",
+              cause,
+            }),
+        }).pipe(
+          Effect.tap((runtime) =>
+            restore(
+              Effect.gen(function* () {
+                if (mcpServers === undefined) return;
+                const failed = yield* Effect.tryPromise(() =>
+                  runtime.setMcpServers(mcpServers),
+                ).pipe(
+                  Effect.map((result) => Object.keys(result.errors)),
+                  Effect.orElseSucceed(() => Object.keys(mcpServers)),
+                  Effect.timeoutOrElse({
+                    duration: "90 seconds",
+                    orElse: () =>
+                      Effect.fail(
+                        new ProviderAdapterProcessError({
+                          provider: PROVIDER,
+                          threadId,
+                          detail: "Claude Code did not answer the MCP server registration.",
+                        }),
+                      ),
+                  }),
+                );
+                if (failed.length > 0) {
+                  yield* Effect.logWarning("Claude MCP servers unavailable", {
+                    threadId,
+                    servers: failed,
+                  });
+                }
+              }),
+            ).pipe(
+              Effect.onError(() =>
+                Queue.shutdown(promptQueue).pipe(
+                  Effect.andThen(Effect.try(() => runtime.close())),
+                  Effect.ignore,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
 
       const session: ProviderSession = {
         threadId,
@@ -5121,6 +5194,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         claudeTasks,
         taskAgents,
         pendingTaskModels,
+        pendingTaskLaunchInputs,
         subagentToolParents,
         workflowMemberFingerprints,
         liveTaskIds,
@@ -5359,6 +5433,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         : {}),
     };
   });
+
+  const stopTask: NonNullable<ClaudeAdapterShape["stopTask"]> = Effect.fn("stopTask")(
+    function* (threadId, taskId) {
+      const context = yield* requireSession(threadId);
+      if (!context.taskAgents.has(taskId))
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "stopTask",
+          issue: "The task does not belong to this live session.",
+        });
+      if (!context.liveTaskIds.has(taskId)) return;
+      yield* Effect.tryPromise({
+        try: () => context.query.stopTask(taskId),
+        catch: (cause) => toRequestError(threadId, "task/stop", cause),
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "task/stop",
+                detail: "Claude did not acknowledge the task stop request.",
+              }),
+            ),
+        }),
+      );
+      // An acknowledgement is not a terminal result. task_notification supplies
+      // the actual outcome, including a completion that raced the stop request.
+    },
+  );
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
@@ -5724,6 +5829,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     startSession,
     sendTurn,
     interruptTurn,
+    stopTask,
     readThread,
     forkConversation,
     rollbackThread,

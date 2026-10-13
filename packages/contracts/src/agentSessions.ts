@@ -132,3 +132,19 @@ export class AgentSessionForkError extends Schema.TaggedError<AgentSessionForkEr
   "AgentSessionForkError",
   { message: Schema.String },
 ) {}
+
+export const AgentTaskStopInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: TrimmedNonEmptyString,
+});
+export type AgentTaskStopInput = typeof AgentTaskStopInput.Type;
+export class AgentTaskStopError extends Schema.TaggedError<AgentTaskStopError>()(
+  "AgentTaskStopError",
+  {
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}

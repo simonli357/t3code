@@ -1,3 +1,4 @@
+import * as AgentScopeLive from "./process/agentScope.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
@@ -988,6 +989,7 @@ const makeServerLayer = Layer.unwrap(
       Layer.provideMerge(FetchHttpClient.layer),
       // PR reads, Git operations, and WebSocket discovery share one process limiter.
       Layer.provide(VcsProcess.layer),
+      Layer.provideMerge(AgentScopeLive.layer),
       Layer.provideMerge(PlatformServicesLive),
     );
   }),

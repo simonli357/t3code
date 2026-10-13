@@ -1,4 +1,5 @@
 // @effect-diagnostics abortControllerInEffect:off - Tests hand-built AbortSignals to the SDK query stub to exercise cancellation.
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
@@ -7,6 +8,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
+  Query,
   Options as ClaudeQueryOptions,
   PermissionMode,
   PermissionResult,
@@ -15,6 +17,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   ClaudeSettings,
   ProviderDriverKind,
   ProviderItemId,
@@ -71,6 +74,15 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public mcpServers: Parameters<Query["setMcpServers"]>[0] | undefined;
+  public setMcpServers: Query["setMcpServers"] = async (servers) => {
+    this.mcpServers = servers;
+    return { added: Object.keys(servers), removed: [], errors: {} };
+  };
+  public stopTaskCalls: string[] = [];
+  public stopTask: Query["stopTask"] = async (taskId) => {
+    this.stopTaskCalls.push(taskId);
+  };
   public closeCalls = 0;
   public closeError: unknown | undefined;
   /** Set by tests that exercise Claude's graceful interrupt. */
@@ -371,6 +383,154 @@ const sendCompletedClaudeTurn = (
   });
 
 describe("ClaudeAdapterLive", () => {
+  it.effect(
+    "stops one native task, retains its owner and siblings, and trusts the reported outcome",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const started = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.started"),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work", attachments: [] });
+        for (const taskId of ["one", "two"])
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: taskId,
+            task_type: "local_agent",
+          } as unknown as SDKMessage);
+        yield* Fiber.join(started);
+        const unknown = yield* adapter.stopTask!(THREAD_ID, "unrelated").pipe(Effect.result);
+        assert.equal(unknown._tag, "Failure");
+        const final = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "task.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.stopTask!(THREAD_ID, "one");
+        assert.deepEqual(harness.query.stopTaskCalls, ["one"]);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.equal((yield* adapter.listSessions()).length, 1);
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "one",
+          status: "completed",
+          summary: "finished before stop",
+        } as unknown as SDKMessage);
+        const [outcome] = yield* Fiber.join(final);
+        assert.equal(outcome?.payload.status, "completed");
+        yield* adapter.stopTask!(THREAD_ID, "one");
+        assert.deepEqual(harness.query.stopTaskCalls, ["one"]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("keeps a task running when its stop request fails", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const started = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "one",
+        task_type: "local_agent",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(started);
+      harness.query.stopTask = async () => {
+        throw new Error("request rejected");
+      };
+      const result = yield* adapter.stopTask!(THREAD_ID, "one").pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(harness.query.closeCalls, 0);
+      assert.equal((yield* adapter.listSessions()).length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  for (const cancel of [false, true]) {
+    it.effect(
+      `closes Claude when MCP registration ${cancel ? "is interrupted" : "times out"}`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const started = yield* Deferred.make<void>();
+          harness.query.setMcpServers = () => {
+            Deferred.doneUnsafe(started, Effect.void);
+            return new Promise(() => {});
+          };
+          McpProviderSession.setMcpProviderSession({
+            environmentId: EnvironmentId.make("test"),
+            threadId: THREAD_ID,
+            providerSessionId: "test",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            endpoint: "http://localhost/mcp",
+            authorizationHeader: "Bearer test-secret",
+            capabilities: new Set(),
+          });
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID)),
+          );
+          const adapter = yield* ClaudeAdapter;
+          const fiber = yield* adapter
+            .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          if (cancel) {
+            yield* Fiber.interrupt(fiber);
+          } else {
+            yield* TestClock.adjust("91 seconds");
+            const failure = yield* Fiber.join(fiber).pipe(Effect.flip);
+            assert.include(failure.message, "MCP server registration");
+          }
+          assert.equal(harness.query.closeCalls, 1);
+        }).pipe(Effect.scoped, Effect.provide(harness.layer));
+      },
+    );
+  }
+
+  it.effect("registers Claude MCP over the control channel without launch credentials", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("test"),
+        threadId: THREAD_ID,
+        providerSessionId: "test",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://localhost/mcp",
+        authorizationHeader: "Bearer test-secret",
+        capabilities: new Set(),
+      });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID)),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+      const options = harness.getLastCreateQueryInput()!.options;
+      assert.isUndefined(options.mcpServers);
+      assert.notInclude(encodeUnknownJsonString(options), "test-secret");
+      assert.deepEqual(harness.query.mcpServers, {
+        "t3-code": {
+          type: "http",
+          url: "http://localhost/mcp",
+          headers: { Authorization: "Bearer test-secret" },
+        },
+      });
+    }).pipe(Effect.scoped, Effect.provide(harness.layer));
+  });
+
   it.effect("returns validation error for non-claude provider on startSession", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3983,6 +4143,80 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  for (const nestedEffort of [undefined, "xhigh"]) {
+    it.effect(
+      `nested Claude tasks preserve inherited and explicit effort (${nestedEffort ?? "inherit"})`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const events = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "task.started"),
+            Stream.take(2),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+              [{ id: "effort", value: "max" }],
+            ),
+          });
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "work", attachments: [] });
+          harness.query.emit({
+            type: "stream_event",
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: {
+                type: "tool_use",
+                id: "outer-tool",
+                name: "Agent",
+                input: { effort: "high" },
+              },
+            },
+            parent_tool_use_id: null,
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: "outer",
+            tool_use_id: "outer-tool",
+            task_type: "local_agent",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "assistant",
+            parent_tool_use_id: "outer-tool",
+            message: {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "inner-tool",
+                  name: "Agent",
+                  input: { model: "inherit", ...(nestedEffort ? { effort: nestedEffort } : {}) },
+                },
+              ],
+            },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: "inner",
+            tool_use_id: "inner-tool",
+            task_type: "local_agent",
+          } as unknown as SDKMessage);
+          const [outer, inner] = yield* Fiber.join(events);
+          assert.equal(outer?.payload.effort, "high");
+          assert.equal(inner?.payload.effort, nestedEffort ?? "high");
+          assert.equal(inner?.payload.model, SYNTHETIC_CLAUDE_CAPABLE_MODEL);
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
 
   it.effect("task.started carries model/effort; subagent snapshots refine the model", () => {
     const harness = makeHarness();

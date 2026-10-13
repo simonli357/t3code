@@ -479,6 +479,54 @@ function makeProviderServiceLayer(
   };
 }
 
+describe("native task control", () => {
+  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const codex = makeFakeCodexAdapter(CODEX_DRIVER);
+  const stopTask = vi.fn((_threadId: ThreadId, _taskId: string) => Effect.void);
+  const harness = makeProviderServiceLayer({
+    registry: makeStaticInstanceRegistry([
+      [claudeAgentInstanceId, { ...claude.adapter, stopTask }],
+      [codexInstanceId, codex.adapter],
+    ]),
+  });
+  harness.layer("routing", (it) => {
+    it.effect(
+      "routes only to the live owner and never restarts a stopped session to stop a task",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const threadId = asThreadId("native-stop-owner");
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: claudeAgentInstanceId,
+            runtimeMode: "full-access",
+          });
+          yield* service.stopTask({ threadId, taskId: "child" });
+          assert.deepEqual(stopTask.mock.calls, [[threadId, "child"]]);
+          assert.equal(claude.interruptTurn.mock.calls.length, 0);
+          yield* service.stopSession({ threadId });
+          const stopped = yield* service
+            .stopTask({ threadId, taskId: "child" })
+            .pipe(Effect.result);
+          assert.equal(stopped._tag, "Failure");
+          assert.equal(claude.startSession.mock.calls.length, 1);
+          const unsupportedId = asThreadId("native-stop-unsupported");
+          yield* service.startSession(unsupportedId, {
+            threadId: unsupportedId,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+          });
+          const unsupported = yield* service
+            .stopTask({ threadId: unsupportedId, taskId: "child" })
+            .pipe(Effect.result);
+          assert.equal(unsupported._tag, "Failure");
+          assert.equal(codex.interruptTurn.mock.calls.length, 0);
+          assert.equal(stopTask.mock.calls.length, 1);
+        }),
+    );
+  });
+});
+
 describe("compatible account switches", () => {
   const first = makeFakeCodexAdapter();
   const second = makeFakeCodexAdapter();

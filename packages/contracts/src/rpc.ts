@@ -40,6 +40,8 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import {
+  AgentTaskStopInput,
+  AgentTaskStopError,
   AgentSessionForkInput,
   AgentSessionForkResult,
   AgentSessionForkError,
@@ -310,6 +312,7 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   agentSessionsFork: "agentSessions.fork",
+  agentTasksStop: "agentTasks.stop",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1034,6 +1037,12 @@ const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   error: Schema.Union([AgentSessionScanError, EnvironmentAuthorizationError]),
 });
 
+const WsAgentTasksStopRpc = Rpc.make(WS_METHODS.agentTasksStop, {
+  payload: AgentTaskStopInput,
+  success: Schema.Void,
+  error: Schema.Union([AgentTaskStopError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsForkRpc = Rpc.make(WS_METHODS.agentSessionsFork, {
   payload: AgentSessionForkInput,
   success: AgentSessionForkResult,
@@ -1548,6 +1557,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAgentSessionsForkRpc,
+  WsAgentTasksStopRpc,
   WsAssetsCreateUrlRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

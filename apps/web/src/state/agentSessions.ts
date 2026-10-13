@@ -28,3 +28,8 @@ export const agentSessionFork = createEnvironmentRpcCommand(connectionAtomRuntim
   label: "environment-data:agent-sessions:fork",
   tag: WS_METHODS.agentSessionsFork,
 });
+
+export const agentTaskStop = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-tasks:stop",
+  tag: WS_METHODS.agentTasksStop,
+});

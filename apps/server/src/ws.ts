@@ -1,3 +1,4 @@
+import { AgentTaskStopError } from "@t3tools/contracts";
 import { forkThread } from "./project/ThreadFork.ts";
 import {
   sameUsageLimitCommandCoverage,
@@ -3448,6 +3449,13 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",
           }),
+        [WS_METHODS.agentTasksStop]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.agentTasksStop,
+            providerService
+              .stopTask(input)
+              .pipe(Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message }))),
+          ),
         [WS_METHODS.agentSessionsFork]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentSessionsFork,

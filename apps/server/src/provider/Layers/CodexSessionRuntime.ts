@@ -18,6 +18,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
@@ -1353,7 +1354,14 @@ export const makeCodexSessionRuntime = (
     };
     const extendEnv = options.environment === undefined;
     const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
-    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+    const launch = yield* (yield* AgentScope).wrap({
+      command: options.binaryPath,
+      args: appServerArgs,
+      name: "codex",
+      threadId: options.threadId,
+      env,
+    });
+    const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, {
       env,
       extendEnv,
     });
