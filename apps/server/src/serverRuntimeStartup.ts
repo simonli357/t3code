@@ -5,7 +5,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
   type ServerSettings as ServerSettingsValue,
-  type ModelSelection,
+  ModelSelection,
   type OrchestrationProjectShell,
   ProjectId,
   ProviderInstanceId,
@@ -379,6 +379,8 @@ function hasServerUpdateContinuationMarker(
   );
 }
 
+const decodeModelSelection = Schema.decodeUnknownOption(ModelSelection);
+
 function readRuntimePayload(runtimePayload: unknown): Record<string, unknown> {
   return runtimePayload !== null &&
     typeof runtimePayload === "object" &&
@@ -700,8 +702,18 @@ export const reconcileProviderSessions = Effect.gen(function* () {
               });
             }
             const capabilities = yield* providerService.getCapabilities(providerInstanceId);
+            // Resuming the native session restores its model, but Codex turn/start
+            // defaults missing effort to medium. Carry the saved active profile
+            // into the continuation, without applying a pending account switch.
+            const savedSelection = Option.getOrUndefined(
+              decodeModelSelection(readRuntimePayload(binding.value.runtimePayload).modelSelection),
+            );
+            const modelSelection = [savedSelection, thread.modelSelection].find(
+              (selection) => selection?.instanceId === providerInstanceId,
+            );
             yield* providerService.sendTurn({
               threadId: thread.id,
+              ...(modelSelection ? { modelSelection } : {}),
               ...(capabilities.promptlessTurnContinuation === true
                 ? { continuation: true }
                 : { input: SERVER_UPDATE_CONTINUATION_PROMPT }),

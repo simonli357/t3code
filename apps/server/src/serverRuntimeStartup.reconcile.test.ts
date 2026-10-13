@@ -9,6 +9,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import { createModelSelection } from "@t3tools/shared/model";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,6 +43,9 @@ const makeThread = (
   archivedAt,
   deletedAt,
   interactionMode: "default" as const,
+  modelSelection: createModelSelection(providerInstanceId, "gpt-6-astra", [
+    { id: "reasoningEffort", value: "high" },
+  ]),
   session: {
     threadId: ThreadId.make(id),
     status,
@@ -195,6 +199,17 @@ it.effect.each(
         recovery === "marked update" ? null : fallbackContinuationTurnId,
       );
       const fallbackProviderInstanceId = ProviderInstanceId.make("claudeAgent");
+      fallback.modelSelection = createModelSelection(
+        fallbackProviderInstanceId,
+        "claude-opus-5-5",
+        [{ id: "effort", value: "xhigh" }],
+      );
+      const savedCodexSelection = codex.modelSelection;
+      // A UI selection queued for the next turn must not change the resumed account.
+      codex.modelSelection = createModelSelection(
+        ProviderInstanceId.make("codex-other"),
+        "gpt-6-sol",
+      );
       const continuationSent = yield* Deferred.make<void>();
       const continuationCleared = yield* Deferred.make<void>();
       const sends: ProviderSendTurnInput[] = [];
@@ -214,6 +229,7 @@ it.effect.each(
             status: "running" as const,
             resumeCursor: { threadId: thread.id },
             runtimePayload: {
+              ...(thread.id === codex.id ? { modelSelection: savedCodexSelection } : {}),
               activeTurnId:
                 thread.id === codex.id && persistedTurn !== "current"
                   ? persistedTurn === "previous"
@@ -306,9 +322,15 @@ it.effect.each(
           String(left.threadId).localeCompare(String(right.threadId)),
         ),
         [
-          { threadId: codex.id, continuation: true, interactionMode: "default" },
+          {
+            threadId: codex.id,
+            modelSelection: savedCodexSelection,
+            continuation: true,
+            interactionMode: "default",
+          },
           {
             threadId: fallback.id,
+            modelSelection: fallback.modelSelection,
             input: "Continue where you left off.",
             interactionMode: "default",
           },
@@ -346,6 +368,7 @@ it.effect.each(
             .filter((binding) => binding.threadId === thread.id)
             .map((binding) => binding.runtimePayload)[0],
           {
+            ...(thread.id === codex.id ? { modelSelection: savedCodexSelection } : {}),
             continueAfterServerUpdate: continuationTurnId,
             continueAfterServerUpdatePrepared: true,
             activeTurnId: null,
@@ -900,7 +923,12 @@ for (const preparedStatus of [
       yield* runReconciliation(input);
       yield* Deferred.await(cleared);
       assert.deepStrictEqual(sends, [
-        { threadId: thread.id, continuation: true, interactionMode: "default" },
+        {
+          threadId: thread.id,
+          modelSelection: thread.modelSelection,
+          continuation: true,
+          interactionMode: "default",
+        },
       ]);
       assert.deepStrictEqual(binding.runtimePayload, {
         activeTurnId: null,
