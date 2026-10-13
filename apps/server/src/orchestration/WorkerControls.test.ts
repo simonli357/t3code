@@ -226,6 +226,14 @@ const reply = Effect.fn(function* (threadId: ThreadId, turn: string, text: strin
     createdAt: timestamp,
   });
 });
+const replyAndReport = Effect.fn(function* (threadId: ThreadId, turn: string, text: string) {
+  yield* reply(threadId, turn, text);
+  yield* (yield* Workers.WorkerControls).report(threadId, {
+    clientRequestId: turn,
+    outcome: "done",
+    summary: text,
+  });
+});
 const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
   const engine = yield* OrchestrationEngineService;
   yield* engine.dispatch({
@@ -245,6 +253,111 @@ const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
   });
 });
 it.layer(testLayer)("persistent workers", (it) => {
+  it.effect("does not notify for progress-only endings, empty turns, or restart completions", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("no-progress-report");
+      yield* service.spawn(owner, input);
+      for (const [id, text] of [
+        ["progress", "Build running; waiting for capacity."],
+        ["empty", ""],
+        ["restart", "Restarting the interrupted work."],
+      ]) {
+        yield* session(worker, "running", id!);
+        if (text) yield* reply(worker, id!, text);
+        yield* session(worker, "ready", `${id}-end`);
+        yield* service.drain();
+      }
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
+        0,
+      );
+    }),
+  );
+  it.effect(
+    "authenticates self reports, deduplicates retries, and defers delivery until the worker ends",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("explicit-report");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "explicit-turn");
+        const report = {
+          clientRequestId: "blocked-on-access",
+          outcome: "blocked" as const,
+          summary: "Verified access is missing; credentials need owner action.",
+        };
+        expect((yield* service.report(owner, report).pipe(Effect.flip)).message).toContain(
+          "not a managed",
+        );
+        const first = yield* service.report(worker, report);
+        const second = yield* service.report(worker, report);
+        expect(first.requestId).toBe(second.requestId);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages,
+        ).toHaveLength(0);
+        expect(
+          (yield* service.report(worker, { ...report, summary: "different" }).pipe(Effect.flip))
+            .message,
+        ).toContain("different assignment");
+        yield* session(worker, "ready", "explicit-end");
+        yield* service.drain();
+        const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+        expect(messages).toHaveLength(1);
+        expect(messages[0]!.text).toContain("Outcome: blocked");
+        expect(messages[0]!.text).toContain(report.summary);
+        yield* service.drain();
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages,
+        ).toHaveLength(1);
+      }),
+  );
+  it.effect("holds an explicit done report until background work finishes", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const liveness = yield* ThreadBackgroundLiveness.ThreadBackgroundLivenessService;
+      const { owner, worker, input } = yield* seed("report-background");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "background-turn");
+      const task = { threadId: worker, taskId: "verification", taskType: undefined };
+      liveness.recordTaskLiveness({ ...task, status: "running", kind: "started" });
+      yield* replyAndReport(worker, "background-turn", "Artifacts ready.");
+      yield* session(worker, "ready", "background-end");
+      yield* service.drain();
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
+        0,
+      );
+      liveness.recordTaskLiveness({ ...task, status: "completed", kind: "completed" });
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      yield* restarted.drain();
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
+        1,
+      );
+    }),
+  );
+  it.effect("cancels undelivered legacy completion notices on upgrade", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("legacy-report");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "legacy-turn");
+      yield* reply(worker, "legacy-turn", "Still working");
+      yield* session(worker, "ready", "legacy-end");
+      yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+        VALUES (${"notice:spawn:" + worker + ":terminal"}, ${worker}, ${owner}, 'notice', 'obsolete progress', ${timestamp})`;
+      yield* service.drain();
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
+        0,
+      );
+      const rows =
+        yield* sql`SELECT state FROM custom_worker_jobs WHERE kind='notice' AND worker_id=${worker}`;
+      expect(rows[0]!.state).toBe("cancelled");
+    }),
+  );
   it.effect("automatically wakes the master for a newly registered worker", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
@@ -254,7 +367,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, worker, input } = yield* seed("automatic");
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "automatic-turn");
-      yield* reply(worker, "automatic-turn", "automatic result");
+      yield* replyAndReport(worker, "automatic-turn", "automatic result");
       yield* session(worker, "ready", "automatic-completed");
       const reports = yield* events.pipe(
         Stream.filter(
@@ -280,7 +393,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         yield* directInput(owner, "master-steer");
         yield* session(owner, "ready", "master-completed");
         yield* session(worker, "running", "worker-result");
-        yield* reply(worker, "worker-result", "Finished the assignment");
+        yield* replyAndReport(worker, "worker-result", "Finished the assignment");
         yield* session(worker, "ready", "worker-completed");
         yield* service.drain();
         expect((yield* service.list(owner))[0]!.pendingReports).toBe(1);
@@ -361,7 +474,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       };
       expect((yield* service.send(owner, follow)).state).toBe("queued");
       yield* service.send(owner, follow);
-      yield* reply(worker, "worker-first", "first result");
+      yield* replyAndReport(worker, "worker-first", "first result");
       yield* session(worker, "ready", "first-finished");
       yield* service.drain();
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
@@ -382,7 +495,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* session(owner, "running", "master-report");
       yield* session(owner, "ready", "master-report-finished");
       yield* session(worker, "running", "worker-second");
-      yield* reply(worker, "worker-second", "corrected result");
+      yield* replyAndReport(worker, "worker-second", "corrected result");
       yield* session(worker, "ready", "second-finished");
       yield* service.drain();
       expect(
@@ -394,7 +507,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("completed");
     }),
   );
-  it.effect("automatically reports direct worker turns without repeating assignment reports", () =>
+  it.effect("delivers explicit reports after direct worker input without duplicates", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const engine = yield* OrchestrationEngineService;
@@ -402,7 +515,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, worker, input } = yield* seed("direct");
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "assigned-turn");
-      yield* reply(worker, "assigned-turn", "assigned result");
+      yield* replyAndReport(worker, "assigned-turn", "assigned result");
       yield* session(worker, "ready", "assigned-finished");
       yield* service.drain();
       yield* session(owner, "running", "assigned-report");
@@ -411,7 +524,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* service.start();
       yield* directInput(worker, "automatic");
       yield* session(worker, "running", "direct-turn");
-      yield* reply(worker, "direct-turn", "direct result");
+      yield* replyAndReport(worker, "direct-turn", "direct result");
       yield* session(worker, "ready", "direct-finished");
       yield* events.pipe(
         Stream.filter(
@@ -427,7 +540,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(messages.filter((m) => m.text.includes("direct result"))).toHaveLength(1);
     }).pipe(Effect.scoped),
   );
-  it.effect("recovers direct worker results after restart and respects paused notifications", () =>
+  it.effect("recovers explicit reports after restart and respects paused notifications", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -441,7 +554,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* service.control(owner, { threadId: worker, notifications: false });
       yield* directInput(worker, "restart");
       yield* session(worker, "running", "restart-direct-turn");
-      yield* reply(worker, "restart-direct-turn", "recovered direct result");
+      yield* replyAndReport(worker, "restart-direct-turn", "recovered direct result");
       yield* session(worker, "ready", "restart-direct-finished");
       const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
       yield* restarted.drain();
@@ -491,7 +604,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       });
       yield* service.drain();
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
-        1,
+        0,
       );
       yield* engine.dispatch({
         type: "thread.unsettle",
@@ -501,7 +614,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       });
       yield* service.drain();
       const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
-      expect(messages.filter((m) => m.text.includes("latest-direct"))).toHaveLength(1);
+      expect(messages.filter((m) => m.text.includes("latest-direct"))).toHaveLength(0);
       expect(messages.filter((m) => m.text.includes("old-direct"))).toHaveLength(0);
     }),
   );
@@ -654,7 +767,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         expect((yield* service.list(owner))[0]!.modelSelection).toEqual(input.modelSelection);
       }),
   );
-  it.effect("reports a turn the worker starts itself once its background work ends", () =>
+  it.effect("reports explicit completion after background work ends but not progress", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -674,7 +787,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* service.drain();
       liveness.recordTaskLiveness({ ...build, status: "completed", kind: "completed" });
       yield* session(worker, "running", "self-final");
-      yield* reply(worker, "self-final", "build finished and checks pass");
+      yield* replyAndReport(worker, "self-final", "build finished and checks pass");
       yield* session(worker, "ready", "self-final-finished");
       yield* service.drain();
       const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
@@ -710,7 +823,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* service.drain();
       expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("submitted");
       yield* session(worker, "running", "handoff-turn", selections[2]!.instanceId);
-      yield* reply(worker, "handoff-turn", "result after switch");
+      yield* replyAndReport(worker, "handoff-turn", "result after switch");
       yield* session(worker, "ready", "handoff-finished", selections[2]!.instanceId);
       yield* service.drain();
       const latest = (yield* service.list(owner))[0]!.latestRequest!;
@@ -836,7 +949,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* sql`UPDATE custom_worker_jobs SET state = 'queued' WHERE id = ${`spawn:${worker}`}`;
       const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
       yield* restarted.drain();
-      yield* reply(worker, "restart-turn", "durable result");
+      yield* replyAndReport(worker, "restart-turn", "durable result");
       yield* session(worker, "ready", "restart-complete");
       yield* restarted.drain();
       const master = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner));
@@ -898,7 +1011,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       });
       yield* service.control(owner, { threadId: worker, cancelRequestId: queued.requestId });
       yield* session(worker, "running", "control-turn");
-      yield* reply(worker, "control-turn", "held result");
+      yield* replyAndReport(worker, "control-turn", "held result");
       yield* session(worker, "ready", "control-finished");
       yield* service.drain();
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
@@ -1017,6 +1130,28 @@ it.layer(mcpLayer)("worker MCP", (it) => {
           expect.objectContaining({ type: "text", text: expect.stringContaining("codex_antoine") }),
         ]),
       );
+      expect(
+        (yield* call("t3_worker_report", {
+          clientRequestId: "forged",
+          outcome: "done",
+          summary: "Cannot impersonate worker",
+          threadId: worker,
+        })).isError,
+      ).toBe(true);
+      const workerCall = yield* server
+        .callTool({
+          name: "t3_worker_report",
+          arguments: {
+            clientRequestId: "finished",
+            outcome: "done",
+            summary: "Evidence verified.",
+          },
+        })
+        .pipe(
+          Effect.provideService(Invocation.McpInvocationContext, { ...scope, threadId: worker }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(workerCall.isError).not.toBe(true);
       const listed = yield* call("t3_worker_list", {});
       expect(listed.content).toEqual(
         expect.arrayContaining([

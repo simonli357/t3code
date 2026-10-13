@@ -11,7 +11,7 @@ const dependencies = [Workers.WorkerControls, Invocation.McpInvocationContext];
 const failure = Schema.Union([Workers.WorkerError]);
 const spawn = Tool.make("t3_worker_spawn", {
   description:
-    "Fork a prepared base into a persistent worker owned by THIS master. Use the project's worker skill to resolve the base, title, explicit provider/model, and fixed reasoning options first. Pass a stable destination UUID across retries. The base keeps its native history unchanged. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Each finished assignment automatically reports to this master when idle; do other work or end your turn instead of polling.",
+    "Fork a prepared base into a persistent worker owned by THIS master. Use the project's worker skill to resolve the base, title, explicit provider/model, and fixed reasoning options first. Pass a stable destination UUID across retries. The base keeps its native history unchanged. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports wake this master when idle; review the latest output and evidence and give a disposition.",
   parameters: Workers.SpawnInput,
   success: Workers.WorkerResult,
   failure,
@@ -34,7 +34,7 @@ const read = Tool.make("t3_worker_read", {
 });
 const send = Tool.make("t3_worker_send", {
   description:
-    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Rejects changed settings immediately; queues durably if busy and settings still match. Use a new clientRequestId per assignment, stable across retries with identical prompt. Each assignment gets its own completion notification. Does not interrupt or steer active work.",
+    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Rejects changed settings immediately; queues durably if busy and settings still match. Use a new clientRequestId per assignment, stable across retries with identical prompt. Workers explicitly report done or blocked with t3_worker_report. Does not interrupt or steer active work.",
   parameters: Workers.SendInput,
   success: Workers.JobResult,
   failure,
@@ -56,6 +56,14 @@ const control = Tool.make("t3_worker_control", {
   failure,
   dependencies,
 });
+const report = Tool.make("t3_worker_report", {
+  description:
+    "Report THIS managed worker's assignment as done or genuinely blocked to its authenticated master. Do not use for progress, a running build, a normal wait, or a restart. First resolve what you can within your authority. Supply a concise summary with evidence for completion or the exact blocker, attempted remedies, and needed action. Use a new clientRequestId per result, stable with identical content on retry. The report waits until your current turn ends; done also waits for background work. Normal progress stays in your own conversation. Do not send another report just to acknowledge the master.",
+  parameters: Workers.ReportInput,
+  success: Workers.JobResult,
+  failure,
+  dependencies,
+});
 const stopSubagent = Tool.make("t3_subagent_stop", {
   description:
     "Request a stop for one native Claude task belonging to THIS session, without stopping its owner. Supply its task_id. Acknowledgement is not completion; read its actual task notification for the outcome. Does not stop separate T3 worker sessions.",
@@ -64,7 +72,16 @@ const stopSubagent = Tool.make("t3_subagent_stop", {
   failure: AgentTaskStopError,
   dependencies: [ProviderService.ProviderService, Invocation.McpInvocationContext],
 });
-export const WorkersToolkit = Toolkit.make(spawn, list, read, send, wait, control, stopSubagent);
+export const WorkersToolkit = Toolkit.make(
+  spawn,
+  list,
+  read,
+  send,
+  wait,
+  control,
+  report,
+  stopSubagent,
+);
 export const handlers = WorkersToolkit.toLayer(
   Effect.gen(function* () {
     const service = yield* Workers.WorkerControls;
@@ -78,6 +95,7 @@ export const handlers = WorkersToolkit.toLayer(
           ),
           Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message })),
         ),
+      t3_worker_report: (input) => owner.pipe(Effect.flatMap((id) => service.report(id, input))),
       t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => service.spawn(id, input))),
       t3_worker_list: () => owner.pipe(Effect.flatMap((id) => service.list(id))),
       t3_worker_read: (input) => owner.pipe(Effect.flatMap((id) => service.read(id, input))),

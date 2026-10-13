@@ -40,6 +40,11 @@ export const SendInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
 });
+export const ReportInput = Schema.Struct({
+  clientRequestId: TrimmedNonEmptyString,
+  outcome: Schema.Literals(["done", "blocked"]),
+  summary: TrimmedNonEmptyString,
+});
 export const ReadInput = Schema.Struct({
   threadId: ThreadId,
   afterSequence: Schema.optional(NonNegativeInt),
@@ -175,6 +180,10 @@ export class WorkerControls extends Context.Service<
       owner: ThreadId,
       input: typeof SendInput.Type,
     ) => Effect.Effect<typeof JobResult.Type, WorkerError>;
+    readonly report: (
+      worker: ThreadId,
+      input: typeof ReportInput.Type,
+    ) => Effect.Effect<typeof JobResult.Type, WorkerError>;
     readonly wait: (
       owner: ThreadId,
       input: typeof WaitInput.Type,
@@ -229,7 +238,7 @@ const make = Effect.gen(function* () {
     const notices = yield* sql<{ pending: number; error: string | null }>`SELECT
       COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0) AS pending,
       MAX(CASE WHEN state = 'error' THEN error END) AS error
-      FROM custom_worker_jobs WHERE worker_id = ${worker.thread_id} AND kind = 'notice'`;
+      FROM custom_worker_jobs WHERE worker_id = ${worker.thread_id} AND kind != 'work'`;
     const state =
       worker.state !== "ready"
         ? worker.state
@@ -273,10 +282,11 @@ const make = Effect.gen(function* () {
     target: string,
     kind: string,
     prompt: string,
+    turnId?: string,
   ) {
     const createdAt = yield* now;
-    yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
-      VALUES (${id}, ${worker.thread_id}, ${target}, ${kind}, ${prompt}, ${createdAt}) ON CONFLICT(id) DO NOTHING`;
+    yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
+      VALUES (${id}, ${worker.thread_id}, ${target}, ${kind}, ${prompt}, ${createdAt}, ${turnId ?? null}) ON CONFLICT(id) DO NOTHING`;
     const rows = yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`;
     const job = rows[0]!;
     if (
@@ -350,7 +360,7 @@ const make = Effect.gen(function* () {
       worker,
       worker.owner_id,
       "notice",
-      `[T3 worker report — ${plan.title}]\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\nUse t3_worker_read for output and t3_worker_send to continue this same worker. A finished turn is not acceptance of the assigned work. Do not reply just to acknowledge this report; continue only if the user's task requires it.`,
+      `[T3 worker report — ${plan.title}]\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker. Runtime failure is not task completion.`,
     );
   });
 
@@ -368,7 +378,7 @@ const make = Effect.gen(function* () {
       WHERE w.state = 'ready' AND t.turn_id IS NOT NULL
         AND p.deleted_at IS NULL AND p.archived_at IS NULL AND p.settled_at IS NULL
         AND t.row_id = (SELECT MAX(row_id) FROM projection_turns WHERE thread_id = w.thread_id AND turn_id IS NOT NULL)
-        AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs j WHERE j.worker_id = w.thread_id
+        AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs j WHERE j.worker_id = w.thread_id AND j.kind = 'work'
           AND (j.turn_id = t.turn_id OR 'worker-job:' || j.id = t.pending_message_id
             OR (j.kind = 'work' AND j.state = 'submitted' AND j.turn_id IS NULL)))
       ON CONFLICT(id) DO NOTHING`;
@@ -395,7 +405,7 @@ const make = Effect.gen(function* () {
         }>`SELECT state, turn_id FROM projection_turns AS t
           WHERE thread_id = ${job.target_id} AND turn_id IS NOT NULL AND pending_message_id IS NULL
             AND requested_at >= ${job.dispatched_at ?? job.created_at}
-            AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs WHERE turn_id = t.turn_id)
+            AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs WHERE turn_id = t.turn_id AND kind = 'work')
           ORDER BY row_id LIMIT 1`;
         turn = started[0];
       }
@@ -442,12 +452,12 @@ const make = Effect.gen(function* () {
           selfStarted && Option.isSome(session) && session.value.backgroundLiveness != null;
         yield* sql.withTransaction(
           Effect.gen(function* () {
-            if (worker.notify && !job.reported && !backgroundLive)
+            if (worker.notify && !job.reported && !backgroundLive && state !== "completed")
               yield* report(
                 worker,
                 job,
                 "terminal",
-                `State: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 3000)}`,
+                `Runtime state: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 3000)}`,
               );
             yield* sql`UPDATE custom_worker_jobs SET state = ${state}, error = ${error},
             turn_id = ${turn?.turn_id ?? job.turn_id}, reported = ${worker.notify ? 1 : job.reported} WHERE id = ${job.id}`;
@@ -473,11 +483,40 @@ const make = Effect.gen(function* () {
       }
     }
   });
+  const submitReport = Effect.fn("WorkerControls.report")(
+    function* (workerId: ThreadId, input: typeof ReportInput.Type) {
+      const rows =
+        yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${workerId} AND state = 'ready'`;
+      const worker = rows[0];
+      if (!worker)
+        return yield* new WorkerError({ message: "This session is not a managed T3 worker." });
+      const plan = decodePlan(worker.plan_json);
+      const source = yield* thread(workerId);
+      const job = yield* enqueue(
+        `report:${workerId}:${input.clientRequestId}`,
+        worker,
+        worker.owner_id,
+        input.outcome,
+        `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`,
+        source.session?.activeTurnId ?? source.latestTurn?.turnId ?? undefined,
+      );
+      return jobResult(job);
+    },
+    lock.withPermit,
+    Effect.mapError(failure),
+  );
   const drain = Effect.fn("WorkerControls.drain")(
     function* () {
       yield* refreshJobs();
+      // Old builds queued turn completions as assignment completions. Retire
+      // only those undelivered automatic notices; retain input/error notices.
+      yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled'
+        WHERE kind = 'notice' AND state = 'queued' AND id IN (
+          SELECT 'notice:' || id || ':terminal' FROM custom_worker_jobs
+          WHERE kind = 'work' AND state = 'completed'
+        )`;
       const jobs =
-        yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY rowid`;
+        yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY CASE WHEN kind = 'work' THEN 1 ELSE 0 END, rowid`;
       const blocked = new Set<string>();
       for (const job of jobs) {
         if (blocked.has(job.target_id)) continue;
@@ -485,7 +524,7 @@ const make = Effect.gen(function* () {
           yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
         const worker = workers[0];
         if (!worker || worker.state !== "ready") continue;
-        if (job.kind === "notice" && !worker.notify) continue;
+        if (job.kind !== "work" && !worker.notify) continue;
         const attempt = Effect.gen(function* () {
           const commandId = CommandId.make(`worker-job:${job.id}:${job.attempt}`);
           const receipts = yield* sql<{
@@ -493,13 +532,30 @@ const make = Effect.gen(function* () {
             error: string | null;
           }>`SELECT status, error FROM orchestration_command_receipts WHERE command_id = ${commandId}`;
           if (receipts[0]?.status === "accepted") {
-            yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind === "notice" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
+            yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind !== "work" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
             return;
           }
           if (receipts[0]?.status === "rejected")
             return yield* new WorkerError({
               message: receipts[0].error ?? "Dispatch was rejected.",
             });
+          if (job.kind === "done" || job.kind === "blocked") {
+            const source = yield* thread(job.worker_id);
+            const turns = yield* sql<{ state: string }>`SELECT state FROM projection_turns
+              WHERE thread_id = ${job.worker_id} AND turn_id = ${job.turn_id}`;
+            if (
+              job.turn_id &&
+              (source.session?.activeTurnId === job.turn_id ||
+                ["pending", "running"].includes(turns[0]?.state ?? ""))
+            )
+              return;
+            if (
+              job.kind === "done" &&
+              source.latestTurn?.turnId === job.turn_id &&
+              source.backgroundLiveness
+            )
+              return;
+          }
           const sequence = yield* engine.latestSequence;
           const target = yield* thread(job.target_id);
           if (target.archivedAt !== null || target.snoozedUntil != null || (yield* busy(target))) {
@@ -525,7 +581,7 @@ const make = Effect.gen(function* () {
             interactionMode: target.interactionMode,
             createdAt: dispatchedAt,
           });
-          yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind === "notice" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
+          yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind !== "work" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
           blocked.add(job.target_id);
         });
         yield* attempt.pipe(
@@ -824,6 +880,7 @@ const make = Effect.gen(function* () {
               "approval.resolved",
               "provider.turn.start.failed",
               "provider.turn.steered",
+              "task.completed",
             ].includes(event.payload.activity.kind)),
       ),
       Stream.runForEach(() =>
@@ -848,6 +905,7 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
+    report: (worker, input) => submitReport(worker, input).pipe(Effect.tap(() => drain())),
     list,
     read,
     wait,
