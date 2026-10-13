@@ -360,16 +360,17 @@ const make = Effect.gen(function* () {
     yield* sql`INSERT INTO custom_worker_jobs
       (id, worker_id, target_id, kind, prompt, created_at, state, turn_id, dispatched_at)
       SELECT 'direct:' || w.thread_id || ':' || t.turn_id, w.thread_id, w.thread_id,
-        'work', m.text, t.requested_at, 'submitted', t.turn_id, t.requested_at
+        'work', COALESCE(m.text, ''), t.requested_at, 'submitted', t.turn_id, t.requested_at
       FROM custom_workers w
       JOIN projection_threads p ON p.thread_id = w.thread_id
       JOIN projection_turns t ON t.thread_id = w.thread_id
-      JOIN projection_thread_messages m ON m.thread_id = t.thread_id AND m.message_id = t.pending_message_id
+      LEFT JOIN projection_thread_messages m ON m.thread_id = t.thread_id AND m.message_id = t.pending_message_id
       WHERE w.state = 'ready' AND t.turn_id IS NOT NULL
         AND p.deleted_at IS NULL AND p.archived_at IS NULL AND p.settled_at IS NULL
         AND t.row_id = (SELECT MAX(row_id) FROM projection_turns WHERE thread_id = w.thread_id AND turn_id IS NOT NULL)
         AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs j WHERE j.worker_id = w.thread_id
-          AND (j.turn_id = t.turn_id OR 'worker-job:' || j.id = t.pending_message_id))
+          AND (j.turn_id = t.turn_id OR 'worker-job:' || j.id = t.pending_message_id
+            OR (j.kind = 'work' AND j.state = 'submitted' AND j.turn_id IS NULL)))
       ON CONFLICT(id) DO NOTHING`;
     const jobs = yield* sql<Job>`SELECT * FROM custom_worker_jobs
       WHERE kind = 'work' AND (state = 'submitted' OR (reported = 0 AND state IN ('completed', 'error', 'interrupted')))
@@ -386,12 +387,29 @@ const make = Effect.gen(function* () {
         WHERE thread_id = ${job.target_id}
           AND (pending_message_id = ${`worker-job:${job.id}`} OR turn_id = ${job.turn_id})
         ORDER BY row_id DESC LIMIT 1`;
-      const turn = turns[0];
+      let turn = turns[0];
+      if (!turn && job.state === "submitted") {
+        const started = yield* sql<{
+          state: string;
+          turn_id: string | null;
+        }>`SELECT state, turn_id FROM projection_turns AS t
+          WHERE thread_id = ${job.target_id} AND turn_id IS NOT NULL AND pending_message_id IS NULL
+            AND requested_at >= ${job.dispatched_at ?? job.created_at}
+            AND NOT EXISTS (SELECT 1 FROM custom_worker_jobs WHERE turn_id = t.turn_id)
+          ORDER BY row_id LIMIT 1`;
+        turn = started[0];
+      }
       if (turn?.turn_id && turn.turn_id !== job.turn_id)
         yield* sql`UPDATE custom_worker_jobs SET turn_id = ${turn.turn_id} WHERE id = ${job.id}`;
       const session = yield* snapshots.getThreadShellById(ThreadId.make(job.target_id));
       let state = turn?.state ?? job.state;
       let error = job.error;
+      const sessionInstance = Option.isSome(session)
+        ? session.value.session?.providerInstanceId
+        : undefined;
+      const switching =
+        sessionInstance !== undefined &&
+        sessionInstance !== decodePlan(worker.plan_json).modelSelection.instanceId;
       if (state === "error" && !error && Option.isSome(session))
         error = session.value.session?.lastError ?? "Provider turn failed.";
       // Failed startup removes the pending placeholder without ever allocating a native turn.
@@ -405,6 +423,7 @@ const make = Effect.gen(function* () {
           failed[0] ||
           Option.isNone(session) ||
           (Option.isSome(session) &&
+            !switching &&
             ["error", "interrupted", "stopped"].includes(session.value.session?.status ?? ""))
         ) {
           state = "error";
@@ -418,14 +437,17 @@ const make = Effect.gen(function* () {
         const replies = yield* sql<{ text: string }>`SELECT text FROM projection_thread_messages
           WHERE thread_id = ${job.target_id} AND turn_id = ${turn?.turn_id ?? job.turn_id} AND role = 'assistant'
           ORDER BY created_at DESC, message_id DESC LIMIT 1`;
+        const selfStarted = job.id.startsWith("direct:") && job.prompt === "";
+        const backgroundLive =
+          selfStarted && Option.isSome(session) && session.value.backgroundLiveness != null;
         yield* sql.withTransaction(
           Effect.gen(function* () {
-            if (worker.notify && !job.reported)
+            if (worker.notify && !job.reported && !backgroundLive)
               yield* report(
                 worker,
                 job,
                 "terminal",
-                `State: ${state}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 3000)}`,
+                `State: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 3000)}`,
               );
             yield* sql`UPDATE custom_worker_jobs SET state = ${state}, error = ${error},
             turn_id = ${turn?.turn_id ?? job.turn_id}, reported = ${worker.notify ? 1 : job.reported} WHERE id = ${job.id}`;

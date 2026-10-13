@@ -48,7 +48,7 @@ const infrastructure = Layer.mergeAll(
   OrchestrationProjectionSnapshotQueryLive,
   ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepository)),
 ).pipe(
-  Layer.provide(ThreadBackgroundLiveness.layer),
+  Layer.provideMerge(ThreadBackgroundLiveness.layer),
   Layer.provide(ThreadPlanProgress.layer),
   Layer.provide(OrchestrationEventStoreLive),
   Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -184,8 +184,9 @@ const seed = Effect.fn(function* (prefix: string, index = 0) {
 });
 const session = Effect.fn(function* (
   threadId: ThreadId,
-  status: "running" | "ready" | "error",
+  status: "running" | "ready" | "error" | "stopped",
   suffix: string,
+  providerInstanceId?: ProviderInstanceId,
 ) {
   const engine = yield* OrchestrationEngineService;
   yield* engine.dispatch({
@@ -196,6 +197,7 @@ const session = Effect.fn(function* (
       threadId,
       status,
       providerName: "codex",
+      ...(providerInstanceId ? { providerInstanceId } : {}),
       runtimeMode: "full-access",
       activeTurnId: status === "running" ? TurnId.make(suffix) : null,
       lastError: status === "error" ? "Test provider error" : null,
@@ -651,6 +653,72 @@ it.layer(testLayer)("persistent workers", (it) => {
         ).toEqual(input.modelSelection);
         expect((yield* service.list(owner))[0]!.modelSelection).toEqual(input.modelSelection);
       }),
+  );
+  it.effect("reports a turn the worker starts itself once its background work ends", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const liveness = yield* ThreadBackgroundLiveness.ThreadBackgroundLivenessService;
+      const { owner, worker, input } = yield* seed("self-started");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "self-assignment");
+      yield* session(worker, "ready", "self-assignment-finished");
+      yield* service.drain();
+      yield* session(owner, "running", "self-assignment-report");
+      yield* session(owner, "ready", "self-assignment-report-finished");
+      const build = { threadId: worker, taskId: "build", taskType: undefined };
+      liveness.recordTaskLiveness({ ...build, status: "running", kind: "started" });
+      yield* session(worker, "running", "self-waiting");
+      yield* reply(worker, "self-waiting", "build still running");
+      yield* session(worker, "ready", "self-waiting-finished");
+      yield* service.drain();
+      liveness.recordTaskLiveness({ ...build, status: "completed", kind: "completed" });
+      yield* session(worker, "running", "self-final");
+      yield* reply(worker, "self-final", "build finished and checks pass");
+      yield* session(worker, "ready", "self-final-finished");
+      yield* service.drain();
+      const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(messages.filter((m) => m.text.includes("build still running"))).toHaveLength(0);
+      expect(
+        messages.filter((m) => m.text.includes("build finished and checks pass")),
+      ).toHaveLength(1);
+    }),
+  );
+  it.effect("links an assignment to the turn a provider switch starts", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("handoff");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "handoff-assignment");
+      yield* session(worker, "ready", "handoff-assignment-finished");
+      yield* service.drain();
+      yield* session(owner, "running", "handoff-report");
+      yield* session(owner, "ready", "handoff-report-finished");
+      yield* service.control(owner, { threadId: worker, modelSelection: selections[2]! });
+      yield* service.send(owner, {
+        threadId: worker,
+        clientRequestId: "after-switch",
+        prompt: "continue after switch",
+      });
+      yield* session(
+        worker,
+        "stopped",
+        "previous-provider-stopped",
+        input.modelSelection.instanceId,
+      );
+      yield* service.drain();
+      expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("submitted");
+      yield* session(worker, "running", "handoff-turn", selections[2]!.instanceId);
+      yield* reply(worker, "handoff-turn", "result after switch");
+      yield* session(worker, "ready", "handoff-finished", selections[2]!.instanceId);
+      yield* service.drain();
+      const latest = (yield* service.list(owner))[0]!.latestRequest!;
+      expect(latest.state).toBe("completed");
+      expect(latest.turnId).toBe("handoff-turn");
+      const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(messages.filter((m) => m.text.includes("result after switch"))).toHaveLength(1);
+    }),
   );
   it.effect("keeps delivery checks when settings change after enqueue", () =>
     Effect.gen(function* () {
