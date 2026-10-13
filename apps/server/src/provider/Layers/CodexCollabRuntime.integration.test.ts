@@ -24,6 +24,7 @@ import { assert, describe } from "vite-plus/test";
 
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
+import { AgentScope, type AgentScopeShape } from "@t3tools/shared/AgentScope";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const ROOT = wireFixture.rootThreadId;
@@ -938,6 +939,76 @@ describe("CodexSessionRuntime compaction", () => {
       );
 
       yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe.skipIf(HostProcessPlatform.defaultValue() === "win32")("Codex fork process scopes", () => {
+  it.effect("forks repeatedly without reusing the source scope or its OOM identity", () =>
+    Effect.gen(function* () {
+      const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "codex-fork-scope-"));
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const forkScript = NodePath.join(directory, "script.json");
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(forkScript, JSON.stringify({ rootThreadId: ROOT, notifications: [] }));
+      const launches: Parameters<AgentScopeShape["wrap"]>[0][] = [];
+      const scope: AgentScopeShape = {
+        clear: () => Effect.void,
+        oomKilled: () => Effect.succeed(false),
+        wrap: (input) =>
+          Effect.sync(() => {
+            launches.push(input);
+            // Model systemd's exclusive unit names with an atomic reservation.
+            // Reusing any already-built launch command fails before the peer starts.
+            return {
+              command: "/bin/sh",
+              args: [
+                "-c",
+                'mkdir "$1" || exit 1; shift; exec "$@"',
+                "scope-test",
+                NodePath.join(directory, `scope-${launches.length}`),
+                input.command,
+                ...input.args,
+              ],
+            };
+          }),
+      };
+      yield* Effect.gen(function* () {
+        const sourceId = ThreadId.make("source-scope-test");
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: sourceId,
+          binaryPath: peerPath,
+          cwd: directory,
+          runtimeMode: "full-access",
+          environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: forkScript },
+        });
+        const source = yield* runtime.start();
+        const first = yield* runtime.forkConversation!;
+        const second = yield* runtime.forkConversation!;
+        assert.notDeepEqual(first, second);
+        assert.notDeepEqual(first, source.resumeCursor);
+        assert.deepEqual(
+          launches.map(({ name, threadId }) => ({ name, threadId })),
+          [
+            { name: "codex", threadId: sourceId },
+            { name: "codex-fork", threadId: undefined },
+            { name: "codex-fork", threadId: undefined },
+          ],
+        );
+        assert.deepEqual(
+          NodeFS.readFileSync(`${forkScript}.requests`, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line)),
+          [1, 2].map(() => ({ method: "thread/fork", params: { threadId: ROOT } })),
+        );
+        // The source remains usable after both short-lived fork processes exit.
+        const turn = yield* runtime.sendTurn({ input: "verify source remains open" });
+        assert.isDefined(turn.turnId);
+        yield* runtime.close;
+      }).pipe(Effect.provideService(AgentScope, scope));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

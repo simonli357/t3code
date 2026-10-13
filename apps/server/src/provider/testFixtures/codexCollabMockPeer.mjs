@@ -102,6 +102,14 @@ rl.on("line", (line) => {
     write({ id, result: { data: [] } });
     return;
   }
+  if (method === "thread/fork") {
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.requests`,
+      `${JSON.stringify({ method, params: message.params })}\n`,
+    );
+    write({ id, result: { thread: { id: `fork-${process.pid}`, turns: [] } } });
+    return;
+  }
   if (method === "thread/start") {
     write({ id, result: fixture.responses.threadStart });
     return;

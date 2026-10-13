@@ -2690,14 +2690,27 @@ export const makeCodexSessionRuntime = (
           // only removes notifications; it does not release that writer. Use
           // a short-lived app-server so its scope closes before the new T3
           // runtime resumes the fork, without detaching the source session.
+          // Scope commands contain a unique systemd unit name and cannot be
+          // reused for another process. Do not associate this temporary scope
+          // with the source thread: its OOM tracking belongs to the live runtime.
+          const forkLaunch = yield* (yield* AgentScope).wrap({
+            command: options.binaryPath,
+            args: appServerArgs,
+            name: "codex-fork",
+            env,
+          });
+          const forkSpawnCommand = yield* resolveSpawnCommand(forkLaunch.command, forkLaunch.args, {
+            env,
+            extendEnv,
+          });
           const forkChild = yield* spawner
             .spawn(
-              ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+              ChildProcess.make(forkSpawnCommand.command, forkSpawnCommand.args, {
                 cwd: options.cwd,
                 env,
                 extendEnv,
                 forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
-                shell: spawnCommand.shell,
+                shell: forkSpawnCommand.shell,
               }),
             )
             .pipe(
