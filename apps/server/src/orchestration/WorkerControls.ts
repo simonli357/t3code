@@ -539,26 +539,36 @@ const make = Effect.gen(function* () {
             return yield* new WorkerError({
               message: receipts[0].error ?? "Dispatch was rejected.",
             });
-          if (job.kind === "done" || job.kind === "blocked") {
-            const source = yield* thread(job.worker_id);
-            const turns = yield* sql<{ state: string }>`SELECT state FROM projection_turns
-              WHERE thread_id = ${job.worker_id} AND turn_id = ${job.turn_id}`;
-            if (
-              job.turn_id &&
-              (source.session?.activeTurnId === job.turn_id ||
-                ["pending", "running"].includes(turns[0]?.state ?? ""))
-            )
-              return;
-            if (
-              job.kind === "done" &&
-              source.latestTurn?.turnId === job.turn_id &&
-              source.backgroundLiveness
-            )
-              return;
+          const isReport = job.kind !== "work";
+          // Persist reports independently of starting/steering a turn. Stop,
+          // snooze and archive may suppress the wake-up, never the visible report.
+          if (isReport) {
+            yield* engine.dispatch({
+              type: "thread.message.user.append",
+              commandId: CommandId.make(`worker-report-visible:${job.id}`),
+              threadId: ThreadId.make(job.target_id),
+              message: {
+                messageId: MessageId.make(`worker-job:${job.id}`),
+                text: job.prompt,
+                attachments: [],
+              },
+              createdAt: yield* now,
+            });
           }
           const sequence = yield* engine.latestSequence;
           const target = yield* thread(job.target_id);
-          if (target.archivedAt !== null || target.snoozedUntil != null || (yield* busy(target))) {
+          if (target.archivedAt !== null || target.snoozedUntil != null) return;
+          if (isReport) {
+            // Ignore our own wake-ups when deciding whether the owner pressed
+            // Stop. Persisted intent survives restarts; normal input resumes it.
+            const intent = yield* sql<{ event_type: string }>`SELECT event_type
+              FROM orchestration_events WHERE aggregate_kind = 'thread'
+                AND stream_id = ${target.id}
+                AND event_type IN ('thread.turn-interrupt-requested', 'thread.turn-start-requested')
+                AND (command_id IS NULL OR command_id NOT LIKE 'worker-job:%')
+              ORDER BY sequence DESC LIMIT 1`;
+            if (intent[0]?.event_type === "thread.turn-interrupt-requested") return;
+          } else if (yield* busy(target)) {
             blocked.add(job.target_id);
             return;
           }
@@ -582,7 +592,7 @@ const make = Effect.gen(function* () {
             createdAt: dispatchedAt,
           });
           yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind !== "work" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
-          blocked.add(job.target_id);
+          if (!isReport) blocked.add(job.target_id);
         });
         yield* attempt.pipe(
           Effect.catch((cause) =>
@@ -905,7 +915,15 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
-    report: (worker, input) => submitReport(worker, input).pipe(Effect.tap(() => drain())),
+    report: (worker, input) =>
+      submitReport(worker, input).pipe(
+        Effect.tap(() => drain()),
+        Effect.flatMap(
+          (result) => sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${result.requestId}`,
+        ),
+        Effect.map((rows) => jobResult(rows[0]!)),
+        Effect.mapError(failure),
+      ),
     list,
     read,
     wait,

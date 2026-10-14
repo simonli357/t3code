@@ -11,7 +11,7 @@ const dependencies = [Workers.WorkerControls, Invocation.McpInvocationContext];
 const failure = Schema.Union([Workers.WorkerError]);
 const spawn = Tool.make("t3_worker_spawn", {
   description:
-    "Fork a prepared base into a persistent worker owned by THIS master. Use the project's worker skill to resolve the base, title, explicit provider/model, and fixed reasoning options first. Pass a stable destination UUID across retries. The base keeps its native history unchanged. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports wake this master when idle; review the latest output and evidence and give a disposition.",
+    "Fork a prepared base into a persistent worker owned by THIS master. Use the project's worker skill to resolve the base, title, explicit provider/model, and fixed reasoning options first. Pass a stable destination UUID across retries. The base keeps its native history unchanged. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports reach the master immediately, steering an active turn or waking an idle master unless stopped; review the latest output and evidence and give a disposition.",
   parameters: Workers.SpawnInput,
   success: Workers.WorkerResult,
   failure,
@@ -58,7 +58,7 @@ const control = Tool.make("t3_worker_control", {
 });
 const report = Tool.make("t3_worker_report", {
   description:
-    "Report THIS managed worker's assignment as done or genuinely blocked to its authenticated master. Do not use for progress, a running build, a normal wait, or a restart. First resolve what you can within your authority. Supply a concise summary with evidence for completion or the exact blocker, attempted remedies, and needed action. Use a new clientRequestId per result, stable with identical content on retry. The report waits until your current turn ends; done also waits for background work. Normal progress stays in your own conversation. Do not send another report just to acknowledge the master.",
+    "Report THIS managed worker's assignment as done or genuinely blocked to its authenticated master. Do not use for progress, a running build, a normal wait, or a restart. First resolve what you can within your authority. Supply a concise summary with evidence for completion or the exact blocker, attempted remedies, and needed action. Use a new clientRequestId per result, stable with identical content on retry. The report is delivered immediately; do not report done while assigned work is still running. A stopped master sees the report without being restarted. Normal progress stays in your own conversation. Do not send another report just to acknowledge the master.",
   parameters: Workers.ReportInput,
   success: Workers.JobResult,
   failure,
