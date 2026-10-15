@@ -434,6 +434,133 @@ it.layer(testLayer)("persistent workers", (it) => {
       }),
     );
   }
+  it.effect("coordinates across owners and providers without transferring ownership", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const sender = yield* seed("peer-sender");
+      const recipient = yield* seed("peer-recipient", 2);
+      yield* service.spawn(recipient.owner, recipient.input);
+      yield* session(recipient.worker, "running", "peer-active");
+      const input = {
+        threadId: recipient.worker,
+        clientRequestId: "coordination",
+        prompt: "Rescore against current main.",
+      };
+      expect((yield* service.send(sender.owner, input).pipe(Effect.flip)).message).toContain(
+        "not a worker owned",
+      );
+      expect((yield* service.message(sender.owner, input)).state).toBe("dispatched");
+      yield* service.message(sender.owner, input);
+      expect(
+        (yield* service.message(sender.owner, { ...input, prompt: "different" }).pipe(Effect.flip))
+          .message,
+      ).toContain("different assignment");
+      const target = Option.getOrThrow(yield* snapshots.getThreadDetailById(recipient.worker));
+      const messages = target.messages.filter((m) => m.text.includes("T3 session message"));
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.text).toContain(`From session: ${sender.owner}`);
+      expect(target.modelSelection).toEqual(recipient.input.modelSelection);
+      expect((yield* service.list(recipient.owner))[0]!.ownerThreadId).toBe(recipient.owner);
+      expect(yield* service.list(sender.owner)).toEqual([]);
+      expect(
+        (yield* service
+          .control(sender.owner, { threadId: recipient.worker, notifications: false })
+          .pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+    }),
+  );
+  it.effect("messages an idle session without a provider process and supports replies", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, source } = yield* seed("peer-idle");
+      expect(Option.getOrThrow(yield* snapshots.getThreadShellById(owner)).session).toBeNull();
+      expect(
+        (yield* service.message(source, {
+          threadId: owner,
+          clientRequestId: "idle",
+          prompt: "Result ready.",
+        })).state,
+      ).toBe("dispatched");
+      expect(
+        (yield* service.message(owner, {
+          threadId: source,
+          clientRequestId: "reply",
+          prompt: "Rerun the dense row.",
+        })).state,
+      ).toBe("dispatched");
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.some((m) =>
+          m.text.includes("dense row"),
+        ),
+      ).toBe(true);
+    }),
+  );
+  it.effect("persists stopped peer messages and dispatches on resume after restart", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, source } = yield* seed("peer-stop");
+      yield* engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("peer-stop-command"),
+        threadId: source,
+        createdAt: timestamp,
+      });
+      const input = { threadId: source, clientRequestId: "held", prompt: "Evidence is ready." };
+      expect((yield* service.message(owner, input)).state).toBe("queued");
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
+          m.text.includes("Evidence is ready"),
+        ),
+      ).toHaveLength(1);
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      const events = yield* engine.subscribeDomainEvents;
+      yield* restarted.start();
+      yield* directInput(source, "peer-resume");
+      yield* events.pipe(
+        Stream.filter(
+          (e) =>
+            e.type === "thread.turn-start-requested" &&
+            e.commandId?.startsWith("worker-job:message:") === true,
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+      expect((yield* restarted.message(owner, input)).state).toBe("dispatched");
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
+          m.text.includes("Evidence is ready"),
+        ),
+      ).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+  it.effect("rejects self, missing and archived recipients", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const { owner, source } = yield* seed("peer-invalid");
+      const input = { threadId: owner, clientRequestId: "invalid", prompt: "Coordination" };
+      expect((yield* service.message(owner, input).pipe(Effect.flip)).message).toContain(
+        "another session",
+      );
+      expect(
+        (yield* service
+          .message(owner, { ...input, threadId: ThreadId.make("absent-peer") })
+          .pipe(Effect.flip)).message,
+      ).toContain("no longer exists");
+      yield* engine.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("archive-peer"),
+        threadId: source,
+      });
+      expect(
+        (yield* service.message(owner, { ...input, threadId: source }).pipe(Effect.flip)).message,
+      ).toContain("archived");
+    }),
+  );
   it.effect(
     "shows reports after Stop without waking; resumes once without duplicate messages",
     () =>
@@ -1195,6 +1322,20 @@ it.layer(mcpLayer)("worker MCP", (it) => {
           Effect.provideService(McpSchema.McpServerClient, client),
         );
       expect(workerCall.isError).not.toBe(true);
+      const peer = yield* seed("mcp-peer");
+      expect(
+        (yield* call("t3_session_send", {
+          threadId: peer.owner,
+          clientRequestId: "peer-auth",
+          prompt: "Coordinate with the actual sender.",
+          senderThreadId: "forged-sender",
+        })).isError,
+      ).not.toBe(true);
+      const peerSnapshot = Option.getOrThrow(
+        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(peer.owner),
+      );
+      expect(peerSnapshot.messages[0]!.text).toContain(`From session: ${owner}`);
+      expect(peerSnapshot.messages[0]!.text).not.toContain("forged-sender");
       const listed = yield* call("t3_worker_list", {});
       expect(listed.content).toEqual(
         expect.arrayContaining([

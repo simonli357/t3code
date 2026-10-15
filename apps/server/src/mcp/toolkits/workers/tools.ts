@@ -56,6 +56,14 @@ const control = Tool.make("t3_worker_control", {
   failure,
   dependencies,
 });
+const message = Tool.make("t3_session_send", {
+  description:
+    "Send user-authorized coordination to another T3 session in this environment, including peers, other masters or their workers. Resolve its exact threadId with the T3 skill first. The authenticated sender is attached automatically; do not impersonate the user or another session. Use a fresh clientRequestId per message, and identical input on retries. Appears immediately and steers a running recipient or wakes an idle one; stopped/snoozed sessions remain paused until resumed. No active native session is required. Dispatched means handed to orchestration, not read or completed; queued means waiting for resume. Preserves recipient account/model and ownership. Reply only for substantive coordination, never acknowledgment loops. Use t3_worker_send for assignments to your own workers.",
+  parameters: Workers.SendInput,
+  success: Workers.SessionMessageResult,
+  failure,
+  dependencies,
+});
 const report = Tool.make("t3_worker_report", {
   description:
     "Report THIS managed worker's assignment as done or genuinely blocked to its authenticated master. Do not use for progress, a running build, a normal wait, or a restart. First resolve what you can within your authority. Supply a concise summary with evidence for completion or the exact blocker, attempted remedies, and needed action. Use a new clientRequestId per result, stable with identical content on retry. The report is delivered immediately; do not report done while assigned work is still running. A stopped master sees the report without being restarted. Normal progress stays in your own conversation. Do not send another report just to acknowledge the master.",
@@ -80,6 +88,7 @@ export const WorkersToolkit = Toolkit.make(
   wait,
   control,
   report,
+  message,
   stopSubagent,
 );
 export const handlers = WorkersToolkit.toLayer(
@@ -95,6 +104,7 @@ export const handlers = WorkersToolkit.toLayer(
           ),
           Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message })),
         ),
+      t3_session_send: (input) => owner.pipe(Effect.flatMap((id) => service.message(id, input))),
       t3_worker_report: (input) => owner.pipe(Effect.flatMap((id) => service.report(id, input))),
       t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => service.spawn(id, input))),
       t3_worker_list: () => owner.pipe(Effect.flatMap((id) => service.list(id))),
