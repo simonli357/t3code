@@ -753,6 +753,34 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("keeps only explicit SDK effort levels for models missing from the catalog", () => {
+    const start = (options: ReadonlyArray<{ id: string; value: string }>) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-pool-model-not-in-catalog",
+            options,
+          ),
+          runtimeMode: "full-access",
+        });
+        return harness.getLastCreateQueryInput()?.options.effort;
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    };
+    return Effect.gen(function* () {
+      assert.equal(yield* start([{ id: "effort", value: "max" }]), "max");
+      assert.equal(yield* start([]), undefined);
+      assert.equal(yield* start([{ id: "effort", value: "brutal" }]), undefined);
+    });
+  });
+
   it.effect("runs Claude SDK sessions with the configured CLAUDE_CONFIG_DIR", () => {
     const harness = makeHarness({ claudeConfig: { homePath: "~/.claude-work" } });
     return Effect.gen(function* () {
@@ -1013,7 +1041,7 @@ describe("ClaudeAdapterLive", () => {
       return Effect.gen(function* () {
         const { options: customOptions, prompt: customPrompt } = yield* runCustomFlow;
         assert.equal(customOptions.model, SYNTHETIC_CLAUDE_COLLIDING_ALIAS);
-        assert.equal(customOptions.effort, undefined);
+        assert.equal(customOptions.effort, "max");
         assert.deepEqual(customOptions.settings, { showThinkingSummaries: true });
         assert.deepEqual(customHarness.query.setModelCalls, [
           `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`,
