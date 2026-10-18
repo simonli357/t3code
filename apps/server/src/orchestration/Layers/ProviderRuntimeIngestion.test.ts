@@ -271,7 +271,7 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
-    beforeRuntimeContextRead?: Effect.Effect<void>;
+    beforeRuntimeContextRead?: (threadId: ThreadId) => Effect.Effect<void>;
     workspaceSubdirectory?: string;
     isGitRepository?: CheckpointStore.CheckpointStore["Service"]["isGitRepository"];
   }) {
@@ -303,7 +303,7 @@ describe("ProviderRuntimeIngestion", () => {
         return ProjectionSnapshotQuery.of({
           ...query,
           getThreadRuntimeContext: (threadId) =>
-            (options?.beforeRuntimeContextRead ?? Effect.void).pipe(
+            (options?.beforeRuntimeContextRead?.(threadId) ?? Effect.void).pipe(
               Effect.andThen(query.getThreadRuntimeContext(threadId)),
             ),
           getThreadDetailById: () =>
@@ -1391,6 +1391,64 @@ describe("ProviderRuntimeIngestion", () => {
     expect(await harness.readModel()).toEqual(initial);
   });
 
+  effectIt.effect("keeps another thread moving while a runtime lookup is blocked", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const otherEntered = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          beforeRuntimeContextRead: (threadId) =>
+            threadId === "thread-1"
+              ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+              : Deferred.succeed(otherEntered, undefined).pipe(Effect.asVoid),
+        }),
+      );
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      yield* Effect.promise(() =>
+        harness.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-second"),
+          threadId: asThreadId("thread-2"),
+          projectId: asProjectId("project-1"),
+          title: "Other thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      const event = {
+        type: "turn.started" as const,
+        provider: ProviderDriverKind.make("codex"),
+        createdAt,
+      };
+      harness.emit({
+        ...event,
+        threadId: asThreadId("thread-1"),
+        eventId: asEventId("first-start"),
+        turnId: asTurnId("first-turn"),
+      });
+      yield* Deferred.await(entered);
+      harness.emit({
+        ...event,
+        threadId: asThreadId("thread-2"),
+        eventId: asEventId("second-start"),
+        turnId: asTurnId("second-turn"),
+      });
+      yield* Deferred.await(otherEntered).pipe(
+        Effect.ensuring(Deferred.succeed(release, undefined)),
+      );
+      yield* Effect.promise(() => harness.drain());
+      const model = yield* Effect.promise(() => harness.readModel());
+      expect(model.threads.find((t) => t.id === "thread-2")?.session?.activeTurnId).toBe(
+        "second-turn",
+      );
+    }),
+  );
+
   effectIt.effect(
     "coalesces a queued token burst without losing text or crossing message boundaries",
     () =>
@@ -1400,13 +1458,14 @@ describe("ProviderRuntimeIngestion", () => {
         let contextReads = 0;
         const harness = yield* Effect.promise(() =>
           createHarness({
-            beforeRuntimeContextRead: Effect.gen(function* () {
-              contextReads += 1;
-              if (contextReads === 1) {
-                yield* Deferred.succeed(entered, undefined);
-                yield* Deferred.await(release);
-              }
-            }),
+            beforeRuntimeContextRead: () =>
+              Effect.gen(function* () {
+                contextReads += 1;
+                if (contextReads === 1) {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+              }),
           }),
         );
         const base = {
