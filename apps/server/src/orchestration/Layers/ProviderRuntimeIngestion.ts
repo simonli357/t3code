@@ -2689,15 +2689,34 @@ const make = Effect.gen(function* () {
   type PendingInput = { readonly threadId: ThreadId; input: RuntimeIngestionInput };
   const pendingText = new Map<ThreadId, PendingInput>();
   yield* Effect.addFinalizer(() => Effect.sync(() => pendingText.clear()));
-  const worker = yield* makeDrainableWorker((pending: PendingInput) =>
-    Effect.suspend(() => {
-      const input = pending.input;
-      if (pendingText.get(pending.threadId) === pending) {
-        pendingText.delete(pending.threadId);
-      }
-      return processInput(input).pipe(logIngestionFailure(input.source, input.event));
-    }),
+  // A slow lookup for one conversation must not hold every provider behind it.
+  // A fixed number of lanes bounds concurrency while keeping each thread ordered.
+  const workers = yield* Effect.forEach(Array.from({ length: 8 }), () =>
+    makeDrainableWorker((pending: PendingInput) =>
+      Effect.suspend(() => {
+        const input = pending.input;
+        if (pendingText.get(pending.threadId) === pending) {
+          pendingText.delete(pending.threadId);
+        }
+        return processInput(input).pipe(
+          logIngestionFailure(input.source, input.event),
+          Effect.withSpan("provider.ingest", {
+            attributes: {
+              "thread.id": pending.threadId,
+              "event.type": input.event.type,
+            },
+          }),
+        );
+      }),
+    ),
   );
+  const workerFor = (threadId: ThreadId) => {
+    let hash = 0;
+    for (let index = 0; index < threadId.length; index += 1) {
+      hash = (hash * 31 + threadId.charCodeAt(index)) | 0;
+    }
+    return workers[(hash >>> 0) % workers.length]!;
+  };
   const enqueueInput = (input: RuntimeIngestionInput) =>
     Effect.suspend(() => {
       const event = input.event;
@@ -2739,7 +2758,7 @@ const make = Effect.gen(function* () {
       } else {
         pendingText.delete(threadId);
       }
-      return worker.enqueue(next);
+      return workerFor(threadId).enqueue(next);
     });
 
   // Repository detection for a diff goes through VCS subprocesses, which can
@@ -2782,7 +2801,9 @@ const make = Effect.gen(function* () {
   return {
     start,
     // The diff worker feeds the lifecycle worker, so drain it first.
-    drain: diffWorker.drain.pipe(Effect.andThen(worker.drain)),
+    drain: diffWorker.drain.pipe(
+      Effect.andThen(Effect.forEach(workers, (worker) => worker.drain, { discard: true })),
+    ),
   } satisfies ProviderRuntimeIngestionShape;
 });
 
