@@ -2684,9 +2684,63 @@ const make = Effect.gen(function* () {
         ),
       );
 
-  const worker = yield* makeDrainableWorker((input: RuntimeIngestionInput) =>
-    processInput(input).pipe(logIngestionFailure(input.source, input.event)),
+  // Combine queued text fragments before doing SQL work for each token. A
+  // lifecycle event closes the slot, preserving ordering within each thread.
+  type PendingInput = { readonly threadId: ThreadId; input: RuntimeIngestionInput };
+  const pendingText = new Map<ThreadId, PendingInput>();
+  yield* Effect.addFinalizer(() => Effect.sync(() => pendingText.clear()));
+  const worker = yield* makeDrainableWorker((pending: PendingInput) =>
+    Effect.suspend(() => {
+      const input = pending.input;
+      if (pendingText.get(pending.threadId) === pending) {
+        pendingText.delete(pending.threadId);
+      }
+      return processInput(input).pipe(logIngestionFailure(input.source, input.event));
+    }),
   );
+  const enqueueInput = (input: RuntimeIngestionInput) =>
+    Effect.suspend(() => {
+      const event = input.event;
+      const threadId =
+        input.source === "domain" ? input.event.payload.threadId : input.event.threadId;
+      const pending = pendingText.get(threadId);
+      const previous = pending?.input;
+      if (
+        input.source === "runtime" &&
+        event.type === "content.delta" &&
+        pending !== undefined &&
+        previous?.source === "runtime" &&
+        previous.event.type === "content.delta" &&
+        previous.event.provider === event.provider &&
+        previous.event.providerInstanceId === event.providerInstanceId &&
+        previous.event.turnId === event.turnId &&
+        previous.event.itemId === event.itemId &&
+        previous.event.payload.streamKind === event.payload.streamKind &&
+        previous.event.payload.contentIndex === event.payload.contentIndex &&
+        previous.event.payload.summaryIndex === event.payload.summaryIndex &&
+        previous.event.payload.delta.length + event.payload.delta.length <=
+          MAX_BUFFERED_ASSISTANT_CHARS
+      ) {
+        pending.input = {
+          source: "runtime",
+          event: {
+            ...previous.event,
+            payload: {
+              ...previous.event.payload,
+              delta: previous.event.payload.delta + event.payload.delta,
+            },
+          },
+        };
+        return Effect.void;
+      }
+      const next = { threadId, input };
+      if (input.source === "runtime" && event.type === "content.delta") {
+        pendingText.set(threadId, next);
+      } else {
+        pendingText.delete(threadId);
+      }
+      return worker.enqueue(next);
+    });
 
   // Repository detection for a diff goes through VCS subprocesses, which can
   // stall behind slow or hung git. It runs on its own worker so a stuck diff
@@ -2700,7 +2754,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.map(Option.getOrUndefined));
     const workspaceCwd = checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot;
     if (!workspaceCwd || !(yield* checkpointStore.isGitRepository(workspaceCwd))) return;
-    yield* worker.enqueue({ source: "diff", event });
+    yield* enqueueInput({ source: "diff", event });
   });
   const diffWorker = yield* makeDrainableWorker((event: ProviderDiffEvent) =>
     detectProviderDiffRepository(event).pipe(logIngestionFailure("diff", event)),
@@ -2712,7 +2766,7 @@ const make = Effect.gen(function* () {
         Stream.runForEach(providerService.streamEvents, (event) =>
           event.type === "turn.diff.updated"
             ? diffWorker.enqueue(event)
-            : worker.enqueue({ source: "runtime", event }),
+            : enqueueInput({ source: "runtime", event }),
         ),
       );
       yield* forkParked(
@@ -2720,7 +2774,7 @@ const make = Effect.gen(function* () {
           if (event.type !== "thread.turn-start-requested") {
             return Effect.void;
           }
-          return worker.enqueue({ source: "domain", event });
+          return enqueueInput({ source: "domain", event });
         }),
       );
     });

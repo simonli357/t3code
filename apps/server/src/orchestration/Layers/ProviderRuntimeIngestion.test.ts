@@ -271,6 +271,7 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
+    beforeRuntimeContextRead?: Effect.Effect<void>;
     workspaceSubdirectory?: string;
     isGitRepository?: CheckpointStore.CheckpointStore["Service"]["isGitRepository"];
   }) {
@@ -301,6 +302,10 @@ describe("ProviderRuntimeIngestion", () => {
         const query = yield* ProjectionSnapshotQuery;
         return ProjectionSnapshotQuery.of({
           ...query,
+          getThreadRuntimeContext: (threadId) =>
+            (options?.beforeRuntimeContextRead ?? Effect.void).pipe(
+              Effect.andThen(query.getThreadRuntimeContext(threadId)),
+            ),
           getThreadDetailById: () =>
             Effect.die("provider runtime ingestion must not hydrate thread detail"),
         });
@@ -436,6 +441,8 @@ describe("ProviderRuntimeIngestion", () => {
         clockOffsetMs += ms;
       },
       emitAndDrain,
+      enqueue: (events: ReadonlyArray<LegacyProviderRuntimeEvent>) =>
+        testRuntime.runPromise(provider.emitAndWaitForEnqueue(events)),
       sqlCount: sqlCounter.count,
       setProviderSession: provider.setSession,
       drain,
@@ -1383,6 +1390,74 @@ describe("ProviderRuntimeIngestion", () => {
     await harness.drain();
     expect(await harness.readModel()).toEqual(initial);
   });
+
+  effectIt.effect(
+    "coalesces a queued token burst without losing text or crossing message boundaries",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let contextReads = 0;
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            beforeRuntimeContextRead: Effect.gen(function* () {
+              contextReads += 1;
+              if (contextReads === 1) {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }
+            }),
+          }),
+        );
+        const base = {
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claude_eol"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-burst"),
+        };
+        harness.emit({ ...base, type: "turn.started", eventId: asEventId("burst-start") });
+        yield* Deferred.await(entered);
+        const events: LegacyProviderRuntimeEvent[] = [];
+        for (const item of ["first", "second"]) {
+          for (let i = 0; i < 1000; i += 1) {
+            events.push({
+              ...base,
+              type: "content.delta",
+              eventId: asEventId(`${item}-${i}`),
+              itemId: asItemId(item),
+              payload: { streamKind: "assistant_text", delta: `${i},`.repeat(8) },
+            });
+          }
+          events.push({
+            ...base,
+            type: "item.completed",
+            eventId: asEventId(`${item}-complete`),
+            itemId: asItemId(item),
+            payload: { itemType: "assistant_message", status: "completed" },
+          });
+        }
+        events.push({
+          ...base,
+          type: "turn.completed",
+          eventId: asEventId("burst-complete"),
+          payload: { state: "completed" },
+        });
+        yield* Effect.promise(() => harness.enqueue(events));
+        yield* Deferred.succeed(release, undefined);
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (t) => t.id === "thread-1",
+        )!;
+        const expected = Array.from({ length: 1000 }, (_, i) => `${i},`.repeat(8)).join("");
+        expect(thread.messages.filter((m) => m.role === "assistant").map((m) => m.text)).toEqual([
+          expected,
+          expected,
+        ]);
+        expect(thread.session?.status).toBe("ready");
+        expect(contextReads).toBeLessThan(10);
+      }),
+  );
 
   it("maps canonical content delta/item completed into finalized assistant messages", async () => {
     const harness = await createHarness();
@@ -2687,7 +2762,7 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
   });
 
-  it("buffers assistant deltas with one lifecycle query per event until completion", async () => {
+  it("buffers assistant deltas with fewer lifecycle queries than text fragments", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
@@ -2719,7 +2794,7 @@ describe("ProviderRuntimeIngestion", () => {
         },
       })),
     );
-    expect(harness.sqlCount() - before).toBe(eventCount);
+    expect(harness.sqlCount() - before).toBeLessThan(eventCount);
 
     const midReadModel = await harness.readModel();
     const midThread = midReadModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
