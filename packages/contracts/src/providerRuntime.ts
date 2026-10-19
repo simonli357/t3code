@@ -347,6 +347,8 @@ export type TurnTokenUsage = typeof TurnTokenUsage.Type;
 
 const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
+  /** Provider-reported API time; not inferred from turn or tool wall time. */
+  apiDurationMs: Schema.optional(NonNegativeInt),
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),

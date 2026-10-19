@@ -2866,6 +2866,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
         ...(errorMessage ? { errorMessage } : {}),
         tokenUsage: normalizeClaudeTurnTokenUsage(result, turnState.hasSubagents, status),
+        ...(finiteNonNegativeInteger(result?.duration_api_ms) !== undefined
+          ? { apiDurationMs: finiteNonNegativeInteger(result?.duration_api_ms) }
+          : {}),
       },
       providerRefs: nativeProviderRefs(context),
     });

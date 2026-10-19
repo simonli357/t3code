@@ -124,6 +124,26 @@ Claude quotas. Tap it to open **Usage → Limits**; on Android this works while 
 the background, otherwise open the app from the launcher. On iOS, use **Edit Widget** to choose
 Session, Weekly, or both for each provider. Reopen T3 to refresh expired readings.
 
+## Measure worker capacity
+
+The custom build provides the read-only `t3_usage_measurements` agent tool and
+`GET /api/orchestration/usage-measurements`. Both report context size, session age,
+turn and tool duration, provider API time when available, token/cache totals, and
+recent account quota consumption. Optional filters are `instanceId`, `threadId`,
+`lookbackHours` (1–336), and `turnLimit` (1–100).
+
+Collection is off by default. Set the server's `usageMeasurementInstanceIds` to
+the provider instance IDs you own; leave shared accounts out. Removing an instance
+also removes its retained measurements. History starts at installation, is bounded
+to 14 days/5,000 turns/30,000 quota changes, and survives server restarts. No prompts,
+responses, tool arguments, or credentials are stored by this collector.
+
+Quota rates include all traffic on an account, including other machines. Per-model
+token baselines are grouped by effort and context size; they are not subscription
+percentages. Session age includes idle time, and non-tool wall time is not model
+compute time. Missing or stale observations do not produce quota forecasts. The
+tool supplies evidence; it never assigns work, changes accounts or redeems resets.
+
 ## Keyboard shortcuts
 
 On web and desktop, open Usage from the command palette. While on Usage,
