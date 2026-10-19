@@ -51,6 +51,8 @@ describe("selectThreadsToPurge", () => {
         { threadId: "failed-spawn-owner", blocked: null },
         { threadId: "plan-a", blocked: null },
         { threadId: "plan-b", blocked: null },
+        { threadId: "pending-work", blocked: null },
+        { threadId: "reporter", blocked: null },
       ],
       liveThreadIds: new Set([
         "owner",
@@ -67,6 +69,9 @@ describe("selectThreadsToPurge", () => {
         "failed-spawn-owner",
         "plan-a",
         "plan-b",
+        "pending-work",
+        "reporter",
+        "live-sender",
       ]),
       workers: [
         { threadId: "worker", ownerId: "owner", remote: false },
@@ -74,7 +79,18 @@ describe("selectThreadsToPurge", () => {
         { threadId: "peer-worker", ownerId: "remote-owner", remote: true },
         { threadId: "never-created", ownerId: "failed-spawn-owner", remote: false },
       ],
-      activeJobs: [{ id: "job-1", workerId: "someone", targetId: "queued", state: "interrupted" }],
+      activeJobs: [
+        { id: "job-1", workerId: "live-sender", targetId: "queued", state: "queued" },
+        {
+          id: "job-2",
+          workerId: "settled-worker",
+          targetId: "settled-worker",
+          state: "interrupted",
+        },
+        { id: "job-3", workerId: "pending-work", targetId: "pending-work", state: "queued" },
+        { id: "job-4", workerId: "reporter", targetId: "live-owner", state: "queued" },
+        { id: "job-5", workerId: "plan-a", targetId: "plan-b", state: "interrupted" },
+      ],
       handoffs: [{ threadId: "successor", ownerId: "owner" }],
       planLinks: [
         { threadId: "planner", linkedThreadId: "implementer" },
@@ -96,7 +112,9 @@ describe("selectThreadsToPurge", () => {
     ]);
     expect(Object.fromEntries(skipped)).toEqual({
       worker: "pinned",
-      queued: "worker job job-1 is interrupted",
+      queued: "worker job job-1 from live-sender is queued",
+      "pending-work": "worker job job-3 is queued",
+      reporter: "worker job job-4 for live-owner is queued",
       owner: "owns worker worker, which is kept",
       successor: "took over from owner, which is kept",
       planner: "shares a proposed plan with implementer, which is kept",

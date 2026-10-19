@@ -125,8 +125,12 @@ export function selectThreadsToPurge(graph: PurgeGraph): {
   const purge = new Set<string>();
   const skipped = new Map<string, string>();
   for (const candidate of graph.candidates) {
+    // A settled worker's interrupted assignment will never resume; queued work still would.
     const job = graph.activeJobs.find(
-      (entry) => entry.workerId === candidate.threadId || entry.targetId === candidate.threadId,
+      (entry) =>
+        entry.workerId === candidate.threadId &&
+        entry.targetId === candidate.threadId &&
+        entry.state !== "interrupted",
     );
     const reason = candidate.blocked ?? (job ? `worker job ${job.id} is ${job.state}` : null);
     if (reason === null) purge.add(candidate.threadId);
@@ -146,6 +150,13 @@ export function selectThreadsToPurge(graph: PurgeGraph): {
       if (worker.remote || kept(worker.threadId)) {
         drop(worker.ownerId, `owns worker ${worker.threadId}, which is kept`);
       }
+    }
+    for (const job of graph.activeJobs) {
+      if (job.workerId === job.targetId) continue;
+      if (kept(job.targetId))
+        drop(job.workerId, `worker job ${job.id} for ${job.targetId} is ${job.state}`);
+      if (kept(job.workerId))
+        drop(job.targetId, `worker job ${job.id} from ${job.workerId} is ${job.state}`);
     }
     for (const handoff of graph.handoffs) {
       if (kept(handoff.ownerId))
