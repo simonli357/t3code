@@ -18,11 +18,13 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -680,9 +682,14 @@ export const make = Effect.gen(function* () {
     } satisfies SettledThreadPurgeReport;
   });
 
+  // A purge outlives the request that started it, so a client that gives up
+  // waiting cannot stop it between deleting a thread's rows and its transcripts.
+  const scope = yield* Scope.Scope;
   return SettledThreadPurge.of({
     purge: (input) =>
       lock.withPermit(run(input)).pipe(
+        Effect.forkIn(scope),
+        Effect.flatMap(Fiber.join),
         Effect.mapError(
           (cause) =>
             new SettledThreadPurgeError({
