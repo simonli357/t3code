@@ -658,7 +658,14 @@ const make = Effect.gen(function* () {
         const isReport = job.kind !== "work";
         // Persist reports independently of starting/steering a turn. Stop,
         // snooze and archive may suppress the wake-up, never the visible report.
-        if (isReport) {
+        // Held reports are retried on every pass, so skip the engine queue once
+        // that copy is accepted.
+        const visible = isReport
+          ? yield* sql`SELECT 1 FROM orchestration_command_receipts
+              WHERE command_id = ${`worker-report-visible:${job.id}`}
+                AND aggregate_id = ${job.target_id} AND status = 'accepted'`
+          : [];
+        if (isReport && visible.length === 0) {
           yield* engine.dispatch({
             type: "thread.message.user.append",
             commandId: CommandId.make(`worker-report-visible:${job.id}`),
