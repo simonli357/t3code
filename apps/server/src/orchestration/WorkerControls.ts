@@ -218,6 +218,16 @@ const jobResult = (job: Job): typeof JobResult.Type => ({
   turnId: job.turn_id,
   error: job.error,
 });
+// Working time is turn time minus tool calls that ran longer than this: monitors,
+// builds and other waits that do not grow the conversation.
+const TOOL_WAIT_SECONDS = 60;
+const WORKER_RENEWAL_HOURS = 3.5;
+const MASTER_RENEWAL_HOURS = 5;
+type WorkTime = { hours: number; turns: number; compactions: number };
+/** One report line; `advice` follows once the session reaches its renewal threshold. */
+const workLine = (who: string, work: WorkTime, threshold: number, advice: string) =>
+  `${who}: ${work.hours.toFixed(1)} h over ${work.turns} turn${work.turns === 1 ? "" : "s"}, ${work.compactions} compaction${work.compactions === 1 ? "" : "s"}.` +
+  (work.hours >= threshold ? ` Over the ${threshold} h renewal threshold: ${advice}` : "");
 const isWorkerError = Schema.is(WorkerError);
 const failure = (cause: unknown) =>
   isWorkerError(cause)
@@ -354,6 +364,39 @@ const make = Effect.gen(function* () {
     if (Option.isNone(result))
       return yield* new WorkerError({ message: `Thread ${id} no longer exists or is archived.` });
     return result.value;
+  });
+  // Sums started turns, counting only the latest one while it runs, then removes
+  // long tool waits. Undefined for a thread that is not in this environment.
+  const workOf = Effect.fn(function* (threadId: string) {
+    const rows = yield* sql<{
+      turns: number;
+      turn_seconds: number | null;
+      wait_seconds: number | null;
+      compactions: number;
+    }>`SELECT
+      (SELECT COUNT(*) FROM projection_turns WHERE thread_id = ${threadId} AND started_at IS NOT NULL) AS turns,
+      (SELECT SUM((julianday(COALESCE(completed_at, ${yield* now})) - julianday(started_at)) * 86400)
+        FROM projection_turns WHERE thread_id = ${threadId} AND started_at IS NOT NULL
+          AND (completed_at IS NOT NULL OR row_id = (SELECT MAX(row_id) FROM projection_turns WHERE thread_id = ${threadId}))) AS turn_seconds,
+      (SELECT SUM(seconds) FROM (
+        SELECT (julianday(MAX(CASE WHEN kind = 'tool.completed' THEN created_at END))
+          - julianday(MIN(CASE WHEN kind = 'tool.started' THEN created_at END))) * 86400 AS seconds
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId} AND kind IN ('tool.started', 'tool.completed')
+          AND json_extract(payload_json, '$.toolCallId') IS NOT NULL
+        GROUP BY json_extract(payload_json, '$.toolCallId'))
+        WHERE seconds > ${TOOL_WAIT_SECONDS}) AS wait_seconds,
+      (SELECT COUNT(*) FROM projection_thread_activities WHERE thread_id = ${threadId} AND kind = 'context-compaction') AS compactions`;
+    const row = rows[0];
+    if (!row || row.turn_seconds === null) return undefined;
+    const hours = Math.max(0, row.turn_seconds - (row.wait_seconds ?? 0)) / 3600;
+    return { hours, turns: row.turns, compactions: row.compactions } satisfies WorkTime;
+  });
+  const masterLine = Effect.fn(function* (masterId: string) {
+    const work = yield* workOf(masterId);
+    return work
+      ? `\n${workLine("Your working time as master", work, MASTER_RENEWAL_HOURS, 'renew yourself with the t3-fork-session "renew yourself" steps at the next calm point.')}`
+      : "";
   });
   const owned = Effect.fn(function* (owner: string, id: string) {
     const rows =
@@ -644,17 +687,24 @@ const make = Effect.gen(function* () {
     const source = yield* thread(workerId);
     const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`;
     const reportId = `report:${workerId}:${input.clientRequestId}`;
+    const work = yield* workOf(workerId);
+    // A remote master adds its own line when the report arrives there.
+    const usage =
+      (work
+        ? `\n\n${workLine("Worker working time", work, WORKER_RENEWAL_HOURS, 'renew this worker with the t3-fork-session "renew <worker>" steps before giving it more work.')}`
+        : "") + (parsePeerRef(worker.owner_id) ? "" : yield* masterLine(worker.owner_id));
     const createdAt = yield* now;
     const turnId = source.session?.activeTurnId ?? source.latestTurn?.turnId ?? null;
     // Persisted without the queue lock so a report is never lost behind a long
     // pass. Reading the owner in the insert keeps it consistent with a handoff,
     // which retargets queued reports in one transaction.
     yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
-        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt}, ${createdAt}, ${turnId}
+        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt + usage}, ${createdAt}, ${turnId}
         FROM custom_workers WHERE thread_id = ${workerId}
         ON CONFLICT(id) DO NOTHING`;
     const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`)[0];
-    if (!job || job.kind !== input.outcome || job.prompt !== prompt)
+    // Retries match on the report itself; the working-time lines change over time.
+    if (!job || job.kind !== input.outcome || !job.prompt.startsWith(prompt))
       return yield* new WorkerError({
         message: "This report ID already belongs to a different assignment.",
       });
@@ -1519,7 +1569,7 @@ const make = Effect.gen(function* () {
           // The record's current owner, so a report reaches a handoff successor.
           target = record.owner_id;
           sender = record.thread_id;
-          prompt = `${request.prompt}\nWorker environment: ${label}`;
+          prompt = `${request.prompt}\nWorker environment: ${label}${request.kind === "notice" ? "" : yield* masterLine(target)}`;
         }
         const createdAt = yield* now;
         yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)

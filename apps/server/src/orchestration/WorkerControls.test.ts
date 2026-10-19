@@ -14,6 +14,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -275,6 +276,42 @@ const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
     interactionMode: "default",
     createdAt: timestamp,
   });
+});
+// Completed turns of the given hours, tool calls of the given seconds inside them, and compactions.
+const workHistory = Effect.fn(function* (
+  threadId: ThreadId,
+  prefix: string,
+  turnHours: ReadonlyArray<number>,
+  toolSeconds: ReadonlyArray<number> = [],
+  compactions = 0,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const at = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+  const origin = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-01T00:00:00.000Z"));
+  let start = origin;
+  for (const [index, hours] of turnHours.entries()) {
+    const end = start + hours * 3_600_000;
+    yield* sql`INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, started_at, completed_at, checkpoint_files_json)
+      VALUES (${threadId}, ${`${prefix}-turn-${index}`}, 'completed', ${at(start)}, ${at(start)}, ${at(end)}, '[]')`;
+    start = end + 60_000;
+  }
+  const activity = (id: string, kind: string, payload: object, ms: number) =>
+    sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+      VALUES (${id}, ${threadId}, ${`${prefix}-turn-0`}, 'tool', ${kind}, ${kind}, ${JSON.stringify(payload)}, ${at(ms)})`;
+  let call = origin;
+  for (const [index, seconds] of toolSeconds.entries()) {
+    const toolCallId = `${prefix}-call-${index}`;
+    yield* activity(`${toolCallId}-started`, "tool.started", { toolCallId }, call);
+    yield* activity(
+      `${toolCallId}-completed`,
+      "tool.completed",
+      { toolCallId },
+      call + seconds * 1000,
+    );
+    call += seconds * 1000 + 1000;
+  }
+  for (let index = 0; index < compactions; index++)
+    yield* activity(`${prefix}-compaction-${index}`, "context-compaction", {}, call + index);
 });
 it.layer(testLayer)("persistent workers", (it) => {
   it.effect(
@@ -1662,6 +1699,45 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(texts.filter((text) => text.includes("Peer note while the queue"))).toHaveLength(1);
     }).pipe(Effect.ensuring(Effect.sync(() => (providerGate = undefined)))),
   );
+  it.effect("reports working time and flags workers and masters past their thresholds", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("work-time");
+      yield* service.spawn(owner, input);
+      // 5 h of turns, a 2 h build wait and two short tool calls that still count as work.
+      yield* workHistory(worker, "first", [2, 3], [7200, 30, 45], 1);
+      yield* workHistory(owner, "master", [5.5]);
+      const first = {
+        clientRequestId: "first",
+        outcome: "done" as const,
+        summary: "First stage done.",
+      };
+      const report = yield* service.report(worker, first);
+      yield* workHistory(worker, "second", [1]);
+      expect((yield* service.report(worker, first)).requestId).toBe(report.requestId);
+      yield* service.report(worker, {
+        clientRequestId: "second",
+        outcome: "done",
+        summary: "Second stage done.",
+      });
+      const texts = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.map(
+        (m) => m.text,
+      );
+      const under = texts.filter((text) => text.includes("First stage done."));
+      expect(under).toHaveLength(1);
+      expect(under[0]).toContain("Worker working time: 3.0 h over 2 turns, 1 compaction.\n");
+      expect(under[0]).not.toContain("renew this worker");
+      expect(under[0]).toContain("Your working time as master: 5.5 h over 1 turn, 0 compactions.");
+      expect(under[0]).toContain(
+        'Over the 5 h renewal threshold: renew yourself with the t3-fork-session "renew yourself" steps',
+      );
+      const over = texts.find((text) => text.includes("Second stage done."));
+      expect(over).toContain(
+        'Worker working time: 4.0 h over 3 turns, 1 compaction. Over the 3.5 h renewal threshold: renew this worker with the t3-fork-session "renew <worker>" steps',
+      );
+    }),
+  );
   it.effect("rejects a stale dispatch atomically and retries its queued assignment", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
@@ -2047,6 +2123,41 @@ it.effect("owns, steers and hears from a worker in a linked environment", () =>
         })
         .pipe(refusal),
     ).toContain("not a worker owned from alpha");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("adds each environment's working time to a linked worker's report", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, messages } = yield* linkedPair;
+    const { owner } = yield* seed("time-alpha").pipe(Effect.provide(alpha));
+    yield* seed("time-beta").pipe(Effect.provide(beta));
+    const worker = ThreadId.make("time-remote-worker");
+    yield* alphaWorkers.spawn(owner, {
+      threadId: worker,
+      projectId: ProjectId.make("time-beta"),
+      title: "remote_time_worker_sol",
+      modelSelection: selections[0]!,
+      prompt: "Run the long job",
+      environment: "beta",
+    });
+    yield* workHistory(worker, "remote", [4]).pipe(Effect.provide(beta));
+    yield* workHistory(owner, "local", [1.5]).pipe(Effect.provide(alpha));
+    yield* betaWorkers.report(worker, {
+      clientRequestId: "long",
+      outcome: "done",
+      summary: "Long job finished",
+    });
+    yield* betaWorkers.drain();
+    yield* alphaWorkers.drain();
+    const report = (yield* messages(alphaSnapshots, owner)).find((text) =>
+      text.includes("Long job finished"),
+    );
+    expect(report).toContain(
+      "Worker working time: 4.0 h over 1 turn, 0 compactions. Over the 3.5 h",
+    );
+    expect(report).toContain(
+      "Worker environment: beta\nYour working time as master: 1.5 h over 1 turn, 0 compactions.",
+    );
   }).pipe(Effect.scoped),
 );
 
