@@ -14,7 +14,9 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ServerConfig } from "../config.ts";
@@ -74,39 +76,49 @@ const providerLayer = Layer.mock(ProviderService)({
   forkConversation: (id) => Effect.succeed({ threadId: `native-fork-${id}` }),
 });
 const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
-const registry = Layer.mock(ProviderRegistry)({
-  getProviders: Effect.succeed(
-    instances.map(([id, driver, model, option, value]) =>
-      decodeProvider({
-        driver,
-        instanceId: id,
-        displayName: id,
-        enabled: true,
-        installed: true,
-        availability: "available",
-        version: null,
-        status: "ready",
-        auth: { status: "authenticated" },
-        checkedAt: "2026-10-06T12:00:00.000Z",
-        models: [
-          {
-            slug: model,
-            name: model,
-            isCustom: false,
-            capabilities: {
-              optionDescriptors: [
-                {
-                  id: option,
-                  label: option,
-                  type: "select",
-                  options: [{ id: value, label: value }],
-                },
-              ],
+const providers = instances.map(([id, driver, model, option, value]) =>
+  decodeProvider({
+    driver,
+    instanceId: id,
+    displayName: id,
+    enabled: true,
+    installed: true,
+    availability: "available",
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-06T12:00:00.000Z",
+    models: [
+      {
+        slug: model,
+        name: model,
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: option,
+              label: option,
+              type: "select",
+              options: [{ id: value, label: value }],
             },
-          },
-        ],
-      }),
-    ),
+          ],
+        },
+      },
+    ],
+  }),
+);
+// Lets a test hold a delivery pass inside its provider check.
+let providerGate:
+  | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }
+  | undefined;
+const registry = Layer.mock(ProviderRegistry)({
+  getProviders: Effect.suspend(() =>
+    providerGate
+      ? Deferred.succeed(providerGate.entered, undefined).pipe(
+          Effect.andThen(Deferred.await(providerGate.release)),
+          Effect.as(providers),
+        )
+      : Effect.succeed(providers),
   ),
 });
 const testLayer = Workers.layer.pipe(
@@ -890,6 +902,8 @@ it.layer(testLayer)("persistent workers", (it) => {
         Stream.take(1),
         Stream.runDrain,
       );
+      // Retries do not wait for the background pass that is recording the delivery.
+      yield* restarted.drain();
       expect((yield* restarted.message(owner, input)).state).toBe("dispatched");
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
@@ -1561,6 +1575,80 @@ it.layer(testLayer)("persistent workers", (it) => {
         ),
       ).toBe(false);
     }),
+  );
+  it.effect("holds paused runtime and explicit outcomes until reports resume", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("paused-outcomes");
+      const reports = snapshots
+        .getThreadDetailById(owner)
+        .pipe(
+          Effect.map((thread) =>
+            Option.getOrThrow(thread).messages.filter((m) => m.text.includes("T3 worker report")),
+          ),
+        );
+      yield* service.spawn(owner, input);
+      yield* service.control(owner, { threadId: worker, notifications: false });
+      yield* session(worker, "running", "paused-turn");
+      yield* session(worker, "error", "paused-failure");
+      yield* service.drain();
+      yield* service.drain();
+      const held = yield* service.report(worker, {
+        clientRequestId: "paused",
+        outcome: "blocked",
+        summary: "Blocked while reports were paused.",
+      });
+      expect(held).toMatchObject({ state: "queued", held: true });
+      expect(yield* reports).toHaveLength(0);
+      yield* service.control(owner, { threadId: worker, notifications: true });
+      yield* service.drain();
+      const delivered = (yield* reports).map((m) => m.text);
+      expect(delivered.filter((text) => text.includes("Test provider error"))).toHaveLength(1);
+      expect(delivered.filter((text) => text.includes("Blocked while reports"))).toHaveLength(1);
+      expect(delivered).toHaveLength(2);
+    }),
+  );
+  it.effect("saves reports and messages while a delivery pass holds the queue", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, source, worker, input } = yield* seed("busy-queue");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "busy-queue-turn");
+      yield* service.send(owner, {
+        threadId: worker,
+        clientRequestId: "next",
+        prompt: "next stage",
+      });
+      yield* reply(worker, "busy-queue-turn", "first stage done");
+      yield* session(worker, "ready", "busy-queue-idle");
+      const gate = { entered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+      providerGate = gate;
+      const pass = yield* service.drain().pipe(Effect.forkChild);
+      yield* Deferred.await(gate.entered);
+      const report = yield* service.report(worker, {
+        clientRequestId: "while-busy",
+        outcome: "done",
+        summary: "Finished while the queue was busy.",
+      });
+      expect(report).toMatchObject({ state: "queued", held: false });
+      const message = yield* service.message(source, {
+        threadId: owner,
+        clientRequestId: "while-busy",
+        prompt: "Peer note while the queue was busy.",
+      });
+      expect(message.state).toBe("queued");
+      providerGate = undefined;
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(pass);
+      yield* service.drain();
+      const texts = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.map(
+        (m) => m.text,
+      );
+      expect(texts.filter((text) => text.includes("Finished while the queue"))).toHaveLength(1);
+      expect(texts.filter((text) => text.includes("Peer note while the queue"))).toHaveLength(1);
+    }).pipe(Effect.ensuring(Effect.sync(() => (providerGate = undefined)))),
   );
   it.effect("rejects a stale dispatch atomically and retries its queued assignment", () =>
     Effect.gen(function* () {
