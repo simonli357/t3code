@@ -60,7 +60,10 @@ export class SettledThreadPurge extends Context.Service<
 
 const DAY_MS = 86_400_000;
 
-/** Everything owned by one thread, deleted in this order inside one transaction. */
+/**
+ * Everything owned by one thread. `projection_threads` goes last so a purge
+ * interrupted part-way still finds the thread on the next run.
+ */
 const THREAD_ROWS = [
   ["orchestration_events", "aggregate_kind = 'thread' AND stream_id = ?1 AND sequence <> ?2"],
   ["orchestration_command_receipts", "aggregate_kind = 'thread' AND aggregate_id = ?1"],
@@ -73,11 +76,14 @@ const THREAD_ROWS = [
   ["projection_thread_pull_requests", "thread_id = ?1"],
   ["projection_thread_sessions", "thread_id = ?1"],
   ["provider_session_runtime", "thread_id = ?1"],
-  ["projection_threads", "thread_id = ?1"],
   ["custom_workers", "thread_id = ?1 OR owner_id = ?1"],
   ["custom_worker_jobs", "worker_id = ?1 OR target_id = ?1"],
   ["custom_orchestrator_handoffs", "thread_id = ?1 OR owner_id = ?1"],
+  ["projection_threads", "thread_id = ?1"],
 ] as const;
+// A busy thread owns tens of thousands of event rows with random-key indexes:
+// one DELETE of them holds SQLite, and with it the event loop, for a minute.
+const DELETE_BATCH = 500;
 
 export interface PurgeGraph {
   /** Threads settled long enough. `blocked` is a reason that holds on its own. */
@@ -445,20 +451,51 @@ export const make = Effect.gen(function* () {
     return counts;
   });
 
-  const deleteRows = (threadId: string, keepSequence: number) =>
+  const deleteFrom = (
+    table: string,
+    where: string,
+    threadId: string,
+    keepSequence: number,
+    limit?: number,
+  ) =>
+    sql
+      .unsafe(
+        `DELETE FROM ${table} WHERE rowid IN
+          (SELECT rowid FROM ${table} WHERE ${where}${limit === undefined ? "" : ` LIMIT ${limit}`})
+          RETURNING 1`,
+        rowParams(where, threadId, keepSequence),
+      )
+      .pipe(Effect.map((rows) => rows.length));
+
+  // The thread is already deleted for clients, so its bulk rows can go in
+  // small autocommitted batches that let other requests in between.
+  const deleteInBatches = Effect.fn("SettledThreadPurge.deleteInBatches")(function* (
+    threadId: string,
+    keepSequence: number,
+  ) {
+    const counts: Record<string, number> = {};
+    for (const [table, where] of THREAD_ROWS.slice(0, -1)) {
+      let deleted = 0;
+      let batch = DELETE_BATCH;
+      while (batch === DELETE_BATCH) {
+        batch = yield* deleteFrom(table, where, threadId, keepSequence, DELETE_BATCH);
+        deleted += batch;
+        yield* Effect.yieldNow;
+      }
+      counts[table] = deleted;
+    }
+    return counts;
+  });
+
+  // Whatever is left, including rows written since the batches and the thread
+  // row itself, goes in one transaction on the engine's command queue.
+  const deleteRemaining = (threadId: string, keepSequence: number) =>
     sql.withTransaction(
-      Effect.gen(function* () {
-        const counts: Record<string, number> = {};
-        for (const [table, where] of THREAD_ROWS) {
-          yield* sql.unsafe(
-            `DELETE FROM ${table} WHERE ${where}`,
-            rowParams(where, threadId, keepSequence),
-          );
-          const changed = yield* sql<{ n: number }>`SELECT changes() AS n`;
-          counts[table] = Number(changed[0]?.n ?? 0);
-        }
-        return counts;
-      }),
+      Effect.forEach(THREAD_ROWS, ([table, where]) =>
+        deleteFrom(table, where, threadId, keepSequence).pipe(
+          Effect.map((count) => [table, count] as const),
+        ),
+      ),
     );
 
   const tombstoneSequence = (threadId: string) =>
@@ -506,7 +543,13 @@ export const make = Effect.gen(function* () {
     const refs = yield* listCheckpointRefs(cwd, threadId);
     const worktreePath = yield* existingWorktree(thread);
 
-    const rows = yield* threadPurge.purgeThreads([threadId], deleteRows(threadId, keepSequence));
+    const rows = yield* deleteInBatches(threadId, keepSequence);
+    for (const [table, count] of yield* threadPurge.purgeThreads(
+      [threadId],
+      deleteRemaining(threadId, keepSequence),
+    )) {
+      rows[table] = (rows[table] ?? 0) + count;
+    }
 
     const refsDeleted =
       cwd === null || refs.length === 0
