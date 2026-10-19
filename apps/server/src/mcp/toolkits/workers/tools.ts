@@ -11,7 +11,7 @@ const dependencies = [Workers.WorkerControls, Invocation.McpInvocationContext];
 const failure = Schema.Union([Workers.WorkerError]);
 const spawn = Tool.make("t3_worker_spawn", {
   description:
-    "Fork a prepared base into a persistent worker owned by THIS master. Use the project's worker skill to resolve the base, title, explicit provider/model, and fixed reasoning options first. Pass a stable destination UUID across retries. The base keeps its native history unchanged. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports reach the master immediately, steering an active turn or waking an idle master unless stopped; review the latest output and evidence and give a disposition.",
+    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the selected account, preserving its native and visible history, modes, branch and worktree. Use the project's worker skill to resolve the title, explicit provider/model, and fixed reasoning options. Pass a stable destination UUID across retries. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports reach the master immediately, steering an active turn or waking an idle master unless stopped; review the latest output and evidence and give a disposition.",
   parameters: Workers.SpawnInput,
   success: Workers.WorkerResult,
   failure,
@@ -19,7 +19,7 @@ const spawn = Tool.make("t3_worker_spawn", {
 });
 const list = Tool.make("t3_worker_list", {
   description:
-    "List workers owned by this master, including their base, fixed selection, notification setting, and latest assignment. Ownership survives restarts and context compaction.",
+    "List workers owned by this master, including their source (null for fresh sessions), fixed selection, notification setting, and latest assignment. Ownership survives restarts and context compaction.",
   success: Schema.Array(Workers.WorkerResult),
   failure,
   dependencies,
@@ -72,6 +72,22 @@ const report = Tool.make("t3_worker_report", {
   failure,
   dependencies,
 });
+const handoff = Tool.make("t3_orchestrator_handoff", {
+  description:
+    "Transfer THIS orchestrator's workers to a new successor session. Supply sourceThreadId for a base fork, selfFork=true to fork this authenticated session, or omit both for fresh context. Supply a new stable destination threadId, title, explicit modelSelection including reasoning options, and a concise handoff prompt with task, constraints, decisions, evidence paths and next actions. Self-forks queue until this turn ends; return after scheduling rather than waiting in the active turn. The successor may use a different account/provider/model/effort. Existing worker assignments and read cursors survive; undelivered reports and future reports follow the successor. The previous session is preserved. Completed means ownership transferred, not that the successor finished its work. After transfer, stop orchestrating those workers. Retry an error with identical input and ID; do not create another successor.",
+  parameters: Workers.HandoffInput,
+  success: Workers.HandoffResult,
+  failure,
+  dependencies,
+});
+const handoffStatus = Tool.make("t3_orchestrator_handoff_status", {
+  description:
+    "Inspect this master's durable successor handoff, including errors and transferred worker IDs. cancel=true cancels a queued or failed handoff before ownership transfer; any partially prepared session is retained without starting its assignment. It does not stop or delete sessions. Inspect the successor thread for actual startup or provider errors after ownership transfer.",
+  parameters: Workers.HandoffStatusInput,
+  success: Workers.HandoffResult,
+  failure,
+  dependencies,
+});
 const stopSubagent = Tool.make("t3_subagent_stop", {
   description:
     "Request a stop for one native Claude task belonging to THIS session, without stopping its owner. Supply its task_id. Acknowledgement is not completion; read its actual task notification for the outcome. Does not stop separate T3 worker sessions.",
@@ -90,6 +106,8 @@ export const WorkersToolkit = Toolkit.make(
   report,
   message,
   stopSubagent,
+  handoff,
+  handoffStatus,
 );
 export const handlers = WorkersToolkit.toLayer(
   Effect.gen(function* () {
@@ -97,6 +115,10 @@ export const handlers = WorkersToolkit.toLayer(
     const providerService = yield* ProviderService.ProviderService;
     const owner = Effect.map(Invocation.McpInvocationContext, (scope) => scope.threadId);
     return {
+      t3_orchestrator_handoff: (input) =>
+        owner.pipe(Effect.flatMap((id) => service.handoff(id, input))),
+      t3_orchestrator_handoff_status: (input) =>
+        owner.pipe(Effect.flatMap((id) => service.handoffStatus(id, input))),
       t3_subagent_stop: (input) =>
         owner.pipe(
           Effect.flatMap((threadId) =>

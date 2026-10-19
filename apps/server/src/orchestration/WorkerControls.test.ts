@@ -253,6 +253,367 @@ const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
   });
 });
 it.layer(testLayer)("persistent workers", (it) => {
+  it.effect(
+    "handoff transfers live workers, queued reports and cursors, preserving retry identity",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const { owner, source, worker, input } = yield* seed("handoff-base");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "ongoing-worker");
+        const follow = yield* service.send(owner, {
+          threadId: worker,
+          clientRequestId: "next",
+          prompt: "next stage",
+        });
+        yield* service.control(owner, { threadId: worker, notifications: false });
+        const report = {
+          clientRequestId: "blocked",
+          outcome: "blocked" as const,
+          summary: "Need missing input",
+        };
+        const receipt = yield* service.report(worker, report);
+        yield* sql`UPDATE custom_workers SET read_seq = 12, read_offset = 7 WHERE thread_id = ${worker}`;
+        const successor = ThreadId.make("handoff-successor");
+        const request = {
+          ...input,
+          threadId: successor,
+          modelSelection: selections[2]!,
+          title: "new_master_opus",
+          prompt: "Review retained work, then finish.",
+        };
+        const result = yield* service.handoff(owner, request);
+        expect(result.state).toBe("completed");
+        expect(result.transferredWorkerIds).toEqual([worker]);
+        expect(yield* service.list(owner)).toEqual([]);
+        const owned = (yield* service.list(successor))[0]!;
+        expect(owned.threadId).toBe(worker);
+        expect(owned.latestRequest?.requestId).toBe(follow.requestId);
+        expect(owned.latestRequest?.state).toBe("queued");
+        expect(owned.modelSelection).toEqual(input.modelSelection);
+        expect(
+          (yield* sql`SELECT read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
+        ).toEqual({ read_seq: 12, read_offset: 7 });
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(worker)).session?.activeTurnId,
+        ).toBe("ongoing-worker");
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).modelSelection,
+        ).toEqual(input.modelSelection);
+        const next = Option.getOrThrow(yield* snapshots.getThreadDetailById(successor));
+        expect(next.modelSelection).toEqual(selections[2]);
+        expect(next.messages.some((m) => m.text === "Inherited base context")).toBe(true);
+        expect(
+          next.messages.filter((m) => m.text.startsWith("[T3 orchestrator handoff]")),
+        ).toHaveLength(1);
+        expect(yield* service.handoff(owner, request)).toEqual(result);
+        expect(
+          (yield* service
+            .control(owner, { threadId: worker, notifications: true })
+            .pipe(Effect.flip)).message,
+        ).toContain("not a worker owned");
+        yield* service.control(successor, { threadId: worker, notifications: true });
+        expect((yield* service.report(worker, report)).requestId).toBe(receipt.requestId);
+        const notices = Option.getOrThrow(yield* snapshots.getThreadDetailById(successor)).messages;
+        expect(notices.filter((m) => m.text.includes("Need missing input"))).toHaveLength(1);
+        const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+        expect(yield* restarted.handoffStatus(owner, { threadId: successor })).toEqual(result);
+        expect((yield* restarted.list(successor))[0]!.threadId).toBe(worker);
+      }),
+  );
+  it.effect("self-fork waits for the native turn to finish and survives a service restart", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { source: owner, input } = yield* seed("handoff-self");
+      yield* session(owner, "running", "self-active");
+      const successor = ThreadId.make("self-successor");
+      const request = {
+        title: input.title,
+        prompt: input.prompt,
+        selfFork: true,
+        threadId: successor,
+        modelSelection: selections[1]!,
+      };
+      expect((yield* service.handoff(owner, request)).state).toBe("queued");
+      expect(Option.isNone(yield* snapshots.getThreadDetailById(successor))).toBe(true);
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      yield* session(owner, "ready", "self-finished");
+      yield* restarted.drain();
+      expect((yield* restarted.handoffStatus(owner, { threadId: successor })).state).toBe(
+        "completed",
+      );
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(successor)).modelSelection,
+      ).toEqual(selections[1]);
+    }),
+  );
+  it.effect(
+    "delivered reports are not replayed after transfer and invalid profiles keep ownership",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("handoff-delivered");
+        yield* service.spawn(owner, input);
+        const report = {
+          clientRequestId: "done-once",
+          outcome: "done" as const,
+          summary: "Verified result",
+        };
+        yield* service.report(worker, report);
+        const next = ThreadId.make("delivered-successor");
+        expect(
+          (yield* service
+            .handoff(owner, {
+              ...input,
+              threadId: next,
+              modelSelection: {
+                ...input.modelSelection,
+                options: [{ id: "reasoningEffort", value: "invalid" }],
+              },
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("does not support");
+        expect((yield* service.list(owner))[0]!.threadId).toBe(worker);
+        yield* service.handoff(owner, { ...input, threadId: next });
+        yield* service.report(worker, report);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(next)).messages.some((m) =>
+            m.text.includes("Verified result"),
+          ),
+        ).toBe(false);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.filter((m) =>
+            m.text.includes("Verified result"),
+          ),
+        ).toHaveLength(1);
+      }),
+  );
+  it.effect("fresh handoff starts without base history and rejects conflicting retries", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, input } = yield* seed("handoff-fresh");
+      const request = {
+        threadId: input.threadId,
+        title: "successor",
+        prompt: "Context summary",
+        modelSelection: selections[2]!,
+      };
+      expect((yield* service.handoff(owner, request)).state).toBe("completed");
+      const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(input.threadId));
+      expect(detail.messages).toHaveLength(1);
+      expect(detail.messages[0]!.text).toContain("Context summary");
+      expect(
+        (yield* service.handoff(owner, { ...request, prompt: "different" }).pipe(Effect.flip))
+          .message,
+      ).toContain("different handoff");
+    }),
+  );
+  it.effect(
+    "failed preparation keeps original workers and can be cancelled before trying another source",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const { owner, worker, input } = yield* seed("handoff-failed");
+        yield* service.spawn(owner, input);
+        const failed = ThreadId.make("failed-successor");
+        const request = { ...input, threadId: failed, sourceThreadId: owner };
+        expect((yield* service.handoff(owner, request)).state).toBe("error");
+        expect((yield* service.list(owner)).some((w) => w.threadId === worker)).toBe(true);
+        expect(
+          (yield* service.handoffStatus(owner, { threadId: failed, cancel: true })).state,
+        ).toBe("cancelled");
+        expect((yield* service.list(owner)).map((w) => w.threadId)).toEqual([worker]);
+        expect(
+          (yield* service.handoff(owner, {
+            ...input,
+            threadId: ThreadId.make("recovered-successor"),
+          })).state,
+        ).toBe("completed");
+      }),
+  );
+  it.effect("queued handoff cancellation preserves ownership and rejects another master", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const { owner, source, worker, input } = yield* seed("handoff-cancel");
+      yield* service.spawn(owner, input);
+      yield* session(source, "running", "cancel-busy");
+      const request = { ...input, threadId: ThreadId.make("cancel-successor") };
+      expect((yield* service.handoff(owner, request)).state).toBe("queued");
+      expect(
+        (yield* service
+          .handoffStatus(source, { threadId: request.threadId, cancel: true })
+          .pipe(Effect.flip)).message,
+      ).toContain("Unknown");
+      expect(
+        (yield* service.handoffStatus(owner, { threadId: request.threadId, cancel: true })).state,
+      ).toBe("cancelled");
+      yield* session(source, "ready", "cancel-ready");
+      yield* service.drain();
+      expect((yield* service.list(owner))[0]!.threadId).toBe(worker);
+    }),
+  );
+  for (const [index, instance] of instances.entries()) {
+    it.effect(`creates a fresh ${instance[0]} worker without copying a busy base`, () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const directory = yield* ProviderSessionDirectory;
+        const { owner, source, worker, input } = yield* seed(`fresh-${index}`);
+        yield* session(source, "running", `busy-base-${index}`);
+        const fresh = {
+          threadId: worker,
+          title: input.title,
+          prompt: input.prompt,
+          modelSelection: selections[index]!,
+        };
+        yield* service.spawn(owner, fresh);
+        yield* service.spawn(owner, fresh);
+        const result = (yield* service.list(owner))[0]!;
+        expect(result.sourceThreadId).toBeNull();
+        expect(result.ownerThreadId).toBe(owner);
+        expect(result.modelSelection).toEqual(selections[index]);
+        const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+        expect(detail.messages.map((message) => message.text)).toEqual(["first task"]);
+        expect(detail.runtimeMode).toBe("full-access");
+        expect(detail.branch).toBeNull();
+        expect(detail.worktreePath).toBeNull();
+        expect(Option.isNone(yield* directory.getBinding(worker))).toBe(true);
+        expect(
+          (yield* service.spawn(owner, { ...fresh, sourceThreadId: source }).pipe(Effect.flip))
+            .message,
+        ).toContain("different");
+      }),
+    );
+  }
+  it.effect(
+    "fresh workers target the chosen project and inherit the master's permission and interaction modes",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("fresh-project");
+        const projectId = ProjectId.make("fresh-destination");
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("fresh-destination-create"),
+          projectId,
+          title: "destination",
+          workspaceRoot: "/tmp/fresh-destination",
+          createdAt: timestamp,
+        });
+        yield* engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("fresh-owner-modes"),
+          threadId: owner,
+          runtimeMode: "approval-required",
+          createdAt: timestamp,
+        });
+        yield* engine.dispatch({
+          type: "thread.interaction-mode.set",
+          commandId: CommandId.make("fresh-owner-interaction"),
+          threadId: owner,
+          interactionMode: "plan",
+          createdAt: timestamp,
+        });
+        yield* service.spawn(owner, {
+          threadId: worker,
+          projectId,
+          title: input.title,
+          prompt: input.prompt,
+          modelSelection: selections[2]!,
+        });
+        const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+        expect(detail.projectId).toBe(projectId);
+        expect(detail.runtimeMode).toBe("approval-required");
+        expect(detail.interactionMode).toBe("plan");
+        expect(detail.modelSelection).toEqual(selections[2]);
+      }),
+  );
+  it.effect(
+    "fresh workers recover creation, report outcomes and accept follow-ups in the same session",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const { owner, worker, input } = yield* seed("fresh-roundtrip");
+        const fresh = {
+          threadId: worker,
+          title: input.title,
+          prompt: input.prompt,
+          modelSelection: input.modelSelection,
+        };
+        yield* service.spawn(owner, fresh);
+        // Recover a crash after create/dispatch but before acknowledging either operation.
+        yield* sql`UPDATE custom_workers SET state = 'creating' WHERE thread_id = ${worker}`;
+        yield* sql`UPDATE custom_worker_jobs SET state = 'queued' WHERE id = ${`spawn:${worker}`}`;
+        const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+        yield* restarted.spawn(owner, fresh);
+        yield* session(worker, "running", "fresh-result");
+        yield* replyAndReport(worker, "fresh-result", "fresh result verified");
+        yield* session(worker, "ready", "fresh-finished");
+        yield* restarted.drain();
+        const master = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner));
+        expect(
+          master.messages.filter((message) => message.text.includes("fresh result verified")),
+        ).toHaveLength(1);
+        expect(
+          (yield* restarted.read(owner, { threadId: worker })).items.some(
+            (item) => item.text === "fresh result verified",
+          ),
+        ).toBe(true);
+        yield* restarted.send(owner, {
+          threadId: worker,
+          clientRequestId: "follow",
+          prompt: "next assignment",
+        });
+        const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
+        expect(detail.messages.filter((message) => message.text === "first task")).toHaveLength(1);
+        expect(
+          detail.messages.filter((message) => message.text === "next assignment"),
+        ).toHaveLength(1);
+        expect((yield* restarted.list(owner))[0]!.sourceThreadId).toBeNull();
+      }),
+  );
+  it.effect(
+    "fresh spawning rejects unrelated destinations, missing projects and changed retry settings",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const { owner, source, worker, input } = yield* seed("fresh-invalid");
+        const fresh = {
+          threadId: worker,
+          title: input.title,
+          prompt: input.prompt,
+          modelSelection: input.modelSelection,
+        };
+        expect(
+          (yield* service.spawn(owner, { ...fresh, threadId: source }).pipe(Effect.flip)).message,
+        ).toContain("already exists");
+        expect(
+          (yield* service
+            .spawn(owner, { ...fresh, projectId: ProjectId.make("missing") })
+            .pipe(Effect.flip)).message,
+        ).toContain("project no longer exists");
+        expect(yield* service.list(owner)).toHaveLength(0);
+        yield* service.spawn(owner, fresh);
+        expect(
+          (yield* service
+            .spawn(owner, { ...fresh, projectId: ProjectId.make("another") })
+            .pipe(Effect.flip)).message,
+        ).toContain("different");
+        expect(
+          (yield* service.spawn(owner, { ...fresh, prompt: "different task" }).pipe(Effect.flip))
+            .message,
+        ).toContain("different");
+      }),
+  );
   it.effect("does not notify for progress-only endings, empty turns, or restart completions", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
@@ -1257,99 +1618,141 @@ const mcpLayer = McpServer.toolkit(WorkerTools.WorkersToolkit).pipe(
   Layer.provideMerge(testLayer),
 );
 it.layer(mcpLayer)("worker MCP", (it) => {
-  it.effect("uses the authenticated master for spawn, list, read and follow-up", () =>
-    Effect.gen(function* () {
-      const server = yield* McpServer.McpServer;
-      const { owner, worker, input } = yield* seed("mcp");
-      const scope = {
-        environmentId: EnvironmentId.make("test"),
-        threadId: owner,
-        providerSessionId: "session",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        capabilities: new Set<Invocation.McpCapability>(),
-        issuedAt: 1,
-      };
-      const client = McpSchema.McpServerClient.of({
-        clientId: 1,
-        clientCapabilities: {},
-        clientInfo: { name: "test", version: "1" },
-        protocolVersion: "2025-06-18",
-        initializePayload: {
-          protocolVersion: "2025-06-18",
-          capabilities: {},
-          clientInfo: { name: "test", version: "1" },
-        },
-        getClient: Effect.die("unused"),
-      });
-      const call = (name: string, args: Record<string, unknown>) =>
-        server
-          .callTool({ name, arguments: args })
-          .pipe(
-            Effect.provideService(Invocation.McpInvocationContext, scope),
-            Effect.provideService(McpSchema.McpServerClient, client),
+  for (const fresh of [false, true]) {
+    it.effect(
+      `uses the authenticated master for ${fresh ? "fresh" : "forked"} spawn, list, read and follow-up`,
+      () =>
+        Effect.gen(function* () {
+          const server = yield* McpServer.McpServer;
+          const { owner, worker, input } = yield* seed(`mcp-${fresh ? "fresh" : "fork"}`);
+          const scope = {
+            environmentId: EnvironmentId.make("test"),
+            threadId: owner,
+            providerSessionId: "session",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            capabilities: new Set<Invocation.McpCapability>(),
+            issuedAt: 1,
+          };
+          const client = McpSchema.McpServerClient.of({
+            clientId: 1,
+            clientCapabilities: {},
+            clientInfo: { name: "test", version: "1" },
+            protocolVersion: "2025-06-18",
+            initializePayload: {
+              protocolVersion: "2025-06-18",
+              capabilities: {},
+              clientInfo: { name: "test", version: "1" },
+            },
+            getClient: Effect.die("unused"),
+          });
+          const call = (name: string, args: Record<string, unknown>) =>
+            server
+              .callTool({ name, arguments: args })
+              .pipe(
+                Effect.provideService(Invocation.McpInvocationContext, scope),
+                Effect.provideService(McpSchema.McpServerClient, client),
+              );
+          const spawnInput = fresh
+            ? {
+                threadId: worker,
+                title: input.title,
+                modelSelection: input.modelSelection,
+                prompt: input.prompt,
+              }
+            : input;
+          const spawned = yield* call("t3_worker_spawn", {
+            ...spawnInput,
+            ownerThreadId: "forged",
+          });
+          expect(spawned.isError).not.toBe(true);
+          const detail = Option.getOrThrow(
+            yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
           );
-      const spawned = yield* call("t3_worker_spawn", { ...input, ownerThreadId: "forged" });
-      expect(spawned.isError).not.toBe(true);
-      const switched = yield* call("t3_worker_control", {
-        threadId: worker,
-        modelSelection: selections[1]!,
-      });
-      expect(switched.isError).not.toBe(true);
-      expect(switched.content).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: "text", text: expect.stringContaining("codex_antoine") }),
-        ]),
-      );
-      expect(
-        (yield* call("t3_worker_report", {
-          clientRequestId: "forged",
-          outcome: "done",
-          summary: "Cannot impersonate worker",
-          threadId: worker,
-        })).isError,
-      ).toBe(true);
-      const workerCall = yield* server
-        .callTool({
-          name: "t3_worker_report",
-          arguments: {
-            clientRequestId: "finished",
-            outcome: "done",
-            summary: "Evidence verified.",
-          },
-        })
-        .pipe(
-          Effect.provideService(Invocation.McpInvocationContext, { ...scope, threadId: worker }),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-      expect(workerCall.isError).not.toBe(true);
-      const peer = yield* seed("mcp-peer");
-      expect(
-        (yield* call("t3_session_send", {
-          threadId: peer.owner,
-          clientRequestId: "peer-auth",
-          prompt: "Coordinate with the actual sender.",
-          senderThreadId: "forged-sender",
-        })).isError,
-      ).not.toBe(true);
-      const peerSnapshot = Option.getOrThrow(
-        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(peer.owner),
-      );
-      expect(peerSnapshot.messages[0]!.text).toContain(`From session: ${owner}`);
-      expect(peerSnapshot.messages[0]!.text).not.toContain("forged-sender");
-      const listed = yield* call("t3_worker_list", {});
-      expect(listed.content).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: "text", text: expect.stringContaining(owner) }),
-        ]),
-      );
-      expect((yield* call("t3_worker_read", { threadId: worker })).isError).not.toBe(true);
-      expect(
-        (yield* call("t3_worker_send", {
-          threadId: worker,
-          clientRequestId: "next",
-          prompt: "follow-up",
-        })).isError,
-      ).not.toBe(true);
-    }),
-  );
+          expect(detail.messages.some((message) => message.text === "Inherited base context")).toBe(
+            !fresh,
+          );
+          const switched = yield* call("t3_worker_control", {
+            threadId: worker,
+            modelSelection: selections[1]!,
+          });
+          expect(switched.isError).not.toBe(true);
+          expect(switched.content).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("codex_antoine"),
+              }),
+            ]),
+          );
+          expect(
+            (yield* call("t3_worker_report", {
+              clientRequestId: "forged",
+              outcome: "done",
+              summary: "Cannot impersonate worker",
+              threadId: worker,
+            })).isError,
+          ).toBe(true);
+          const workerCall = yield* server
+            .callTool({
+              name: "t3_worker_report",
+              arguments: {
+                clientRequestId: "finished",
+                outcome: "done",
+                summary: "Evidence verified.",
+              },
+            })
+            .pipe(
+              Effect.provideService(Invocation.McpInvocationContext, {
+                ...scope,
+                threadId: worker,
+              }),
+              Effect.provideService(McpSchema.McpServerClient, client),
+            );
+          expect(workerCall.isError).not.toBe(true);
+          const peer = yield* seed(`mcp-peer-${fresh ? "fresh" : "fork"}`);
+          expect(
+            (yield* call("t3_session_send", {
+              threadId: peer.owner,
+              clientRequestId: "peer-auth",
+              prompt: "Coordinate with the actual sender.",
+              senderThreadId: "forged-sender",
+            })).isError,
+          ).not.toBe(true);
+          const peerSnapshot = Option.getOrThrow(
+            yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(peer.owner),
+          );
+          expect(peerSnapshot.messages[0]!.text).toContain(`From session: ${owner}`);
+          expect(peerSnapshot.messages[0]!.text).not.toContain("forged-sender");
+          const listed = yield* call("t3_worker_list", {});
+          expect(listed.content).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ type: "text", text: expect.stringContaining(owner) }),
+            ]),
+          );
+          expect((yield* call("t3_worker_read", { threadId: worker })).isError).not.toBe(true);
+          expect(
+            (yield* call("t3_worker_send", {
+              threadId: worker,
+              clientRequestId: "next",
+              prompt: "follow-up",
+            })).isError,
+          ).not.toBe(true);
+          const successor = ThreadId.make(`${worker}-successor`);
+          expect(
+            (yield* call("t3_orchestrator_handoff", {
+              threadId: successor,
+              title: "next_master",
+              prompt: "Take over the retained work",
+              modelSelection: selections[2]!,
+            })).isError,
+          ).not.toBe(true);
+          expect(
+            (yield* call("t3_orchestrator_handoff_status", { threadId: successor })).isError,
+          ).not.toBe(true);
+          expect((yield* (yield* Workers.WorkerControls).list(successor))[0]!.threadId).toBe(
+            worker,
+          );
+        }),
+    );
+  }
 });
