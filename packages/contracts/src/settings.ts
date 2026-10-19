@@ -1107,6 +1107,10 @@ export const StorageCleanupSettings = Schema.Struct({
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
 export const ServerSettings = Schema.Struct({
+  /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
+  usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
@@ -1468,6 +1472,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(
       Schema.Union([

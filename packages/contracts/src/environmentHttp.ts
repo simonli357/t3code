@@ -1,4 +1,6 @@
 import * as Context from "effect/Context";
+import { UsageMeasurementsReport } from "./usageMeasurements.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
@@ -506,6 +508,29 @@ const EnvironmentOrchestrationThreadSnapshotQuery = {
 };
 
 export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
+  .add(
+    HttpApiEndpoint.get("usageMeasurements", "/api/orchestration/usage-measurements", {
+      headers: OptionalBearerHeaders,
+      payload: {
+        instanceId: Schema.optional(ProviderInstanceId),
+        threadId: Schema.optional(ThreadId),
+        lookbackHours: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: 336 }),
+          ),
+        ),
+        turnLimit: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: 100 }),
+          ),
+        ),
+      },
+      success: UsageMeasurementsReport,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("snapshot", "/api/orchestration/snapshot", {
       headers: OptionalBearerHeaders,
