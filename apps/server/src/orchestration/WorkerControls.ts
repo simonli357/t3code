@@ -7,6 +7,7 @@ import {
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
+  WorkerRenewalSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -28,6 +29,7 @@ import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDi
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { forkThread } from "../project/ThreadFork.ts";
 import { PeerLinks, layer as peerLinksLayer } from "./PeerLinks.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 
 export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError", {
   message: Schema.String,
@@ -218,16 +220,13 @@ const jobResult = (job: Job): typeof JobResult.Type => ({
   turnId: job.turn_id,
   error: job.error,
 });
-// Working time is turn time minus tool calls that ran longer than this: monitors,
-// builds and other waits that do not grow the conversation.
-const TOOL_WAIT_SECONDS = 60;
-const WORKER_RENEWAL_HOURS = 3.5;
-const MASTER_RENEWAL_HOURS = 5;
-type WorkTime = { hours: number; turns: number; compactions: number };
+// Thresholds come from the `workerRenewal` server setting, read for each report.
+type WorkTime = { hours: number; turns: number; compactions: number; renewalScale: number };
 /** One report line; `advice` follows once the session reaches its renewal threshold. */
 const workLine = (who: string, work: WorkTime, threshold: number, advice: string) =>
   `${who}: ${work.hours.toFixed(1)} h over ${work.turns} turn${work.turns === 1 ? "" : "s"}, ${work.compactions} compaction${work.compactions === 1 ? "" : "s"}.` +
   (work.hours >= threshold ? ` Over the ${threshold} h renewal threshold: ${advice}` : "");
+const decodeWorkerRenewal = Schema.decodeSync(WorkerRenewalSettings);
 const isWorkerError = Schema.is(WorkerError);
 const failure = (cause: unknown) =>
   isWorkerError(cause)
@@ -341,6 +340,7 @@ const make = Effect.gen(function* () {
   const directory = yield* ProviderSessionDirectory;
   const catalog = yield* ProviderRegistry;
   const peers = yield* PeerLinks;
+  const settings = yield* ServerSettingsService;
   const lock = yield* Semaphore.make(1);
   // Holds at most one pending pass, so a burst of events or requests costs one drain.
   const drainRequests = yield* Queue.dropping<void>(1);
@@ -367,7 +367,11 @@ const make = Effect.gen(function* () {
   });
   // Sums started turns, counting only the latest one while it runs, then removes
   // long tool waits. Undefined for a thread that is not in this environment.
-  const workOf = Effect.fn(function* (threadId: string) {
+  const renewal = settings.getSettings.pipe(
+    Effect.map((current) => current.workerRenewal),
+    Effect.orElseSucceed(() => decodeWorkerRenewal({})),
+  );
+  const workOf = Effect.fn(function* (threadId: string, limits: WorkerRenewalSettings) {
     const rows = yield* sql<{
       turns: number;
       turn_seconds: number | null;
@@ -385,17 +389,27 @@ const make = Effect.gen(function* () {
         WHERE thread_id = ${threadId} AND kind IN ('tool.started', 'tool.completed')
           AND json_extract(payload_json, '$.toolCallId') IS NOT NULL
         GROUP BY json_extract(payload_json, '$.toolCallId'))
-        WHERE seconds > ${TOOL_WAIT_SECONDS}) AS wait_seconds,
+        WHERE seconds > ${limits.toolWaitSeconds}) AS wait_seconds,
       (SELECT COUNT(*) FROM projection_thread_activities WHERE thread_id = ${threadId} AND kind = 'context-compaction') AS compactions`;
     const row = rows[0];
     if (!row || row.turn_seconds === null) return undefined;
     const hours = Math.max(0, row.turn_seconds - (row.wait_seconds ?? 0)) / 3600;
-    return { hours, turns: row.turns, compactions: row.compactions } satisfies WorkTime;
+    // The session's own provider record; reports must not wait on the provider registry.
+    const shell = yield* snapshots.getThreadShellById(ThreadId.make(threadId));
+    const provider = Option.isSome(shell) ? shell.value.session?.providerName : undefined;
+    const renewalScale = provider === "codex" ? limits.codexScale : 1;
+    return {
+      hours,
+      turns: row.turns,
+      compactions: row.compactions,
+      renewalScale,
+    } satisfies WorkTime;
   });
   const masterLine = Effect.fn(function* (masterId: string) {
-    const work = yield* workOf(masterId);
+    const limits = yield* renewal;
+    const work = yield* workOf(masterId, limits);
     return work
-      ? `\n${workLine("Your working time as master", work, MASTER_RENEWAL_HOURS, 'renew yourself with the t3-fork-session "renew yourself" steps at the next calm point.')}`
+      ? `\n${workLine("Your working time as master", work, limits.masterHours * work.renewalScale, 'renew yourself with the t3-fork-session "renew yourself" steps at the next calm point.')}`
       : "";
   });
   const owned = Effect.fn(function* (owner: string, id: string) {
@@ -687,11 +701,12 @@ const make = Effect.gen(function* () {
     const source = yield* thread(workerId);
     const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`;
     const reportId = `report:${workerId}:${input.clientRequestId}`;
-    const work = yield* workOf(workerId);
+    const limits = yield* renewal;
+    const work = yield* workOf(workerId, limits);
     // A remote master adds its own line when the report arrives there.
     const usage =
       (work
-        ? `\n\n${workLine("Worker working time", work, WORKER_RENEWAL_HOURS, 'renew this worker with the t3-fork-session "renew <worker>" steps before giving it more work.')}`
+        ? `\n\n${workLine("Worker working time", work, limits.workerHours * work.renewalScale, 'renew this worker with the t3-fork-session "renew <worker>" steps before giving it more work.')}`
         : "") + (parsePeerRef(worker.owner_id) ? "" : yield* masterLine(worker.owner_id));
     const createdAt = yield* now;
     const turnId = source.session?.activeTurnId ?? source.latestTurn?.turnId ?? null;

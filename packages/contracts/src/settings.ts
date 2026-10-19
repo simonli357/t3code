@@ -1106,12 +1106,28 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/**
+ * Working time after which worker reports suggest renewing a session. Working time
+ * leaves out tool calls longer than `toolWaitSeconds`; Codex sessions get
+ * `codexScale` times longer.
+ */
+export const WorkerRenewalSettings = Schema.Struct({
+  workerHours: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(3.5))),
+  masterHours: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(5))),
+  codexScale: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(1.5))),
+  toolWaitSeconds: Schema.Number.pipe(Schema.withDecodingDefault(Effect.succeed(60))),
+});
+export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
+
 export const ServerSettings = Schema.Struct({
   /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
   usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  workerRenewal: WorkerRenewalSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorkerRenewalSettings)({}))),
+  ),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
   ),
@@ -1488,6 +1504,14 @@ export const ServerSettingsPatch = Schema.Struct({
         }),
       ]),
     ),
+  ),
+  workerRenewal: Schema.optionalKey(
+    Schema.Struct({
+      workerHours: Schema.optionalKey(Schema.Number),
+      masterHours: Schema.optionalKey(Schema.Number),
+      codexScale: Schema.optionalKey(Schema.Number),
+      toolWaitSeconds: Schema.optionalKey(Schema.Number),
+    }),
   ),
   storageCleanup: Schema.optionalKey(
     Schema.Struct({

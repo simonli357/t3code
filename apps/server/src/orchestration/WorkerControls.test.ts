@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import { ServerConfig } from "../config.ts";
+import * as Settings from "../serverSettings.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -60,6 +61,7 @@ const infrastructure = Layer.mergeAll(
   Layer.provide(OrchestrationCommandReceiptRepositoryLive),
   Layer.provide(RepositoryIdentityResolver.layer),
   Layer.provideMerge(SqlitePersistenceMemory),
+  Layer.provideMerge(Settings.layerTest()),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-thread-fork-test-" })),
   Layer.provideMerge(NodeServices.layer),
 );
@@ -1703,7 +1705,7 @@ it.layer(testLayer)("persistent workers", (it) => {
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
-      const { owner, worker, input } = yield* seed("work-time");
+      const { owner, worker, input } = yield* seed("work-time", 2);
       yield* service.spawn(owner, input);
       // 5 h of turns, a 2 h build wait and two short tool calls that still count as work.
       yield* workHistory(worker, "first", [2, 3], [7200, 30, 45], 1);
@@ -1735,6 +1737,63 @@ it.layer(testLayer)("persistent workers", (it) => {
       const over = texts.find((text) => text.includes("Second stage done."));
       expect(over).toContain(
         'Worker working time: 4.0 h over 3 turns, 1 compaction. Over the 3.5 h renewal threshold: renew this worker with the t3-fork-session "renew <worker>" steps',
+      );
+    }),
+  );
+  it.effect("applies renewal setting changes to the next report without a restart", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const settings = yield* Settings.ServerSettingsService;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("tuned-time", 2);
+      yield* service.spawn(owner, input);
+      yield* workHistory(worker, "tuned", [2], [2400, 1200]);
+      const report = (id: string) =>
+        service.report(worker, { clientRequestId: id, outcome: "done", summary: `Tuned ${id}.` });
+      yield* report("defaults");
+      yield* settings.updateSettings({ workerRenewal: { workerHours: 1, toolWaitSeconds: 1800 } });
+      yield* report("changed").pipe(
+        Effect.ensuring(
+          settings
+            .updateSettings({ workerRenewal: { workerHours: 3.5, toolWaitSeconds: 60 } })
+            .pipe(Effect.ignore),
+        ),
+      );
+      const texts = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.map(
+        (m) => m.text,
+      );
+      expect(texts.find((text) => text.includes("Tuned defaults."))).toContain(
+        "Worker working time: 1.0 h over 1 turn, 0 compactions.",
+      );
+      expect(texts.find((text) => text.includes("Tuned changed."))).toContain(
+        "Worker working time: 1.3 h over 1 turn, 0 compactions. Over the 1 h",
+      );
+    }),
+  );
+  it.effect("gives Codex workers and masters 1.5 times longer before renewal", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("codex-time", 0);
+      yield* service.spawn(owner, input);
+      yield* session(owner, "ready", "codex-master-session");
+      yield* session(worker, "ready", "codex-worker-session");
+      yield* workHistory(worker, "first", [4]);
+      yield* workHistory(owner, "master", [6]);
+      const report = (id: string, summary: string) =>
+        service.report(worker, { clientRequestId: id, outcome: "done", summary });
+      yield* report("under", "Codex stage one.");
+      yield* workHistory(worker, "second", [1.5]);
+      yield* report("over", "Codex stage two.");
+      const texts = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.map(
+        (m) => m.text,
+      );
+      const under = texts.find((text) => text.includes("Codex stage one."));
+      expect(under).toContain("Worker working time: 4.0 h over 1 turn, 0 compactions.\n");
+      expect(under).toContain("Your working time as master: 6.0 h over 1 turn, 0 compactions.");
+      expect(under).not.toContain("renewal threshold");
+      expect(texts.find((text) => text.includes("Codex stage two."))).toContain(
+        "Worker working time: 5.5 h over 2 turns, 0 compactions. Over the 5.25 h renewal threshold",
       );
     }),
   );
@@ -2135,8 +2194,8 @@ it.effect("adds each environment's working time to a linked worker's report", ()
     yield* alphaWorkers.spawn(owner, {
       threadId: worker,
       projectId: ProjectId.make("time-beta"),
-      title: "remote_time_worker_sol",
-      modelSelection: selections[0]!,
+      title: "remote_time_worker_opus",
+      modelSelection: selections[2]!,
       prompt: "Run the long job",
       environment: "beta",
     });
