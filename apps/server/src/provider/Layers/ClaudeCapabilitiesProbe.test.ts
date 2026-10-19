@@ -237,11 +237,11 @@ it.effect("retains usage arriving after six seconds of network latency", () =>
           }),
           usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => {
             Deferred.doneUnsafe(usageStarted, Effect.void);
-            return new Promise((resolve) => {
+            return new Promise<unknown>((resolve) => {
               finishUsage = resolve;
             });
           },
-        }) as ReturnType<typeof ClaudeSdk.query>,
+        }) as unknown as ReturnType<typeof ClaudeSdk.query>,
     );
     yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
     const probe = yield* probeClaudeCapabilities(
@@ -255,6 +255,6 @@ it.effect("retains usage arriving after six seconds of network latency", () =>
     };
     finishUsage?.(usage);
     const capabilities = yield* Fiber.join(probe);
-    assert.deepEqual(capabilities.usage, usage);
+    assert.deepEqual(capabilities?.usage, usage);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
