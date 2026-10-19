@@ -566,6 +566,30 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         }),
       );
 
+      it.effect(
+        "does not time out a healthy probe slower than the shared 10s auth-probe timeout (#7513)",
+        () =>
+          Effect.gen(function* () {
+            let attempts = 0;
+            const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.sync(() => {
+                attempts += 1;
+              }).pipe(
+                Effect.andThen(Effect.sleep("15 seconds")),
+                Effect.as(makeCodexProbeSnapshot()),
+              ),
+            ).pipe(Effect.forkChild);
+
+            yield* Effect.yieldNow;
+            // Long enough for a needless fresh-process retry to finish too.
+            yield* TestClock.adjust("30 seconds");
+
+            const status = yield* Fiber.join(statusFiber);
+            assert.strictEqual(status.status, "ready");
+            assert.strictEqual(attempts, 1);
+          }),
+      );
+
       it.effect("keeps a successful status when process cleanup crosses the probe deadline", () =>
         Effect.gen(function* () {
           const cleanedUp = yield* Ref.make(false);
@@ -574,12 +598,12 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               yield* Effect.addFinalizer(() =>
                 Effect.sleep("2 seconds").pipe(Effect.andThen(Ref.set(cleanedUp, true))),
               );
-              yield* Effect.sleep("9 seconds");
+              yield* Effect.sleep("19 seconds");
               return makeCodexProbeSnapshot();
             }),
           ).pipe(Effect.forkChild);
 
-          yield* TestClock.adjust("12 seconds");
+          yield* TestClock.adjust("22 seconds");
           const status = yield* Fiber.join(statusFiber);
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.auth.status, "authenticated");
@@ -605,7 +629,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
             }),
           ).pipe(Effect.forkChild);
 
-          yield* TestClock.adjust("11 seconds");
+          yield* TestClock.adjust("21 seconds");
           const status = yield* Fiber.join(statusFiber);
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.auth.status, "authenticated");
@@ -624,7 +648,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           );
 
           yield* Effect.yieldNow;
-          yield* TestClock.adjust("21 seconds");
+          yield* TestClock.adjust("41 seconds");
           yield* Effect.yieldNow;
 
           const status = yield* Fiber.join(statusFiber);
