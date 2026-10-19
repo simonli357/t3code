@@ -171,6 +171,18 @@ rules to connected environments that support shared settings. Offline environmen
 and older servers keep their previous values. Changing a rule does not reopen
 already settled threads.
 
+### Purge old settled threads
+
+Settled threads keep their full history and agent transcripts on disk. To free that space, run
+`t3 threads purge-settled --days 30` on the machine that runs the environment while it is running. It
+lists the threads settled for more than 30 days that it would remove, with their Claude and Codex
+session transcripts, and the threads it keeps with the reason, such as a worker that is still
+active or a pinned thread. Add `--yes` to remove them for good. Agents can run the same purge with
+the `t3_purge_settled_threads` tool, which also only reports unless told otherwise.
+
+A purge cannot be undone. Worktrees stay on disk, and the database file keeps its size: the freed
+space is reused for new work.
+
 ## Link a pull request
 
 The server finds the PR for each unsettled thread's saved branch, even when your
