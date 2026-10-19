@@ -267,7 +267,7 @@ const PlatformServicesLive = NodeServices.layer;
 
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
-  Layer.provideMerge(WorkerControls.layer),
+  Layer.provideMerge(WorkerControls.liveLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),
@@ -604,7 +604,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(authHttpApiLayer),
       Layer.provide(connectHttpApiLayer),
-      Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(orchestrationHttpApiLayer.pipe(Layer.provide(WorkerControls.liveLayer))),
       Layer.provide(pullRequestHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
@@ -618,7 +618,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(McpSessionRegistry.layer),
-    Layer.provide(WorkerControls.layer),
+    Layer.provide(WorkerControls.liveLayer),
   ),
   // Last, so no route layer can replace the server's one TracerDisabledWhen.
   untracedRequestsLayer,

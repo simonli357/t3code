@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  PeerRequestError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as UsageMeasurements from "../usage/UsageMeasurements.ts";
@@ -20,6 +21,7 @@ import {
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { WorkerControls } from "./WorkerControls.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -29,8 +31,19 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const orchestrationEngine = yield* OrchestrationEngineService;
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
     const measurements = yield* UsageMeasurements.UsageMeasurements;
+    const workers = yield* WorkerControls;
 
     return handlers
+      .handle(
+        "peer",
+        Effect.fn("environment.peer")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* workers
+            .receive(args.payload.from, args.payload.request)
+            .pipe(Effect.mapError((error) => new PeerRequestError({ message: error.message })));
+        }),
+      )
       .handle(
         "usageMeasurements",
         Effect.fn("environment.usage.measurements")(function* (args) {

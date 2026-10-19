@@ -11,15 +11,15 @@ const dependencies = [Workers.WorkerControls, Invocation.McpInvocationContext];
 const failure = Schema.Union([Workers.WorkerError]);
 const spawn = Tool.make("t3_worker_spawn", {
   description:
-    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the selected account, preserving its native and visible history, modes, branch and worktree. Use the project's worker skill to resolve the title, explicit provider/model, and fixed reasoning options. Pass a stable destination UUID across retries. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports reach the master immediately, steering an active turn or waking an idle master unless stopped; review the latest output and evidence and give a disposition.",
-  parameters: Workers.SpawnInput,
+    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the selected account, preserving its native and visible history, modes, branch and worktree. Use the project's worker skill to resolve the title, explicit provider/model, and fixed reasoning options. Pass a stable destination UUID across retries. The worker keeps its selected account/model/options on follow-ups. Set environment to a linked peer's label to run the worker on that machine: give its projectId or sourceThreadId there, and its account/model. Ownership, reports and the other worker tools then work across machines. Acceptance means queued, not task completed. Workers must call t3_worker_report only when the assignment is done or genuinely blocked. Reports reach the master immediately, steering an active turn or waking an idle master unless stopped; review the latest output and evidence and give a disposition.",
+  parameters: Workers.RemoteSpawnInput,
   success: Workers.WorkerResult,
   failure,
   dependencies,
 });
 const list = Tool.make("t3_worker_list", {
   description:
-    "List workers owned by this master, including their source (null for fresh sessions), fixed selection, notification setting, and latest assignment. Ownership survives restarts and context compaction.",
+    "List workers owned by this master, including their source (null for fresh sessions), fixed selection, notification setting, latest assignment, and environment for workers on a linked machine (state unreachable while it is offline). Ownership survives restarts and context compaction.",
   success: Schema.Array(Workers.WorkerResult),
   failure,
   dependencies,
@@ -58,8 +58,8 @@ const control = Tool.make("t3_worker_control", {
 });
 const message = Tool.make("t3_session_send", {
   description:
-    "Send user-authorized coordination to another T3 session in this environment, including peers, other masters or their workers. Resolve its exact threadId with the T3 skill first. The authenticated sender is attached automatically; do not impersonate the user or another session. Use a fresh clientRequestId per message, and identical input on retries. Appears immediately and steers a running recipient or wakes an idle one; stopped/snoozed sessions remain paused until resumed. No active native session is required. Dispatched means handed to orchestration, not read or completed; queued means saved and delivered automatically, once a stopped or snoozed recipient resumes or the current delivery pass finishes. Preserves recipient account/model and ownership. Report your work through this tool only when done or genuinely blocked. Do not send progress, intermediate findings, expected waits, or failures you are still recovering from; general permission to coordinate does not waive this rule. Masters may send concrete assignments, corrections or blocker resolutions. Never send acknowledgment loops. Use t3_worker_send for assignments to your own workers.",
-  parameters: Workers.SendInput,
+    "Send user-authorized coordination to another T3 session, including peers, other masters or their workers. Resolve its exact threadId with the T3 skill first. For a session on a linked machine, also set environment to that machine's label; the message is held and retried while it is unreachable. The authenticated sender is attached automatically; do not impersonate the user or another session. Use a fresh clientRequestId per message, and identical input on retries. Appears immediately and steers a running recipient or wakes an idle one; stopped/snoozed sessions remain paused until resumed. No active native session is required. Dispatched means handed to orchestration, not read or completed; queued means saved and delivered automatically, once a stopped or snoozed recipient resumes or the current delivery pass finishes. Preserves recipient account/model and ownership. Report your work through this tool only when done or genuinely blocked. Do not send progress, intermediate findings, expected waits, or failures you are still recovering from; general permission to coordinate does not waive this rule. Masters may send concrete assignments, corrections or blocker resolutions. Never send acknowledgment loops. Use t3_worker_send for assignments to your own workers.",
+  parameters: Workers.MessageInput,
   success: Workers.SessionMessageResult,
   failure,
   dependencies,

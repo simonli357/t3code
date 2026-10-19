@@ -119,6 +119,17 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedError<Environme
   }
 }
 
+/** A linked peer environment refused a worker or message request. */
+export class PeerRequestError extends Schema.TaggedError<PeerRequestError>()(
+  "PeerRequestError",
+  { message: Schema.String },
+  { httpApiStatus: 409 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(PeerRequestError)(this, { status: 409 });
+  }
+}
+
 export class EnvironmentAuthInvalidError extends Schema.TaggedError<EnvironmentAuthInvalidError>()(
   "EnvironmentAuthInvalidError",
   {
@@ -552,6 +563,15 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       payload: EnvironmentOrchestrationThreadSnapshotQuery,
       success: OrchestrationThreadDetailSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // Server-to-server worker traffic; the request is validated by WorkerControls.
+    HttpApiEndpoint.post("peer", "/api/peer/v1", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ from: TrimmedNonEmptyString, request: Schema.Unknown }),
+      success: Schema.Unknown,
+      error: [EnvironmentScopeRequiredError, PeerRequestError, EnvironmentInternalError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

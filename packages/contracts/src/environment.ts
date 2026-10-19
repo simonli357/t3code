@@ -139,6 +139,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadForking: Schema.optionalKey(Schema.Boolean),
   workerFreshSessions: Schema.optionalKey(Schema.Boolean),
   orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
+  /** Worker tools and session messages can reach linked peer environments. */
+  peerEnvironments: Schema.optionalKey(Schema.Boolean),
   claudeSubagentStop: Schema.optionalKey(Schema.Boolean),
   providerSwitching: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).

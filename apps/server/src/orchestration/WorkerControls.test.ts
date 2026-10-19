@@ -19,6 +19,8 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import { ServerConfig } from "../config.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
@@ -36,6 +38,7 @@ import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDi
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Workers from "./WorkerControls.ts";
+import { PeerLinks, PeerRejected, PeerUnavailable, findPeer } from "./PeerLinks.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Schema from "effect/Schema";
@@ -121,10 +124,19 @@ const registry = Layer.mock(ProviderRegistry)({
       : Effect.succeed(providers),
   ),
 });
+const noPeers = Layer.succeed(
+  PeerLinks,
+  PeerLinks.of({
+    localEnvironment: Effect.succeed({ environmentId: "env-local", label: "local" }),
+    resolve: () => Effect.succeedNone,
+    call: () => Effect.fail(new PeerRejected({ message: "No peers in this test." })),
+  }),
+);
 const testLayer = Workers.layer.pipe(
   Layer.provideMerge(infrastructure),
   Layer.provideMerge(providerLayer),
   Layer.provideMerge(registry),
+  Layer.provideMerge(noPeers),
 );
 const timestamp = "2026-10-06T12:00:00.000Z";
 const seed = Effect.fn(function* (prefix: string, index = 0) {
@@ -1844,3 +1856,240 @@ it.layer(mcpLayer)("worker MCP", (it) => {
     );
   }
 });
+
+// Two environments with their own databases, linked as the HTTP peer route would.
+const peerHandlers = new Map<
+  string,
+  (from: string, request: unknown) => Effect.Effect<unknown, Workers.WorkerError>
+>();
+const offline = new Set<string>();
+const linkedEnvironments = [
+  { environmentId: "env-alpha", label: "alpha", url: "https://alpha.test", token: "alpha" },
+  { environmentId: "env-beta", label: "beta", url: "https://beta.test", token: "beta" },
+];
+const environmentLayer = (environmentId: string) =>
+  Workers.layer.pipe(
+    Layer.provideMerge(infrastructure),
+    Layer.provideMerge(providerLayer),
+    Layer.provideMerge(registry),
+    Layer.provideMerge(
+      Layer.succeed(
+        PeerLinks,
+        PeerLinks.of({
+          localEnvironment: Effect.succeed({
+            environmentId,
+            label: linkedEnvironments.find((peer) => peer.environmentId === environmentId)!.label,
+          }),
+          resolve: (nameOrId) =>
+            Effect.succeed(
+              findPeer(
+                linkedEnvironments.filter((peer) => peer.environmentId !== environmentId),
+                nameOrId,
+              ),
+            ),
+          call: (target, request) => {
+            const handler = peerHandlers.get(target);
+            return handler && !offline.has(target)
+              ? handler(environmentId, structuredClone(request)).pipe(
+                  Effect.map((response) => structuredClone(response)),
+                  Effect.mapError((error) => new PeerRejected({ message: error.message })),
+                )
+              : Effect.fail(new PeerUnavailable({ environmentId: target, message: "offline" }));
+          },
+        }),
+      ),
+    ),
+  );
+const linkedPair = Effect.gen(function* () {
+  const scope = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+  const alpha = yield* Layer.build(environmentLayer("env-alpha")).pipe(Scope.provide(scope));
+  const beta = yield* Layer.build(environmentLayer("env-beta")).pipe(Scope.provide(scope));
+  for (const [id, context] of [
+    ["env-alpha", alpha],
+    ["env-beta", beta],
+  ] as const)
+    peerHandlers.set(id, (from, request) =>
+      Workers.WorkerControls.pipe(
+        Effect.flatMap((service) => service.receive(from, request)),
+        Effect.provide(context),
+      ),
+    );
+  offline.clear();
+  const services = Effect.all([Workers.WorkerControls, ProjectionSnapshotQuery]);
+  const [alphaWorkers, alphaSnapshots] = yield* services.pipe(Effect.provide(alpha));
+  const [betaWorkers, betaSnapshots] = yield* services.pipe(Effect.provide(beta));
+  const messages = (snapshots: typeof alphaSnapshots, id: ThreadId) =>
+    snapshots
+      .getThreadDetailById(id)
+      .pipe(Effect.map((thread) => Option.getOrThrow(thread).messages.map((m) => m.text)));
+  return { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots, messages };
+});
+
+it.effect("messages a session in a linked environment, holding it while offline", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots, messages } =
+      yield* linkedPair;
+    const sender = (yield* seed("msg-alpha").pipe(Effect.provide(alpha))).owner;
+    const recipient = (yield* seed("msg-beta").pipe(Effect.provide(beta))).owner;
+    const input = {
+      threadId: recipient,
+      clientRequestId: "status",
+      prompt: "Is the shared build green?",
+      environment: "beta",
+    };
+    offline.add("env-beta");
+    expect((yield* alphaWorkers.message(sender, input)).state).toBe("queued");
+    offline.delete("env-beta");
+    yield* alphaWorkers.drain();
+    expect(yield* alphaWorkers.message(sender, input)).toMatchObject({
+      threadId: recipient,
+      state: "dispatched",
+    });
+    yield* betaWorkers.drain();
+    const received = (yield* messages(betaSnapshots, recipient)).filter((text) =>
+      text.includes("Is the shared build green?"),
+    );
+    expect(received).toHaveLength(1);
+    expect(received[0]).toContain(`From session: ${sender} in environment alpha`);
+    yield* betaWorkers.message(recipient, {
+      threadId: sender,
+      clientRequestId: "reply",
+      prompt: "Green on main.",
+      environment: "alpha",
+    });
+    yield* betaWorkers.drain();
+    yield* alphaWorkers.drain();
+    expect(
+      (yield* messages(alphaSnapshots, sender)).filter((text) => text.includes("Green on main.")),
+    ).toHaveLength(1);
+    expect(
+      (yield* alphaWorkers
+        .message(sender, { ...input, clientRequestId: "x", environment: "gamma" })
+        .pipe(Effect.flip)).message,
+    ).toContain("No linked environment named gamma");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("owns, steers and hears from a worker in a linked environment", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots, messages } =
+      yield* linkedPair;
+    const { owner } = yield* seed("own-alpha").pipe(Effect.provide(alpha));
+    yield* seed("own-beta").pipe(Effect.provide(beta));
+    const worker = ThreadId.make("own-remote-worker");
+    const input = {
+      threadId: worker,
+      projectId: ProjectId.make("own-beta"),
+      title: "remote_worker_sol",
+      modelSelection: selections[0]!,
+      prompt: "Measure the beta build",
+      environment: "beta",
+    };
+    expect(yield* alphaWorkers.spawn(owner, input)).toMatchObject({
+      threadId: worker,
+      ownerThreadId: owner,
+      environment: "beta",
+    });
+    expect((yield* alphaWorkers.spawn(owner, input)).threadId).toBe(worker);
+    expect(Option.isNone(yield* alphaSnapshots.getThreadShellById(worker))).toBe(true);
+    expect(yield* messages(betaSnapshots, worker)).toContain("Measure the beta build");
+    expect(
+      (yield* alphaWorkers.list(owner)).map((entry) => [entry.threadId, entry.environment]),
+    ).toEqual([[worker, "beta"]]);
+
+    const read = yield* alphaWorkers.read(owner, { threadId: worker });
+    expect(read.worker).toMatchObject({ ownerThreadId: owner, environment: "beta" });
+    expect(read.items.some((item) => item.text === "Measure the beta build")).toBe(true);
+    expect(
+      (yield* alphaWorkers.send(owner, {
+        threadId: worker,
+        clientRequestId: "logs",
+        prompt: "Also check the logs",
+      })).requestId,
+    ).toBe(`${worker}:logs`);
+
+    yield* betaWorkers.report(worker, {
+      clientRequestId: "measured",
+      outcome: "done",
+      summary: "Beta build measured: 41 s",
+    });
+    yield* betaWorkers.drain();
+    yield* alphaWorkers.drain();
+    const reports = (yield* messages(alphaSnapshots, owner)).filter((text) =>
+      text.includes("Beta build measured: 41 s"),
+    );
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toContain("Worker environment: beta");
+
+    offline.add("env-beta");
+    expect((yield* alphaWorkers.list(owner))[0]).toMatchObject({
+      threadId: worker,
+      state: "unreachable",
+      environment: "beta",
+    });
+    offline.delete("env-beta");
+    const refusal = Effect.match({
+      onFailure: (error: Workers.WorkerError) => error.message,
+      onSuccess: () => "accepted",
+    });
+    expect(yield* betaWorkers.receive("env-gamma", { _tag: "ping" }).pipe(refusal)).toContain(
+      "no peer link",
+    );
+    expect(
+      yield* betaWorkers
+        .receive("env-alpha", {
+          _tag: "worker",
+          owner: { threadId: owner, runtimeMode: "full-access", interactionMode: "default" },
+          workerThreadId: "own-beta-master",
+          op: "describe",
+          input: {},
+        })
+        .pipe(refusal),
+    ).toContain("not a worker owned from alpha");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("routes a linked worker's reports to the master's handoff successor", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, messages } = yield* linkedPair;
+    const { owner } = yield* seed("handoff-alpha").pipe(Effect.provide(alpha));
+    yield* seed("handoff-beta").pipe(Effect.provide(beta));
+    const worker = ThreadId.make("handoff-remote-worker");
+    yield* alphaWorkers.spawn(owner, {
+      threadId: worker,
+      projectId: ProjectId.make("handoff-beta"),
+      title: "remote_worker_sol",
+      modelSelection: selections[0]!,
+      prompt: "Profile the beta tests",
+      environment: "beta",
+    });
+    const successor = ThreadId.make("handoff-alpha-successor");
+    yield* alphaWorkers.handoff(owner, {
+      threadId: successor,
+      title: "next_master",
+      modelSelection: selections[0]!,
+      prompt: "Take over the beta work",
+    });
+    expect((yield* alphaWorkers.list(successor)).map((entry) => entry.threadId)).toEqual([worker]);
+    yield* betaWorkers.report(worker, {
+      clientRequestId: "blocked",
+      outcome: "blocked",
+      summary: "Need the beta signing key",
+    });
+    yield* betaWorkers.drain();
+    yield* alphaWorkers.drain();
+    expect(
+      (yield* messages(alphaSnapshots, successor)).some((text) =>
+        text.includes("Need the beta signing key"),
+      ),
+    ).toBe(true);
+    expect(
+      (yield* alphaWorkers.send(successor, {
+        threadId: worker,
+        clientRequestId: "key",
+        prompt: "Use the shared vault",
+      })).requestId,
+    ).toBe(`${worker}:key`);
+  }).pipe(Effect.scoped),
+);

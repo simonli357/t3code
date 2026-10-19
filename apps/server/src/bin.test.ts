@@ -41,6 +41,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import * as WorkerControls from "./orchestration/WorkerControls.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as UsageMeasurements from "./usage/UsageMeasurements.ts";
 import { MeasurementHistory } from "./usage/measurementHistory.ts";
@@ -382,6 +383,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
               discard: () => Effect.void,
             }),
           ),
+          Layer.provide(Layer.mock(WorkerControls.WorkerControls)({})),
         ),
       ),
       Layer.provide(environmentAuthenticatedAuthLayer),
