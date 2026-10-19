@@ -137,6 +137,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       version-skew contract as threadSettlement. */
   threadPinning: Schema.optionalKey(Schema.Boolean),
   threadForking: Schema.optionalKey(Schema.Boolean),
+  workerFreshSessions: Schema.optionalKey(Schema.Boolean),
+  orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
   claudeSubagentStop: Schema.optionalKey(Schema.Boolean),
   providerSwitching: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).

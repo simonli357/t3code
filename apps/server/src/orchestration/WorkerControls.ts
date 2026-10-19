@@ -4,6 +4,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   OrchestrationThreadShell,
+  ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
@@ -29,7 +30,8 @@ export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError"
   message: Schema.String,
 }) {}
 export const SpawnInput = Schema.Struct({
-  sourceThreadId: ThreadId,
+  sourceThreadId: Schema.optional(ThreadId),
+  projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -69,6 +71,46 @@ export const ControlInput = Schema.Struct({
   adoptCurrentSettings: Schema.optional(Schema.Boolean),
   modelSelection: Schema.optional(ModelSelection),
 });
+export const HandoffInput = Schema.Struct({
+  ...SpawnInput.fields,
+  selfFork: Schema.optional(Schema.Boolean),
+});
+export const HandoffStatusInput = Schema.Struct({
+  threadId: ThreadId,
+  cancel: Schema.optional(Schema.Boolean),
+});
+export const HandoffResult = Schema.Struct({
+  threadId: ThreadId,
+  previousOwnerThreadId: ThreadId,
+  state: Schema.Literals(["queued", "completed", "error", "cancelled"]),
+  error: Schema.NullOr(Schema.String),
+  transferredWorkerIds: Schema.Array(ThreadId),
+  startupState: Schema.NullOr(Schema.String),
+  startupError: Schema.NullOr(Schema.String),
+});
+type Handoff = {
+  thread_id: string;
+  owner_id: string;
+  plan_json: string;
+  state: (typeof HandoffResult.Type)["state"];
+  error: string | null;
+  transferred_json: string;
+  startup_state?: string | null;
+  startup_error?: string | null;
+};
+const decodeHandoff = Schema.decodeUnknownSync(Schema.fromJsonString(HandoffInput));
+const decodeTransferredWorkers = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Array(ThreadId)),
+);
+const handoffResult = (row: Handoff): typeof HandoffResult.Type => ({
+  threadId: ThreadId.make(row.thread_id),
+  previousOwnerThreadId: ThreadId.make(row.owner_id),
+  state: row.state,
+  error: row.error,
+  transferredWorkerIds: decodeTransferredWorkers(row.transferred_json),
+  startupState: row.startup_state ?? null,
+  startupError: row.startup_error ?? null,
+});
 const JobState = Schema.Literals([
   "queued",
   "submitted",
@@ -87,7 +129,7 @@ export const JobResult = Schema.Struct({
 export const WorkerResult = Schema.Struct({
   threadId: ThreadId,
   ownerThreadId: ThreadId,
-  sourceThreadId: ThreadId,
+  sourceThreadId: Schema.NullOr(ThreadId),
   title: Schema.String,
   modelSelection: ModelSelection,
   state: Schema.String,
@@ -129,7 +171,7 @@ type Job = {
 type Worker = {
   thread_id: string;
   owner_id: string;
-  source_id: string;
+  source_id: string | null;
   plan_json: string;
   baseline: number;
   state: string;
@@ -202,6 +244,14 @@ export class WorkerControls extends Context.Service<
       owner: ThreadId,
       input: typeof ControlInput.Type,
     ) => Effect.Effect<typeof WorkerResult.Type, WorkerError>;
+    readonly handoff: (
+      owner: ThreadId,
+      input: typeof HandoffInput.Type,
+    ) => Effect.Effect<typeof HandoffResult.Type, WorkerError>;
+    readonly handoffStatus: (
+      owner: ThreadId,
+      input: typeof HandoffStatusInput.Type,
+    ) => Effect.Effect<typeof HandoffResult.Type, WorkerError>;
     readonly start: () => Effect.Effect<void, WorkerError, Scope.Scope>;
     readonly drain: () => Effect.Effect<void, WorkerError>;
   }
@@ -219,7 +269,14 @@ const make = Effect.gen(function* () {
   const persisted = yield* sql<Worker>`SELECT * FROM custom_workers`;
   const peerMessages =
     yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE kind = 'message' AND state = 'queued'`;
+  const pendingHandoffs =
+    yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE state = 'queued'`;
   const watched = new Set([
+    ...pendingHandoffs.flatMap((row) => [
+      row.owner_id,
+      row.thread_id,
+      decodeHandoff(row.plan_json).sourceThreadId ?? row.owner_id,
+    ]),
     ...persisted.flatMap((worker) => [worker.thread_id, worker.owner_id]),
     ...peerMessages.flatMap((job) => [job.worker_id, job.target_id]),
   ]);
@@ -267,7 +324,7 @@ const make = Effect.gen(function* () {
     return {
       threadId: plan.threadId,
       ownerThreadId: ThreadId.make(worker.owner_id),
-      sourceThreadId: plan.sourceThreadId,
+      sourceThreadId: plan.sourceThreadId ?? null,
       title: plan.title,
       modelSelection: plan.modelSelection,
       state,
@@ -507,12 +564,22 @@ const make = Effect.gen(function* () {
         return yield* new WorkerError({ message: "This session is not a managed T3 worker." });
       const plan = decodePlan(worker.plan_json);
       const source = yield* thread(workerId);
+      const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`;
+      const reportId = `report:${workerId}:${input.clientRequestId}`;
+      const previous = yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`;
+      if (previous[0]) {
+        if (previous[0].kind !== input.outcome || previous[0].prompt !== prompt)
+          return yield* new WorkerError({
+            message: "This report ID already belongs to a different assignment.",
+          });
+        return jobResult(previous[0]);
+      }
       const job = yield* enqueue(
-        `report:${workerId}:${input.clientRequestId}`,
+        reportId,
         worker,
         worker.owner_id,
         input.outcome,
-        `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`,
+        prompt,
         source.session?.activeTurnId ?? source.latestTurn?.turnId ?? undefined,
       );
       return jobResult(job);
@@ -546,6 +613,7 @@ const make = Effect.gen(function* () {
   );
   const drain = Effect.fn("WorkerControls.drain")(
     function* () {
+      yield* processHandoffs();
       yield* refreshJobs();
       // Old builds queued turn completions as assignment completions. Retire
       // only those undelivered automatic notices; retain input/error notices.
@@ -555,7 +623,7 @@ const make = Effect.gen(function* () {
           WHERE kind = 'work' AND state = 'completed'
         )`;
       const jobs =
-        yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY CASE WHEN kind = 'work' THEN 1 ELSE 0 END, rowid`;
+        yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY CASE WHEN id LIKE 'handoff-start:%' THEN 0 WHEN kind = 'work' THEN 2 ELSE 1 END, rowid`;
       const blocked = new Set<string>();
       for (const job of jobs) {
         if (blocked.has(job.target_id)) continue;
@@ -563,6 +631,9 @@ const make = Effect.gen(function* () {
           yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
         const worker = workers[0];
         // Peer messages share durable delivery, not worker ownership/control.
+        const preparing = yield* sql`SELECT 1 FROM custom_orchestrator_handoffs
+          WHERE thread_id = ${job.target_id} AND state != 'completed'`;
+        if (preparing.length && job.id === `spawn:${job.target_id}`) continue;
         if (job.kind !== "message") {
           if (!worker || worker.state !== "ready") continue;
           if (job.kind !== "work" && !worker.notify) continue;
@@ -657,87 +728,118 @@ const make = Effect.gen(function* () {
     Effect.mapError(failure),
   );
 
-  const spawn = Effect.fn("WorkerControls.spawn")(
-    function* (owner: ThreadId, input: typeof SpawnInput.Type) {
-      const parent = yield* thread(owner);
-      if (input.threadId === owner || input.threadId === input.sourceThreadId)
-        return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
-      const existing =
-        yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${input.threadId}`;
-      let worker = existing[0];
-      if (worker) {
-        const plan = decodePlan(worker.plan_json);
-        if (
-          worker.owner_id !== owner ||
-          worker.source_id !== input.sourceThreadId ||
-          plan.title !== input.title ||
-          plan.prompt !== input.prompt ||
-          selectionKey(plan.modelSelection) !== selectionKey(input.modelSelection)
-        )
-          return yield* new WorkerError({
-            message:
-              "This worker ID is already reserved with different ownership or task settings.",
-          });
-      } else {
-        const source = yield* thread(input.sourceThreadId);
-        if (source.modelSelection.instanceId !== input.modelSelection.instanceId)
-          return yield* new WorkerError({
-            message: "The base and worker must use the same provider account.",
-          });
-        if (source.runtimeMode === "full-access" && parent.runtimeMode !== "full-access")
-          return yield* new WorkerError({
-            message: "The base has broader permissions than the master.",
-          });
-        yield* checkSelection(input.modelSelection);
-        if (yield* busy(source))
-          return yield* new WorkerError({
-            message: "The base is busy. Wait before forking; it will not be interrupted.",
-          });
-        const plan = encodePlan({
-          ...input,
-          runtimeMode: source.runtimeMode,
-          interactionMode: source.interactionMode,
+  const spawn = Effect.fn("WorkerControls.spawn")(function* (
+    owner: ThreadId,
+    input: typeof SpawnInput.Type,
+    forHandoff = false,
+  ) {
+    const parent = yield* thread(owner);
+    if (input.threadId === owner || input.threadId === input.sourceThreadId)
+      return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
+    const existing =
+      yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${input.threadId}`;
+    let worker = existing[0];
+    if (worker) {
+      const plan = decodePlan(worker.plan_json);
+      if (
+        worker.owner_id !== owner ||
+        worker.source_id !== (input.sourceThreadId ?? null) ||
+        (input.projectId !== undefined && plan.projectId !== input.projectId) ||
+        plan.title !== input.title ||
+        plan.prompt !== input.prompt ||
+        selectionKey(plan.modelSelection) !== selectionKey(input.modelSelection)
+      )
+        return yield* new WorkerError({
+          message: "This worker ID is already reserved with different ownership or task settings.",
         });
-        yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json)
-        VALUES (${input.threadId}, ${owner}, ${input.sourceThreadId}, ${plan})`;
-        worker = yield* owned(owner, input.threadId);
-      }
-      watched.add(owner);
-      watched.add(input.threadId);
-      if (worker.state !== "ready") {
-        yield* Effect.gen(function* () {
+    } else {
+      if (Option.isSome(yield* snapshots.getThreadShellById(input.threadId)))
+        return yield* new WorkerError({ message: "That destination thread already exists." });
+      const source = input.sourceThreadId ? yield* thread(input.sourceThreadId) : undefined;
+      if (
+        !forHandoff &&
+        source &&
+        source.modelSelection.instanceId !== input.modelSelection.instanceId
+      )
+        return yield* new WorkerError({
+          message: "The base and worker must use the same provider account.",
+        });
+      if (source?.runtimeMode === "full-access" && parent.runtimeMode !== "full-access")
+        return yield* new WorkerError({
+          message: "The base has broader permissions than the master.",
+        });
+      yield* checkSelection(input.modelSelection);
+      if (source && (yield* busy(source)))
+        return yield* new WorkerError({
+          message: "The base is busy. Wait before forking; it will not be interrupted.",
+        });
+      const projectId = source?.projectId ?? input.projectId ?? parent.projectId;
+      if (input.projectId !== undefined && input.projectId !== projectId)
+        return yield* new WorkerError({ message: "The fork source belongs to another project." });
+      if (Option.isNone(yield* snapshots.getProjectShellById(projectId)))
+        return yield* new WorkerError({ message: "The project no longer exists." });
+      const plan = encodePlan({
+        ...input,
+        projectId,
+        runtimeMode: source?.runtimeMode ?? parent.runtimeMode,
+        interactionMode: source?.interactionMode ?? parent.interactionMode,
+      });
+      yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json)
+        VALUES (${input.threadId}, ${owner}, ${input.sourceThreadId ?? null}, ${plan})`;
+      worker = yield* owned(owner, input.threadId);
+    }
+    watched.add(owner);
+    watched.add(input.threadId);
+    if (worker.state !== "ready") {
+      const plan = decodePlan(worker.plan_json);
+      yield* Effect.gen(function* () {
+        if (plan.sourceThreadId) {
           yield* forkThread({
-            sourceThreadId: input.sourceThreadId,
-            threadId: input.threadId,
+            sourceThreadId: plan.sourceThreadId,
+            threadId: plan.threadId,
           }).pipe(
             Effect.provideService(OrchestrationEngineService, engine),
             Effect.provideService(ProjectionSnapshotQuery, snapshots),
             Effect.provideService(ProviderService, provider),
             Effect.provideService(ProviderSessionDirectory, directory),
           );
+        } else {
+          if (!plan.projectId)
+            return yield* new WorkerError({ message: "The fresh worker has no saved project." });
           yield* engine.dispatch({
-            type: "thread.meta.update",
-            commandId: CommandId.make(`worker:${input.threadId}:configure`),
-            threadId: input.threadId,
-            title: input.title,
-            modelSelection: input.modelSelection,
+            type: "thread.create",
+            commandId: CommandId.make(`worker:${plan.threadId}:create`),
+            threadId: plan.threadId,
+            projectId: plan.projectId,
+            title: plan.title,
+            modelSelection: plan.modelSelection,
+            runtimeMode: plan.runtimeMode,
+            interactionMode: plan.interactionMode,
+            branch: null,
+            worktreePath: null,
+            createdAt: yield* now,
           });
-          const baseline = yield* engine.latestSequence;
-          yield* sql`UPDATE custom_workers SET state = 'ready', error = NULL, baseline = ${baseline} WHERE thread_id = ${input.threadId}`;
-        }).pipe(
-          Effect.tapError(
-            (cause) =>
-              sql`UPDATE custom_workers SET state = 'error', error = ${failure(cause).message} WHERE thread_id = ${input.threadId}`,
-          ),
-        );
-      }
-      worker = yield* owned(owner, input.threadId);
-      yield* enqueue(`spawn:${input.threadId}`, worker, worker.thread_id, "work", input.prompt);
-      return yield* describe(worker);
-    },
-    lock.withPermit,
-    Effect.mapError(failure),
-  );
+        }
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`worker:${input.threadId}:configure`),
+          threadId: input.threadId,
+          title: input.title,
+          modelSelection: input.modelSelection,
+        });
+        const baseline = yield* engine.latestSequence;
+        yield* sql`UPDATE custom_workers SET state = 'ready', error = NULL, baseline = ${baseline} WHERE thread_id = ${input.threadId}`;
+      }).pipe(
+        Effect.tapError(
+          (cause) =>
+            sql`UPDATE custom_workers SET state = 'error', error = ${failure(cause).message} WHERE thread_id = ${input.threadId}`,
+        ),
+      );
+    }
+    worker = yield* owned(owner, input.threadId);
+    yield* enqueue(`spawn:${input.threadId}`, worker, worker.thread_id, "work", input.prompt);
+    return yield* describe(worker);
+  }, Effect.mapError(failure));
 
   const send = Effect.fn("WorkerControls.send")(
     function* (owner: ThreadId, input: typeof SendInput.Type) {
@@ -917,6 +1019,147 @@ const make = Effect.gen(function* () {
     lock.withPermit,
     Effect.mapError(failure),
   );
+  const handoffStatus = Effect.fn("WorkerControls.handoffStatus")(
+    function* (owner: ThreadId, input: typeof HandoffStatusInput.Type) {
+      const rows =
+        yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE thread_id = ${input.threadId} AND owner_id = ${owner}`;
+      if (!rows[0]) return yield* new WorkerError({ message: "Unknown handoff for this master." });
+      if (input.cancel) {
+        if (!["queued", "error", "cancelled"].includes(rows[0].state))
+          return yield* new WorkerError({
+            message: "A completed ownership transfer cannot be cancelled.",
+          });
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${`spawn:${input.threadId}`} AND state = 'queued'`;
+            yield* sql`DELETE FROM custom_workers WHERE thread_id = ${input.threadId} AND owner_id = ${owner}`;
+            yield* sql`UPDATE custom_orchestrator_handoffs SET state = 'cancelled' WHERE thread_id = ${input.threadId}`;
+          }),
+        );
+      }
+      const current =
+        yield* sql<Handoff>`SELECT h.*, j.state AS startup_state, j.error AS startup_error
+          FROM custom_orchestrator_handoffs h LEFT JOIN custom_worker_jobs j ON j.id = 'handoff-start:' || h.thread_id
+          WHERE h.thread_id = ${input.threadId}`;
+      return handoffResult(current[0]!);
+    },
+    lock.withPermit,
+    Effect.mapError(failure),
+  );
+  const handoff = Effect.fn("WorkerControls.handoff")(
+    function* (owner: ThreadId, input: typeof HandoffInput.Type) {
+      if (input.selfFork) {
+        if (input.sourceThreadId && input.sourceThreadId !== owner)
+          return yield* new WorkerError({
+            message: "selfFork cannot select another source session.",
+          });
+        input = { ...input, sourceThreadId: owner };
+      }
+      yield* thread(owner);
+      if (input.threadId === owner || input.threadId === input.sourceThreadId)
+        return yield* new WorkerError({ message: "A successor must have a new thread ID." });
+      const saved =
+        yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE thread_id = ${input.threadId}`;
+      const planJson = encodeUnknown(input);
+      if (saved[0]) {
+        if (saved[0].owner_id !== owner || saved[0].plan_json !== planJson)
+          return yield* new WorkerError({
+            message: "This successor ID already has different handoff settings.",
+          });
+        if (saved[0].state !== "error") return handoffResult(saved[0]);
+      } else {
+        const outstanding =
+          yield* sql`SELECT 1 FROM custom_orchestrator_handoffs WHERE owner_id = ${owner} AND state IN ('queued', 'error')`;
+        if (outstanding.length)
+          return yield* new WorkerError({
+            message: "Resolve the existing handoff before preparing another successor.",
+          });
+        if (Option.isSome(yield* snapshots.getThreadShellById(input.threadId)))
+          return yield* new WorkerError({ message: "That destination thread already exists." });
+      }
+      yield* checkSelection(input.modelSelection);
+      if (input.sourceThreadId) yield* checkPermissions(owner, yield* thread(input.sourceThreadId));
+      yield* sql`INSERT INTO custom_orchestrator_handoffs (thread_id, owner_id, plan_json)
+        VALUES (${input.threadId}, ${owner}, ${planJson})
+        ON CONFLICT(thread_id) DO UPDATE SET state = 'queued', error = NULL`;
+      watched.add(owner);
+      watched.add(input.threadId);
+      if (input.sourceThreadId) watched.add(input.sourceThreadId);
+      return handoffResult(
+        (yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE thread_id = ${input.threadId}`)[0]!,
+      );
+    },
+    lock.withPermit,
+    Effect.mapError(failure),
+  );
+  // Called under the queue lock. Preparation uses normal fork/create commands;
+  // ownership and undelivered report routing change in one SQL transaction.
+  const processHandoffs = Effect.fn(function* () {
+    const rows =
+      yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE state = 'queued' ORDER BY rowid`;
+    for (const row of rows) {
+      yield* Effect.gen(function* () {
+        const input = decodeHandoff(row.plan_json);
+        const parent = yield* thread(row.owner_id);
+        if (parent.archivedAt !== null || parent.snoozedUntil !== null) return;
+        // Self-forks must snapshot the completed native turn, never a live tool call.
+        if (input.sourceThreadId && (yield* busy(yield* thread(input.sourceThreadId)))) return;
+        const intent = yield* sql<{
+          event_type: string;
+        }>`SELECT event_type FROM orchestration_events
+          WHERE stream_id = ${row.owner_id} AND event_type IN ('thread.turn-interrupt-requested', 'thread.turn-start-requested')
+          AND (command_id IS NULL OR command_id NOT LIKE 'worker-job:%') ORDER BY sequence DESC LIMIT 1`;
+        if (intent[0]?.event_type === "thread.turn-interrupt-requested") return;
+        const successorMode = input.sourceThreadId
+          ? (yield* thread(input.sourceThreadId)).runtimeMode
+          : parent.runtimeMode;
+        if (successorMode !== "full-access") {
+          const children =
+            yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
+          for (const child of children) {
+            if ((yield* thread(child.thread_id)).runtimeMode === "full-access")
+              return yield* new WorkerError({
+                message:
+                  "The successor would have less permission than an existing worker. Choose a compatible source.",
+              });
+          }
+        }
+        yield* spawn(ThreadId.make(row.owner_id), input, true);
+        const workers =
+          yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
+        const transferred = workers.map((worker) => worker.thread_id);
+        const prompt = `[T3 orchestrator handoff]\nPrevious orchestrator: ${row.owner_id}\nYou are the successor orchestrator. Existing worker ownership has transferred to this session. Use t3_worker_list/read to review current assignments and evidence before giving concrete follow-ups. Queued/running work continues; do not duplicate it. The previous conversation remains available.\n\n${input.prompt}`;
+        yield* sql.withTransaction(
+          Effect.gen(function* () {
+            // A receipt may have committed just before a restart, before queue state did.
+            yield* sql`UPDATE custom_worker_jobs SET state = 'completed' WHERE kind IN ('notice', 'done', 'blocked') AND state = 'queued'
+            AND EXISTS (SELECT 1 FROM orchestration_command_receipts r WHERE r.command_id = 'worker-job:' || custom_worker_jobs.id || ':' || custom_worker_jobs.attempt AND r.status = 'accepted')`;
+            yield* sql`UPDATE custom_worker_jobs SET target_id = ${row.thread_id}, attempt = attempt + 1, dispatched_at = NULL
+            WHERE target_id = ${row.owner_id} AND kind IN ('notice', 'done', 'blocked') AND state = 'queued'
+            AND worker_id IN (SELECT thread_id FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id})`;
+            yield* sql`UPDATE custom_workers SET owner_id = ${row.thread_id} WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
+            // The successor is a master, not a worker reporting back to the old master.
+            yield* sql`DELETE FROM custom_worker_jobs WHERE id = ${`spawn:${row.thread_id}`} AND state = 'queued'`;
+            yield* sql`DELETE FROM custom_workers WHERE thread_id = ${row.thread_id}`;
+            yield* enqueue(
+              `handoff-start:${row.thread_id}`,
+              { thread_id: row.owner_id },
+              row.thread_id,
+              "message",
+              prompt,
+            );
+            yield* sql`UPDATE custom_orchestrator_handoffs SET state = 'completed', error = NULL,
+            transferred_json = ${encodeUnknown(transferred)} WHERE thread_id = ${row.thread_id}`;
+          }),
+        );
+      }).pipe(
+        Effect.catch(
+          (cause) =>
+            sql`UPDATE custom_orchestrator_handoffs SET state = 'error', error = ${failure(cause).message} WHERE thread_id = ${row.thread_id}`,
+        ),
+      );
+    }
+  });
   const start = Effect.fn("WorkerControls.start")(function* () {
     const changes = yield* engine.subscribeDomainEvents;
     yield* changes.pipe(
@@ -945,7 +1188,11 @@ const make = Effect.gen(function* () {
     yield* drain();
   });
   return WorkerControls.of({
-    spawn: (owner, input) => spawn(owner, input).pipe(Effect.tap(() => drain())),
+    spawn: (owner, input) =>
+      spawn(owner, input).pipe(
+        lock.withPermit,
+        Effect.tap(() => drain()),
+      ),
     send: (owner, input) =>
       send(owner, input).pipe(
         Effect.tap(() => drain()),
@@ -983,6 +1230,12 @@ const make = Effect.gen(function* () {
         Effect.map((rows) => jobResult(rows[0]!)),
         Effect.mapError(failure),
       ),
+    handoff: (owner, input) =>
+      handoff(owner, input).pipe(
+        Effect.tap(() => drain()),
+        Effect.flatMap(() => handoffStatus(owner, { threadId: input.threadId })),
+      ),
+    handoffStatus,
     list,
     read,
     wait,
