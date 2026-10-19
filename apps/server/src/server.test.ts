@@ -197,6 +197,7 @@ import * as ResourceAttribution from "./resourceTelemetry/ResourceAttribution.ts
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as UsageMeasurements from "./usage/UsageMeasurements.ts";
+import * as SettledThreadPurge from "./orchestration/SettledThreadPurge.ts";
 import { MeasurementHistory } from "./usage/measurementHistory.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as Data from "effect/Data";
@@ -1093,6 +1094,7 @@ const buildAppUnderTest = (options?: {
           Layer.succeed(UsageMeasurements.UsageMeasurements, {
             read: (input) => Effect.sync(() => new MeasurementHistory().report(input, 0)),
           }),
+          Layer.mock(SettledThreadPurge.SettledThreadPurge)({}),
         ),
       ),
       Layer.provide(

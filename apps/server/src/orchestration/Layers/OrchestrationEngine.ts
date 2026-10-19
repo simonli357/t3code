@@ -8,6 +8,7 @@ import type {
 import { OrchestrationCommand } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -47,7 +48,9 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import {
   OrchestrationEngineService,
+  OrchestrationThreadPurge,
   type OrchestrationEngineShape,
+  type OrchestrationThreadPurgeShape,
 } from "../Services/OrchestrationEngine.ts";
 const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
@@ -59,6 +62,11 @@ interface CommandEnvelope {
   origin: OrchestrationClientOrigin | undefined;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
+}
+
+/** Work that must not interleave with command processing. */
+interface ExclusiveTask {
+  readonly exclusive: Effect.Effect<void>;
 }
 
 function commandToAggregateRef(command: OrchestrationCommand): {
@@ -93,7 +101,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   let commandReadModel = createEmptyReadModel(yield* nowIso);
 
-  const commandQueue = yield* Queue.unbounded<CommandEnvelope>();
+  const commandQueue = yield* Queue.unbounded<CommandEnvelope | ExclusiveTask>();
   const eventPubSub = yield* PubSub.unbounded<OrchestrationEvent>();
 
   const projectEventsOntoReadModel = (
@@ -428,7 +436,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   yield* projectionPipeline.bootstrap;
   commandReadModel = yield* projectionSnapshotQuery.getCommandReadModel();
 
-  const worker = Effect.forever(Queue.take(commandQueue).pipe(Effect.flatMap(processEnvelope)));
+  const worker = Effect.forever(
+    Queue.take(commandQueue).pipe(
+      Effect.flatMap((item) => ("exclusive" in item ? item.exclusive : processEnvelope(item))),
+    ),
+  );
   yield* Effect.forkScoped(worker);
   yield* Effect.logDebug("orchestration engine started").pipe(
     Effect.annotateLogs({ sequence: commandReadModel.snapshotSequence }),
@@ -462,7 +474,32 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       return yield* Deferred.await(result);
     });
 
-  return {
+  const purgeThreads = <A, E>(
+    threadIds: ReadonlyArray<ThreadId>,
+    removeRows: Effect.Effect<A, E>,
+  ): Effect.Effect<A, E> =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<A, E>();
+      const purged = new Set<string>(threadIds);
+      yield* Queue.offer(commandQueue, {
+        exclusive: removeRows.pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              commandReadModel = {
+                ...commandReadModel,
+                threads: commandReadModel.threads.filter((thread) => !purged.has(thread.id)),
+              };
+            }),
+          ),
+          Effect.exit,
+          Effect.flatMap((exit) => Deferred.done(result, exit)),
+          Effect.asVoid,
+        ),
+      });
+      return yield* Deferred.await(result);
+    });
+
+  const engine = {
     readEvents,
     readThreadEvents,
     getThreadReplayStats,
@@ -480,9 +517,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     // atomic on the single-threaded event loop.
     latestSequence: Effect.sync(() => commandReadModel.snapshotSequence),
   } satisfies OrchestrationEngineShape;
+  return Context.make(OrchestrationEngineService, engine).pipe(
+    Context.add(OrchestrationThreadPurge, {
+      purgeThreads,
+    } satisfies OrchestrationThreadPurgeShape),
+  );
 });
 
-export const OrchestrationEngineLive = Layer.effect(
-  OrchestrationEngineService,
-  makeOrchestrationEngine,
-);
+export const OrchestrationEngineLive = Layer.effectContext(makeOrchestrationEngine);

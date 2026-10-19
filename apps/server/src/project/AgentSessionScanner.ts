@@ -17,8 +17,6 @@ import * as NodeOS from "node:os";
 
 import {
   AgentSessionScanError,
-  ClaudeSettings,
-  CodexSettings,
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
@@ -49,7 +47,6 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -57,6 +54,7 @@ import {
   createTranscriptJsonSelector,
   TranscriptJsonLimitError,
 } from "./AgentSessionJson.ts";
+import { resolveTranscriptHome } from "./AgentTranscripts.ts";
 
 /** Chunk size for full transcript reads. */
 const TRANSCRIPT_PREFIX_BYTES = 32 * 1024;
@@ -135,8 +133,6 @@ const TranscriptRecord = Schema.Struct({
   ),
 });
 
-const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
-const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
@@ -903,24 +899,6 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  /**
-   * Resolve the Claude config directory the CLI would use, matching the
-   * precedence the spawned CLI sees: the instance's `homePath` (exported as
-   * `CLAUDE_CONFIG_DIR`), then a `CLAUDE_CONFIG_DIR` already in the
-   * environment, then `~/.claude`.
-   */
-  const resolveClaudeConfigDir = (homePath: string, environmentHome?: string): string => {
-    const configured = homePath.trim();
-    if (configured.length > 0) {
-      return path.resolve(expandHomePath(configured));
-    }
-    const fromEnvironment = environmentHome?.trim() ?? "";
-    if (fromEnvironment.length > 0) {
-      return path.resolve(expandHomePath(fromEnvironment));
-    }
-    return path.join(NodeOS.homedir(), ".claude");
-  };
-
   const discoverClaudeTranscripts = Effect.fn("AgentSessionScanner.discoverClaudeTranscripts")(
     function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
       const projectsDir = path.join(homePath, "projects");
@@ -1125,30 +1103,11 @@ export const make = Effect.gen(function* () {
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
       const seenHomes = new Set<string>();
       for (const { instanceId, config: instance } of instances) {
-        const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-        const environmentHome =
-          instance.environment?.findLast((variable) => variable.name === homeVariable)?.value ??
-          hostEnvironment[homeVariable];
-
-        let homePath: string;
-        if (source === "claudeAgent") {
-          const config = decodeClaudeSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          homePath = resolveClaudeConfigDir(config.value.homePath, environmentHome);
-        } else {
-          const config = decodeCodexSettings(instance.config ?? {});
-          if (Option.isNone(config)) continue;
-          const codexSettings =
-            config.value.homePath.trim().length === 0 &&
-            config.value.shadowHomePath.trim().length === 0 &&
-            environmentHome?.trim()
-              ? { ...config.value, homePath: environmentHome }
-              : config.value;
-          const layout = yield* resolveCodexHomeLayout(codexSettings).pipe(
-            Effect.provideService(Path.Path, path),
-          );
-          homePath = layout.sharedHomePath;
-        }
+        const home = yield* resolveTranscriptHome(instance, hostEnvironment).pipe(
+          Effect.provideService(Path.Path, path),
+        );
+        if (home === null) continue;
+        const homePath = home.homePath;
 
         const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
         if (seenHomes.has(homeKey)) continue;

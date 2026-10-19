@@ -1,5 +1,10 @@
 import * as Context from "effect/Context";
 import { UsageMeasurementsReport } from "./usageMeasurements.ts";
+import {
+  SettledThreadPurgeError,
+  SettledThreadPurgeInput,
+  SettledThreadPurgeReport,
+} from "./threadPurge.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -572,6 +577,14 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       payload: Schema.Struct({ from: TrimmedNonEmptyString, request: Schema.Unknown }),
       success: Schema.Unknown,
       error: [EnvironmentScopeRequiredError, PeerRequestError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("purgeSettledThreads", "/api/orchestration/threads/purge-settled", {
+      headers: OptionalBearerHeaders,
+      payload: SettledThreadPurgeInput,
+      success: SettledThreadPurgeReport,
+      error: [EnvironmentScopeRequiredError, SettledThreadPurgeError, EnvironmentInternalError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

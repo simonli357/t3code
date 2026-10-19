@@ -2,6 +2,7 @@ import * as HistoryToolkit from "./toolkits/history/tools.ts";
 import * as UsageToolkit from "./toolkits/usage/tools.ts";
 import * as ThreadHistory from "../orchestration/ContextHandoff.ts";
 import * as WorkersToolkit from "./toolkits/workers/tools.ts";
+import * as ThreadsToolkit from "./toolkits/threads/tools.ts";
 import * as NodeCrypto from "node:crypto";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -678,6 +679,7 @@ export const layer = Layer.mergeAll(
     Layer.provide(ThreadHistory.layer),
   ),
   McpServer.toolkit(WorkersToolkit.WorkersToolkit).pipe(Layer.provide(WorkersToolkit.handlers)),
+  McpServer.toolkit(ThreadsToolkit.ThreadsToolkit).pipe(Layer.provide(ThreadsToolkit.handlers)),
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,

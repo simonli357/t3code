@@ -94,6 +94,7 @@ import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as SettledThreadPurge from "./orchestration/SettledThreadPurge.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "./orchestration/ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -266,6 +267,8 @@ const HttpServerLive = Layer.unwrap(
 const PlatformServicesLive = NodeServices.layer;
 
 const ReactorLayerLive = Layer.empty.pipe(
+  // Purging drains the deletion reactor and runtime ingestion below it.
+  Layer.provideMerge(SettledThreadPurge.layer),
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(WorkerControls.liveLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),

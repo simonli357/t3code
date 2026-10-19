@@ -115,3 +115,21 @@ export class OrchestrationEngineService extends Context.Service<
   OrchestrationEngineService,
   OrchestrationEngineShape
 >()("t3/orchestration/Services/OrchestrationEngine/OrchestrationEngineService") {}
+
+export interface OrchestrationThreadPurgeShape {
+  /**
+   * Run `removeRows` between commands, then drop the threads from the engine's
+   * command read model, so no command can observe or extend a half-purged
+   * thread. `removeRows` must delete every row a restart would load for them.
+   */
+  readonly purgeThreads: <A, E>(
+    threadIds: ReadonlyArray<ThreadId>,
+    removeRows: Effect.Effect<A, E>,
+  ) => Effect.Effect<A, E>;
+}
+
+/** Provided by the orchestration engine layer alongside the engine itself. */
+export class OrchestrationThreadPurge extends Context.Service<
+  OrchestrationThreadPurge,
+  OrchestrationThreadPurgeShape
+>()("t3/orchestration/Services/OrchestrationEngine/OrchestrationThreadPurge") {}

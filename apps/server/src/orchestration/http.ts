@@ -22,6 +22,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import { WorkerControls } from "./WorkerControls.ts";
+import { SettledThreadPurge } from "./SettledThreadPurge.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -32,6 +33,7 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
     const measurements = yield* UsageMeasurements.UsageMeasurements;
     const workers = yield* WorkerControls;
+    const settledThreadPurge = yield* SettledThreadPurge;
 
     return handlers
       .handle(
@@ -42,6 +44,14 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           return yield* workers
             .receive(args.payload.from, args.payload.request)
             .pipe(Effect.mapError((error) => new PeerRequestError({ message: error.message })));
+        }),
+      )
+      .handle(
+        "purgeSettledThreads",
+        Effect.fn("environment.orchestration.purgeSettledThreads")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* settledThreadPurge.purge(args.payload);
         }),
       )
       .handle(
