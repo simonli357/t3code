@@ -223,3 +223,38 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
     assert.equal(abortSignal?.aborted, true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("retains usage arriving after six seconds of network latency", () =>
+  Effect.gen(function* () {
+    const usageStarted = yield* Deferred.make<void>();
+    let finishUsage: ((value: unknown) => void) | undefined;
+    const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+      () =>
+        ({
+          initializationResult: async () => ({
+            account: { subscriptionType: "pro" },
+            commands: [],
+          }),
+          usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: () => {
+            Deferred.doneUnsafe(usageStarted, Effect.void);
+            return new Promise((resolve) => {
+              finishUsage = resolve;
+            });
+          },
+        }) as ReturnType<typeof ClaudeSdk.query>,
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+    const probe = yield* probeClaudeCapabilities(
+      decodeClaudeSettings({ binaryPath: "claude" }),
+    ).pipe(Effect.forkChild);
+    yield* Deferred.await(usageStarted);
+    yield* TestClock.adjust("6 seconds");
+    const usage = {
+      rate_limits_available: true,
+      rate_limits: { five_hour: { utilization: 12, resets_at: "2026-07-18T14:39:00Z" } },
+    };
+    finishUsage?.(usage);
+    const capabilities = yield* Fiber.join(probe);
+    assert.deepEqual(capabilities.usage, usage);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
