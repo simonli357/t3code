@@ -81,6 +81,9 @@ const THREAD_ROWS = [
   ["custom_workers", "thread_id = ?1 OR owner_id = ?1"],
   ["custom_worker_jobs", "worker_id = ?1 OR target_id = ?1"],
   ["custom_orchestrator_handoffs", "thread_id = ?1 OR owner_id = ?1"],
+  ["custom_orchestrator_authority", "thread_id = ?1"],
+  ["custom_session_message_confirmations", "sender_id = ?1 OR target_id = ?1"],
+  ["custom_worker_reclaims", "owner_id = ?1"],
   ["projection_threads", "thread_id = ?1"],
 ] as const;
 // A busy thread owns tens of thousands of event rows with random-key indexes:

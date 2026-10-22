@@ -210,6 +210,16 @@ const seed = Effect.fn(function* (prefix: string, index = 0) {
     },
   };
 });
+const confirmedMessage = Effect.fn(function* (
+  service: Workers.WorkerControls["Service"],
+  sender: ThreadId,
+  input: typeof Workers.MessageInput.Type,
+) {
+  const preview = yield* service.message(sender, input);
+  return preview.confirmation
+    ? yield* service.message(sender, { ...input, confirmationToken: preview.confirmation.token })
+    : preview;
+});
 const session = Effect.fn(function* (
   threadId: ThreadId,
   status: "running" | "ready" | "error" | "stopped",
@@ -262,7 +272,11 @@ const replyAndReport = Effect.fn(function* (threadId: ThreadId, turn: string, te
     summary: text,
   });
 });
-const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
+const directInput = Effect.fn(function* (
+  threadId: ThreadId,
+  suffix: string,
+  text = "continue directly",
+) {
   const engine = yield* OrchestrationEngineService;
   yield* engine.dispatch({
     type: "thread.turn.start",
@@ -271,7 +285,7 @@ const directInput = Effect.fn(function* (threadId: ThreadId, suffix: string) {
     message: {
       messageId: MessageId.make(`human-${suffix}`),
       role: "user",
-      text: "continue directly",
+      text,
       attachments: [],
     },
     modelSelection: selections[0]!,
@@ -377,7 +391,7 @@ it.layer(testLayer)("persistent workers", (it) => {
           (yield* service
             .control(owner, { threadId: worker, notifications: true })
             .pipe(Effect.flip)).message,
-        ).toContain("not a worker owned");
+        ).toContain("retired");
         yield* service.control(successor, { threadId: worker, notifications: true });
         expect((yield* service.report(worker, report)).requestId).toBe(receipt.requestId);
         const notices = Option.getOrThrow(yield* snapshots.getThreadDetailById(successor)).messages;
@@ -859,6 +873,269 @@ it.layer(testLayer)("persistent workers", (it) => {
       }),
     );
   }
+  it.effect("requires a message-specific confirmation and sends no warning to the recipient", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const sender = yield* seed("confirm-sender");
+      const target = yield* seed("confirm-target");
+      const input = {
+        threadId: target.owner,
+        clientRequestId: "review",
+        prompt: "Please inspect the shared result.",
+      };
+      const warning = yield* service.message(sender.owner, input);
+      expect(warning.state).toBe("confirmation_required");
+      expect(warning.confirmation?.recipient.projectId).toBe("confirm-target");
+      expect(warning.confirmation?.warning).toContain("is it necessary?");
+      expect(
+        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${warning.requestId}`,
+      ).toHaveLength(0);
+      const wrong = yield* service.message(sender.owner, {
+        ...input,
+        confirmationToken: "invented",
+      });
+      expect(wrong.state).toBe("confirmation_required");
+      expect(
+        (yield* service.message(sender.owner, { ...input, prompt: "changed" }).pipe(Effect.flip))
+          .message,
+      ).toContain("different message");
+      const confirmed = yield* service.message(sender.owner, {
+        ...input,
+        confirmationToken: warning.confirmation!.token,
+      });
+      expect(confirmed.state).toBe("dispatched");
+      yield* service.message(sender.owner, input);
+      expect(
+        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${warning.requestId}`,
+      ).toHaveLength(1);
+    }),
+  );
+  it.effect("expires confirmations and requires a new review after recipient changes", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const { owner, source } = yield* seed("confirm-expiry");
+      const input = {
+        threadId: source,
+        clientRequestId: "expiring",
+        prompt: "Coordinate this task.",
+      };
+      const first = yield* service.message(owner, input);
+      yield* TestClock.adjust("11 minutes");
+      const expired = yield* service.message(owner, {
+        ...input,
+        confirmationToken: first.confirmation!.token,
+      });
+      expect(expired.state).toBe("confirmation_required");
+      expect(expired.confirmation!.token).not.toBe(first.confirmation!.token);
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("rename-confirm"),
+        threadId: source,
+        title: "Different recipient title",
+      });
+      const changed = yield* service.message(owner, {
+        ...input,
+        confirmationToken: expired.confirmation!.token,
+      });
+      expect(changed.state).toBe("confirmation_required");
+      expect(changed.confirmation!.recipient.title).toBe("Different recipient title");
+      expect(changed.confirmation!.token).not.toBe(expired.confirmation!.token);
+    }),
+  );
+  it.effect("rechecks queued messages after retirement and refuses retired senders", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const sender = yield* seed("retire-sender");
+      const target = yield* seed("retire-target");
+      yield* engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("hold-peer"),
+        threadId: target.owner,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      const message = yield* confirmedMessage(service, sender.owner, {
+        threadId: target.owner,
+        clientRequestId: "stale",
+        prompt: "A queued message.",
+      });
+      expect(message.state).toBe("queued");
+      yield* directInput(target.owner, "retire-resume");
+      const next = ThreadId.make("retire-target-next");
+      yield* service.handoff(target.owner, {
+        threadId: next,
+        title: "next",
+        prompt: "Take over",
+        modelSelection: selections[0]!,
+      });
+      yield* service.drain();
+      expect(
+        (yield* sql<{
+          state: string;
+          error: string;
+        }>`SELECT state, error FROM custom_worker_jobs WHERE id = ${message.requestId}`)[0],
+      ).toMatchObject({ state: "error", error: expect.stringContaining("retired") });
+      expect(
+        (yield* service
+          .message(target.owner, {
+            threadId: sender.owner,
+            clientRequestId: "old",
+            prompt: "Stale master",
+          })
+          .pipe(Effect.flip)).successorThreadId,
+      ).toBe(next);
+      expect(
+        (yield* service
+          .spawn(target.owner, { ...target.input, threadId: ThreadId.make("stale-worker") })
+          .pipe(Effect.flip)).message,
+      ).toContain("retired");
+    }),
+  );
+  it.effect("reclaims only selected historical workers after a new direct user instruction", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("reclaim");
+      const other = ThreadId.make("reclaim-other");
+      yield* service.spawn(owner, input);
+      yield* service.spawn(owner, { ...input, threadId: other, title: "other" });
+      yield* session(worker, "running", "reclaim-running");
+      yield* service.control(owner, { threadId: worker, notifications: false });
+      yield* service.report(worker, {
+        clientRequestId: "held-result",
+        outcome: "blocked",
+        summary: "Needs a decision.",
+      });
+      yield* sql`UPDATE custom_workers SET read_seq = 12, read_offset = 7 WHERE thread_id = ${worker}`;
+      const next = ThreadId.make("reclaim-next");
+      yield* service.handoff(owner, {
+        threadId: next,
+        title: "next",
+        prompt: "Take over",
+        modelSelection: selections[0]!,
+      });
+      const request = {
+        clientRequestId: "selected",
+        workerThreadIds: [worker],
+        userRequest: "Reclaim the original worker.",
+      };
+      expect((yield* service.reclaim(owner, request).pipe(Effect.flip)).message).toContain(
+        "direct user",
+      );
+      yield* engine.dispatch({
+        type: "thread.message.user.append",
+        commandId: CommandId.make("worker-peer-fake"),
+        threadId: owner,
+        message: {
+          messageId: MessageId.make("worker-job:fake-user"),
+          text: request.userRequest,
+          attachments: [],
+        },
+        createdAt: timestamp,
+      });
+      expect((yield* service.reclaim(owner, request).pipe(Effect.flip)).message).toContain(
+        "direct user",
+      );
+      yield* directInput(owner, "reclaim-user", request.userRequest);
+      const result = yield* service.reclaim(owner, request);
+      expect(result.workerThreadIds).toEqual([worker]);
+      expect((yield* service.list(owner)).map((w) => w.threadId)).toEqual([worker]);
+      expect((yield* service.list(next)).map((w) => w.threadId)).toEqual([other]);
+      expect(
+        (yield* sql`SELECT read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
+      ).toEqual({ read_seq: 12, read_offset: 7 });
+      expect(
+        (yield* sql<{
+          target_id: string;
+        }>`SELECT target_id FROM custom_worker_jobs WHERE id = ${`report:${worker}:held-result`}`)[0]!
+          .target_id,
+      ).toBe(owner);
+      expect(yield* service.reclaim(owner, request)).toEqual(result);
+      expect(
+        (yield* service.control(next, { threadId: worker, notifications: true }).pipe(Effect.flip))
+          .message,
+      ).toContain("not a worker owned");
+      yield* service.control(owner, { threadId: worker, notifications: true });
+      const snapshots = yield* ProjectionSnapshotQuery;
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).session?.activeTurnId,
+      ).toBe("reclaim-running");
+      const unrelated = yield* seed("reclaim-unrelated");
+      yield* service.spawn(unrelated.owner, unrelated.input);
+      expect(
+        (yield* service
+          .reclaim(owner, {
+            ...request,
+            clientRequestId: "no-stealing",
+            workerThreadIds: [other, unrelated.worker],
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("handed-off worker");
+      expect((yield* service.list(next)).map((w) => w.threadId)).toEqual([other]);
+    }),
+  );
+  it.effect("splits an undelivered digest when reclaiming a subset of workers", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("reclaim-digest");
+      const second = ThreadId.make("reclaim-digest-second");
+      const remaining = ThreadId.make("reclaim-digest-remaining");
+      for (const workerId of [worker, second, remaining])
+        yield* service.spawn(owner, { ...input, threadId: workerId, title: workerId });
+      const next = ThreadId.make("reclaim-digest-next");
+      yield* service.handoff(owner, {
+        threadId: next,
+        title: "next",
+        prompt: "Take over",
+        modelSelection: selections[0]!,
+      });
+      yield* engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("stop-digest-master"),
+        threadId: next,
+        createdAt: timestamp,
+      });
+      yield* replyAndReport(worker, "digest-one", "First result");
+      yield* replyAndReport(second, "digest-two", "Second result");
+      yield* TestClock.adjust("21 minutes");
+      yield* service.drain();
+      expect(
+        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id LIKE 'digest:%' AND state = 'queued'`,
+      ).toHaveLength(1);
+      const userRequest = "Reclaim the second worker only.";
+      yield* directInput(owner, "reclaim-digest-user", userRequest);
+      yield* service.reclaim(owner, {
+        clientRequestId: "split",
+        workerThreadIds: [second],
+        userRequest,
+      });
+      expect((yield* service.list(owner)).map((w) => w.threadId)).toEqual([second]);
+      expect((yield* service.list(next)).map((w) => w.threadId).sort()).toEqual(
+        [worker, remaining].sort(),
+      );
+      expect(
+        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id LIKE 'digest:%' AND state = 'cancelled'`,
+      ).toHaveLength(1);
+      expect(
+        (yield* sql<{
+          target_id: string;
+        }>`SELECT target_id FROM custom_worker_jobs WHERE id = ${`report:${second}:digest-two`}`)[0]!
+          .target_id,
+      ).toBe(owner);
+      expect(
+        (yield* sql<{
+          target_id: string;
+        }>`SELECT target_id FROM custom_worker_jobs WHERE id = ${`report:${worker}:digest-one`}`)[0]!
+          .target_id,
+      ).toBe(next);
+    }),
+  );
   it.effect("coordinates across owners and providers without transferring ownership", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
@@ -875,12 +1152,13 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.send(sender.owner, input).pipe(Effect.flip)).message).toContain(
         "not a worker owned",
       );
-      expect((yield* service.message(sender.owner, input)).state).toBe("dispatched");
-      yield* service.message(sender.owner, input);
+      expect((yield* confirmedMessage(service, sender.owner, input)).state).toBe("dispatched");
+      yield* confirmedMessage(service, sender.owner, input);
       expect(
-        (yield* service.message(sender.owner, { ...input, prompt: "different" }).pipe(Effect.flip))
-          .message,
-      ).toContain("different assignment");
+        (yield* confirmedMessage(service, sender.owner, { ...input, prompt: "different" }).pipe(
+          Effect.flip,
+        )).message,
+      ).toContain("different message");
       const target = Option.getOrThrow(yield* snapshots.getThreadDetailById(recipient.worker));
       const messages = target.messages.filter((m) => m.text.includes("T3 session message"));
       expect(messages).toHaveLength(1);
@@ -902,14 +1180,14 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, source } = yield* seed("peer-idle");
       expect(Option.getOrThrow(yield* snapshots.getThreadShellById(owner)).session).toBeNull();
       expect(
-        (yield* service.message(source, {
+        (yield* confirmedMessage(service, source, {
           threadId: owner,
           clientRequestId: "idle",
           prompt: "Result ready.",
         })).state,
       ).toBe("dispatched");
       expect(
-        (yield* service.message(owner, {
+        (yield* confirmedMessage(service, owner, {
           threadId: source,
           clientRequestId: "reply",
           prompt: "Rerun the dense row.",
@@ -935,7 +1213,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         createdAt: timestamp,
       });
       const input = { threadId: source, clientRequestId: "held", prompt: "Evidence is ready." };
-      expect((yield* service.message(owner, input)).state).toBe("queued");
+      expect((yield* confirmedMessage(service, owner, input)).state).toBe("queued");
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
           m.text.includes("Evidence is ready"),
@@ -956,7 +1234,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       );
       // Retries do not wait for the background pass that is recording the delivery.
       yield* restarted.drain();
-      expect((yield* restarted.message(owner, input)).state).toBe("dispatched");
+      expect((yield* confirmedMessage(restarted, owner, input)).state).toBe("dispatched");
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
           m.text.includes("Evidence is ready"),
@@ -970,7 +1248,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const engine = yield* OrchestrationEngineService;
       const { owner, source } = yield* seed("peer-invalid");
       const input = { threadId: owner, clientRequestId: "invalid", prompt: "Coordination" };
-      expect((yield* service.message(owner, input).pipe(Effect.flip)).message).toContain(
+      expect((yield* confirmedMessage(service, owner, input).pipe(Effect.flip)).message).toContain(
         "another session",
       );
       expect(
@@ -984,7 +1262,8 @@ it.layer(testLayer)("persistent workers", (it) => {
         threadId: source,
       });
       expect(
-        (yield* service.message(owner, { ...input, threadId: source }).pipe(Effect.flip)).message,
+        (yield* confirmedMessage(service, owner, { ...input, threadId: source }).pipe(Effect.flip))
+          .message,
       ).toContain("archived");
     }),
   );
@@ -1767,7 +2046,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         summary: "Finished while the queue was busy.",
       });
       expect(report).toMatchObject({ state: "queued", held: false });
-      const message = yield* service.message(source, {
+      const message = yield* confirmedMessage(service, source, {
         threadId: owner,
         clientRequestId: "while-busy",
         prompt: "Peer note while the queue was busy.",
@@ -2036,6 +2315,20 @@ it.layer(mcpLayer)("worker MCP", (it) => {
               senderThreadId: "forged-sender",
             })).isError,
           ).not.toBe(true);
+          const preview = yield* (yield* Workers.WorkerControls).message(owner, {
+            threadId: peer.owner,
+            clientRequestId: "peer-auth",
+            prompt: "Coordinate with the actual sender.",
+          });
+          expect(
+            (yield* call("t3_session_send", {
+              threadId: peer.owner,
+              clientRequestId: "peer-auth",
+              prompt: "Coordinate with the actual sender.",
+              confirmationToken: preview.confirmation!.token,
+              senderThreadId: "forged-sender",
+            })).isError,
+          ).not.toBe(true);
           const peerSnapshot = Option.getOrThrow(
             yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(peer.owner),
           );
@@ -2070,6 +2363,17 @@ it.layer(mcpLayer)("worker MCP", (it) => {
           expect((yield* (yield* Workers.WorkerControls).list(successor))[0]!.threadId).toBe(
             worker,
           );
+          const userRequest = "Reclaim this worker at my request.";
+          yield* directInput(owner, `mcp-reclaim-${fresh}`, userRequest);
+          expect(
+            (yield* call("t3_worker_reclaim", {
+              clientRequestId: "mcp-reclaim",
+              workerThreadIds: [worker],
+              userRequest,
+              ownerThreadId: "forged",
+            })).isError,
+          ).not.toBe(true);
+          expect((yield* (yield* Workers.WorkerControls).list(owner))[0]!.threadId).toBe(worker);
         }),
     );
   }
@@ -2156,11 +2460,18 @@ it.effect("messages a session in a linked environment, holding it while offline"
       prompt: "Is the shared build green?",
       environment: "beta",
     };
+    const preview = yield* alphaWorkers.message(sender, input);
+    expect(preview.state).toBe("confirmation_required");
     offline.add("env-beta");
-    expect((yield* alphaWorkers.message(sender, input)).state).toBe("queued");
+    expect(
+      (yield* alphaWorkers.message(sender, {
+        ...input,
+        confirmationToken: preview.confirmation!.token,
+      })).state,
+    ).toBe("queued");
     offline.delete("env-beta");
     yield* alphaWorkers.drain();
-    expect(yield* alphaWorkers.message(sender, input)).toMatchObject({
+    expect(yield* confirmedMessage(alphaWorkers, sender, input)).toMatchObject({
       threadId: recipient,
       state: "dispatched",
     });
@@ -2170,7 +2481,7 @@ it.effect("messages a session in a linked environment, holding it while offline"
     );
     expect(received).toHaveLength(1);
     expect(received[0]).toContain(`From session: ${sender} in environment alpha`);
-    yield* betaWorkers.message(recipient, {
+    yield* confirmedMessage(betaWorkers, recipient, {
       threadId: sender,
       clientRequestId: "reply",
       prompt: "Green on main.",
@@ -2345,4 +2656,78 @@ it.effect("routes a linked worker's reports to the master's handoff successor", 
       })).requestId,
     ).toBe(`${worker}:key`);
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "refuses unconfirmed linked delivery and reclaims a linked worker without restarting it",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, messages } =
+        yield* linkedPair;
+      const a = yield* seed("reclaim-linked-alpha").pipe(Effect.provide(alpha));
+      const b = yield* seed("reclaim-linked-beta").pipe(Effect.provide(beta));
+      const rejected = yield* betaWorkers
+        .receive("env-alpha", {
+          _tag: "deliver",
+          jobId: "unconfirmed",
+          kind: "message",
+          senderThreadId: a.owner,
+          recipientThreadId: b.owner,
+          prompt: "Bypass attempt",
+        })
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(rejected)).toBe(true);
+      if (Exit.isFailure(rejected))
+        expect(String(rejected.cause)).toContain("requires confirmation");
+      const worker = ThreadId.make("reclaim-linked-worker");
+      yield* alphaWorkers.spawn(a.owner, { ...b.input, threadId: worker, environment: "beta" });
+      const next = ThreadId.make("reclaim-linked-next");
+      yield* alphaWorkers.handoff(a.owner, {
+        threadId: next,
+        title: "next",
+        prompt: "Take over",
+        modelSelection: selections[0]!,
+      });
+      const userRequest = "Reclaim my linked worker.";
+      yield* directInput(a.owner, "reclaim-linked-user", userRequest).pipe(Effect.provide(alpha));
+      yield* alphaWorkers.reclaim(a.owner, {
+        clientRequestId: "linked",
+        workerThreadIds: [worker],
+        userRequest,
+      });
+      expect((yield* alphaWorkers.list(a.owner))[0]!.ownerThreadId).toBe(a.owner);
+      expect(yield* alphaWorkers.list(next)).toHaveLength(0);
+      expect(
+        (yield* alphaWorkers
+          .message(a.owner, {
+            environment: "beta",
+            threadId: worker,
+            clientRequestId: "wrong-tool",
+            prompt: "A follow-up",
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("t3_worker_send");
+      yield* alphaWorkers.send(a.owner, {
+        threadId: worker,
+        clientRequestId: "follow-up",
+        prompt: "Finish the remaining work.",
+      });
+      yield* betaWorkers.report(worker, {
+        clientRequestId: "after-reclaim",
+        outcome: "blocked",
+        summary: "Need the master's decision.",
+      });
+      yield* betaWorkers.drain();
+      yield* alphaWorkers.drain();
+      expect(
+        (yield* messages(alphaSnapshots, a.owner)).some((text) =>
+          text.includes("Need the master's decision."),
+        ),
+      ).toBe(true);
+      expect(
+        (yield* messages(alphaSnapshots, next)).some((text) =>
+          text.includes("Need the master's decision."),
+        ),
+      ).toBe(false);
+    }).pipe(Effect.scoped),
 );

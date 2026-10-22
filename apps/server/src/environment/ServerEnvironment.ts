@@ -236,6 +236,8 @@ export const make = Effect.gen(function* () {
       threadForking: true,
       workerFreshSessions: true,
       boundedSessionHistory: true,
+      sessionMessageConfirmation: true,
+      workerReclaim: true,
       orchestratorHandoff: true,
       peerEnvironments: true,
       claudeSubagentStop: true,

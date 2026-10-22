@@ -180,6 +180,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.threadPullRequests).toBe(true);
       expect(second.capabilities.workerFreshSessions).toBe(true);
       expect(second.capabilities.boundedSessionHistory).toBe(true);
+      expect(second.capabilities.sessionMessageConfirmation).toBe(true);
+      expect(second.capabilities.workerReclaim).toBe(true);
       expect(second.capabilities.threadPullRequestLinking).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
