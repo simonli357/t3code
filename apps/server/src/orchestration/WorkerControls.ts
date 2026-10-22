@@ -66,7 +66,11 @@ export const SessionMessageResult = Schema.Struct({
 export const ReportInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
   outcome: Schema.Literals(["done", "blocked"]),
-  summary: TrimmedNonEmptyString,
+  /** Who must act on a blocker. Defaults to the master. */
+  needs: Schema.optional(Schema.Literals(["user", "master"])),
+  /** Short by design: the evidence carries the detail. */
+  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  evidence: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(300))),
 });
 export const ReadInput = Schema.Struct({
   threadId: ThreadId,
@@ -227,6 +231,14 @@ const workLine = (who: string, work: WorkTime, threshold: number, advice: string
   `${who}: ${work.hours.toFixed(1)} h over ${work.turns} turn${work.turns === 1 ? "" : "s"}, ${work.compactions} compaction${work.compactions === 1 ? "" : "s"}.` +
   (work.hours >= threshold ? ` Over the ${threshold} h renewal threshold: ${advice}` : "");
 const decodeWorkerRenewal = Schema.decodeSync(WorkerRenewalSettings);
+// Review instructions the master receives with each report. Kept short so a
+// routine acceptance stays a one-line note rather than a message to the user.
+const REVIEW_DONE =
+  "Review: settle verified finished work, or send one concrete correction with t3_worker_send. Read the worker with t3_worker_read only if the summary leaves doubt. Never acknowledge the worker. Tell the user only what they must decide or act on; otherwise one short line.";
+const REVIEW_BLOCKED =
+  "Review: resolve the blocker if it is within your authority and send the worker one concrete resolution with t3_worker_send. If the user must act, tell them exactly what is needed in one short message. Never acknowledge the worker.";
+/** Finished work waits at most this long for the master's other workers. */
+const DIGEST_WAIT_MS = 20 * 60_000;
 const isWorkerError = Schema.is(WorkerError);
 const failure = (cause: unknown) =>
   isWorkerError(cause)
@@ -562,7 +574,7 @@ const make = Effect.gen(function* () {
       worker,
       worker.owner_id,
       "notice",
-      `[T3 worker report — ${plan.title}]\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker. Runtime failure is not task completion.`,
+      `[T3 worker report — ${plan.title}]\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
     );
   });
 
@@ -662,7 +674,7 @@ const make = Effect.gen(function* () {
                 worker,
                 job,
                 "terminal",
-                `Runtime state: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 3000)}`,
+                `Runtime state: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 600)}`,
               );
             yield* sql`UPDATE custom_worker_jobs SET state = ${state}, error = ${error},
             turn_id = ${turn?.turn_id ?? job.turn_id}, reported = ${worker.notify ? 1 : job.reported} WHERE id = ${job.id}`;
@@ -683,7 +695,7 @@ const make = Effect.gen(function* () {
             worker,
             job,
             question.activity_id,
-            `Needs input: ${question.summary}\n${question.payload_json.slice(0, 3000)}`,
+            `Needs input: ${question.summary}\n${question.payload_json.slice(0, 600)}`,
           );
       }
     }
@@ -699,7 +711,11 @@ const make = Effect.gen(function* () {
       return yield* new WorkerError({ message: "This session is not a managed T3 worker." });
     const plan = decodePlan(worker.plan_json);
     const source = yield* thread(workerId);
-    const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${input.outcome}\n${input.summary}\n\nRequired master review: use t3_worker_read to check the latest output and assignment, then inspect relevant evidence. Decide: accept and settle verified finished work; send a concrete correction or blocker resolution with t3_worker_send; or leave ongoing work alone. Do not duplicate work already queued or running. End with a brief evidence-based disposition for the user, not an empty reply or an acknowledgment to the worker.`;
+    const outcome =
+      input.outcome === "done"
+        ? "done"
+        : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
+    const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
     const reportId = `report:${workerId}:${input.clientRequestId}`;
     const limits = yield* renewal;
     const work = yield* workOf(workerId, limits);
@@ -748,9 +764,67 @@ const make = Effect.gen(function* () {
     watched.add(target.id);
     return job.id;
   }, Effect.mapError(failure));
+  // Finished work waits while the master's other workers still run, so one digest
+  // replaces a wake-up per worker. Blockers and runtime notices are never held.
+  const batchDoneReports = Effect.fn(function* () {
+    const pending = yield* sql<Job>`SELECT j.* FROM custom_worker_jobs j
+      JOIN custom_workers w ON w.thread_id = j.worker_id
+      WHERE j.kind = 'done' AND j.state = 'queued' AND j.target_id NOT LIKE 'peer:%' AND w.notify = 1
+        AND NOT EXISTS (SELECT 1 FROM orchestration_command_receipts r
+          WHERE r.command_id = 'worker-report-visible:' || j.id AND r.status = 'accepted')
+      ORDER BY j.rowid`;
+    const held = new Set<string>();
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    for (const target of new Set(pending.map((job) => job.target_id))) {
+      const group = pending.filter((job) => job.target_id === target);
+      const running = yield* sql`SELECT 1 FROM custom_workers w
+        JOIN custom_worker_jobs j ON j.worker_id = w.thread_id
+        WHERE w.owner_id = ${target} AND w.state = 'ready' AND j.kind = 'work'
+          AND j.state IN ('queued', 'submitted')
+          AND NOT ${sql.in(
+            "w.thread_id",
+            group.map((job) => job.worker_id),
+          )}
+        LIMIT 1`;
+      if (running.length && nowMs - Date.parse(group[0]!.created_at) < DIGEST_WAIT_MS) {
+        for (const job of group) held.add(job.id);
+        continue;
+      }
+      if (group.length < 2) continue;
+      // One message: each report without its review text, then one review and
+      // the master's latest working-time line.
+      const split = group.map((job) => {
+        const [head, tail = ""] = job.prompt.split(`\n\n${REVIEW_DONE}`);
+        const lines = tail.split("\n");
+        return {
+          body: [head, ...lines.filter((line) => line.startsWith("Worker working time"))].join(
+            "\n",
+          ),
+          master: lines.find((line) => line.startsWith("Your working time as master")),
+        };
+      });
+      const master = split.at(-1)?.master;
+      const prompt = `[T3 worker reports — ${group.length} finished]\n\n${split.map((part) => part.body).join("\n\n")}\n\n${REVIEW_DONE}${master ? `\n${master}` : ""}`;
+      const createdAt = yield* now;
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+            VALUES (${`digest:${target}:${group[0]!.id}`}, ${group[0]!.worker_id}, ${target}, 'done', ${prompt}, ${createdAt})
+            ON CONFLICT(id) DO NOTHING`;
+          yield* sql`UPDATE custom_worker_jobs SET state = 'completed'
+            WHERE ${sql.in(
+              "id",
+              group.map((job) => job.id),
+            )}`;
+        }),
+      );
+    }
+    return held;
+  });
   const drainJobs = Effect.fn("WorkerControls.drain")(function* () {
     yield* processHandoffs();
     yield* refreshJobs();
+    const held = yield* batchDoneReports();
     // Old builds queued turn completions as assignment completions. Retire
     // only those undelivered automatic notices; retain input/error notices.
     yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled'
@@ -763,7 +837,7 @@ const make = Effect.gen(function* () {
     const blocked = new Set<string>();
     const unreachable = new Set<string>();
     for (const job of jobs) {
-      if (blocked.has(job.target_id)) continue;
+      if (blocked.has(job.target_id) || held.has(job.id)) continue;
       const workers =
         yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
       const worker = workers[0];
@@ -1657,8 +1731,9 @@ const make = Effect.gen(function* () {
       Effect.forever,
       Effect.forkScoped,
     );
-    // Local events cannot announce that a peer came back; retry its deliveries.
-    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND target_id LIKE 'peer:%' LIMIT 1`.pipe(
+    // Local events cannot announce that a peer came back or that a held report
+    // reached its deadline; retry those deliveries.
+    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND (target_id LIKE 'peer:%' OR kind = 'done') LIMIT 1`.pipe(
       Effect.flatMap((rows) => (rows.length ? Queue.offer(drainRequests, undefined) : Effect.void)),
       Effect.catch((error) => Effect.logError("Peer delivery retry failed", error)),
       Effect.repeat(Schedule.spaced("30 seconds")),

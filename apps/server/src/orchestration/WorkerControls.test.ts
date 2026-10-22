@@ -21,6 +21,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Exit from "effect/Exit";
+import * as TestClock from "effect/testing/TestClock";
 import * as Scope from "effect/Scope";
 import { ServerConfig } from "../config.ts";
 import * as Settings from "../serverSettings.ts";
@@ -985,6 +986,88 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(
         (yield* service.message(owner, { ...input, threadId: source }).pipe(Effect.flip)).message,
       ).toContain("archived");
+    }),
+  );
+  it.effect("holds finished reports while other workers run, then sends one digest", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("digest");
+      const second = ThreadId.make("digest-worker-2");
+      yield* service.spawn(owner, input);
+      yield* service.spawn(owner, { ...input, threadId: second, title: "digest_WORKER_2" });
+      const ownerTexts = () =>
+        snapshots
+          .getThreadDetailById(owner)
+          .pipe(Effect.map((thread) => Option.getOrThrow(thread).messages.map((m) => m.text)));
+      const starts = () =>
+        sql`SELECT 1 FROM orchestration_events WHERE stream_id = ${owner} AND event_type = 'thread.turn-start-requested' AND command_id LIKE 'worker-job:%'`;
+
+      yield* replyAndReport(worker, "digest-first", "First part finished");
+      yield* service.drain();
+      expect((yield* ownerTexts()).some((text) => text.includes("First part finished"))).toBe(
+        false,
+      );
+
+      yield* service.report(second, {
+        clientRequestId: "digest-blocked",
+        outcome: "blocked",
+        needs: "user",
+        summary: "Needs the signing key",
+      });
+      yield* service.drain();
+      const blocked = (yield* ownerTexts()).filter((text) =>
+        text.includes("Needs the signing key"),
+      );
+      expect(blocked).toHaveLength(1);
+      expect(blocked[0]).toContain("blocked, needs the user");
+
+      yield* replyAndReport(second, "digest-second", "Second part finished");
+      yield* service.drain();
+      const digests = (yield* ownerTexts()).filter((text) =>
+        text.startsWith("[T3 worker reports — 2 finished]"),
+      );
+      expect(digests).toHaveLength(1);
+      expect(digests[0]).toContain("First part finished");
+      expect(digests[0]).toContain("Second part finished");
+      expect(yield* starts()).toHaveLength(2);
+      expect((yield* service.list(owner)).map((entry) => entry.pendingReports)).toEqual([0, 0]);
+    }),
+  );
+  it.effect("releases a held report after the digest wait", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("digest-wait");
+      yield* service.spawn(owner, input);
+      yield* service.spawn(owner, {
+        ...input,
+        threadId: ThreadId.make("digest-wait-worker-2"),
+        title: "digest_wait_WORKER_2",
+      });
+      yield* replyAndReport(worker, "digest-wait-first", "Finished alone");
+      const delivered = () =>
+        snapshots
+          .getThreadDetailById(owner)
+          .pipe(
+            Effect.map((thread) =>
+              Option.getOrThrow(thread).messages.some((m) => m.text.includes("Finished alone")),
+            ),
+          );
+      yield* service.drain();
+      expect(yield* delivered()).toBe(false);
+      yield* TestClock.adjust("21 minutes");
+      yield* service.drain();
+      expect(yield* delivered()).toBe(true);
+    }),
+  );
+  it.effect("rejects report summaries over 500 characters", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownExit(Workers.ReportInput);
+      const report = { clientRequestId: "long", outcome: "done" };
+      expect(Exit.isFailure(decode({ ...report, summary: "x".repeat(501) }))).toBe(true);
+      expect(Exit.isSuccess(decode({ ...report, summary: "x".repeat(500) }))).toBe(true);
     }),
   );
   it.effect(
