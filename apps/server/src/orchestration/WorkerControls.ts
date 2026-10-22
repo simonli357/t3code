@@ -71,6 +71,7 @@ const SessionInfo = Schema.Struct({
 });
 const MessagePolicy = Schema.Struct({ sender: SessionInfo, recipient: SessionInfo });
 export const SessionMessageResult = Schema.Struct({
+  warning: Schema.optional(Schema.String),
   requestId: Schema.String,
   threadId: ThreadId,
   state: Schema.Literals(["confirmation_required", "queued", "dispatched", "error"]),
@@ -133,6 +134,7 @@ export const HandoffStatusInput = Schema.Struct({
   cancel: Schema.optional(Schema.Boolean),
 });
 export const HandoffResult = Schema.Struct({
+  warning: Schema.optional(Schema.String),
   threadId: ThreadId,
   previousOwnerThreadId: ThreadId,
   state: Schema.Literals(["queued", "completed", "error", "cancelled"]),
@@ -173,6 +175,7 @@ const JobState = Schema.Literals([
   "cancelled",
 ]);
 export const JobResult = Schema.Struct({
+  warning: Schema.optional(Schema.String),
   requestId: Schema.String,
   threadId: ThreadId,
   state: JobState,
@@ -182,6 +185,7 @@ export const JobResult = Schema.Struct({
 /** `held` means the master paused reports; the report is delivered when they resume. */
 export const ReportResult = Schema.Struct({ ...JobResult.fields, held: Schema.Boolean });
 export const WorkerResult = Schema.Struct({
+  warning: Schema.optional(Schema.String),
   threadId: ThreadId,
   ownerThreadId: ThreadId,
   sourceThreadId: Schema.NullOr(ThreadId),
@@ -229,6 +233,7 @@ type Job = {
 };
 type Authority = {
   active: number;
+  retirement_warned: number;
   successor_id: string | null;
   retired_sequence: number;
   revision: number;
@@ -451,26 +456,33 @@ const make = Effect.gen(function* () {
   const authorityOf = Effect.fn(function* (id: string) {
     return (yield* sql<Authority>`SELECT * FROM custom_orchestrator_authority WHERE thread_id = ${id}`)[0];
   });
-  const assertActive = Effect.fn(function* (id: string) {
-    if (parsePeerRef(id)) return;
-    const authority = yield* authorityOf(id);
-    if (!authority || authority.active) return;
-    let successor = authority.successor_id;
-    const seen = new Set([id]);
-    while (successor && !seen.has(successor)) {
-      seen.add(successor);
-      const next = yield* authorityOf(successor);
-      if (!next || next.active || !next.successor_id) break;
-      successor = next.successor_id;
-    }
-    return yield* new WorkerError({
-      code: "orchestrator_retired",
-      message: `Session ${id} is retired. Current successor: ${successor ?? "unknown"}. Only a new direct user request may reclaim selected workers.`,
-      ...(successor ? { successorThreadId: ThreadId.make(successor) } : {}),
-    });
-  });
+  // Only successful caller actions consume the warning, never reads or background
+  // delivery checks. Claim it atomically so concurrent launches warn once too.
+  const warnIfRetired =
+    (id: ThreadId) =>
+    <A extends object, E, R>(action: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const before = yield* authorityOf(id);
+        const result = yield* action;
+        if (!before || before.active || before.retirement_warned) return result;
+        const [claimed] = yield* sql<Authority>`UPDATE custom_orchestrator_authority
+          SET retirement_warned = 1 WHERE thread_id = ${id} AND retirement_warned = 0
+          RETURNING *`;
+        if (!claimed) return result;
+        let successor = claimed.successor_id;
+        const seen = new Set<string>([id]);
+        while (successor && !seen.has(successor)) {
+          seen.add(successor);
+          const next = yield* authorityOf(successor);
+          if (!next || next.active || !next.successor_id) break;
+          successor = next.successor_id;
+        }
+        return {
+          ...result,
+          warning: `This session previously handed off to ${successor ?? "a successor"}. This action is proceeding; no confirmation or reclaim is needed to create and supervise new workers. Previously transferred workers remain with their current master. Reclaim them only if the user requests it. This informational warning is shown once per session.`,
+        };
+      });
   const localSessionInfo = Effect.fn(function* (id: ThreadId) {
-    yield* assertActive(id);
     const value = yield* thread(id);
     if (value.archivedAt !== null)
       return yield* new WorkerError({
@@ -668,7 +680,6 @@ const make = Effect.gen(function* () {
       : "";
   });
   const owned = Effect.fn(function* (owner: string, id: string) {
-    yield* assertActive(owner);
     const rows =
       yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${id} AND owner_id = ${owner}`;
     if (!rows[0])
@@ -948,7 +959,6 @@ const make = Effect.gen(function* () {
     workerId: ThreadId,
     input: typeof ReportInput.Type,
   ) {
-    yield* assertActive(workerId);
     const rows =
       yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${workerId} AND state = 'ready'`;
     const worker = rows[0];
@@ -1357,7 +1367,6 @@ const make = Effect.gen(function* () {
     environmentId: string,
     input: typeof SpawnInput.Type,
   ) {
-    yield* assertActive(owner);
     const master = yield* thread(owner);
     if (input.threadId === owner || input.threadId === input.sourceThreadId)
       return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
@@ -1438,7 +1447,6 @@ const make = Effect.gen(function* () {
     input: typeof SpawnInput.Type,
     forHandoff = false,
   ) {
-    yield* assertActive(owner);
     if (input.threadId === owner || input.threadId === input.sourceThreadId)
       return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
     const existing =
@@ -1905,7 +1913,6 @@ const make = Effect.gen(function* () {
         if (Option.isSome(yield* snapshots.getThreadShellById(input.threadId)))
           return yield* new WorkerError({ message: "That destination thread already exists." });
       }
-      yield* assertActive(owner);
       yield* checkSelection(input.modelSelection);
       if (input.sourceThreadId) yield* checkPermissions(owner, yield* thread(input.sourceThreadId));
       yield* sql`INSERT INTO custom_orchestrator_handoffs (thread_id, owner_id, plan_json)
@@ -2168,6 +2175,7 @@ const make = Effect.gen(function* () {
                 Effect.tap(() => kick()),
               ),
         ),
+        warnIfRetired(owner),
         Effect.mapError(failure),
       ),
     send: (owner, input) =>
@@ -2179,6 +2187,7 @@ const make = Effect.gen(function* () {
               )
             : sendJob(owner, input),
         ),
+        warnIfRetired(owner),
         Effect.mapError(failure),
       ),
     receive,
@@ -2227,6 +2236,7 @@ const make = Effect.gen(function* () {
             };
           }),
         ),
+        warnIfRetired(sender),
         Effect.mapError(failure),
       ),
     report: (worker, input) =>
@@ -2242,12 +2252,15 @@ const make = Effect.gen(function* () {
           ...jobResult(jobs[0]!),
           held: jobs[0]!.state === "queued" && workers[0]?.notify === 0,
         })),
+        warnIfRetired(worker),
         Effect.mapError(failure),
       ),
     handoff: (owner, input) =>
       handoff(owner, input).pipe(
         Effect.tap(() => kick()),
         Effect.flatMap(() => handoffStatus(owner, { threadId: input.threadId })),
+        warnIfRetired(owner),
+        Effect.mapError(failure),
       ),
     handoffStatus,
     reclaim,
@@ -2289,6 +2302,7 @@ const make = Effect.gen(function* () {
               )
             : control(owner, input).pipe(Effect.tap(() => kick())),
         ),
+        warnIfRetired(owner),
         Effect.mapError(failure),
       ),
     start,

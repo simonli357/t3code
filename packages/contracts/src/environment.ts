@@ -141,6 +141,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   boundedSessionHistory: Schema.optionalKey(Schema.Boolean),
   sessionMessageConfirmation: Schema.optionalKey(Schema.Boolean),
   workerReclaim: Schema.optionalKey(Schema.Boolean),
+  workerRetirementWarning: Schema.optionalKey(Schema.Boolean),
   orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
   /** Worker tools and session messages can reach linked peer environments. */
   peerEnvironments: Schema.optionalKey(Schema.Boolean),

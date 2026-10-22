@@ -238,6 +238,7 @@ export const make = Effect.gen(function* () {
       boundedSessionHistory: true,
       sessionMessageConfirmation: true,
       workerReclaim: true,
+      workerRetirementWarning: true,
       orchestratorHandoff: true,
       peerEnvironments: true,
       claudeSubagentStop: true,

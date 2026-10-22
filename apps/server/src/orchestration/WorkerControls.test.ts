@@ -386,12 +386,12 @@ it.layer(testLayer)("persistent workers", (it) => {
         expect(
           next.messages.filter((m) => m.text.startsWith("[T3 orchestrator handoff]")),
         ).toHaveLength(1);
-        expect(yield* service.handoff(owner, request)).toEqual(result);
+        expect(yield* service.handoff(owner, request)).toMatchObject(result);
         expect(
           (yield* service
             .control(owner, { threadId: worker, notifications: true })
             .pipe(Effect.flip)).message,
-        ).toContain("retired");
+        ).toContain("not a worker owned");
         yield* service.control(successor, { threadId: worker, notifications: true });
         expect((yield* service.report(worker, report)).requestId).toBe(receipt.requestId);
         const notices = Option.getOrThrow(yield* snapshots.getThreadDetailById(successor)).messages;
@@ -944,7 +944,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(changed.confirmation!.token).not.toBe(expired.confirmation!.token);
     }),
   );
-  it.effect("rechecks queued messages after retirement and refuses retired senders", () =>
+  it.effect("rechecks queued messages after handoff and permits retired peers", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const engine = yield* OrchestrationEngineService;
@@ -977,21 +977,132 @@ it.layer(testLayer)("persistent workers", (it) => {
           state: string;
           error: string;
         }>`SELECT state, error FROM custom_worker_jobs WHERE id = ${message.requestId}`)[0],
-      ).toMatchObject({ state: "error", error: expect.stringContaining("retired") });
+      ).toMatchObject({
+        state: "error",
+        error: expect.stringContaining("changed since confirmation"),
+      });
+      const preview = yield* service.message(target.owner, {
+        threadId: sender.owner,
+        clientRequestId: "old",
+        prompt: "New coordination",
+      });
+      expect(preview.state).toBe("confirmation_required");
+      expect(preview.warning).toContain(next);
+      const sent = yield* service.message(target.owner, {
+        threadId: sender.owner,
+        clientRequestId: "old",
+        prompt: "New coordination",
+        confirmationToken: preview.confirmation!.token,
+      });
+      expect(sent.state).toBe("dispatched");
+      expect(sent.warning).toBeUndefined();
+      const received = yield* confirmedMessage(service, sender.owner, {
+        threadId: target.owner,
+        clientRequestId: "back-to-former-master",
+        prompt: "Intentional reply",
+      });
+      expect(received.state).toBe("dispatched");
+    }),
+  );
+  it.effect("retired masters launch and supervise new workers with one persistent warning", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("retired-launch");
+      const next = ThreadId.make("retired-launch-next");
+      yield* service.spawn(owner, input);
       expect(
-        (yield* service
-          .message(target.owner, {
-            threadId: sender.owner,
-            clientRequestId: "old",
-            prompt: "Stale master",
-          })
-          .pipe(Effect.flip)).successorThreadId,
-      ).toBe(next);
+        (yield* service.handoff(owner, {
+          threadId: next,
+          title: "next",
+          prompt: "Take over",
+          modelSelection: selections[0]!,
+        })).warning,
+      ).toBeUndefined();
+      // Inspection and failed ownership checks must not consume the warning.
+      expect(yield* service.list(owner)).toHaveLength(0);
       expect(
-        (yield* service
-          .spawn(target.owner, { ...target.input, threadId: ThreadId.make("stale-worker") })
-          .pipe(Effect.flip)).message,
-      ).toContain("retired");
+        (yield* service.control(owner, { threadId: worker }).pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      expect(
+        (yield* sql<{ retirement_warned: number }>`SELECT retirement_warned
+        FROM custom_orchestrator_authority WHERE thread_id = ${owner}`)[0]!.retirement_warned,
+      ).toBe(0);
+      const launched = yield* Effect.forEach(
+        [1, 2, 3],
+        (index) =>
+          service.spawn(owner, {
+            projectId: ProjectId.make("retired-launch"),
+            threadId: ThreadId.make(`retired-launch-fresh-${index}`),
+            title: `fresh-${index}`,
+            modelSelection: selections[0]!,
+            prompt: "New assignment",
+          }),
+        { concurrency: "unbounded" },
+      );
+      expect(launched.filter((result) => result.warning)).toHaveLength(1);
+      expect(launched.find((result) => result.warning)!.warning).toContain(
+        "no confirmation or reclaim",
+      );
+      for (const result of launched) {
+        expect(result.ownerThreadId).toBe(owner);
+        expect(["queued", "submitted"]).toContain(result.latestRequest!.state);
+      }
+      yield* service.drain();
+      expect(
+        (yield* service.list(owner)).every((result) => result.latestRequest!.state === "submitted"),
+      ).toBe(true);
+      expect((yield* service.list(next)).map((result) => result.threadId)).toEqual([worker]);
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      const freshId = launched[0]!.threadId;
+      yield* restarted.control(owner, { threadId: freshId, notifications: false });
+      const report = yield* restarted.report(freshId, {
+        clientRequestId: "done-after-retirement",
+        outcome: "blocked",
+        summary: "New work needs a decision.",
+      });
+      expect(
+        (yield* sql<{ target_id: string }>`SELECT target_id FROM custom_worker_jobs
+        WHERE id = ${report.requestId}`)[0]!.target_id,
+      ).toBe(owner);
+      yield* restarted.control(owner, { threadId: freshId, notifications: true });
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.some((message) =>
+          message.text.includes("New work needs a decision."),
+        ),
+      ).toBe(true);
+      const forked = yield* restarted.spawn(owner, {
+        ...input,
+        threadId: ThreadId.make("retired-launch-later-fork"),
+      });
+      expect(forked.warning).toBeUndefined();
+      expect(
+        (yield* restarted.send(owner, {
+          threadId: freshId,
+          clientRequestId: "follow-up",
+          prompt: "Continue the new assignment",
+        })).warning,
+      ).toBeUndefined();
+      expect(
+        (yield* restarted.control(owner, { threadId: worker }).pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      const nextAgain = ThreadId.make("retired-launch-next-again");
+      expect(
+        (yield* restarted.handoff(owner, {
+          threadId: nextAgain,
+          title: "next again",
+          prompt: "Take over the new work",
+          modelSelection: selections[0]!,
+        })).warning,
+      ).toBeUndefined();
+      yield* restarted.drain();
+      expect(
+        (yield* restarted.spawn(owner, {
+          ...input,
+          threadId: ThreadId.make("retired-launch-after-second-handoff"),
+        })).warning,
+      ).toBeUndefined();
     }),
   );
   it.effect("reclaims only selected historical workers after a new direct user instruction", () =>
@@ -2363,6 +2474,27 @@ it.layer(mcpLayer)("worker MCP", (it) => {
           expect((yield* (yield* Workers.WorkerControls).list(successor))[0]!.threadId).toBe(
             worker,
           );
+          const newSpawn = { ...spawnInput, threadId: `${worker}-after-handoff` };
+          const warned = yield* call("t3_worker_spawn", newSpawn);
+          expect(warned.isError).not.toBe(true);
+          expect(warned.content).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("informational warning"),
+              }),
+            ]),
+          );
+          const quietRetry = yield* call("t3_worker_spawn", newSpawn);
+          expect(quietRetry.isError).not.toBe(true);
+          expect(quietRetry.content).not.toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "text",
+                text: expect.stringContaining("informational warning"),
+              }),
+            ]),
+          );
           const userRequest = "Reclaim this worker at my request.";
           yield* directInput(owner, `mcp-reclaim-${fresh}`, userRequest);
           expect(
@@ -2373,7 +2505,9 @@ it.layer(mcpLayer)("worker MCP", (it) => {
               ownerThreadId: "forged",
             })).isError,
           ).not.toBe(true);
-          expect((yield* (yield* Workers.WorkerControls).list(owner))[0]!.threadId).toBe(worker);
+          expect(
+            (yield* (yield* Workers.WorkerControls).list(owner)).map((result) => result.threadId),
+          ).toContain(worker);
         }),
     );
   }
@@ -2636,6 +2770,34 @@ it.effect("routes a linked worker's reports to the master's handoff successor", 
       prompt: "Take over the beta work",
     });
     expect((yield* alphaWorkers.list(successor)).map((entry) => entry.threadId)).toEqual([worker]);
+    const newWorker = ThreadId.make("handoff-new-remote-worker");
+    const newAssignment = {
+      threadId: newWorker,
+      projectId: ProjectId.make("handoff-beta"),
+      title: "new_remote_worker_sol",
+      modelSelection: selections[0]!,
+      prompt: "Handle a new assignment",
+      environment: "beta",
+    };
+    expect((yield* alphaWorkers.spawn(owner, newAssignment)).warning).toContain(successor);
+    expect((yield* alphaWorkers.spawn(owner, newAssignment)).warning).toBeUndefined();
+    yield* betaWorkers.report(newWorker, {
+      clientRequestId: "new-blocker",
+      outcome: "blocked",
+      summary: "New assignment needs input",
+    });
+    yield* betaWorkers.drain();
+    yield* alphaWorkers.drain();
+    expect(
+      (yield* messages(alphaSnapshots, owner)).some((text) =>
+        text.includes("New assignment needs input"),
+      ),
+    ).toBe(true);
+    expect(
+      (yield* messages(alphaSnapshots, successor)).some((text) =>
+        text.includes("New assignment needs input"),
+      ),
+    ).toBe(false);
     yield* betaWorkers.report(worker, {
       clientRequestId: "blocked",
       outcome: "blocked",

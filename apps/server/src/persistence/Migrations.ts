@@ -70,6 +70,7 @@ import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledA
 import Migration0057 from "./Migrations/057_OrchestratorHandoffs.ts";
 import Migration0056 from "./Migrations/056_FreshWorkers.ts";
 import Migration0058 from "./Migrations/058_WorkerCommunication.ts";
+import Migration0059 from "./Migrations/059_RetirementWarning.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -140,6 +141,7 @@ const migrationEntries = [
   [56, "FreshWorkers", Migration0056],
   [57, "OrchestratorHandoffs", Migration0057],
   [58, "WorkerCommunication", Migration0058],
+  [59, "RetirementWarning", Migration0059],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
