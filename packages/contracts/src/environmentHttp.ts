@@ -1,6 +1,13 @@
 import * as Context from "effect/Context";
 import { UsageMeasurementsReport } from "./usageMeasurements.ts";
 import {
+  SESSION_HISTORY_MAX_MESSAGES,
+  SESSION_HISTORY_MIN_CHARS,
+  SESSION_HISTORY_MAX_CHARS,
+  SessionHistoryReadError,
+  SessionHistoryReadResult,
+} from "./sessionHistory.ts";
+import {
   SettledThreadPurgeError,
   SettledThreadPurgeInput,
   SettledThreadPurgeReport,
@@ -34,6 +41,7 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  MessageId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -524,6 +532,37 @@ const EnvironmentOrchestrationThreadSnapshotQuery = {
 };
 
 export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
+  .add(
+    HttpApiEndpoint.get("sessionHistory", "/api/orchestration/threads/:threadId/messages", {
+      headers: OptionalBearerHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      payload: {
+        messageLimit: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: SESSION_HISTORY_MAX_MESSAGES }),
+          ),
+        ),
+        maxChars: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({
+              minimum: SESSION_HISTORY_MIN_CHARS,
+              maximum: SESSION_HISTORY_MAX_CHARS,
+            }),
+          ),
+        ),
+        view: Schema.optional(Schema.Literals(["final", "all"])),
+        beforeMessageId: Schema.optional(MessageId),
+        messageId: Schema.optional(MessageId),
+        offset: Schema.optional(
+          Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+        ),
+      },
+      success: SessionHistoryReadResult,
+      error: [...EnvironmentOrchestrationSnapshotErrors, SessionHistoryReadError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("usageMeasurements", "/api/orchestration/usage-measurements", {
       headers: OptionalBearerHeaders,

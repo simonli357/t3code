@@ -5,6 +5,8 @@ import {
   PeerRequestError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as ThreadHistory from "./ContextHandoff.ts";
 import * as UsageMeasurements from "../usage/UsageMeasurements.ts";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
@@ -34,8 +36,17 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const measurements = yield* UsageMeasurements.UsageMeasurements;
     const workers = yield* WorkerControls;
     const settledThreadPurge = yield* SettledThreadPurge;
+    const history = yield* ThreadHistory.ThreadHistory;
 
     return handlers
+      .handle(
+        "sessionHistory",
+        Effect.fn("environment.orchestration.sessionHistory")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* history.readRecent(args.params.threadId, args.payload);
+        }),
+      )
       .handle(
         "peer",
         Effect.fn("environment.peer")(function* (args) {
@@ -158,4 +169,4 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         }),
       );
   }),
-);
+).pipe(Layer.provide(ThreadHistory.layer));

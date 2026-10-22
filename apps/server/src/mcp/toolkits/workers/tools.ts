@@ -26,7 +26,7 @@ const list = Tool.make("t3_worker_list", {
 });
 const read = Tool.make("t3_worker_read", {
   description:
-    "Read new worker replies after inherited base history. The saved cursor survives master compaction and server restarts. Set includeProgress=true for streaming and tool activity. Continue with nextSequence as afterSequence and nextTextOffset as textOffset until hasMore=false. Omit the cursor to continue from the last read, or provide an explicit cursor to reread. Reading does not accept the task or stop completion notifications.",
+    "Read new worker replies after inherited base history. The saved cursor survives master compaction and server restarts. This incremental view includes intermediate assistant updates; use the T3 skill's bounded session lookup for just recent prompts and final replies. Set includeProgress=true for streaming and tool activity. Use nextSequence as afterSequence and nextTextOffset as textOffset only when more context is needed; hasMore does not require reading every page. Omit the cursor to continue from the last read, or provide an explicit cursor to reread. Reading does not accept the task or stop completion notifications.",
   parameters: Workers.ReadInput,
   success: Workers.ReadResult,
   failure,
