@@ -197,6 +197,30 @@ export const makeCoordination = Effect.gen(function* () {
       (id, worker_id, target_id, kind, prompt, created_at, state, attempt, turn_id, error, reported, dispatched_at, policy_json, report_ids_json)
       VALUES (${value.id}, ${value.worker_id}, ${value.target_id}, ${value.kind}, ${value.prompt}, ${value.created_at}, ${value.state}, ${value.attempt}, ${value.turn_id}, ${value.error}, ${value.reported}, ${value.dispatched_at}, ${value.policy_json}, ${value.report_ids_json})`;
   });
+  const announceOrganization = Effect.fn(function* (threadId: string, participant?: string) {
+    const worker = yield* get(threadId);
+    if (!worker) return;
+    const current = plan(worker);
+    if (
+      !Array.isArray(current.organizationHosts) ||
+      (current.authorityEnvironmentId ?? local.environmentId) !== local.environmentId
+    )
+      return;
+    yield* sql`INSERT INTO custom_orchestrator_authority (thread_id, revision) VALUES (${threadId}, 1) ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
+    const revision = (yield* sql<{
+      revision: number;
+    }>`SELECT revision FROM custom_orchestrator_authority WHERE thread_id = ${threadId}`)[0]!
+      .revision;
+    yield* sql`UPDATE custom_workers SET plan_json = ${encode({
+      ...current,
+      authorityRevision: revision,
+      organizationHosts: [
+        ...new Set([...current.organizationHosts, ...(participant ? [participant] : [])]),
+      ],
+    })} WHERE thread_id = ${threadId}`;
+    yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json)
+      VALUES (${`move-sync:${threadId}:${revision}`}, '{}', ${encode({ threadId, ownerThreadId: worker.owner_id, previousOwnerThreadId: worker.owner_id, revision })}) ON CONFLICT DO NOTHING`;
+  });
   const importState = Effect.fn(
     function* (source: string, threadId: ThreadId, raw: unknown, selection: ModelSelection) {
       const value = yield* decodeCoordination(raw).pipe(
@@ -256,8 +280,10 @@ export const makeCoordination = Effect.gen(function* () {
         if (child.owner_id !== threadId)
           return yield* new SessionMoveError({ message: "Unrelated owned worker in transfer." });
         const sourcePlan = plan(child);
-        delete sourcePlan.authorityEnvironmentId;
-        delete sourcePlan.authorityRevision;
+        if (!sourcePlan.organizationHosts) {
+          delete sourcePlan.authorityEnvironmentId;
+          delete sourcePlan.authorityRevision;
+        }
         const executionEnvironment = child.state === "remote" ? sourcePlan.environmentId : source;
         if (typeof executionEnvironment !== "string")
           return yield* new SessionMoveError({
@@ -273,8 +299,10 @@ export const makeCoordination = Effect.gen(function* () {
               message: "A destination worker changed ownership while moving its master.",
             });
           const nativePlan = plan(native);
-          delete nativePlan.authorityEnvironmentId;
-          delete nativePlan.authorityRevision;
+          if (!nativePlan.organizationHosts) {
+            delete nativePlan.authorityEnvironmentId;
+            delete nativePlan.authorityRevision;
+          }
           yield* sql`UPDATE custom_workers SET owner_id = ${threadId}, plan_json = ${encode(nativePlan)} WHERE thread_id = ${child.thread_id}`;
         } else {
           if (Option.isNone(yield* peers.resolve(executionEnvironment)))
@@ -348,14 +376,23 @@ export const makeCoordination = Effect.gen(function* () {
           });
         const relocatedPlan = plan(worker);
         delete relocatedPlan.authorityRevision;
-        relocatedPlan.authorityEnvironmentId = change.targetEnvironmentId;
+        if (!relocatedPlan.organizationHosts)
+          relocatedPlan.authorityEnvironmentId = change.targetEnvironmentId;
+        else
+          relocatedPlan.organizationHosts = [
+            ...new Set([
+              ...(relocatedPlan.organizationHosts as string[]),
+              change.targetEnvironmentId,
+            ]),
+          ];
         yield* sql`UPDATE custom_workers SET owner_id = ${nextOwner}, plan_json = ${encode(relocatedPlan)} WHERE thread_id = ${worker.thread_id}`;
         yield* sql`UPDATE custom_worker_jobs SET target_id = ${nextOwner} WHERE worker_id = ${worker.thread_id}
         AND target_id = ${oldOwner} AND state = 'queued' AND kind IN ('notice', 'done', 'blocked')`;
       } else {
         const current = plan(worker);
         if (
-          worker.owner_id !== change.masterId ||
+          (worker.owner_id !== change.masterId &&
+            (worker.owner_id === null || splitPeer(worker.owner_id)?.thread !== change.masterId)) ||
           worker.state !== "remote" ||
           (current.environmentId !== from && current.environmentId !== change.targetEnvironmentId)
         )
@@ -365,9 +402,20 @@ export const makeCoordination = Effect.gen(function* () {
         yield* sql`UPDATE custom_workers SET plan_json = ${encode({
           ...current,
           environmentId: change.targetEnvironmentId,
+          ...(current.organizationHosts
+            ? {
+                organizationHosts: [
+                  ...new Set([
+                    ...(current.organizationHosts as string[]),
+                    change.targetEnvironmentId,
+                  ]),
+                ],
+              }
+            : {}),
           ...(change.modelSelection ? { modelSelection: change.modelSelection } : {}),
         })} WHERE thread_id = ${worker.thread_id}`;
       }
+      yield* announceOrganization(worker.thread_id, change.targetEnvironmentId);
       return { relocated: true };
     },
     (effect) => workers.withCoordinationLock(sql.withTransaction(effect)),
@@ -411,8 +459,12 @@ export const makeCoordination = Effect.gen(function* () {
     );
     if (state.worker) {
       const owner = state.worker.owner_id === null ? null : splitPeer(state.worker.owner_id);
-      const authority = owner?.environment ?? plan(state.worker).authorityEnvironmentId;
-      if (typeof authority === "string" && authority !== destination)
+      const authority = plan(state.worker).authorityEnvironmentId ?? owner?.environment;
+      if (
+        typeof authority === "string" &&
+        authority !== destination &&
+        authority !== local.environmentId
+      )
         yield* peers.call(authority, {
           _tag: "sessionMove",
           op: "relocate",
@@ -432,10 +484,18 @@ export const makeCoordination = Effect.gen(function* () {
         state: "remote",
         plan_json: encode({
           ...plan(state.worker),
+          ...(plan(state.worker).organizationHosts
+            ? {
+                organizationHosts: [
+                  ...new Set([...(plan(state.worker).organizationHosts as string[]), destination]),
+                ],
+              }
+            : {}),
           environmentId: destination,
           modelSelection: selection,
         }),
       });
+      yield* announceOrganization(threadId, destination);
       yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE worker_id = ${threadId} AND state = 'queued' AND kind != 'message'`;
     }
     for (const child of state.children) {
@@ -454,19 +514,39 @@ export const makeCoordination = Effect.gen(function* () {
             targetEnvironmentId: destination,
           },
         });
+      const authority = sourcePlan.authorityEnvironmentId;
+      if (
+        sourcePlan.organizationHosts &&
+        typeof authority === "string" &&
+        authority !== local.environmentId &&
+        authority !== environment &&
+        authority !== destination
+      )
+        yield* peers.call(authority, {
+          _tag: "sessionMove",
+          op: "relocate",
+          requestId,
+          relocation: {
+            kind: "owner",
+            workerId: child.thread_id,
+            masterId: threadId,
+            targetEnvironmentId: destination,
+          },
+        });
       delete sourcePlan.authorityRevision;
       yield* sql`UPDATE custom_workers SET owner_id = ${peerRef(destination, threadId)},
-        plan_json = ${encode({ ...sourcePlan, authorityEnvironmentId: destination })}
+        plan_json = ${encode({ ...sourcePlan, authorityEnvironmentId: sourcePlan.organizationHosts ? sourcePlan.authorityEnvironmentId : destination })}
         WHERE thread_id = ${child.thread_id} AND owner_id = ${threadId}`;
       // The destination now owns synchronization. Do not retry an obsolete
       // authority's outbox against a worker after the master has moved.
       yield* sql`UPDATE custom_session_ownership_changes SET announced = 1
         WHERE json_extract(result_json, '$.threadId') = ${child.thread_id}`;
+      yield* announceOrganization(child.thread_id, destination);
     }
     // Reports that arrived after capture are forwarded with their original receipt
     // identities. The destination deduplicates those against the imported receipts.
     yield* sql`UPDATE custom_worker_jobs SET target_id = ${peerRef(destination, threadId)}
       WHERE target_id = ${threadId} AND kind IN ('notice', 'done', 'blocked') AND state = 'queued'`;
   }, workers.withCoordinationLock);
-  return { importState, relocate, finish };
+  return { importState, relocate, finish, withLock: workers.withCoordinationLock };
 });

@@ -11,6 +11,8 @@ import {
   buildSessionHierarchy,
   sessionKey,
   sessionRole,
+  recoverOwnershipEdit,
+  ownershipEditRequest,
 } from "@t3tools/client-runtime/state/session-organization";
 import {
   createEnvironmentRpcCommand,
@@ -76,16 +78,12 @@ export function SessionOrganizationSheet({
   }, [readRelationship, authority, thread.id, connected]);
   const save = async (owner: EnvironmentThreadShell | null) => {
     if (!relationship || busy) return;
-    const input =
-      pending?.ownerThreadId === (owner?.id ?? null)
-        ? pending
-        : {
-            clientRequestId: uuidv4(),
-            threadId: thread.id,
-            ownerThreadId: owner?.id ?? null,
-            expectedOwnerThreadId: relationship.ownerThreadId,
-            expectedRevision: relationship.revision,
-          };
+    const input = ownershipEditRequest(
+      pending,
+      relationship,
+      owner ? { environmentId: owner.environmentId, threadId: owner.id } : null,
+      uuidv4(),
+    );
     setPending(input);
     setBusy(true);
     try {
@@ -94,18 +92,31 @@ export function SessionOrganizationSheet({
         setRelationship(result.value);
         setPending(null);
         setMessage(
-          owner
-            ? `Master changed to ${owner.title}. Future reports go to this master.`
+          result.value.ownerThreadId
+            ? `Master changed to ${threads.find((t) => t.id === result.value.ownerThreadId && t.environmentId === result.value.ownerEnvironmentId)?.title ?? result.value.ownerThreadId}. Future reports go to this master.`
             : "This session is now independent.",
         );
-      } else setMessage(String(squashAtomCommandFailure(result)));
+      } else {
+        const failure = squashAtomCommandFailure(result);
+        setMessage(String(failure));
+        const recovery = await recoverOwnershipEdit(failure, async () => {
+          const refreshed = await readRelationship({
+            environmentId: authority,
+            input: { threadId: thread.id },
+          });
+          return refreshed._tag === "Success" ? refreshed.value : null;
+        });
+        if (recovery.confirmed) {
+          setPending(null);
+          setRelationship(recovery.relationship);
+        }
+      }
     } finally {
       setBusy(false);
     }
   };
   const candidates = threads.filter(
     (candidate) =>
-      candidate.environmentId === authority &&
       candidate.archivedAt === null &&
       sessionKey(candidate) !== sessionKey(thread) &&
       !hierarchy.path(sessionKey(candidate)).includes(sessionKey(thread)) &&
@@ -134,9 +145,18 @@ export function SessionOrganizationSheet({
           <AppText>
             Current master:{" "}
             {currentOwner
-              ? (threads.find((t) => t.id === currentOwner && t.environmentId === authority)
-                  ?.title ?? currentOwner)
+              ? (threads.find(
+                  (t) =>
+                    t.id === currentOwner &&
+                    t.environmentId ===
+                      (relationship?.ownerEnvironmentId ??
+                        thread.organization?.owner?.environmentId ??
+                        thread.environmentId),
+                )?.title ?? currentOwner)
               : "Independent"}
+            {currentOwner
+              ? ` · ${environments.find((e) => e.environmentId === (relationship?.ownerEnvironmentId ?? thread.organization?.owner?.environmentId ?? thread.environmentId))?.label ?? relationship?.ownerEnvironmentId ?? thread.organization?.owner?.environmentId ?? thread.environmentId}`
+              : ""}
           </AppText>
           <AppText className="my-2 text-sm">
             Its conversation and current work continue on {label}.
@@ -150,6 +170,34 @@ export function SessionOrganizationSheet({
             <AppText accessibilityRole="alert" className="my-2">
               {message}
             </AppText>
+          )}
+          {!relationship && connected && (
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => {
+                void readRelationship({
+                  environmentId: authority,
+                  input: { threadId: thread.id },
+                }).then((outcome) => {
+                  if (outcome._tag === "Success") setRelationship(outcome.value);
+                  else setMessage(String(squashAtomCommandFailure(outcome)));
+                });
+              }}
+              className="min-h-12 justify-center px-3"
+            >
+              <AppText>Refresh relationship</AppText>
+            </Pressable>
+          )}
+          {pending && (
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy || !connected}
+              onPress={() => void save(null)}
+              className="min-h-12 justify-center px-3"
+            >
+              <AppText>Retry change</AppText>
+            </Pressable>
           )}
           <TextInput
             accessibilityLabel="Find a master session"
@@ -165,7 +213,7 @@ export function SessionOrganizationSheet({
             ListHeaderComponent={
               <Pressable
                 accessibilityRole="button"
-                disabled={!relationship || busy || !connected}
+                disabled={!relationship || busy || !connected || pending !== null}
                 onPress={() => void save(null)}
                 className="min-h-12 justify-center px-3"
               >
@@ -176,11 +224,15 @@ export function SessionOrganizationSheet({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Assign to ${item.title}`}
-                disabled={!relationship || busy || !connected}
+                disabled={!relationship || busy || !connected || pending !== null}
                 onPress={() => void save(item)}
                 className="min-h-12 justify-center px-3"
               >
-                <AppText>{item.title}</AppText>
+                <AppText>
+                  {item.title} ·{" "}
+                  {environments.find((e) => e.environmentId === item.environmentId)?.label ??
+                    item.environmentId}
+                </AppText>
               </Pressable>
             )}
           />

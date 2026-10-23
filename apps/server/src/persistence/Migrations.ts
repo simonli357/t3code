@@ -72,6 +72,7 @@ import Migration0056 from "./Migrations/056_FreshWorkers.ts";
 import Migration0058 from "./Migrations/058_WorkerCommunication.ts";
 import Migration0059 from "./Migrations/059_RetirementWarning.ts";
 import Migration0060 from "./Migrations/060_SessionMoves.ts";
+import Migration0062 from "./Migrations/062_OwnershipTransactions.ts";
 import Migration0061 from "./Migrations/061_SessionOrganization.ts";
 
 /**
@@ -146,6 +147,7 @@ const migrationEntries = [
   [59, "RetirementWarning", Migration0059],
   [60, "SessionMoves", Migration0060],
   [61, "SessionOrganization", Migration0061],
+  [62, "OwnershipTransactions", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

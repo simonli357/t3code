@@ -81,7 +81,7 @@ const ownershipRead = Tool.make("t3_session_ownership_read", {
 });
 const ownership = Tool.make("t3_session_ownership", {
   description:
-    "Assign an independent session, transfer your worker to another master, or make a worker independent. Preserves provider, execution computer, history and queued work. Requires an exact quote from the latest direct user instruction; never adopt unrelated workers. Call on the current master computer with the shell relationship revision and expected owner. Null ownerThreadId releases ownership. UI and agents use the same atomic service.",
+    "Assign an independent session, transfer your worker to another master, or make a worker independent. Preserves provider, execution computer, history and queued work. Requires an exact quote from the latest direct user instruction; never adopt unrelated workers. Use threadEnvironmentId for an existing session on another linked computer, ownerEnvironmentId for its new master, and the canonical expected owner environment/revision from t3_session_ownership_read. Keep clientRequestId and all inputs unchanged after an uncertain outcome. Null ownerThreadId releases ownership. UI and agents use the same atomic service.",
   parameters: Schema.Struct({
     ...SessionOwnershipInput.fields,
     userRequest: TrimmedNonEmptyString,
@@ -165,7 +165,8 @@ export const handlers = WorkersToolkit.toLayer(
         ),
       t3_session_send: (input) => owner.pipe(Effect.flatMap((id) => service.message(id, input))),
       t3_worker_report: (input) => owner.pipe(Effect.flatMap((id) => service.report(id, input))),
-      t3_session_ownership_read: ({ threadId }) => service.readOwnership(threadId),
+      t3_session_ownership_read: ({ threadId, threadEnvironmentId }) =>
+        service.readOwnership(threadId, threadEnvironmentId),
       t3_session_ownership: ({ userRequest, ...input }) =>
         owner.pipe(
           Effect.flatMap((threadId) => service.changeOwnership(input, { threadId, userRequest })),

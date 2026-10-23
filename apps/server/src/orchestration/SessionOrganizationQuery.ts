@@ -23,10 +23,12 @@ export const makeSessionOrganizationQuery = Effect.gen(function* () {
             environment_id: string | null;
             authority_environment_id: string | null;
             state: string;
+            relationship_revision: number;
             assignment_state: string | null;
             report_outcome: "done" | "blocked" | null;
             direct_input_at: string | null;
           }>`SELECT w.thread_id, w.owner_id, w.state,
+    COALESCE(json_extract(w.plan_json, '$.authorityRevision'), (SELECT a.revision FROM custom_orchestrator_authority a WHERE a.thread_id = w.thread_id), 0) AS relationship_revision,
     json_extract(w.plan_json, '$.environmentId') AS environment_id,
     json_extract(w.plan_json, '$.authorityEnvironmentId') AS authority_environment_id,
     (SELECT j.state FROM custom_worker_jobs j WHERE j.worker_id = w.thread_id AND j.kind = 'work' ORDER BY j.rowid DESC LIMIT 1) AS assignment_state,
@@ -66,6 +68,7 @@ export const makeSessionOrganizationQuery = Effect.gen(function* () {
           ...value,
           owner: row.owner_id === null ? null : reference(row.owner_id),
           authorityEnvironmentId: row.authority_environment_id,
+          revision: row.relationship_revision,
           assignmentState: row.assignment_state,
           reportOutcome: row.report_outcome,
           directInputAt: row.direct_input_at,
@@ -81,6 +84,7 @@ export const makeSessionOrganizationQuery = Effect.gen(function* () {
             {
               environmentId: row.state === "remote" ? row.environment_id : null,
               threadId: id,
+              revision: row.relationship_revision,
             },
           ],
         });

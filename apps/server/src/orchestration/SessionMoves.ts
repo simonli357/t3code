@@ -774,17 +774,19 @@ const make = Effect.gen(function* () {
           return yield* new SessionMoveError({
             message: "Another destination conversation already owns this native session.",
           });
-        yield* maintenance.run(
-          sql.withTransaction(
-            Effect.gen(function* () {
-              yield* sql`UPDATE custom_session_moves SET locked = 0 WHERE thread_id = ${manifest.input.threadId}
+        yield* maintenance
+          .run(
+            sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`UPDATE custom_session_moves SET locked = 0 WHERE thread_id = ${manifest.input.threadId}
           AND ((direction = 'out' AND state = 'complete') OR (direction = 'in' AND state = 'cancelled'))`;
-              yield* sql`INSERT INTO custom_session_moves
+                yield* sql`INSERT INTO custom_session_moves
           (id, thread_id, target_thread_id, direction, peer_environment_id, state, input_json, manifest_json, created_at, updated_at)
           VALUES (${request.requestId}, ${manifest.input.threadId}, ${manifest.input.threadId}, 'in', ${from}, 'copying', ${encode(manifest.input)}, ${encode(manifest)}, ${yield* now}, ${yield* now})`;
-            }),
-          ),
-        );
+              }),
+            ),
+          )
+          .pipe(coordination.withLock);
         return result((yield* row(request.requestId))!);
       }
       const saved = yield* row(request.requestId);
@@ -1063,9 +1065,11 @@ const make = Effect.gen(function* () {
       },
       head: workspace.head,
     });
-    yield* maintenance.run(sql`INSERT INTO custom_session_moves
+    yield* maintenance
+      .run(sql`INSERT INTO custom_session_moves
       (id, thread_id, target_thread_id, direction, peer_environment_id, input_json, created_at, updated_at)
-      VALUES (${input.requestId}, ${input.threadId}, ${input.threadId}, 'out', ${peer.value.environmentId}, ${encode(input)}, ${yield* now}, ${yield* now})`);
+      VALUES (${input.requestId}, ${input.threadId}, ${input.threadId}, 'out', ${peer.value.environmentId}, ${encode(input)}, ${yield* now}, ${yield* now})`)
+      .pipe(coordination.withLock);
     yield* Queue.offer(work, undefined);
     return result((yield* row(input.requestId))!);
   }, Effect.mapError(failure));

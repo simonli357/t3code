@@ -3470,10 +3470,10 @@ const makeWsRpcLayer = (
               .stopTask(input)
               .pipe(Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message }))),
           ),
-        [WS_METHODS.sessionOwnershipRead]: ({ threadId }) =>
+        [WS_METHODS.sessionOwnershipRead]: ({ threadId, threadEnvironmentId }) =>
           observeRpcEffect(
             WS_METHODS.sessionOwnershipRead,
-            workerControls.readOwnership(threadId),
+            workerControls.readOwnership(threadId, threadEnvironmentId),
             { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.sessionOwnershipChange]: (input) =>

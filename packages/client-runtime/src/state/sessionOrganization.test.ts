@@ -6,6 +6,8 @@ import {
   expandSessionGroups,
   sessionKey,
   sessionRole,
+  ownershipEditRequest,
+  recoverOwnershipEdit,
   summarizeSessionWorkers,
 } from "./sessionOrganization.ts";
 
@@ -230,4 +232,100 @@ describe("managed session navigation", () => {
     ).toEqual(["master", "pinned", "reopened"]);
     expect(summarizeSessionWorkers(hierarchy, sessionKey(master), connected).finished).toBe(1);
   });
+});
+
+it("refreshes a confirmed ownership conflict and retries with the canonical revision in the open editor", async () => {
+  const initial = {
+    threadId: ThreadId.make("worker"),
+    ownerThreadId: ThreadId.make("master"),
+    ownerEnvironmentId: "alpha",
+    previousOwnerThreadId: null,
+    revision: 1,
+  };
+  const destination = { environmentId: "gamma", threadId: ThreadId.make("master") };
+  const original = ownershipEditRequest(null, initial, destination, "original");
+  const canonical = { ...initial, ownerEnvironmentId: "beta", revision: 2 };
+  let reads = 0;
+  const recovered = await recoverOwnershipEdit({ code: "conflict" }, async () => {
+    reads++;
+    return canonical;
+  });
+  expect(reads).toBe(1);
+  expect(recovered.confirmed).toBe(true);
+  const retried = ownershipEditRequest(null, recovered.relationship!, destination, "retry");
+  expect(retried).toMatchObject({
+    clientRequestId: "retry",
+    ownerEnvironmentId: "gamma",
+    expectedOwnerEnvironmentId: "beta",
+    expectedRevision: 2,
+  });
+  expect(original.expectedRevision).toBe(1);
+});
+
+it("keeps the exact request and scoped destination after an uncertain outcome on either client", async () => {
+  const relationship = {
+    threadId: ThreadId.make("worker"),
+    ownerThreadId: null,
+    previousOwnerThreadId: null,
+    revision: 0,
+  };
+  const pending = ownershipEditRequest(
+    null,
+    relationship,
+    { environmentId: "beta", threadId: ThreadId.make("same-id") },
+    "stable",
+  );
+  const recovery = await recoverOwnershipEdit(new Error("connection interrupted"), async () => {
+    throw new Error("must not discard an uncertain commit by reading a stale relationship");
+  });
+  expect(recovery.confirmed).toBe(false);
+  expect(
+    ownershipEditRequest(
+      pending,
+      relationship,
+      { environmentId: "gamma", threadId: ThreadId.make("same-id") },
+      "new",
+    ),
+  ).toBe(pending);
+  expect(ownershipEditRequest(pending, relationship, null, "release")).toBe(pending);
+});
+
+it("uses canonical relationship revisions when disconnected master mirrors disagree", () => {
+  const oldMaster = thread("master", null, {
+    environmentId: EnvironmentId.make("alpha"),
+    organization: {
+      ...thread("empty").organization!,
+      workers: [{ environmentId: "beta", threadId: ThreadId.make("worker"), revision: 1 }],
+    },
+  });
+  const currentMaster = thread("master", null, {
+    environmentId: EnvironmentId.make("gamma"),
+    organization: {
+      ...thread("empty").organization!,
+      workers: [{ environmentId: "beta", threadId: ThreadId.make("worker"), revision: 2 }],
+    },
+  });
+  const worker = thread("worker", null, {
+    environmentId: EnvironmentId.make("beta"),
+    organization: {
+      ...thread("empty").organization!,
+      authorityEnvironmentId: "beta",
+      revision: 1,
+      owner: { environmentId: "alpha", threadId: oldMaster.id },
+    },
+  });
+  for (const masters of [
+    [oldMaster, currentMaster],
+    [currentMaster, oldMaster],
+  ]) {
+    const hierarchy = buildSessionHierarchy([worker, ...masters]);
+    expect(hierarchy.path(sessionKey(worker))).toEqual([sessionKey(currentMaster)]);
+  }
+  const released = {
+    ...worker,
+    organization: { ...worker.organization!, owner: null, revision: 3 },
+  };
+  const hierarchy = buildSessionHierarchy([released, currentMaster, oldMaster]);
+  expect(hierarchy.path(sessionKey(released))).toEqual([]);
+  expect(sessionRole(hierarchy.byKey.get(sessionKey(released))!)).toBe("Independent");
 });

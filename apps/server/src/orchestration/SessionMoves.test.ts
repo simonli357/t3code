@@ -798,27 +798,94 @@ it.effect(
       expect(
         Option.getOrThrow(yield* beta.snapshots.getThreadShellById(threadId)).organization,
       ).toMatchObject({ owner: null, authorityEnvironmentId: "gamma" });
-      expect(
-        (yield* beta.workers
-          .changeOwnership({
-            clientRequestId: "wrong-authority",
-            threadId,
-            ownerThreadId: null,
-            expectedOwnerThreadId: null,
-            expectedRevision: 2,
-          })
-          .pipe(Effect.flip)).message,
-      ).toContain("owning computer");
       yield* gamma.workers.changeOwnership({
         clientRequestId: "reassign-after-move",
         threadId,
         ownerThreadId: master,
         expectedOwnerThreadId: null,
-        expectedRevision: 1,
+        expectedRevision: (yield* gamma.workers.readOwnership(threadId)).revision,
       });
       expect(
         Option.getOrThrow(yield* beta.snapshots.getThreadShellById(threadId)).organization?.owner,
       ).toEqual({ environmentId: "gamma", threadId: master });
       expect((yield* gamma.workers.list(master))[0]?.environment).toBe("beta");
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "native move after cross-computer transfer preserves the current master and report route",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, gamma, input } = yield* fixture;
+      const oldMaster = ThreadId.make("transfer-old-master");
+      const master = ThreadId.make("transfer-current-master");
+      for (const [host, id] of [
+        [beta, oldMaster],
+        [gamma, master],
+      ] as const) {
+        yield* host.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${id}`),
+          threadId: id,
+          projectId: host.projectId,
+          title: id,
+          modelSelection: selection,
+          runtimeMode: "full-access",
+          interactionMode: "plan",
+          branch: null,
+          worktreePath: null,
+          historyImport: true,
+          createdAt: timestamp,
+        });
+      }
+      const assigned = yield* alpha.workers.changeOwnership({
+        clientRequestId: "native-assign",
+        threadId,
+        ownerThreadId: oldMaster,
+        ownerEnvironmentId: "beta",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      });
+      yield* beta.workers.changeOwnership({
+        clientRequestId: "native-transfer",
+        threadId,
+        ownerThreadId: master,
+        ownerEnvironmentId: "gamma",
+        expectedOwnerThreadId: oldMaster,
+        expectedOwnerEnvironmentId: "beta",
+        expectedRevision: assigned.revision,
+      });
+      yield* alpha.moves.request(input);
+      yield* alpha.moves.drain();
+      expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+        state: "complete",
+        error: null,
+      });
+      expect(yield* beta.workers.readOwnership(threadId)).toMatchObject({
+        ownerThreadId: master,
+        ownerEnvironmentId: "gamma",
+      });
+      expect(
+        (yield* beta.workers
+          .send(oldMaster, { threadId, clientRequestId: "stale-native", prompt: "Denied" })
+          .pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      yield* alpha.workers.drain();
+      expect((yield* gamma.workers.list(master))[0]?.environment).toBe("beta");
+      yield* gamma.workers.control(master, { threadId, notifications: true });
+      yield* beta.workers.report(threadId, {
+        clientRequestId: "after-transfer-move",
+        outcome: "blocked",
+        summary: "Moved worker still reports to current master",
+      });
+      yield* beta.workers.drain();
+      yield* alpha.workers.drain();
+      yield* beta.workers.drain();
+      yield* gamma.workers.drain();
+      expect(
+        Option.getOrThrow(yield* gamma.snapshots.getThreadDetailById(master)).messages.filter((m) =>
+          m.text.includes("Moved worker still reports to current master"),
+        ),
+      ).toHaveLength(1);
     }).pipe(Effect.scoped),
 );

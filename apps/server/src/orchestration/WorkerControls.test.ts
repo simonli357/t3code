@@ -2628,7 +2628,9 @@ const peerHandlers = new Map<
   (from: string, request: unknown) => Effect.Effect<unknown, Workers.WorkerError>
 >();
 const offline = new Set<string>();
+const lostReplies = new Set<string>();
 const linkedEnvironments = [
+  { environmentId: "env-gamma", label: "gamma", url: "https://gamma.test", token: "gamma" },
   { environmentId: "env-alpha", label: "alpha", url: "https://alpha.test", token: "alpha" },
   { environmentId: "env-beta", label: "beta", url: "https://beta.test", token: "beta" },
 ];
@@ -2658,6 +2660,20 @@ const environmentLayer = (environmentId: string) =>
               ? handler(environmentId, structuredClone(request)).pipe(
                   Effect.map((response) => structuredClone(response)),
                   Effect.mapError((error) => new PeerRejected({ message: error.message })),
+                  Effect.flatMap((response) => {
+                    const tag =
+                      typeof request === "object" && request !== null && "_tag" in request
+                        ? request._tag
+                        : "";
+                    return lostReplies.delete(`${target}:${tag}`)
+                      ? Effect.fail(
+                          new PeerUnavailable({
+                            environmentId: target,
+                            message: "Response lost after durable acceptance",
+                          }),
+                        )
+                      : Effect.succeed(response);
+                  }),
                 )
               : Effect.fail(new PeerUnavailable({ environmentId: target, message: "offline" }));
           },
@@ -2670,9 +2686,11 @@ const linkedPair = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   const alpha = yield* Layer.build(environmentLayer("env-alpha")).pipe(Scope.provide(scope));
   const beta = yield* Layer.build(environmentLayer("env-beta")).pipe(Scope.provide(scope));
+  const gamma = yield* Layer.build(environmentLayer("env-gamma")).pipe(Scope.provide(scope));
   for (const [id, context] of [
     ["env-alpha", alpha],
     ["env-beta", beta],
+    ["env-gamma", gamma],
   ] as const)
     peerHandlers.set(id, (from, request) =>
       Workers.WorkerControls.pipe(
@@ -2681,6 +2699,7 @@ const linkedPair = Effect.gen(function* () {
       ),
     );
   offline.clear();
+  lostReplies.clear();
   const services = Effect.all([Workers.WorkerControls, ProjectionSnapshotQuery]);
   const [alphaWorkers, alphaSnapshots] = yield* services.pipe(Effect.provide(alpha));
   const [betaWorkers, betaSnapshots] = yield* services.pipe(Effect.provide(beta));
@@ -2688,7 +2707,19 @@ const linkedPair = Effect.gen(function* () {
     snapshots
       .getThreadDetailById(id)
       .pipe(Effect.map((thread) => Option.getOrThrow(thread).messages.map((m) => m.text)));
-  return { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots, messages };
+  const [gammaWorkers, gammaSnapshots] = yield* services.pipe(Effect.provide(gamma));
+  return {
+    gamma,
+    gammaWorkers,
+    gammaSnapshots,
+    alpha,
+    beta,
+    alphaWorkers,
+    betaWorkers,
+    alphaSnapshots,
+    betaSnapshots,
+    messages,
+  };
 });
 
 it.effect("messages a session in a linked environment, holding it while offline", () =>
@@ -2737,9 +2768,9 @@ it.effect("messages a session in a linked environment, holding it while offline"
     ).toHaveLength(1);
     expect(
       (yield* alphaWorkers
-        .message(sender, { ...input, clientRequestId: "x", environment: "gamma" })
+        .message(sender, { ...input, clientRequestId: "x", environment: "unlinked" })
         .pipe(Effect.flip)).message,
-    ).toContain("No linked environment named gamma");
+    ).toContain("No linked environment named unlinked");
   }).pipe(Effect.scoped),
 );
 
@@ -2805,7 +2836,7 @@ it.effect("owns, steers and hears from a worker in a linked environment", () =>
       onFailure: (error: Workers.WorkerError) => error.message,
       onSuccess: () => "accepted",
     });
-    expect(yield* betaWorkers.receive("env-gamma", { _tag: "ping" }).pipe(refusal)).toContain(
+    expect(yield* betaWorkers.receive("env-unlinked", { _tag: "ping" }).pipe(refusal)).toContain(
       "no peer link",
     );
     expect(
@@ -3065,7 +3096,7 @@ it.layer(testLayer)("session organization", (it) => {
           summary: "Signing decision required",
         });
         const before =
-          (yield* sql`SELECT plan_json, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0];
+          (yield* sql`SELECT json_extract(plan_json, '$.modelSelection') AS model, json_extract(plan_json, '$.runtimeMode') AS mode, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0];
         const moved = yield* service.changeOwnership({
           clientRequestId: "transfer",
           threadId: worker,
@@ -3103,7 +3134,7 @@ it.layer(testLayer)("session organization", (it) => {
           (yield* sql`SELECT state, target_id FROM custom_worker_jobs WHERE id = ${queued.requestId}`)[0],
         ).toEqual({ state: "queued", target_id: worker });
         expect(
-          (yield* sql`SELECT plan_json, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
+          (yield* sql`SELECT json_extract(plan_json, '$.modelSelection') AS model, json_extract(plan_json, '$.runtimeMode') AS mode, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
         ).toEqual(before);
         yield* service.changeOwnership({
           clientRequestId: "reassign",
@@ -3315,24 +3346,24 @@ it.effect(
   "retains remote hierarchy offline and synchronizes transfer/release through the authority proxy",
   () =>
     Effect.gen(function* () {
-      const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots } =
-        yield* linkedPair;
+      const { alpha, beta, alphaWorkers, betaWorkers, betaSnapshots } = yield* linkedPair;
       const a = yield* seed("organization-alpha").pipe(Effect.provide(alpha));
       const b = yield* seed("organization-beta").pipe(Effect.provide(beta));
       yield* alphaWorkers.spawn(a.owner, { ...b.input, environment: "beta" });
       offline.add("env-beta");
-      yield* alphaWorkers.changeOwnership({
+      const transferInput = {
         clientRequestId: "remote-transfer",
         threadId: b.worker,
         ownerThreadId: a.source,
         expectedOwnerThreadId: a.owner,
         expectedRevision: 0,
-      });
-      expect(
-        Option.getOrThrow(yield* alphaSnapshots.getThreadShellById(a.source)).organization?.workers,
-      ).toContainEqual({ environmentId: "env-beta", threadId: b.worker });
-      expect((yield* alphaWorkers.list(a.source))[0]?.state).toBe("unreachable");
+      };
+      expect((yield* alphaWorkers.changeOwnership(transferInput).pipe(Effect.flip)).code).toBe(
+        "pending",
+      );
+      expect((yield* alphaWorkers.readOwnership(b.worker)).ownerThreadId).toBe(a.owner);
       offline.delete("env-beta");
+      yield* alphaWorkers.changeOwnership(transferInput);
       yield* alphaWorkers.drain();
       expect(
         Option.getOrThrow(yield* betaSnapshots.getThreadShellById(b.worker)).organization?.owner,
@@ -3363,5 +3394,414 @@ it.effect(
         Option.getOrThrow(yield* betaSnapshots.getThreadShellById(b.worker)).organization?.owner
           ?.threadId,
       ).toBe(a.owner);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "cross-computer ownership assigns, transfers, releases and reassigns without moving native execution",
+  () =>
+    Effect.gen(function* () {
+      const {
+        alpha,
+        beta,
+        gamma,
+        alphaWorkers: aw,
+        betaWorkers: bw,
+        gammaWorkers: cw,
+        betaSnapshots,
+        gammaSnapshots,
+        messages,
+      } = yield* linkedPair;
+      const a = yield* seed("cross-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("cross-b").pipe(Effect.provide(beta));
+      const c = yield* seed("cross-c").pipe(Effect.provide(gamma));
+      const before = Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.source));
+      const native = yield* ProviderSessionDirectory.pipe(
+        Effect.flatMap((d) => d.getBinding(b.source)),
+        Effect.provide(beta),
+      );
+      const assigned = yield* bw.changeOwnership({
+        clientRequestId: "assign-a",
+        threadId: b.source,
+        ownerThreadId: a.owner,
+        ownerEnvironmentId: "env-alpha",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      });
+      expect(assigned.ownerEnvironmentId).toBe("env-alpha");
+      expect((yield* aw.list(a.owner)).map((w) => w.threadId)).toEqual([b.source]);
+      yield* aw.control(a.owner, { threadId: b.source, notifications: false });
+      yield* bw.report(b.source, {
+        clientRequestId: "queued-report",
+        outcome: "blocked",
+        summary: "Exactly one ownership decision",
+      });
+      const moved = yield* aw.changeOwnership({
+        clientRequestId: "transfer-c",
+        threadId: b.source,
+        ownerThreadId: c.owner,
+        ownerEnvironmentId: "env-gamma",
+        expectedOwnerThreadId: a.owner,
+        expectedOwnerEnvironmentId: "env-alpha",
+        expectedRevision: assigned.revision,
+      });
+      yield* cw.control(c.owner, { threadId: b.source, notifications: true });
+      yield* aw.drain();
+      yield* bw.drain();
+      yield* cw.drain();
+      expect(
+        (yield* messages(gammaSnapshots, c.owner)).filter((t) =>
+          t.includes("Exactly one ownership decision"),
+        ),
+      ).toHaveLength(1);
+      expect(
+        (yield* aw
+          .send(a.owner, { threadId: b.source, clientRequestId: "stale", prompt: "must be denied" })
+          .pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      const released = yield* cw.changeOwnership({
+        clientRequestId: "release",
+        threadId: b.source,
+        ownerThreadId: null,
+        expectedOwnerThreadId: c.owner,
+        expectedOwnerEnvironmentId: "env-gamma",
+        expectedRevision: moved.revision,
+      });
+      expect((yield* bw.readOwnership(b.source)).ownerThreadId).toBeNull();
+      yield* bw.changeOwnership({
+        clientRequestId: "assign-again",
+        threadId: b.source,
+        ownerThreadId: a.owner,
+        ownerEnvironmentId: "env-alpha",
+        expectedOwnerThreadId: null,
+        expectedRevision: released.revision,
+      });
+      const after = Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.source));
+      expect(after.messages).toEqual(before.messages);
+      expect(after.modelSelection).toEqual(before.modelSelection);
+      expect(after.worktreePath).toEqual(before.worktreePath);
+      expect(
+        yield* ProviderSessionDirectory.pipe(
+          Effect.flatMap((d) => d.getBinding(b.source)),
+          Effect.provide(beta),
+        ),
+      ).toEqual(native);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "cross-computer unavailable participant retains the relationship and recovers on service restart",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, alphaWorkers: aw, betaWorkers: bw } = yield* linkedPair;
+      const a = yield* seed("offline-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("offline-b").pipe(Effect.provide(beta));
+      const input = {
+        clientRequestId: "offline-assignment",
+        threadId: b.source,
+        ownerThreadId: a.owner,
+        ownerEnvironmentId: "env-alpha",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      };
+      offline.add("env-alpha");
+      expect((yield* bw.changeOwnership(input).pipe(Effect.flip)).code).toBe("pending");
+      expect((yield* bw.readOwnership(b.source)).ownerThreadId).toBeNull();
+      offline.delete("env-alpha");
+      const restarted = yield* Workers.WorkerControls.pipe(
+        Effect.provide(Workers.layer),
+        Effect.provide(beta),
+      );
+      peerHandlers.set("env-beta", (from, request) => restarted.receive(from, request));
+      yield* restarted.drain();
+      const committed = yield* restarted.changeOwnership(input);
+      expect(committed.ownerThreadId).toBe(a.owner);
+      expect((yield* aw.list(a.owner)).map((w) => w.threadId)).toEqual([b.source]);
+      expect((yield* restarted.readOwnership(b.source)).revision).toBe(1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("cross-computer ancestry rejects cycles and concurrent opposing transfers", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, alphaWorkers: aw, betaWorkers: bw } = yield* linkedPair;
+    const a = yield* seed("cycle-a").pipe(Effect.provide(alpha));
+    const b = yield* seed("cycle-b").pipe(Effect.provide(beta));
+    const toB = {
+      clientRequestId: "a-to-b",
+      threadId: a.source,
+      ownerThreadId: b.source,
+      ownerEnvironmentId: "env-beta",
+      expectedOwnerThreadId: null,
+      expectedRevision: 0,
+    };
+    const toA = {
+      clientRequestId: "b-to-a",
+      threadId: b.source,
+      ownerThreadId: a.source,
+      ownerEnvironmentId: "env-alpha",
+      expectedOwnerThreadId: null,
+      expectedRevision: 0,
+    };
+    yield* Effect.all(
+      [aw.changeOwnership(toB).pipe(Effect.exit), bw.changeOwnership(toA).pipe(Effect.exit)],
+      { concurrency: "unbounded" },
+    );
+    yield* aw.drain();
+    yield* bw.drain();
+    const ar = yield* aw.readOwnership(a.source);
+    const br = yield* bw.readOwnership(b.source);
+    expect(ar.ownerThreadId === b.source && br.ownerThreadId === a.source).toBe(false);
+    // Ensure one direction exists, then exercise a non-racing cycle attempt.
+    if (!ar.ownerThreadId && !br.ownerThreadId)
+      yield* aw.changeOwnership({ ...toB, clientRequestId: "one-direction" });
+    const attempt =
+      ar.ownerThreadId || !br.ownerThreadId
+        ? bw.changeOwnership({ ...toA, clientRequestId: "cycle" })
+        : aw.changeOwnership({ ...toB, clientRequestId: "cycle" });
+    expect((yield* attempt.pipe(Effect.flip)).message).toContain("ancestors");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("nested renewal retains a remote parent and children across retry", () =>
+  Effect.gen(function* () {
+    const {
+      alpha,
+      beta,
+      alphaWorkers: aw,
+      betaWorkers: bw,
+      betaSnapshots,
+      messages,
+    } = yield* linkedPair;
+    const a = yield* seed("nested-a").pipe(Effect.provide(alpha));
+    const b = yield* seed("nested-b").pipe(Effect.provide(beta));
+    yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+    const child = ThreadId.make("nested-child");
+    yield* bw.spawn(b.worker, { ...b.input, threadId: child });
+    const successor = ThreadId.make("nested-successor");
+    const input = {
+      ...b.input,
+      threadId: successor,
+      sourceThreadId: undefined,
+      projectId: ProjectId.make("nested-b"),
+      title: "Nested successor",
+      prompt: "Continue supervising",
+    };
+    offline.add("env-alpha");
+    yield* bw.handoff(b.worker, input);
+    yield* bw.drain();
+    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("error");
+    expect((yield* bw.readOwnership(child)).ownerThreadId).toBe(b.worker);
+    offline.delete("env-alpha");
+    lostReplies.add("env-alpha:organizationRenew");
+    yield* bw.handoff(b.worker, input);
+    yield* bw.drain();
+    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("error");
+    const restarted = yield* Workers.WorkerControls.pipe(
+      Effect.provide(Workers.layer),
+      Effect.provide(beta),
+    );
+    peerHandlers.set("env-beta", (from, request) => restarted.receive(from, request));
+    yield* restarted.handoff(b.worker, input);
+    yield* restarted.drain();
+    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("completed");
+    expect((yield* bw.readOwnership(successor)).ownerThreadId).toBe(a.owner);
+    expect((yield* bw.readOwnership(successor)).ownerEnvironmentId).toBe("env-alpha");
+    expect((yield* bw.readOwnership(child)).ownerThreadId).toBe(successor);
+    yield* bw.handoff(b.worker, input);
+    yield* bw.drain();
+    yield* aw.drain();
+    expect((yield* aw.list(a.owner)).filter((w) => w.threadId === successor)).toHaveLength(1);
+    expect(
+      (yield* messages(betaSnapshots, successor)).filter((text) =>
+        text.includes("[T3 orchestrator handoff]"),
+      ),
+    ).toHaveLength(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "committed cross-computer transfer recovers a lost finalize response and delivers a queued report once",
+  () =>
+    Effect.gen(function* () {
+      const {
+        alpha,
+        beta,
+        gamma,
+        alphaWorkers: aw,
+        betaWorkers: bw,
+        gammaWorkers: cw,
+        gammaSnapshots,
+        messages,
+      } = yield* linkedPair;
+      const a = yield* seed("lost-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("lost-b").pipe(Effect.provide(beta));
+      const c = yield* seed("lost-c").pipe(Effect.provide(gamma));
+      yield* bw.changeOwnership({
+        clientRequestId: "lost-assign",
+        threadId: b.source,
+        ownerThreadId: a.owner,
+        ownerEnvironmentId: "env-alpha",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      });
+      const input = {
+        clientRequestId: "lost-transfer",
+        threadId: b.source,
+        ownerThreadId: c.owner,
+        ownerEnvironmentId: "env-gamma",
+        expectedOwnerThreadId: a.owner,
+        expectedOwnerEnvironmentId: "env-alpha",
+        expectedRevision: 1,
+      };
+      lostReplies.add("env-gamma:organizationFinish");
+      expect((yield* bw.changeOwnership(input).pipe(Effect.flip)).code).toBe("pending");
+      expect(
+        (yield* aw
+          .send(a.owner, {
+            threadId: b.source,
+            clientRequestId: "stale-during-recovery",
+            prompt: "Denied",
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("not a worker owned");
+      yield* bw.report(b.source, {
+        clientRequestId: "pending-commit-report",
+        outcome: "blocked",
+        summary: "Recover once",
+      });
+      const restarted = yield* Workers.WorkerControls.pipe(
+        Effect.provide(Workers.layer),
+        Effect.provide(beta),
+      );
+      peerHandlers.set("env-beta", (from, request) => restarted.receive(from, request));
+      yield* restarted.drain();
+      expect((yield* restarted.changeOwnership(input)).revision).toBe(2);
+      lostReplies.add("env-gamma:deliver");
+      yield* restarted.report(b.source, {
+        clientRequestId: "lost-report-response",
+        outcome: "blocked",
+        summary: "Delivery accepted before response loss",
+      });
+      yield* restarted.drain();
+      yield* cw.drain();
+      yield* restarted.drain();
+      const texts = yield* messages(gammaSnapshots, c.owner);
+      expect(texts.filter((text) => text.includes("Recover once"))).toHaveLength(1);
+      expect(
+        texts.filter((text) => text.includes("Delivery accepted before response loss")),
+      ).toHaveLength(1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "scoped agent adoption uses the same remote ownership service and denies a stale owner",
+  () =>
+    Effect.gen(function* () {
+      const {
+        alpha,
+        beta,
+        gamma,
+        alphaWorkers: aw,
+        betaWorkers: bw,
+        gammaWorkers: cw,
+      } = yield* linkedPair;
+      const a = yield* seed("agent-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("agent-b").pipe(Effect.provide(beta));
+      const c = yield* seed("agent-c").pipe(Effect.provide(gamma));
+      const instruction = "Assign that existing remote session to me";
+      yield* directInput(a.owner, "agent-adopt", instruction).pipe(Effect.provide(alpha));
+      expect((yield* aw.readOwnership(b.source, "env-beta")).ownerThreadId).toBeNull();
+      const assigned = yield* aw.changeOwnership(
+        {
+          clientRequestId: "remote-agent-adopt",
+          threadId: b.source,
+          threadEnvironmentId: "env-beta",
+          ownerThreadId: a.owner,
+          ownerEnvironmentId: "env-alpha",
+          expectedOwnerThreadId: null,
+          expectedRevision: 0,
+        },
+        { threadId: a.owner, userRequest: instruction },
+      );
+      yield* bw.changeOwnership({
+        clientRequestId: "remote-agent-transfer",
+        threadId: b.source,
+        ownerThreadId: c.owner,
+        ownerEnvironmentId: "env-gamma",
+        expectedOwnerThreadId: a.owner,
+        expectedOwnerEnvironmentId: "env-alpha",
+        expectedRevision: assigned.revision,
+      });
+      expect(
+        (yield* aw
+          .changeOwnership(
+            {
+              clientRequestId: "stale-agent-adopt",
+              threadId: b.source,
+              threadEnvironmentId: "env-beta",
+              ownerThreadId: a.owner,
+              ownerEnvironmentId: "env-alpha",
+              expectedOwnerThreadId: c.owner,
+              expectedOwnerEnvironmentId: "env-gamma",
+              expectedRevision: assigned.revision + 1,
+            },
+            { threadId: a.owner, userRequest: instruction },
+          )
+          .pipe(Effect.flip)).message,
+      ).toContain("current master");
+      expect((yield* cw.list(c.owner)).map((worker) => worker.threadId)).toEqual([b.source]);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "renews a transferred nested master with a child whose authority is on a third computer",
+  () =>
+    Effect.gen(function* () {
+      const {
+        alpha,
+        beta,
+        gamma,
+        alphaWorkers: aw,
+        betaWorkers: bw,
+        gammaWorkers: cw,
+      } = yield* linkedPair;
+      const a = yield* seed("renew-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("renew-b").pipe(Effect.provide(beta));
+      const c = yield* seed("renew-c").pipe(Effect.provide(gamma));
+      yield* bw.changeOwnership({
+        clientRequestId: "parent",
+        threadId: b.source,
+        ownerThreadId: a.owner,
+        ownerEnvironmentId: "env-alpha",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      });
+      yield* cw.changeOwnership({
+        clientRequestId: "child",
+        threadId: c.source,
+        ownerThreadId: b.source,
+        ownerEnvironmentId: "env-beta",
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      });
+      const successor = ThreadId.make("third-host-renewal");
+      const input = {
+        threadId: successor,
+        projectId: ProjectId.make("renew-b"),
+        title: "Successor with remote family",
+        modelSelection: b.input.modelSelection,
+        prompt: "Continue this group",
+      };
+      yield* bw.handoff(b.source, input);
+      yield* bw.drain();
+      yield* aw.drain();
+      yield* cw.drain();
+      expect((yield* bw.handoffStatus(b.source, { threadId: successor })).state).toBe("completed");
+      expect((yield* bw.readOwnership(successor)).ownerThreadId).toBe(a.owner);
+      expect((yield* cw.readOwnership(c.source)).ownerThreadId).toBe(successor);
+      expect(
+        (yield* aw.list(a.owner)).filter((worker) => worker.threadId === successor),
+      ).toHaveLength(1);
+      expect((yield* bw.list(successor)).map((worker) => worker.threadId)).toEqual([c.source]);
     }).pipe(Effect.scoped),
 );

@@ -1,5 +1,11 @@
 /* oxlint-disable unicorn/no-array-reverse -- Hermes needs copied arrays and reverse(). */
-import { EnvironmentId, type ManagedSessionRef, type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type ManagedSessionRef,
+  type ScopedThreadRef,
+  type SessionOwnershipResult,
+  type SessionOwnershipInput,
+} from "@t3tools/contracts";
 import { scopeThreadRef, scopedThreadKey } from "../environment/scoped.ts";
 import { sortActiveThreadsByOrderKey, sortPinnedThreadsByOrderKey } from "./threadSort.ts";
 import type { EnvironmentThreadShell } from "./models.ts";
@@ -54,7 +60,10 @@ export function buildSessionHierarchy(threads: ReadonlyArray<EnvironmentThreadSh
   const byKey = new Map(threads.map((thread) => [sessionKey(thread), thread]));
   const parentByKey = new Map<string, string>();
   const references = new Map<string, ScopedThreadRef>();
+  const revisions = new Map<string, number>();
   for (const thread of threads) {
+    if (thread.organization?.authorityEnvironmentId)
+      revisions.set(sessionKey(thread), thread.organization.revision);
     const owner = thread.organization?.owner;
     if (owner) {
       const ref = resolveManagedSessionRef(thread.environmentId, owner);
@@ -62,6 +71,7 @@ export function buildSessionHierarchy(threads: ReadonlyArray<EnvironmentThreadSh
       // A connected authority can release/transfer a worker while the execution
       // host is offline. Its complete child list outranks that host's saved owner.
       const authoritativeRelease =
+        !thread.organization?.authorityEnvironmentId &&
         ref.environmentId !== thread.environmentId &&
         master?.organization !== undefined &&
         !master.organization.workers.some(
@@ -73,14 +83,26 @@ export function buildSessionHierarchy(threads: ReadonlyArray<EnvironmentThreadSh
       references.set(scopedThreadKey(ref), ref);
     }
   }
-  // The master's proxy is authoritative for workers on another computer. Its
-  // shell survives disconnection; the execution host may still have an older owner.
+  // Versioned proxies carry the canonical worker revision. Older disconnected
+  // mirrors cannot override a newer execution shell or a newer parent's proxy.
   for (const thread of threads)
     for (const worker of thread.organization?.workers ?? []) {
       const ref = resolveManagedSessionRef(thread.environmentId, worker);
       const key = scopedThreadKey(ref);
       references.set(key, ref);
-      if (ref.environmentId !== thread.environmentId || !byKey.has(key))
+      if (worker.revision !== undefined) {
+        const currentRevision = revisions.get(key) ?? -1;
+        if (
+          worker.revision > currentRevision ||
+          (worker.revision === currentRevision && !byKey.has(key))
+        ) {
+          parentByKey.set(key, sessionKey(thread));
+          revisions.set(key, worker.revision);
+        }
+      } else if (
+        !revisions.has(key) &&
+        (ref.environmentId !== thread.environmentId || !byKey.has(key))
+      )
         parentByKey.set(key, sessionKey(thread));
     }
   // Tolerate incomplete/older snapshots without dropping rows or looping.
@@ -228,4 +250,37 @@ export function expandSessionGroups(input: {
     );
   }
   return result;
+}
+
+/** A confirmed refusal can refresh the editor; an uncertain response must keep
+ * the original request ID and destination until the same request is resolved. */
+export async function recoverOwnershipEdit(
+  error: unknown,
+  read: () => Promise<SessionOwnershipResult | null>,
+): Promise<{ confirmed: boolean; relationship: SessionOwnershipResult | null }> {
+  const confirmed =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "conflict" || error.code === "rejected");
+  return { confirmed, relationship: confirmed ? await read() : null };
+}
+
+export function ownershipEditRequest(
+  pending: SessionOwnershipInput | null,
+  relationship: SessionOwnershipResult,
+  owner: ManagedSessionRef | null,
+  clientRequestId: string,
+): SessionOwnershipInput {
+  return (
+    pending ?? {
+      clientRequestId,
+      threadId: relationship.threadId,
+      ownerThreadId: owner?.threadId ?? null,
+      ownerEnvironmentId: owner?.environmentId ?? null,
+      expectedOwnerThreadId: relationship.ownerThreadId,
+      expectedOwnerEnvironmentId: relationship.ownerEnvironmentId,
+      expectedRevision: relationship.revision,
+    }
+  );
 }

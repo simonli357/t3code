@@ -73,12 +73,15 @@ names such as reviewer or researcher do not change these roles.
 
 Open **Session organization** from a conversation's menu (long-press on mobile),
 or select its role in the web/desktop chat header. Choose an eligible master on
-the current owning computer, or **Independent** to release a worker. The dialog
+any linked computer, or **Independent** to release a worker. The dialog
 shows the current relationship and confirms the change. Assignment preserves
 the conversation, workspace, provider/account/model and running or queued work;
-future reports follow the new owner. Cross-computer workers can be transferred
-between masters on their owning computer. Changing the owning computer itself
-uses the existing native session move flow.
+future reports follow the new owner. Each choice shows its computer. Changing
+ownership leaves the worker on its current computer; moving its execution uses
+the separate native session move flow. All participating computers must be
+reachable to verify ancestry and prepare the change. If a connection is lost,
+use **Retry change**: T3 resumes the same durable request instead of creating a
+second transfer. A stale relationship refreshes in the open editor for review.
 
 The sidebar groups workers under their master while keeping each worker's actual
 project and computer. Collapsed groups show running work, attention requests and
@@ -88,9 +91,10 @@ path. Pins, snoozes and settlement still apply within the group. Collapsing a
 group or closing a tab does not stop its workers.
 
 You can message a worker directly; its master sees a compact direct-input marker.
-Renewing a master transfers its workers to the successor. A nested master with a
-parent on another computer currently requires coordination through that parent;
-T3 preserves its relationship and explains this restriction instead of detaching it.
+Renewing a master transfers its workers to the successor. A nested master keeps
+its parent, including a parent on another computer. Retry an interrupted renewal
+with the same successor; its durable intent preserves the parent and children
+without starting another conversation.
 
 ## Queue messages offline on mobile
 

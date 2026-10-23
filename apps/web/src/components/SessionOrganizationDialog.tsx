@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   EnvironmentId,
-  ThreadId,
   type ScopedThreadRef,
   type SessionOwnershipResult,
   type SessionOwnershipInput,
@@ -10,6 +9,8 @@ import {
   buildSessionHierarchy,
   sessionKey,
   sessionRole,
+  recoverOwnershipEdit,
+  ownershipEditRequest,
 } from "@t3tools/client-runtime/state/session-organization";
 import {
   squashAtomCommandFailure,
@@ -69,10 +70,16 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
     thread?.organization?.authorityEnvironmentId ?? ownerRef?.environmentId ?? source.environmentId,
   );
   const currentOwner = relationship ? relationship.ownerThreadId : ownerRef?.threadId;
+  const ownerEnvironment =
+    relationship?.ownerEnvironmentId ?? ownerRef?.environmentId ?? source.environmentId;
   const owner = currentOwner
-    ? threads.find((t) => t.environmentId === authorityEnvironment && t.id === currentOwner)
+    ? threads.find((t) => t.environmentId === ownerEnvironment && t.id === currentOwner)
     : null;
-  const [destination, setDestination] = useState<string>(ownerRef?.threadId ?? "independent");
+  const [destination, setDestination] = useState<string>(
+    ownerRef
+      ? JSON.stringify([ownerRef.environmentId ?? source.environmentId, ownerRef.threadId])
+      : "independent",
+  );
   const [pending, setPending] = useState<SessionOwnershipInput | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +91,6 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
     environments.find((e) => e.environmentId === environment)?.label ?? environment;
   const candidates = threads.filter(
     (candidate) =>
-      candidate.environmentId === authorityEnvironment &&
       candidate.archivedAt === null &&
       !(candidate.id === source.threadId && candidate.environmentId === source.environmentId) &&
       !hierarchy.path(sessionKey(candidate)).includes(thread ? sessionKey(thread) : ""),
@@ -97,7 +103,14 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
           if (disposed) return;
           if (outcome._tag === "Success") {
             setRelationship(outcome.value);
-            setDestination(outcome.value.ownerThreadId ?? "independent");
+            setDestination(
+              outcome.value.ownerThreadId
+                ? JSON.stringify([
+                    outcome.value.ownerEnvironmentId ?? authorityEnvironment,
+                    outcome.value.ownerThreadId,
+                  ])
+                : "independent",
+            );
           } else setError(String(squashAtomCommandFailure(outcome)));
         },
       );
@@ -107,13 +120,21 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
   }, [read, authorityEnvironment, source.threadId, connected]);
   const submit = async () => {
     if (!thread?.organization || !relationship || busy) return;
-    const input = pending ?? {
-      clientRequestId: randomUUID(),
-      threadId: source.threadId,
-      ownerThreadId: destination === "independent" ? null : ThreadId.make(destination),
-      expectedOwnerThreadId: relationship.ownerThreadId,
-      expectedRevision: relationship.revision,
-    };
+    const destinationThread = candidates.find(
+      (t) => JSON.stringify([t.environmentId, t.id]) === destination,
+    );
+    if (!pending && destination !== "independent" && !destinationThread) {
+      setError("The selected master is no longer available. Choose a master again.");
+      return;
+    }
+    const input = ownershipEditRequest(
+      pending,
+      relationship,
+      destinationThread
+        ? { environmentId: destinationThread.environmentId, threadId: destinationThread.id }
+        : null,
+      randomUUID(),
+    );
     setPending(input);
     setBusy(true);
     setError(null);
@@ -124,10 +145,24 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
         setResult(
           outcome.value.ownerThreadId === null
             ? "This session is now independent."
-            : `Master: ${candidates.find((t) => t.id === outcome.value.ownerThreadId)?.title ?? outcome.value.ownerThreadId}. Future reports go to this master.`,
+            : `Master: ${candidates.find((t) => t.id === outcome.value.ownerThreadId && t.environmentId === outcome.value.ownerEnvironmentId)?.title ?? outcome.value.ownerThreadId}. Future reports go to this master.`,
         );
         setPending(null);
-      } else setError(String(squashAtomCommandFailure(outcome)));
+      } else {
+        const failure = squashAtomCommandFailure(outcome);
+        setError(String(failure));
+        const recovery = await recoverOwnershipEdit(failure, async () => {
+          const refreshed = await read({
+            environmentId: authorityEnvironment,
+            input: { threadId: source.threadId },
+          });
+          return refreshed._tag === "Success" ? refreshed.value : null;
+        });
+        if (recovery.confirmed) {
+          setPending(null);
+          setRelationship(recovery.relationship);
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -162,7 +197,7 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
               {thread?.title} · {displayedRole}
               <br />
               {currentOwner
-                ? `Current master: ${owner?.title ?? currentOwner} · ${label(authorityEnvironment)}`
+                ? `Current master: ${owner?.title ?? currentOwner} · ${label(ownerEnvironment)}`
                 : "No current master"}
             </p>
             <div className="flex flex-col gap-1.5">
@@ -174,7 +209,7 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
                   setPending(null);
                   setResult(null);
                 }}
-                disabled={busy}
+                disabled={busy || pending !== null}
               >
                 <SelectTrigger id="session-master">
                   <SelectValue />
@@ -182,7 +217,10 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
                 <SelectPopup>
                   <SelectItem value="independent">Independent</SelectItem>
                   {candidates.map((candidate) => (
-                    <SelectItem key={candidate.id} value={candidate.id}>
+                    <SelectItem
+                      key={sessionKey(candidate)}
+                      value={JSON.stringify([candidate.environmentId, candidate.id])}
+                    >
                       {candidate.title} ·{" "}
                       {projects.find(
                         (p) =>
@@ -217,6 +255,23 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
           <Button variant="outline" onClick={close} disabled={busy}>
             Close
           </Button>
+          {!relationship && connected && (
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                void read({
+                  environmentId: authorityEnvironment,
+                  input: { threadId: source.threadId },
+                }).then((outcome) => {
+                  if (outcome._tag === "Success") setRelationship(outcome.value);
+                  else setError(String(squashAtomCommandFailure(outcome)));
+                });
+              }}
+            >
+              Refresh relationship
+            </Button>
+          )}
           <Button
             onClick={() => void submit()}
             disabled={
