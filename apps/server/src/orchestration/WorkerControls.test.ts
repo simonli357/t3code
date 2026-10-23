@@ -796,6 +796,12 @@ it.layer(testLayer)("persistent workers", (it) => {
         `[T3 worker report — ${input.title}]`,
       );
       yield* sql`UPDATE custom_worker_jobs SET prompt = ${legacy} WHERE id = ${first.requestId}`;
+      yield* (yield* OrchestrationEngineService).dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("rename-legacy-report"),
+        threadId: worker,
+        title: "renamed legacy worker",
+      });
       yield* TestClock.adjust("1 day");
       expect((yield* service.report(worker, report)).requestId).toBe(first.requestId);
       expect(
@@ -807,6 +813,58 @@ it.layer(testLayer)("persistent workers", (it) => {
           .message,
       ).toContain("different assignment");
     }),
+  );
+  it.effect(
+    "uses the renamed worker title for new reports and lists while preserving retries",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
+        const { owner, worker, input } = yield* seed("renamed-report");
+        yield* service.spawn(owner, input);
+        yield* TestClock.setTime(Date.parse("2026-01-15T18:05:00Z"));
+        const report = {
+          clientRequestId: "original",
+          outcome: "blocked" as const,
+          summary: "Capacity required.",
+        };
+        const first = yield* service.report(worker, report);
+        const saved = (yield* sql<{
+          prompt: string;
+        }>`SELECT prompt FROM custom_worker_jobs WHERE id = ${first.requestId}`)[0]!.prompt;
+        expect(saved.split("\n")[0]).toBe(`[T3 worker report — ${input.title} — 13:05]`);
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("rename-worker-assignment"),
+          threadId: worker,
+          title: "computers_deploy_worker_astra",
+        });
+        expect((yield* service.list(owner))[0]!.title).toBe("computers_deploy_worker_astra");
+        yield* TestClock.adjust("2 minutes");
+        expect((yield* service.report(worker, report)).requestId).toBe(first.requestId);
+        expect(
+          (yield* sql<{
+            prompt: string;
+          }>`SELECT prompt FROM custom_worker_jobs WHERE id = ${first.requestId}`)[0]!.prompt,
+        ).toBe(saved);
+        expect(
+          (yield* service
+            .report(worker, { ...report, summary: "Different result." })
+            .pipe(Effect.flip)).message,
+        ).toContain("different assignment");
+        const next = yield* service.report(worker, {
+          ...report,
+          clientRequestId: "new-assignment",
+        });
+        expect(
+          (yield* sql<{
+            prompt: string;
+          }>`SELECT prompt FROM custom_worker_jobs WHERE id = ${next.requestId}`)[0]!.prompt.split(
+            "\n",
+          )[0],
+        ).toBe("[T3 worker report — computers_deploy_worker_astra — 13:07]");
+      }),
   );
   it.effect("delivers explicit reports without waiting for background liveness", () =>
     Effect.gen(function* () {
@@ -2149,6 +2207,12 @@ it.layer(testLayer)("persistent workers", (it) => {
         const sql = yield* SqlClient.SqlClient;
         const { owner, worker, input } = yield* seed(`runtime-time-${state}`);
         yield* service.spawn(owner, input);
+        yield* (yield* OrchestrationEngineService).dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`runtime-rename-${state}`),
+          threadId: worker,
+          title: `current-${state}-assignment`,
+        });
         yield* session(worker, "running", `timed-${state}-turn`);
         yield* session(worker, state, `timed-${state}-end`);
         // An in-flight session move parks delivery without suppressing report creation.
@@ -2161,10 +2225,16 @@ it.layer(testLayer)("persistent workers", (it) => {
           FROM custom_worker_jobs WHERE worker_id = ${worker} AND kind = 'notice'`;
         expect(notices).toHaveLength(1);
         expect(notices[0]!.prompt.split("\n")[0]).toBe(
-          `[T3 worker report — ${input.title} — 20:05]`,
+          `[T3 worker report — current-${state}-assignment — 20:05]`,
         );
         expect(notices[0]!.prompt).toContain(`Runtime state: ${state}`);
         expect(notices[0]!.state).toBe("queued");
+        yield* (yield* OrchestrationEngineService).dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`runtime-rename-again-${state}`),
+          threadId: worker,
+          title: `next-${state}-assignment`,
+        });
         yield* TestClock.adjust("1 hour");
         yield* sql`UPDATE custom_session_moves SET locked = 0 WHERE id = ${"hold-" + state}`;
         const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));

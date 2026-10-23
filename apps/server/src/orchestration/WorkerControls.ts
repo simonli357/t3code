@@ -732,7 +732,7 @@ const make = Effect.gen(function* () {
       threadId: plan.threadId,
       ownerThreadId: ThreadId.make(worker.owner_id),
       sourceThreadId: plan.sourceThreadId ?? null,
-      title: plan.title,
+      title: Option.isSome(status) ? status.value.title : plan.title,
       modelSelection: plan.modelSelection,
       state,
       error: worker.error,
@@ -839,13 +839,15 @@ const make = Effect.gen(function* () {
   const report = Effect.fn(function* (worker: Worker, job: Job, suffix: string, detail: string) {
     if (!worker.notify) return;
     const plan = decodePlan(worker.plan_json);
+    const current = yield* snapshots.getThreadShellById(plan.threadId);
+    const title = Option.isSome(current) ? current.value.title : plan.title;
     const createdAt = yield* now;
     yield* enqueue(
       `notice:${job.id}:${suffix}`,
       worker,
       worker.owner_id,
       "notice",
-      `${reportHeader(plan.title, createdAt)}\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
+      `${reportHeader(title, createdAt)}\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
     );
   });
 
@@ -980,14 +982,12 @@ const make = Effect.gen(function* () {
     const worker = rows[0];
     if (!worker)
       return yield* new WorkerError({ message: "This session is not a managed T3 worker." });
-    const plan = decodePlan(worker.plan_json);
     const source = yield* thread(workerId);
     const outcome =
       input.outcome === "done"
         ? "done"
         : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
-    const prompt = (createdAt?: string) =>
-      `${reportHeader(plan.title, createdAt)}\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
+    const body = `\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
     const reportId = `report:${workerId}:${input.clientRequestId}`;
     const limits = yield* renewal;
     const work = yield* workOf(workerId, limits);
@@ -1002,16 +1002,16 @@ const make = Effect.gen(function* () {
     // pass. Reading the owner in the insert keeps it consistent with a handoff,
     // which retargets queued reports in one transaction.
     yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
-        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt(createdAt) + usage}, ${createdAt}, ${turnId}
+        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${reportHeader(source.title, createdAt) + body + usage}, ${createdAt}, ${turnId}
         FROM custom_workers WHERE thread_id = ${workerId}
         ON CONFLICT(id) DO NOTHING`;
     const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`)[0];
-    // Retries retain the saved time, including headers from before timestamps.
-    // The working-time lines change over time and are excluded from the match.
+    // Titles and working time can change after submission. Match the report body
+    // while retaining its saved header, including reports from before timestamps.
     if (
       !job ||
       job.kind !== input.outcome ||
-      (!job.prompt.startsWith(prompt(job.created_at)) && !job.prompt.startsWith(prompt()))
+      !job.prompt.slice(job.prompt.indexOf(`\nWorker: ${workerId}\n`)).startsWith(body)
     )
       return yield* new WorkerError({
         message: "This report ID already belongs to a different assignment.",
