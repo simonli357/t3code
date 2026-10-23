@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderDriverKind,
+  PROVIDER_DISPLAY_NAMES,
   ProviderInstanceId,
   ThreadId,
   AllocationPolicy,
@@ -12,6 +13,7 @@ import {
   type AllocationOperation,
   type AllocationRequest,
   type AllocationSnapshot,
+  type AllocationResponse,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import {
@@ -19,6 +21,7 @@ import {
   allocationPreviewKey,
   allocationChartPoints,
   allocationSummary,
+  allocationAccountLabel,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -33,6 +36,10 @@ const time = (value: string | null) =>
 const field = "rounded border bg-background px-2 py-1 text-sm";
 
 export function ProviderAllocationPage({ environmentId }: { environmentId: EnvironmentId }) {
+  return <AllocationEditor key={environmentId} environmentId={environmentId} />;
+}
+
+function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
   const start = useAtomCommand(commands.start, { reportFailure: false });
   const projects = useProjects().filter((p) => p.environmentId === environmentId);
@@ -45,6 +52,7 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [coordinator, setCoordinator] = useState<string>(environmentId);
+  const [connections, setConnections] = useState<AllocationResponse["connections"]>();
   const [request, setRequest] = useState<AllocationRequest>(() => ({
     assignmentId: randomUUID(),
     threadId: ThreadId.make(randomUUID()),
@@ -92,6 +100,9 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
     }
   };
   const load = async () => {
+    const topology = await execute({ environmentId, input: { _tag: "connections" } });
+    if (topology._tag === "Success" && topology.value.connections)
+      setConnections(topology.value.connections);
     const response = await call({ _tag: "snapshot" });
     if (!response?.snapshot) return;
     setSnapshot(response.snapshot);
@@ -101,6 +112,11 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
   };
   useEffect(() => {
     let active = true;
+    void execute({ environmentId, input: { _tag: "connections" } }).then((result) => {
+      if (!active || result._tag !== "Success" || !result.value.connections) return;
+      setConnections(result.value.connections);
+      setCoordinator(result.value.connections.coordinatorEnvironmentId ?? environmentId);
+    });
     void execute({ environmentId, input: { _tag: "snapshot" } }).then((result) => {
       if (!active) return;
       if (result._tag === "Success" && result.value.snapshot) {
@@ -113,6 +129,15 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
       active = false;
     };
   }, [environmentId, execute]);
+  const environmentLabel = (id: string) =>
+    connections?.environments.find((e) => e.environmentId === id)?.label ??
+    snapshot?.inventories.find((i) => i.environmentId === id)?.environmentLabel ??
+    (id === environmentId ? "This environment" : "Disconnected environment");
+  const coordinatorChoices = connections?.environments ?? [
+    { environmentId, label: "This environment" },
+  ];
+  const accountLabel = (host: string, instance: string) =>
+    allocationAccountLabel(snapshot, host, instance);
   const accounts =
     snapshot?.inventories
       .flatMap((i) => i.accounts)
@@ -249,18 +274,35 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
       )}
       <div className="flex flex-wrap items-end gap-3">
         <label>
-          Coordinator environment ID
-          <input
+          Coordinator
+          <select
             className={field}
+            disabled={busy || !connections}
             value={coordinator}
-            onChange={(e) => setCoordinator(e.target.value)}
-          />
+            onChange={(e) => {
+              setCoordinator(e.target.value);
+              setPreviewKey(null);
+            }}
+          >
+            {coordinatorChoices.map((e) => (
+              <option key={e.environmentId} value={e.environmentId}>
+                {e.label}
+                {e.environmentId === environmentId ? " (this environment)" : ""}
+              </option>
+            ))}
+            {!coordinatorChoices.some((e) => e.environmentId === coordinator) && (
+              <option value={coordinator}>Previously selected environment (not linked)</option>
+            )}
+          </select>
         </label>
         <Button
-          disabled={busy || !coordinator}
+          disabled={busy || !coordinator || !connections}
           onClick={async () => {
-            if (await call({ _tag: "connect", coordinatorEnvironmentId: coordinator }))
+            if (await call({ _tag: "connect", coordinatorEnvironmentId: coordinator })) {
+              setSnapshot(null);
+              setPreviewKey(null);
               await load();
+            }
           }}
         >
           Connect coordinator
@@ -269,6 +311,15 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
           Refresh
         </Button>
       </div>
+      <p className="text-xs text-muted-foreground">
+        Choose this computer or a linked environment from Connections. Linked environments may be
+        offline; the connection must succeed before their coordinator can be used.
+      </p>
+      <details>
+        <summary>Advanced connection details</summary>
+        <p>Execution environment ID: {environmentId}</p>
+        <p>Selected coordinator ID: {coordinator}</p>
+      </details>
       <p className="text-sm">
         {snapshot?.authorityAvailable
           ? `Coordinator ready · policy ${snapshot.policy.version} · ${snapshot.policy.mode}`
@@ -292,7 +343,9 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
               }
             >
               {drivers.map((d) => (
-                <option key={d}>{d}</option>
+                <option key={d} value={d}>
+                  {PROVIDER_DISPLAY_NAMES[d] ?? "Other provider"}
+                </option>
               ))}
             </select>
           </label>
@@ -388,7 +441,13 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
         <Button disabled={busy || !request.model} onClick={() => void preview()}>
           Preview assignment and policy
         </Button>
-        {decision && <DecisionView decision={decision} />}
+        {decision && (
+          <DecisionView
+            decision={decision}
+            accountLabel={accountLabel}
+            environmentLabel={environmentLabel}
+          />
+        )}
         <details>
           <summary>Start a new session with this assignment</summary>
           <div className="mt-3 grid gap-3">
@@ -634,7 +693,9 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
             >
               <p>
                 {o.windowId} ·{" "}
-                {accounts.find((a) => a.accountKey === o.accountKey)?.label ?? o.accountKey}
+                {snapshot?.inventories
+                  .flatMap((i) => i.accounts)
+                  .find((a) => a.accountKey === o.accountKey)?.label ?? "Unavailable account"}
               </p>
               <p>
                 Use by {time(o.useBy ?? null)}; expires {time(o.expiresAt)}.{" "}
@@ -657,16 +718,20 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
         {snapshot?.inventories.map((host) => (
           <div key={host.environmentId}>
             <h3>
-              {host.environmentId} · {host.complete ? "load observed" : "load unknown"}
+              {environmentLabel(host.environmentId)} ·{" "}
+              {host.complete ? "load observed" : "load unknown"}
             </h3>
             {host.accounts.map((a) => (
               <article key={a.instanceId} className="my-3 rounded border p-3">
                 <h4 className="font-medium">
-                  {a.label} · {a.driver}
+                  {a.label} · {PROVIDER_DISPLAY_NAMES[a.driver] ?? "Other provider"}
                 </h4>
                 <p className="text-xs">
-                  Identity: {a.accountKey ?? "unknown"} · short window: {a.shortWindow} ·{" "}
-                  {host.demand.filter((d) => d.accountKey === a.accountKey).length} ongoing ·{" "}
+                  Short window:{" "}
+                  {a.shortWindow === "known-absent"
+                    ? "none reported in complete read"
+                    : a.shortWindow}{" "}
+                  · {host.demand.filter((d) => d.accountKey === a.accountKey).length} ongoing ·{" "}
                   {
                     snapshot.reservations.filter(
                       (r) =>
@@ -675,6 +740,15 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
                   }{" "}
                   pending
                 </p>
+                <details>
+                  <summary>Advanced account details</summary>
+                  <p>Account identity: {a.accountKey ?? "unknown"}</p>
+                  <p>Provider instance ID: {a.instanceId}</p>
+                  <p>Environment ID: {host.environmentId}</p>
+                  {a.shortWindowAbsentCheckedAt && (
+                    <p>Complete window read: {time(a.shortWindowAbsentCheckedAt)}</p>
+                  )}
+                </details>
                 {a.unavailableReason && <p>{a.unavailableReason}</p>}
                 {a.windows.map((w) => {
                   const points = a.accountKey
@@ -761,7 +835,8 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
               className="flex flex-wrap items-center gap-3 rounded border p-2 text-sm"
             >
               <span>
-                {r.instanceId} · {r.request.model} · {r.request.environmentId} ·{" "}
+                {accountLabel(r.request.environmentId, r.instanceId)} · {r.request.model} ·{" "}
+                {environmentLabel(r.request.environmentId)} ·{" "}
                 {r.state === "consumed" ? "running" : r.state} · unused lease expires{" "}
                 {time(r.expiresAt)}
               </span>
@@ -798,21 +873,40 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
             className="my-2 rounded border p-2"
           >
             <summary>
-              {time(d.at)} · {d.selectedInstanceId ?? d.outcome} · policy {d.policyVersion}
+              {time(d.at)} ·{" "}
+              {d.selectedInstanceId
+                ? accountLabel(d.request.environmentId, d.selectedInstanceId)
+                : d.outcome}{" "}
+              · policy {d.policyVersion}
             </summary>
-            <DecisionView decision={d} />
+            <DecisionView
+              decision={d}
+              accountLabel={accountLabel}
+              environmentLabel={environmentLabel}
+            />
           </details>
         ))}
       </section>
     </div>
   );
 }
-function DecisionView({ decision }: { decision: AllocationDecision }) {
+function DecisionView({
+  decision,
+  accountLabel,
+  environmentLabel,
+}: {
+  decision: AllocationDecision;
+  accountLabel: (host: string, instance: string) => string;
+  environmentLabel: (host: string) => string;
+}) {
   const summary = allocationSummary(decision);
   return (
     <div className="rounded border p-3">
       <p className="font-medium">
-        {summary.choice} · {summary.confidence} confidence
+        {decision.selectedInstanceId
+          ? accountLabel(decision.request.environmentId, decision.selectedInstanceId)
+          : summary.choice}{" "}
+        · {summary.confidence} confidence
       </p>
       <p>{summary.reason}</p>
       <p className="text-sm">
@@ -821,7 +915,8 @@ function DecisionView({ decision }: { decision: AllocationDecision }) {
       {decision.candidates.map((c) => (
         <details key={`${c.environmentId}:${c.instanceId}`}>
           <summary>
-            {c.instanceId}: {c.eligible ? "eligible" : "excluded"}
+            {accountLabel(c.environmentId, c.instanceId)} · {environmentLabel(c.environmentId)}:{" "}
+            {c.eligible ? "eligible" : "excluded"}
           </summary>
           <p className="text-sm">{c.reasons.join(" ")}</p>
           {c.windows.map((w) => (

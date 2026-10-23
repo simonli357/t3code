@@ -52,6 +52,7 @@ const account = (id: string, patch: Partial<AllocationAccount> = {}): Allocation
     },
   ],
   shortWindow: "reported",
+  shortWindowAbsentCheckedAt: at,
   windows: [
     window(),
     window({
@@ -122,6 +123,81 @@ describe("allowance curves", () => {
   });
 });
 describe("deterministic admission", () => {
+  it("never borrows unrelated resets for unknown or incompatible account blockers", () => {
+    const claude = account("claude", { driver: ProviderDriverKind.make("claudeAgent") });
+    for (const patch of [
+      { shortWindow: "unknown" as const, windows: [window()] },
+      { models: [] },
+      { accountKey: null },
+      { available: false },
+      { environmentId: "other" },
+      {
+        shortWindow: "known-absent" as const,
+        shortWindowAbsentCheckedAt: "2026-10-22T12:00:00.000Z",
+        windows: [window()],
+      },
+    ]) {
+      const result = decideAllocation({
+        ...input(),
+        inventories: [inventory([account("a", patch), claude])],
+      });
+      expect(result.outcome).toBe("unavailable");
+      expect(result.waitUntil).toBeNull();
+    }
+  });
+  it("estimates the latest blocking reset of a compatible candidate, conditional on fresh confirmation", () => {
+    const full = account("full", {
+      windows: [
+        window({
+          id: "short",
+          kind: "session",
+          durationHours: 5,
+          usedPoints: 99,
+          resetsAt: "2026-10-23T18:00:00.000Z",
+        }),
+        window({
+          id: "other-short",
+          kind: "session",
+          durationHours: 5,
+          usedPoints: 99,
+          resetsAt: "2026-10-23T19:00:00.000Z",
+        }),
+      ],
+    });
+    const x = {
+      ...input(),
+      inventories: [
+        inventory([full, account("claude", { driver: ProviderDriverKind.make("claudeAgent") })]),
+      ],
+    };
+    expect(decideAllocation(x)).toMatchObject({
+      outcome: "wait",
+      waitUntil: "2026-10-23T19:00:00.000Z",
+    });
+    expect(decideAllocation({ ...x, authorityAvailable: false })).toMatchObject({
+      outcome: "unavailable",
+      waitUntil: null,
+    });
+    expect(
+      decideAllocation({
+        ...x,
+        request: { ...request, explicitInstanceId: ProviderInstanceId.make("missing") },
+      }).waitUntil,
+    ).toBeNull();
+    expect(
+      decideAllocation({
+        ...x,
+        inventories: [
+          inventory([
+            {
+              ...full,
+              windows: full.windows.map((w) => ({ ...w, checkedAt: "2026-10-22T12:00:00.000Z" })),
+            },
+          ]),
+        ],
+      }).waitUntil,
+    ).toBeNull();
+  });
   it("replays byte-for-byte and breaks ties by stable identity, not input order", () => {
     const x = input();
     expect(decideAllocation(x).selectedInstanceId).toBe("a");

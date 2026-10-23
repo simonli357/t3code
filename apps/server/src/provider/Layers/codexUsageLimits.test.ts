@@ -13,6 +13,45 @@ import {
 const checkedAt = "2026-07-18T10:00:00.000Z";
 
 describe("codexRateLimitsToLimits", () => {
+  it("records absence only from explicit complete reads, never partial or ambiguous snapshots", () => {
+    const weekly = { usedPercent: 5, windowDurationMins: 10080, resetsAt: 1_793_382_503 };
+    const snapshot = { primary: weekly, secondary: null };
+    expect(codexRateLimitsToLimits({ checkedAt, completeRead: true, snapshot })).toMatchObject({
+      shortWindowAbsent: true,
+      shortWindowAbsentCheckedAt: checkedAt,
+    });
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        completeRead: true,
+        snapshot: {
+          primary: null,
+          secondary: weekly,
+        },
+      }).shortWindowAbsent,
+    ).toBe(true);
+    for (const snapshot of [
+      { primary: weekly },
+      { primary: null, secondary: null },
+      { primary: { usedPercent: 5 }, secondary: null },
+      { primary: { ...weekly, windowDurationMins: NaN }, secondary: null },
+      { primary: { ...weekly, windowDurationMins: 300 }, secondary: weekly },
+    ]) {
+      expect(
+        codexRateLimitsToLimits({ checkedAt, completeRead: true, snapshot }).shortWindowAbsent,
+      ).toBeUndefined();
+    }
+    expect(codexRateLimitsToLimits({ checkedAt, snapshot }).shortWindowAbsent).toBeUndefined();
+    expect(codexRateLimitsToUpdate(snapshot)).not.toHaveProperty("shortWindowAbsent");
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        completeRead: true,
+        snapshot,
+        rateLimitsByLimitId: { codex: snapshot, spark: { primary: weekly } },
+      }).shortWindowAbsent,
+    ).toBeUndefined();
+  });
   it("maps primary and secondary onto the session and weekly windows", () => {
     expect(
       codexRateLimitsToLimits({

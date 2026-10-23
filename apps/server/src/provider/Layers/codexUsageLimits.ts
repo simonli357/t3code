@@ -115,6 +115,8 @@ export function codexResetCreditsToContract(
 }
 
 export function codexRateLimitsToLimits(input: {
+  /** Only the successful account/rateLimits/read path supplies this, never notifications. */
+  readonly completeRead?: boolean;
   readonly snapshot: CodexRateLimitSnapshot;
   readonly rateLimitsByLimitId?:
     | Readonly<Record<string, CodexRateLimitSnapshot>>
@@ -130,12 +132,33 @@ export function codexRateLimitsToLimits(input: {
   const windows = [...buckets]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .flatMap(([limitId, snapshot]) => codexRateLimitsToWindows({ ...snapshot, limitId }));
+  // A full read describes the current reported window set. Require explicit slots
+  // and durations: omitted/invalid fields and duration fallbacks cannot prove absence.
+  // This is not a guarantee about enforcement limits the upstream API does not expose.
+  const shortWindowAbsent =
+    input.completeRead === true &&
+    buckets.has("codex") &&
+    windows.length > 0 &&
+    [...buckets.values()].every((snapshot) =>
+      [snapshot.primary, snapshot.secondary].every(
+        (window) =>
+          window === null ||
+          (window !== undefined &&
+            Number.isFinite(window.usedPercent) &&
+            typeof window.windowDurationMins === "number" &&
+            Number.isFinite(window.windowDurationMins) &&
+            window.windowDurationMins > 1440),
+      ),
+    );
   return {
     ...makeUsageLimits({
       checkedAt: input.checkedAt,
       windows,
     }),
     ...(resetCredits ? { resetCredits } : {}),
+    ...(shortWindowAbsent
+      ? { shortWindowAbsent: true, shortWindowAbsentCheckedAt: input.checkedAt }
+      : {}),
   };
 }
 

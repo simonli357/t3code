@@ -52,7 +52,9 @@ export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
  * last good bars for the latter and clear them for the former.
  */
 export const ServerProviderUsageLimits = Schema.Struct({
+  /** No short window in a complete provider read; sparse updates cannot renew this evidence. */
   shortWindowAbsent: Schema.optional(Schema.Boolean),
+  shortWindowAbsentCheckedAt: Schema.optional(IsoDateTime),
   checkedAt: IsoDateTime,
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
   /** Opaque credential identity when the provider does not report an account. */

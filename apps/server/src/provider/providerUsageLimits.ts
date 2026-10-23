@@ -109,6 +109,9 @@ export function applyUsageLimitsUpdate(input: {
     ...(previous?.shortWindowAbsent !== undefined
       ? { shortWindowAbsent: previous.shortWindowAbsent }
       : {}),
+    ...(previous?.shortWindowAbsentCheckedAt !== undefined
+      ? { shortWindowAbsentCheckedAt: previous.shortWindowAbsentCheckedAt }
+      : {}),
   };
 }
 

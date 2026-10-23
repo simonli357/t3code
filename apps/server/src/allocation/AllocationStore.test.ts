@@ -43,6 +43,7 @@ const inventory = (environmentId: string): AllocationInventory => ({
       limitedUntil: null,
       models: [{ slug: "astra", capabilities: null }],
       shortWindow: "known-absent",
+      shortWindowAbsentCheckedAt: at,
       resetCredits: null,
       profileSamples: 0,
       profileUncertainty: 1,

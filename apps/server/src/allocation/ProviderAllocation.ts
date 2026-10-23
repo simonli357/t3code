@@ -117,6 +117,7 @@ const make = Effect.gen(function* () {
     }
     return {
       ...current,
+      environmentLabel: local.label,
       demand,
       coordinatorEnvironmentId: (yield* settings.getSettings).allocationCoordinatorEnvironmentId,
     };
@@ -170,6 +171,7 @@ const make = Effect.gen(function* () {
             Effect.succeed({
               coordinatorEnvironmentId: null,
               environmentId: peer.environmentId,
+              environmentLabel: peer.label,
               observedAt: own.observedAt,
               accounts: [],
               demand: [],
@@ -275,7 +277,7 @@ const make = Effect.gen(function* () {
       }
       return { reservation: yield* store.lifecycle(operation.input, yield* now) };
     }
-    if (operation._tag === "connect")
+    if (operation._tag === "connect" || operation._tag === "connections")
       return yield* new AllocationError({
         code: "invalid",
         detail: "Connect must run on the requesting environment.",
@@ -322,6 +324,16 @@ const make = Effect.gen(function* () {
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
     operation: AllocationOperation,
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
+    if (operation._tag === "connections")
+      return {
+        connections: {
+          coordinatorEnvironmentId: (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
+            .allocationCoordinatorEnvironmentId,
+          environments: [local, ...(yield* peers.list.pipe(Effect.mapError(unavailable)))].map(
+            ({ environmentId, label }) => ({ environmentId, label }),
+          ),
+        },
+      };
     if (operation._tag === "connect") {
       yield* store.expireUnused(yield* now);
       const id = operation.coordinatorEnvironmentId;

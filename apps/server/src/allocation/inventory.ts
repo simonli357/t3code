@@ -104,9 +104,12 @@ export function allocationInventory(input: {
           (w.windowDurationMins !== undefined && w.windowDurationMins <= 1440),
       )
         ? "reported"
-        : limits?.shortWindowAbsent === true
+        : limits?.shortWindowAbsent === true && limits.shortWindowAbsentCheckedAt !== undefined
           ? "known-absent"
           : "unknown",
+      ...(limits?.shortWindowAbsentCheckedAt
+        ? { shortWindowAbsentCheckedAt: limits.shortWindowAbsentCheckedAt }
+        : {}),
       windows: (limits?.windows ?? []).map((w) => {
         const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         const scope = w.modelScope ? normalize(w.modelScope) : null;

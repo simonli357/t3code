@@ -120,6 +120,19 @@ beforeEach(async () => {
   state.navigate.mockReset();
   state.execute.mockImplementation(async ({ input }: { input: AllocationOperation }) => {
     if (input._tag === "snapshot") return { _tag: "Success", value: { snapshot } };
+    if (input._tag === "connections")
+      return {
+        _tag: "Success",
+        value: {
+          connections: {
+            coordinatorEnvironmentId: "host",
+            environments: [
+              { environmentId: "host", label: "Workstation" },
+              { environmentId: "peer", label: "Build computer" },
+            ],
+          },
+        },
+      };
     if (input._tag === "preview")
       return {
         _tag: "Success",
@@ -142,6 +155,77 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 describe("Provider allocation editor", () => {
+  it("chooses a named linked coordinator without exposing IDs and preserves edits when connection fails", async () => {
+    const coordinator = input("Coordinator") as HTMLSelectElement;
+    expect([...coordinator.options].map((o) => o.textContent)).toEqual([
+      "Workstation (this environment)",
+      "Build computer",
+    ]);
+    expect(container.querySelector("h3")?.textContent).toContain("Workstation");
+    expect(container.querySelector("h4")?.textContent).toContain("SL · Codex");
+    const identity = [...container.querySelectorAll("p")].find((p) =>
+      p.textContent?.includes("Account identity: identity"),
+    );
+    expect(identity?.closest("details")?.open).toBe(false);
+    await change("Reserve points", "12");
+    await change("Coordinator", "peer");
+    await act(() => button("Connect coordinator").click());
+    expect(state.execute.mock.calls.at(-1)?.[0]).toMatchObject({
+      environmentId: "host",
+      input: { _tag: "connect", coordinatorEnvironmentId: "peer" },
+    });
+    expect(input("Coordinator").value).toBe("peer");
+    expect(input("Reserve points").value).toBe("12");
+  });
+  it("retains a disconnected saved coordinator and resets the assignment when settings scope changes", async () => {
+    state.execute.mockImplementation(
+      async ({ input: operation }: { input: AllocationOperation }) => {
+        if (operation._tag === "connections")
+          return {
+            _tag: "Success",
+            value: {
+              connections: {
+                coordinatorEnvironmentId: "unlinked",
+                environments: [{ environmentId: "other", label: "Laptop" }],
+              },
+            },
+          };
+        if (operation._tag === "snapshot")
+          return {
+            _tag: "Success",
+            value: {
+              snapshot: {
+                ...snapshot,
+                inventories: snapshot.inventories.map((i) => ({
+                  ...i,
+                  environmentId: "other",
+                  accounts: i.accounts.map((a) => ({
+                    ...a,
+                    environmentId: "other",
+                    driver: ProviderDriverKind.make("claudeAgent"),
+                  })),
+                })),
+              },
+            },
+          };
+        return { _tag: "Failure" };
+      },
+    );
+    await change("Model", "astra");
+    await change("Effort", "high");
+    await act(() =>
+      root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("other")} />),
+    );
+    expect(input("Coordinator").value).toBe("unlinked");
+    expect((input("Coordinator") as HTMLSelectElement).selectedOptions[0]?.textContent).toContain(
+      "not linked",
+    );
+    expect(input("Model").value).toBe("");
+    expect(container.querySelector("h4")?.textContent).toContain("Claude");
+    await act(() => button("Refresh").click());
+    expect(input("Coordinator").value).toBe("unlinked");
+    expect(state.execute.mock.calls.at(-1)?.[0].environmentId).toBe("other");
+  });
   it("requires a preview of the exact edited policy and preserves edits on a stale save", async () => {
     expect(button("Save previewed policy").disabled).toBe(true);
     await change("Model", "astra");

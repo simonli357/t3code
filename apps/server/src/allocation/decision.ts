@@ -124,6 +124,7 @@ export function decideAllocation(input: {
     .sort(
       (a, b) => compare(a.environmentId, b.environmentId) || compare(a.instanceId, b.instanceId),
     );
+  const candidateWaits: string[] = [];
   const candidates: AllocationCandidate[] = allAccounts
     .map((localAccount) => {
       const siblings = localAccount.accountKey
@@ -172,6 +173,13 @@ export function decideAllocation(input: {
       if (!account.accountKey)
         reasons.push("Shared account identity is unknown; aliases are not identity.");
       if (account.shortWindow === "unknown") reasons.push("Short-window availability is unknown.");
+      if (account.shortWindow === "known-absent") {
+        const checked = Date.parse(account.shortWindowAbsentCheckedAt ?? "");
+        if (!Number.isFinite(checked) || now - checked > policy.maxReadingAgeMinutes * 60_000)
+          reasons.push("Evidence that no short window was reported is missing or stale.");
+        else if (checked > now + 60_000)
+          reasons.push("Evidence that no short window was reported is from the future.");
+      }
       const existing = demand.filter(
         (d) =>
           d.accountKey === account.accountKey &&
@@ -189,6 +197,11 @@ export function decideAllocation(input: {
         reasons.push("No applicable short-window reading for this model.");
       let confidence: "low" | "medium" = "medium";
       let behind = 0;
+      // Only measured headroom blockers have an actionable reset estimate. Identity,
+      // compatibility, health, unknown evidence and pacing need another observation
+      // or action; the passage of an unrelated reset does not resolve them.
+      let canWait = reasons.length === 0;
+      const blockedUntil: string[] = [];
       const windows = relevant.map((window) => {
         const issues: string[] = [];
         const ageMinutes = Math.max(0, (now - Date.parse(window.checkedAt)) / 60_000);
@@ -281,8 +294,13 @@ export function decideAllocation(input: {
           perAssignment * horizon +
           ((Math.max(knownLoadRate, observedRate) + perAssignment) * ageMinutes) / 60;
         const headroomPoints = usable - window.usedPoints - forecastPoints;
-        if (headroomPoints < 0)
+        if (issues.length > 0) canWait = false;
+        if (headroomPoints < 0) {
           issues.push("Insufficient headroom for ongoing and incoming demand.");
+          if (forecastPoints <= usable && window.resetsAt && Date.parse(window.resetsAt) > now)
+            blockedUntil.push(window.resetsAt);
+          else canWait = false;
+        }
         // Borrowing caps outstanding demand, including a single useful assignment
         // when all accounts are ahead. It never authorizes an unlimited catch-up
         // surge. An explicit account may override pacing, but never hard headroom.
@@ -291,10 +309,12 @@ export function decideAllocation(input: {
           window.cycleStartedAt &&
           !request.explicitInstanceId &&
           forecastPoints > Math.max(0, target - window.usedPoints) + curve.borrowPoints
-        )
+        ) {
+          canWait = false;
           issues.push(
             "Forecast exceeds the pacing deficit plus bounded borrowing. Reduce the assignment or tune borrowing.",
           );
+        }
         reasons.push(...issues.map((r) => `${window.label}: ${r}`));
         return {
           id: window.id,
@@ -311,6 +331,7 @@ export function decideAllocation(input: {
       const resets = relevant
         .flatMap((w) => (w.resetsAt ? [(Date.parse(w.resetsAt) - now) / HOUR] : []))
         .filter((h) => h > 0);
+      if (canWait && blockedUntil.length > 0) candidateWaits.push(blockedUntil.sort().at(-1)!);
       return {
         environmentId: account.environmentId,
         instanceId: account.instanceId,
@@ -342,20 +363,12 @@ export function decideAllocation(input: {
       );
     });
   const selected = eligible[0];
-  const future = inventories
-    .flatMap((i) => i.accounts)
-    .flatMap((a) => [a.limitedUntil, ...a.windows.map((w) => w.resetsAt)])
-    .filter((t): t is string => t !== null && Date.parse(t) > now)
-    .sort();
+  const waitUntil = !selected && !globalReasons.length ? (candidateWaits.sort()[0] ?? null) : null;
   return {
     at,
     policyVersion: policy.version,
     request,
-    outcome: selected
-      ? "selected"
-      : future.length && !globalReasons.length
-        ? "wait"
-        : "unavailable",
+    outcome: selected ? "selected" : waitUntil ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
     candidates,
     confidence: selected?.confidence ?? "low",
@@ -369,8 +382,10 @@ export function decideAllocation(input: {
         ]
       : [
           ...globalReasons,
-          "No safe compatible account; refresh readings or wait. Reset times are estimates until confirmed.",
+          waitUntil
+            ? "Recheck after the estimated reset; fresh provider confirmation is required before admission."
+            : "No safe compatible account. Resolve the reported blockers and refresh readings; no reliable wait estimate is available.",
         ],
-    waitUntil: selected ? null : (future[0] ?? null),
+    waitUntil,
   };
 }

@@ -3,6 +3,7 @@ import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 import {
   EnvironmentId,
   ProviderDriverKind,
+  PROVIDER_DISPLAY_NAMES,
   ThreadId,
   type AllocationSnapshot,
   type AllocationDecision,
@@ -10,6 +11,7 @@ import {
 import {
   createAllocationCommands,
   allocationSummary,
+  allocationAccountLabel,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -95,12 +97,31 @@ export function SettingsAllocationRouteScreen() {
         </Pressable>
         {message ? <Text accessibilityRole="alert">{message}</Text> : null}
         <Text className="font-semibold">Try an assignment</Text>
-        <TextInput
-          accessibilityLabel="Provider driver"
-          value={driver}
-          onChangeText={setDriver}
-          className="rounded border border-border p-2 text-foreground"
-        />
+        <View accessibilityLabel="Provider" className="flex-row flex-wrap gap-3">
+          {[
+            ...new Set(
+              snapshot?.inventories
+                .find((i) => i.environmentId === target?.environmentId)
+                ?.accounts.map((a) => a.driver) ?? [],
+            ),
+          ].map((kind) => (
+            <Pressable
+              key={kind}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: driver === kind }}
+              onPress={() => {
+                setDriver(kind);
+                setModel("");
+                setEffort("");
+                setDecision(null);
+              }}
+            >
+              <Text className="text-primary">
+                {PROVIDER_DISPLAY_NAMES[kind] ?? "Other provider"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
         <TextInput
           accessibilityLabel="Exact model"
           placeholder="Exact model"
@@ -125,12 +146,20 @@ export function SettingsAllocationRouteScreen() {
         {decision ? (
           <View>
             <Text>
-              {allocationSummary(decision).choice} · {decision.confidence} confidence
+              {decision.selectedInstanceId
+                ? allocationAccountLabel(
+                    snapshot,
+                    decision.request.environmentId,
+                    decision.selectedInstanceId,
+                  )
+                : allocationSummary(decision).choice}{" "}
+              · {decision.confidence} confidence
             </Text>
             <Text>{decision.reasons.join(" ")}</Text>
             {decision.candidates.map((c) => (
               <Text key={`${c.environmentId}:${c.instanceId}`}>
-                {c.instanceId}: {c.eligible ? "eligible" : c.reasons.join(" ")}
+                {allocationAccountLabel(snapshot, c.environmentId, c.instanceId)}:{" "}
+                {c.eligible ? "eligible" : c.reasons.join(" ")}
               </Text>
             ))}
           </View>
@@ -138,8 +167,11 @@ export function SettingsAllocationRouteScreen() {
         {snapshot?.inventories.map((host) => (
           <View key={host.environmentId} className="gap-2">
             <Text className="font-semibold">
-              {host.environmentId} ·{" "}
-              {host.complete ? `${host.demand.length} ongoing` : "load unknown"}
+              {host.environmentLabel ??
+                (host.environmentId === target?.environmentId
+                  ? target.label
+                  : "Linked environment")}{" "}
+              · {host.complete ? `${host.demand.length} ongoing` : "load unknown"}
             </Text>
             {host.accounts.map((a) => (
               <View key={a.instanceId} className="gap-1 rounded border border-border p-3">

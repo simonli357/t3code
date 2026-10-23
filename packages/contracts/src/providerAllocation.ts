@@ -138,6 +138,7 @@ export const AllocationAccount = Schema.Struct({
     Schema.Struct({ slug: Schema.String, capabilities: Schema.NullOr(ModelCapabilities) }),
   ),
   shortWindow: Schema.Literals(["reported", "known-absent", "unknown"]),
+  shortWindowAbsentCheckedAt: Schema.optional(IsoDateTime),
   windows: Schema.Array(AllocationWindow),
   resetCredits: Schema.NullOr(
     Schema.Struct({
@@ -161,6 +162,7 @@ export const AllocationDemand = Schema.Struct({
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
 export const AllocationInventory = Schema.Struct({
+  environmentLabel: Schema.optional(Schema.String),
   coordinatorEnvironmentId: Schema.optional(Schema.NullOr(Schema.String)),
   environmentId: Schema.String,
   observedAt: IsoDateTime,
@@ -258,6 +260,7 @@ export const AllocationStartResult = Schema.Struct({
 });
 export type AllocationStartResult = typeof AllocationStartResult.Type;
 export const AllocationOperation = Schema.TaggedUnion({
+  connections: {},
   snapshot: {},
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
   allocate: { request: AllocationRequest },
@@ -267,6 +270,17 @@ export const AllocationOperation = Schema.TaggedUnion({
 });
 export type AllocationOperation = typeof AllocationOperation.Type;
 export const AllocationResponse = Schema.Struct({
+  connections: Schema.optional(
+    Schema.Struct({
+      coordinatorEnvironmentId: Schema.NullOr(Schema.String),
+      environments: Schema.Array(
+        Schema.Struct({
+          environmentId: Schema.String,
+          label: Schema.String,
+        }),
+      ),
+    }),
+  ),
   snapshot: Schema.optional(AllocationSnapshot),
   result: Schema.optional(AllocationResult),
   policy: Schema.optional(AllocationPolicy),

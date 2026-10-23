@@ -700,6 +700,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
           })
         : codexRateLimitsToLimits({
+            completeRead: true,
             snapshot: snapshot.rateLimits.snapshot,
             rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
             resetCredits: snapshot.rateLimits.resetCredits,

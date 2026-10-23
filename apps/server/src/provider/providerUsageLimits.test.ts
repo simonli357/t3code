@@ -102,6 +102,35 @@ describe("applyUsageLimitsUpdate", () => {
 });
 
 describe("resolveUsageLimitsAfterProbe", () => {
+  it("does not renew complete-read absence evidence with sparse updates or failed probes", () => {
+    const previous = {
+      checkedAt,
+      shortWindowAbsent: true,
+      shortWindowAbsentCheckedAt: checkedAt,
+      windows: [weekly],
+    };
+    const next = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: "2026-09-03T14:00:00.000Z",
+      update: { windows: [{ ...weekly, usedPercent: 25 }] },
+    });
+    expect(next?.shortWindowAbsentCheckedAt).toBe(checkedAt);
+    expect(next?.checkedAt).toBe("2026-09-03T14:00:00.000Z");
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: next,
+        probed: {
+          checkedAt: "2026-09-03T14:10:00.000Z",
+          windows: [],
+          unavailable: { reason: "probeFailed" },
+        },
+      })?.shortWindowAbsentCheckedAt,
+    ).toBe(checkedAt);
+    expect(
+      resolveUsageLimitsAfterProbe({ published: next, probed: { checkedAt, windows: [weekly] } })
+        ?.shortWindowAbsent,
+    ).toBeUndefined();
+  });
   it("keeps the last good windows through a failed probe but not an unsupported one", () => {
     const failed = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
     const unsupported = { checkedAt, windows: [], unavailable: { reason: "unsupported" as const } };

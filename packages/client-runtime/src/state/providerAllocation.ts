@@ -61,3 +61,15 @@ export function allocationSummary(decision: AllocationDecision) {
     confidence: decision.confidence,
   };
 }
+
+export function allocationAccountLabel(
+  snapshot: AllocationSnapshot | null,
+  environmentId: string,
+  instanceId: string,
+) {
+  return (
+    snapshot?.inventories
+      .find((i) => i.environmentId === environmentId)
+      ?.accounts.find((a) => a.instanceId === instanceId)?.label ?? "Unavailable account"
+  );
+}

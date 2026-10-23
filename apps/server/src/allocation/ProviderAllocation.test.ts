@@ -30,6 +30,8 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Workers from "../orchestration/WorkerControls.ts";
+import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
+import { applyUsageLimitsUpdate } from "../provider/providerUsageLimits.ts";
 
 const at = "1970-01-01T00:00:00.000Z";
 const report: UsageMeasurementsReport = {
@@ -119,15 +121,20 @@ const startInput: AllocationStart = {
 function fixture(options: { remote?: boolean; fail?: boolean } = {}) {
   const calls: Array<typeof Workers.RemoteSpawnInput.Type> = [];
   const dispatched: OrchestrationCommand[] = [];
-  const state: { threads: OrchestrationThreadShell[]; peers: AllocationInventory[] } = {
+  const state: {
+    threads: OrchestrationThreadShell[];
+    peers: AllocationInventory[];
+    providers: ServerProvider[];
+  } = {
     threads: [],
     peers: [],
+    providers: [provider],
   };
   const db = NodeSqliteClient.layer({ filename: ":memory:" });
   const deps = Layer.mergeAll(
     db,
     Settings.layerTest({ allocationCoordinatorEnvironmentId: options.remote ? "remote" : "local" }),
-    Layer.mock(ProviderRegistry)({ getProviders: Effect.succeed([provider]) }),
+    Layer.mock(ProviderRegistry)({ getProviders: Effect.sync(() => state.providers) }),
     Layer.mock(ProjectionSnapshotQuery)({
       getShellSnapshot: () =>
         Effect.succeed({
@@ -232,6 +239,87 @@ it.effect(
       expect(rows[0]?.replay_json).not.toContain("PRIVATE TASK CONTENT");
       expect(rows[0]?.replay_json).not.toContain("account@example.test");
       expect((yield* store.history)[0]?.candidates[0]?.windows).toEqual([]);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "complete weekly-only reads admit an exact assignment, while partial, stale and five-hour evidence stays conservative",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const weekly = { usedPercent: 5, windowDurationMins: 10080, resetsAt: 6 * 24 * 3600 };
+      const complete = codexRateLimitsToLimits({
+        checkedAt: at,
+        completeRead: true,
+        snapshot: { primary: weekly, secondary: null },
+      });
+      f.state.providers = [{ ...provider, usageLimits: complete }];
+      const admitted = yield* allocation.execute({ _tag: "allocate", request: startInput.request });
+      expect(admitted.result?.decision).toMatchObject({
+        outcome: "selected",
+        request: startInput.request,
+      });
+      expect(admitted.result?.reservation).not.toBeNull();
+      const preview = () => allocation.execute({ _tag: "preview", request: startInput.request });
+      f.state.providers = [
+        {
+          ...provider,
+          usageLimits: codexRateLimitsToLimits({
+            checkedAt: at,
+            completeRead: true,
+            snapshot: { primary: weekly },
+          }),
+        },
+      ];
+      expect((yield* preview()).result?.decision).toMatchObject({
+        outcome: "unavailable",
+        waitUntil: null,
+      });
+      f.state.providers = [
+        {
+          ...provider,
+          usageLimits: codexRateLimitsToLimits({
+            checkedAt: at,
+            completeRead: true,
+            snapshot: {
+              primary: { usedPercent: 99, windowDurationMins: 300, resetsAt: 4 * 3600 },
+              secondary: weekly,
+            },
+          }),
+        },
+      ];
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+      yield* TestClock.adjust("1 hour");
+      f.state.providers = [
+        {
+          ...provider,
+          usageLimits: applyUsageLimitsUpdate({
+            previous: complete,
+            checkedAt: "1970-01-01T01:00:00.000Z",
+            update: { windows: complete.windows.map((w) => ({ ...w, usedPercent: 6 })) },
+          })!,
+        },
+      ];
+      const stale = (yield* preview()).result!.decision;
+      expect(stale.waitUntil).toBeNull();
+      expect(stale.candidates[0]?.reasons.join(" ")).toContain("missing or stale");
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "lists named coordinator choices locally even when the configured authority is disconnected",
+  () => {
+    const f = fixture({ remote: true });
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const result = yield* allocation.execute({ _tag: "connections" });
+      expect(result.connections).toEqual({
+        coordinatorEnvironmentId: "remote",
+        environments: [{ environmentId: "local", label: "Local" }],
+      });
     }).pipe(Effect.provide(f.layer));
   },
 );
