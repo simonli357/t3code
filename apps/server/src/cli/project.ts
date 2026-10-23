@@ -311,6 +311,7 @@ const fetchLiveOrchestrationSnapshot = (origin: string, bearerToken: string) =>
   Effect.gen(function* () {
     const client = yield* makeLiveServerClient(origin);
     return yield* client.orchestration.snapshot({
+      payload: { projectConfigIdentity: "true" },
       headers: { authorization: `Bearer ${bearerToken}` },
     });
   }).pipe(

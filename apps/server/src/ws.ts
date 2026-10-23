@@ -150,6 +150,10 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as NewProject from "./project/NewProject.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import {
+  projectSnapshotIdentities,
+  projectShellIdentities,
+} from "./orchestration/ProjectIdentityProjection.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
@@ -2431,13 +2435,24 @@ const makeWsRpcLayer = (
                 }),
                 synchronizedThenLive,
               );
-            }),
+            }).pipe(
+              Effect.map((stream) =>
+                stream.pipe(
+                  Stream.map((item) =>
+                    projectShellIdentities(item, input.projectConfigIdentity === true),
+                  ),
+                ),
+              ),
+            ),
             { "rpc.aggregate": "orchestration" },
           ),
-        [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
+        [ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.getArchivedShellSnapshot,
             projectionSnapshotQuery.getArchivedShellSnapshot().pipe(
+              Effect.map((snapshot) =>
+                projectSnapshotIdentities(snapshot, input.projectConfigIdentity === true),
+              ),
               Effect.tapError((cause) =>
                 Effect.logError("orchestration archived shell snapshot load failed", { cause }),
               ),

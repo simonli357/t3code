@@ -313,6 +313,7 @@ describe("environment shell synchronization", () => {
       const subscribeInput = yield* Queue.take(subscribeInputs);
       expect(subscribeInput.afterSequence).toBeUndefined();
       expect(subscribeInput.requestCompletionMarker).toBe(true);
+      expect(subscribeInput).toMatchObject({ projectConfigIdentity: true });
       expect(yield* Ref.get(loaderCalls)).toBe(1);
       const synchronizing = yield* SubscriptionRef.get(shellState);
       expect(synchronizing.status).toBe("synchronizing");
@@ -333,6 +334,7 @@ describe("environment shell synchronization", () => {
       const resumedInput = yield* Queue.take(subscribeInputs);
       expect(resumedInput.afterSequence).toBe(resetSnapshot.snapshotSequence);
       expect(resumedInput.requestCompletionMarker).toBe(true);
+      expect(resumedInput).toMatchObject({ projectConfigIdentity: true });
       expect(yield* Ref.get(loaderCalls)).toBe(1);
     }),
   );

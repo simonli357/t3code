@@ -250,6 +250,9 @@ describe("authenticated environment HTTP requests", () => {
           accessToken: "current-token",
         },
       ]);
+      if (loader.name === "shell snapshot") {
+        expect(url.searchParams.get("projectConfigIdentity")).toBe("true");
+      }
       if (loader.name === "older thread history") {
         expect(url.searchParams.get("turnLimit")).toBe("20");
         expect(url.searchParams.get("beforeCursor")).toBe("older-page");

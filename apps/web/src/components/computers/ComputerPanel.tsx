@@ -399,7 +399,7 @@ export function ComputerPanel({
                   memoryPercent === null ? null : formatPercent(memoryPercent),
                 ]
                   .filter((part) => part !== null)
-                  .join(" Â· ") || null
+                  .join(" · ") || null
               }
               samples={metrics.memory.history}
               stale={stale}

@@ -11,6 +11,7 @@ import * as UsageMeasurements from "../usage/UsageMeasurements.ts";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
+import { projectSnapshotIdentities } from "./ProjectIdentityProjection.ts";
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
 import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
 import {
@@ -111,13 +112,14 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           // and activity payload in the database has OOM-killed servers, and
           // the route's only consumer (the project CLI) reads projects alone —
           // UI clients load the shell and per-thread snapshots instead.
-          return yield* projectionSnapshotQuery
-            .getCommandReadModel()
-            .pipe(
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_snapshot_failed", cause),
-              ),
-            );
+          return yield* projectionSnapshotQuery.getCommandReadModel().pipe(
+            Effect.map((snapshot) =>
+              projectSnapshotIdentities(snapshot, args.payload.projectConfigIdentity === "true"),
+            ),
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_snapshot_failed", cause),
+            ),
+          );
         }),
       )
       .handle(
@@ -125,13 +127,14 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* projectionSnapshotQuery
-            .getShellSnapshot()
-            .pipe(
-              Effect.catch((cause) =>
-                failEnvironmentInternal("orchestration_snapshot_failed", cause),
-              ),
-            );
+          return yield* projectionSnapshotQuery.getShellSnapshot().pipe(
+            Effect.map((snapshot) =>
+              projectSnapshotIdentities(snapshot, args.payload.projectConfigIdentity === "true"),
+            ),
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_snapshot_failed", cause),
+            ),
+          );
         }),
       )
       .handle(

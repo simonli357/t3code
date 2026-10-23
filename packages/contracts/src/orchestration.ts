@@ -988,6 +988,8 @@ export const OrchestrationShellStreamItem = Schema.Union([
 export type OrchestrationShellStreamItem = typeof OrchestrationShellStreamItem.Type;
 
 export const OrchestrationSubscribeShellInput = Schema.Struct({
+  /** Opt in to non-Git project-config identity locators. */
+  projectConfigIdentity: Schema.optionalKey(Schema.Boolean),
   /**
    * When provided, the server skips the initial full shell snapshot and instead
    * replays shell events after this sequence before streaming live events.
@@ -2391,7 +2393,7 @@ export const OrchestrationRpcSchemas = {
     output: OrchestrationSearchThreadsResult,
   },
   getArchivedShellSnapshot: {
-    input: Schema.Struct({}),
+    input: Schema.Struct({ projectConfigIdentity: Schema.optionalKey(Schema.Boolean) }),
     output: OrchestrationShellSnapshot,
   },
   subscribeThread: {
