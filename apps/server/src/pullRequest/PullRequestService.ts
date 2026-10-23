@@ -641,6 +641,7 @@ export const make = Effect.gen(function* () {
     for (const project of projects) {
       if (filter.projectId !== undefined && project.id !== filter.projectId) continue;
       const identity = project.repositoryIdentity;
+      if (identity?.locator.source !== "git-remote") continue;
       if (
         (identity?.provider !== "unknown" &&
           !(identity?.provider === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl))) ||
@@ -738,7 +739,12 @@ export const make = Effect.gen(function* () {
           const identity = project.repositoryIdentity;
           let kind = identity?.provider as SourceControlProviderKind | undefined;
           const repository = sourceControlRepositorySelector(project.repositoryIdentity);
-          if (!identity || kind === undefined || repository === null) continue;
+          if (
+            identity?.locator.source !== "git-remote" ||
+            kind === undefined ||
+            repository === null
+          )
+            continue;
           // Worktrees of one repository are separate projects; reading the remote once keeps
           // the page from repeating every change request per local checkout. The host is part
           // of the key, so the same `owner/repo` on two hosts stays two repositories.

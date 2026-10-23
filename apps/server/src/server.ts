@@ -327,6 +327,7 @@ const RepositoryIdentityResolverLayerLive = Layer.effect(
     const registry = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
     return yield* RepositoryIdentityResolver.make({
       refine: Effect.fn(function* (identity: RepositoryIdentity) {
+        if (identity.locator.source !== "git-remote") return identity;
         const remote = ForgejoCli.parseForgejoRemote(identity.locator.remoteUrl);
         if (
           !remote ||
@@ -355,7 +356,10 @@ const RepositoryIdentityResolverLayerLive = Layer.effect(
       }),
     });
   }),
-).pipe(Layer.provide(SourceControlProviderRegistryLayerLive), Layer.provide(ProcessRunner.layer));
+).pipe(
+  Layer.provide(SourceControlProviderRegistryLayerLive),
+  Layer.provide([ProcessRunner.layer, T3ProjectFileLoader.layer]),
+);
 
 const PullRequestServiceLive = PullRequestService.layer.pipe(
   Layer.provide(PullRequestProviderRegistry.layer),

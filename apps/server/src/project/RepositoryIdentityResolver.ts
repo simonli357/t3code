@@ -9,8 +9,10 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as ProcessRunner from "../processRunner.ts";
+import * as T3ProjectFileLoader from "./T3ProjectFileLoader.ts";
 
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 // Background sweeps resolve every project each minute. A long TTL keeps them
@@ -44,7 +46,8 @@ function parseRemoteFetchUrls(stdout: string): Map<string, string> {
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)$/.exec(trimmed);
+    // Partial clones append their object filter (or [promisor]) to fetch rows.
+    const match = /^(\S+)\s+(\S+)\s+\((fetch|push)\)(?:\s+\[[^\]\r\n]*\])?$/.exec(trimmed);
     if (!match) continue;
     const [, remoteName = "", remoteUrl = "", direction = ""] = match;
     if (direction !== "fetch" || remoteName.length === 0 || remoteUrl.length === 0) {
@@ -73,10 +76,12 @@ function pickPrimaryRemote(
 function buildRepositoryIdentity(input: {
   readonly remoteName: string;
   readonly remoteUrl: string;
+  readonly identityUrl?: string;
   readonly rootPath: string;
 }): RepositoryIdentity {
-  const canonicalKey = normalizeGitRemoteUrl(input.remoteUrl);
-  const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(input.remoteUrl);
+  const identityUrl = input.identityUrl ?? input.remoteUrl;
+  const canonicalKey = normalizeGitRemoteUrl(identityUrl);
+  const sourceControlProvider = detectSourceControlProviderFromGitRemoteUrl(identityUrl);
   const repositoryPath = canonicalKey.split("/").slice(1).join("/");
   const repositoryPathSegments = repositoryPath.split("/").filter((segment) => segment.length > 0);
   const [owner] = repositoryPathSegments;
@@ -96,6 +101,51 @@ function buildRepositoryIdentity(input: {
     ...(repositoryName ? { name: repositoryName } : {}),
   };
 }
+
+const resolveSshIdentityUrl = Effect.fn("RepositoryIdentityResolver.resolveSshIdentityUrl")(
+  function* (remoteUrl: string) {
+    const provider = detectSourceControlProviderFromGitRemoteUrl(remoteUrl);
+    if (provider && provider.kind !== "unknown") return remoteUrl;
+    const scp = /^([^@\s]+@)([a-zA-Z0-9][a-zA-Z0-9._-]*):(.+)$/.exec(remoteUrl);
+    let url: URL | undefined;
+    if (remoteUrl.startsWith("ssh://")) {
+      try {
+        url = new URL(remoteUrl);
+      } catch {
+        return remoteUrl;
+      }
+    }
+    const host = scp?.[2] ?? url?.hostname;
+    if (!host || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(host)) return remoteUrl;
+    const user = scp?.[1]?.slice(0, -1) ?? url?.username;
+    const runner = yield* ProcessRunner.ProcessRunner;
+    // -G reads local SSH configuration without connecting. Keep the original
+    // locator so Git still selects the alias's configured account and key.
+    const result = yield* runner
+      .run({
+        command: "ssh",
+        args: [
+          "-G",
+          "-o",
+          "CanonicalizeHostname=no",
+          ...(user ? ["-l", user] : []),
+          ...(url?.port ? ["-p", url.port] : []),
+          host,
+        ],
+        timeout: Duration.seconds(5),
+        timeoutBehavior: "timedOutResult",
+      })
+      .pipe(Effect.option);
+    if (Option.isNone(result) || result.value.code !== 0) return remoteUrl;
+    const hostname = /^hostname\s+(\S+)\s*$/m.exec(result.value.stdout)?.[1];
+    if (!hostname || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(hostname)) return remoteUrl;
+    if (url) {
+      url.hostname = hostname;
+      return url.href;
+    }
+    return `${scp?.[1]}${hostname}:${scp?.[3]}`;
+  },
+);
 
 const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.resolveCacheKey")(
   function* (cwd: string) {
@@ -137,13 +187,16 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   }
 
   const remote = pickPrimaryRemote(parseRemoteFetchUrls(remoteResult.value.stdout));
-  return remote ? buildRepositoryIdentity({ ...remote, rootPath: cacheKey }) : null;
+  if (!remote) return null;
+  const identityUrl = yield* resolveSshIdentityUrl(remote.remoteUrl);
+  return buildRepositoryIdentity({ ...remote, identityUrl, rootPath: cacheKey });
 });
 
 export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   options: RepositoryIdentityResolverOptions = {},
 ) {
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const projectFiles = yield* T3ProjectFileLoader.T3ProjectFileLoader;
   const cacheCapacity = options.cacheCapacity ?? DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY;
   const refine = options.refine ?? Effect.succeed;
   // Git errors and timeouts resolve to null, so they use the negative TTL like
@@ -156,6 +209,23 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
           : (options.positiveCacheTtl ?? DEFAULT_POSITIVE_CACHE_TTL),
       onFailure: () => Duration.zero,
     });
+
+  const projectIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
+    (cwd) =>
+      projectFiles.load(cwd).pipe(
+        Effect.map((config) => {
+          const projectKey = Option.getOrNull(config)?.projectKey;
+          return projectKey
+            ? {
+                canonicalKey: `project:${projectKey}`,
+                locator: { source: "project-config" as const, projectKey },
+                rootPath: cwd,
+              }
+            : null;
+        }),
+      ),
+    { capacity: cacheCapacity, timeToLive },
+  );
 
   const repositoryRootCache = yield* Cache.makeWith<string, string | null>(
     (cwd) =>
@@ -181,6 +251,9 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   // git keep their own spans.
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(
     function* (cwd, options) {
+      if (options?.refresh) yield* Cache.invalidate(projectIdentityCache, cwd);
+      const projectIdentity = yield* Cache.get(projectIdentityCache, cwd);
+      if (projectIdentity !== null) return projectIdentity;
       if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
       const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
       if (cacheKey === null) return null;
@@ -193,5 +266,5 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
 });
 
 export const layer = Layer.effect(RepositoryIdentityResolver, make()).pipe(
-  Layer.provide(ProcessRunner.layer),
+  Layer.provide([ProcessRunner.layer, T3ProjectFileLoader.layer]),
 );

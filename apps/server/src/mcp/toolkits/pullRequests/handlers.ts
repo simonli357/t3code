@@ -90,7 +90,9 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
       host,
       repository,
       input.number,
-      project?.repositoryIdentity?.locator.remoteUrl,
+      project?.repositoryIdentity?.locator.source === "git-remote"
+        ? project.repositoryIdentity.locator.remoteUrl
+        : undefined,
     ) ?? `https://${host}/${repository}/pull/${input.number}`;
   return {
     ...normalizeThreadPullRequestKey({ host, repository, number: input.number, url }),

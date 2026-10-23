@@ -156,7 +156,8 @@ export function legacyLinkedPullRequestOf(
   projectId: ThreadLinkedPullRequest["projectId"],
   identity: RepositoryIdentity | null | undefined,
 ): ThreadLinkedPullRequest | null {
-  if (!identity) return null;
+  if (identity?.locator.source !== "git-remote") return null;
+  const remoteUrl = identity.locator.remoteUrl;
   // A local-path remote has no host segment and no provider, so there is no host to match.
   const host = pullRequestHostOf(identity, identity.provider as SourceControlProviderKind);
   if (typeof host !== "string") return null;
@@ -175,7 +176,7 @@ export function legacyLinkedPullRequestOf(
       const parsed = parseChangeRequestUrl(link.url);
       if (parsed?.authority !== undefined) {
         try {
-          const remote = new URL(identity.locator.remoteUrl);
+          const remote = new URL(remoteUrl);
           if (remote.protocol === "http:" || remote.protocol === "https:") {
             return (
               parsed.authority === remote.host && parsed.repository === repository.toLowerCase()

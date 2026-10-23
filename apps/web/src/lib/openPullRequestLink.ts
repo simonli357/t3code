@@ -45,8 +45,10 @@ function matchesChangeRequestAuthority(
   link: ChangeRequestLink,
 ): boolean {
   if (link.authority === undefined) return true;
+  const locator = project.repositoryIdentity?.locator;
+  if (!locator || !("remoteUrl" in locator)) return false;
   try {
-    const remote = new URL(project.repositoryIdentity?.locator.remoteUrl ?? "");
+    const remote = new URL(locator.remoteUrl);
     if (remote.protocol === "http:" || remote.protocol === "https:") {
       return remote.host.toLowerCase() === link.authority;
     }

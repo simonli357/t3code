@@ -212,11 +212,17 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;
 
-export const RepositoryIdentityLocator = Schema.Struct({
-  source: Schema.Literal("git-remote"),
-  remoteName: TrimmedNonEmptyString,
-  remoteUrl: TrimmedNonEmptyString,
-});
+export const RepositoryIdentityLocator = Schema.Union([
+  Schema.Struct({
+    source: Schema.Literal("git-remote"),
+    remoteName: TrimmedNonEmptyString,
+    remoteUrl: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    source: Schema.Literal("project-config"),
+    projectKey: TrimmedNonEmptyString,
+  }),
+]);
 export type RepositoryIdentityLocator = typeof RepositoryIdentityLocator.Type;
 
 export const RepositoryIdentity = Schema.Struct({

@@ -40,6 +40,13 @@ and other phone-only settings ignore the filter.
 
 ## Defaults and inheritance
 
+Corresponding workspaces on connected computers group by their Git repository. For a project
+without a Git remote, add the same unique `"projectKey"` (for example,
+`"my-team/survey-tool"`) to `t3.json` in each workspace root. This explicitly groups those
+folders without copying their files. Different projects must use different keys. Remove the
+key to return to automatic Git grouping, or separate folders when no Git identity is available.
+Changes appear after the identity cache refreshes (within 15 minutes).
+
 General contains the model and workspace for new threads. Integrations controls agent browser
 access. Source Control contains automatic pull, the default pull request merge method and text
 generation. The same rows edit environment defaults or project overrides depending on the

@@ -1297,15 +1297,20 @@ export function pullRequestHostOf(
   identity:
     | {
         readonly canonicalKey?: string | undefined;
-        readonly locator?: { readonly remoteUrl: string } | undefined;
+        readonly locator?:
+          | { readonly remoteUrl: string }
+          | { readonly source: "project-config"; readonly projectKey: string }
+          | undefined;
       }
     | null
     | undefined,
   kind: SourceControlProviderKind,
 ): string {
+  if (identity?.locator && "projectKey" in identity.locator) return kind;
   if (kind === "forgejo") {
     try {
-      const remote = new URL(identity?.locator?.remoteUrl ?? "");
+      const locator = identity?.locator;
+      const remote = new URL(locator && "remoteUrl" in locator ? locator.remoteUrl : "");
       if (remote.protocol === "http:" || remote.protocol === "https:")
         return remote.host.toLowerCase();
     } catch {

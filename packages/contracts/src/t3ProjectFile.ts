@@ -67,6 +67,15 @@ export const T3ProjectFileScript = Schema.Struct({
 export type T3ProjectFileScript = typeof T3ProjectFileScript.Type;
 
 export const T3ProjectFile = Schema.Struct({
+  projectKey: Schema.optionalKey(
+    trimmedNonEmpty(
+      {
+        description:
+          "Explicit shared project identity. Use the same unique key in corresponding workspaces on different computers, including folders without Git. Overrides Git-based grouping; unrelated projects must use different keys.",
+      },
+      256,
+    ),
+  ),
   $schema: Schema.optionalKey(
     Schema.String.annotate({
       description: `URL of the JSON Schema for this file, typically "${T3_PROJECT_FILE_SCHEMA_URL}".`,
