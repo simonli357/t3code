@@ -624,7 +624,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     attachmentUploadRouteLayer,
     deviceHubProxyRouteLayer,
     staticAndDevRouteLayer,
-    websocketRpcRouteLayer,
+    websocketRpcRouteLayer.pipe(Layer.provide(WorkerControls.liveLayer)),
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(McpSessionRegistry.layer),

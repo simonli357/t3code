@@ -2010,3 +2010,61 @@ describe("buildThreadListV2ListItems row-state stamps", () => {
     expect(threadListV2ListItemsAreEqual(shelfLoading, shelfLoaded)).toBe(false);
   });
 });
+
+describe("managed worker groups on native lists", () => {
+  it("keeps the selected finished worker reachable and reports attention when its group is collapsed", () => {
+    const master = makeThread({
+      id: ThreadId.make("master"),
+      title: "Master",
+      organization: {
+        owner: null,
+        workers: [{ environmentId: null, threadId: ThreadId.make("worker") }],
+        revision: 0,
+        assignmentState: null,
+        reportOutcome: null,
+        directInputAt: null,
+      },
+    });
+    const worker = makeThread({
+      id: ThreadId.make("worker"),
+      title: "Worker",
+      settledOverride: "settled",
+      projectId: ProjectId.make("other-project"),
+      organization: {
+        owner: { environmentId: null, threadId: master.id },
+        workers: [],
+        revision: 0,
+        assignmentState: null,
+        reportOutcome: "done",
+        directInputAt: null,
+      },
+    });
+    const input = {
+      threads: [master, worker],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      organization: {
+        collapsed: new Set([`${environmentId}:master`]),
+        finishedExpanded: new Set<string>(),
+        connected: new Set([environmentId]),
+      },
+    };
+    expect(buildThreadListV2Items(input).items.map((row) => row.thread.id)).toEqual(["master"]);
+    const revealed = buildThreadListV2Items({
+      ...input,
+      selectedThreadKey: `${environmentId}:worker`,
+    });
+    expect(revealed.items.map((row) => row.thread.id)).toEqual(["master", "worker"]);
+    expect(revealed.items[1]?.thread.projectId).toBe("other-project");
+    expect(revealed.items[1]?.organization?.ownerPath).toBe("Master");
+    const attention = buildThreadListV2Items({
+      ...input,
+      threads: [master, { ...worker, hasPendingUserInput: true }],
+    });
+    expect(attention.items[0]?.organization?.summaryLabel).toContain("1 need attention");
+    const searched = buildThreadListV2Items({ ...input, searchQuery: "Worker" });
+    expect(searched.items.map((row) => row.thread.id)).toEqual(["worker"]);
+    expect(searched.items[0]?.organization?.ownerPath).toBe("Master");
+  });
+});

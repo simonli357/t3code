@@ -1,3 +1,4 @@
+import { SessionOrganization } from "./sessionOrganization.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -882,6 +883,7 @@ export const OrchestrationProjectShell = Schema.Struct({
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
 export const OrchestrationThreadShell = Schema.Struct({
+  organization: Schema.optional(SessionOrganization),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,

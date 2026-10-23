@@ -1,3 +1,7 @@
+import { sessionRole, sessionKey } from "@t3tools/client-runtime/state/session-organization";
+import { toggleSessionGroup } from "../../state/session-organization";
+import { SessionOrganizationSheet } from "./SessionOrganizationSheet";
+import type { ThreadListV2Organization } from "./threadListV2";
 import { useNativeSessionMove } from "./useNativeSessionMove";
 import {
   THREAD_LIST_V2_MONO_FONT as MONO_FONT,
@@ -439,6 +443,7 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
 });
 
 export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
+  readonly organization?: ThreadListV2Organization | undefined;
   readonly thread: EnvironmentThreadShell;
   readonly variant: "card" | "slim";
   /** A message for this thread is waiting in the outbox. */
@@ -700,9 +705,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : [],
     [props.autoSettleOptOutSupported, thread.autoSettleDisabledAt],
   );
+  const [organizationOpen, setOrganizationOpen] = useState(false);
   const nativeMove = useNativeSessionMove(thread);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      ...(thread.organization
+        ? [{ id: "session-organization", title: "Session organization…", image: "person.2" }]
+        : []),
       ...nativeMove.menuItems,
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
@@ -710,7 +719,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         isRegenerating: thread.titleRegeneration != null,
       }),
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration, nativeMove.menuItems],
+    [
+      props.titleRegenerationSupported,
+      thread.titleRegeneration,
+      thread.organization,
+      nativeMove.menuItems,
+    ],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -772,6 +786,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event === "session-organization") setOrganizationOpen(true);
       if (nativeEvent.event.startsWith("native-move")) nativeMove.onAction(nativeEvent.event);
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "settle") handleSettle();
@@ -825,6 +840,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleUnsnooze,
       snoozePresets,
       setCustomSnoozeOpen,
+      setOrganizationOpen,
     ],
   );
   const primaryAction = useMemo(() => {
@@ -1180,7 +1196,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     );
 
   return (
-    <View collapsable={false}>
+    <View
+      collapsable={false}
+      style={props.organization?.ownerPath ? { marginLeft: 12 } : undefined}
+    >
+      {organizationOpen && (
+        <SessionOrganizationSheet thread={thread} onClose={() => setOrganizationOpen(false)} />
+      )}
+      {thread.organization && (
+        <View className="px-3 pt-1">
+          <Text numberOfLines={1} className="text-xs text-foreground-secondary">
+            {sessionRole(thread)} · {props.environmentLabel ?? thread.environmentId}
+            {thread.organization.directInputAt ? " · Direct input" : ""}
+            {props.organization?.ownerPath ? ` · Master: ${props.organization.ownerPath}` : ""}
+          </Text>
+        </View>
+      )}
       {customSnoozeOpen && (
         <CustomSnoozeSheet onClose={() => setCustomSnoozeOpen(false)} onSnooze={handleSnooze} />
       )}
@@ -1234,6 +1265,34 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </ControlPillMenu>
         )}
       </ThreadSwipeable>
+      {props.organization?.summaryLabel && (
+        <View className="ml-3 px-3 pb-2">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: props.organization.expanded }}
+            accessibilityLabel={`${props.organization.expanded ? "Collapse" : "Expand"} workers of ${thread.title}`}
+            onPress={() => toggleSessionGroup(sessionKey(thread))}
+            className="min-h-11 justify-center"
+          >
+            <Text className="text-xs">
+              {props.organization.expanded ? "⌄" : "›"} {props.organization.summaryLabel}
+            </Text>
+          </Pressable>
+          {props.organization.expanded && props.organization.finishedCount > 0 && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded: props.organization.finishedExpanded }}
+              onPress={() => toggleSessionGroup(sessionKey(thread), true)}
+              className="min-h-11 justify-center"
+            >
+              <Text className="text-xs">
+                Finished ({props.organization.finishedCount}){" "}
+                {props.organization.finishedExpanded ? "⌄" : "›"}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      )}
     </View>
   );
 });

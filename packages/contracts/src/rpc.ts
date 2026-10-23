@@ -1,4 +1,10 @@
 import {
+  SessionOwnershipReadInput,
+  SessionOwnershipInput,
+  SessionOwnershipResult,
+  SessionOwnershipError,
+} from "./sessionOrganization.ts";
+import {
   ComputerInspectInput,
   ComputerInspection,
   ComputerActionInput,
@@ -325,6 +331,8 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   agentSessionsFork: "agentSessions.fork",
+  sessionOwnershipRead: "sessionOwnership.read",
+  sessionOwnershipChange: "sessionOwnership.change",
   sessionMovesRequest: "sessionMoves.request",
   sessionMovesStatus: "sessionMoves.status",
   agentTasksStop: "agentTasks.stop",
@@ -1076,6 +1084,16 @@ const WsAgentSessionsForkRpc = Rpc.make(WS_METHODS.agentSessionsFork, {
   success: AgentSessionForkResult,
   error: Schema.Union([AgentSessionForkError, EnvironmentAuthorizationError]),
 });
+const WsSessionOwnershipReadRpc = Rpc.make(WS_METHODS.sessionOwnershipRead, {
+  payload: SessionOwnershipReadInput,
+  success: SessionOwnershipResult,
+  error: Schema.Union([SessionOwnershipError, EnvironmentAuthorizationError]),
+});
+const WsSessionOwnershipChangeRpc = Rpc.make(WS_METHODS.sessionOwnershipChange, {
+  payload: SessionOwnershipInput,
+  success: SessionOwnershipResult,
+  error: Schema.Union([SessionOwnershipError, EnvironmentAuthorizationError]),
+});
 const WsSessionMovesRequestRpc = Rpc.make(WS_METHODS.sessionMovesRequest, {
   payload: SessionMoveInput,
   success: SessionMoveResult,
@@ -1597,6 +1615,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAgentSessionsForkRpc,
+  WsSessionOwnershipReadRpc,
+  WsSessionOwnershipChangeRpc,
   WsSessionMovesRequestRpc,
   WsSessionMovesStatusRpc,
   WsAgentTasksStopRpc,

@@ -231,6 +231,10 @@
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
     },
+    "./state/session-organization": {
+      "types": "./src/state/sessionOrganization.ts",
+      "default": "./src/state/sessionOrganization.ts"
+    },
     "./state/thread-settled": {
       "types": "./src/state/threadSettled.ts",
       "default": "./src/state/threadSettled.ts"

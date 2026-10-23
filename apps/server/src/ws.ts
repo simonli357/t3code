@@ -1,6 +1,7 @@
 import * as Computers from "./computers/Computers.ts";
 import { AgentTaskStopError } from "@t3tools/contracts";
 import { forkThread } from "./project/ThreadFork.ts";
+import { WorkerControls } from "./orchestration/WorkerControls.ts";
 import { SessionMoves } from "./orchestration/SessionMoves.ts";
 import {
   sameUsageLimitCommandCoverage,
@@ -638,6 +639,7 @@ const makeWsRpcLayer = (
       >();
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const sessionMoves = yield* SessionMoves;
+      const workerControls = yield* WorkerControls;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -3468,6 +3470,18 @@ const makeWsRpcLayer = (
               .stopTask(input)
               .pipe(Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message }))),
           ),
+        [WS_METHODS.sessionOwnershipRead]: ({ threadId }) =>
+          observeRpcEffect(
+            WS_METHODS.sessionOwnershipRead,
+            workerControls.readOwnership(threadId),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.sessionOwnershipChange]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.sessionOwnershipChange,
+            workerControls.changeOwnership(input),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [WS_METHODS.sessionMovesRequest]: (input) =>
           observeRpcEffect(WS_METHODS.sessionMovesRequest, sessionMoves.request(input), {
             "rpc.aggregate": "thread",
@@ -4129,6 +4143,7 @@ const makeWsRpcLayer = (
 
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
+    const workerControls = yield* WorkerControls;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const config = yield* ServerConfig.ServerConfig;
@@ -4198,6 +4213,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
             ).pipe(
+              Layer.provide(Layer.succeed(WorkerControls, workerControls)),
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),

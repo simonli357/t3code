@@ -1,3 +1,4 @@
+import { useSessionGroupSettings } from "../../state/session-organization";
 import { useAndroidControlSizing } from "../../components/useAndroidControlSizing";
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import { computeThreadMoveAvailability } from "../threads/threadOrder";
@@ -224,6 +225,7 @@ function HomeTopContentSpacer() {
 /* ─── Main screen ────────────────────────────────────────────────────── */
 
 export function HomeScreen(props: HomeScreenProps) {
+  const sessionGroupSettings = useSessionGroupSettings();
   const queuedThreadKeys = useQueuedThreadKeys();
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
   const insets = useSafeAreaInsets();
@@ -610,6 +612,7 @@ export function HomeScreen(props: HomeScreenProps) {
     // Settled threads are live shells; archived threads keep their original
     // "hidden from lists" meaning.
     return buildThreadListV2Items({
+      organization: sessionGroupSettings,
       pendingOrder,
       threads: props.threads.filter((thread) => thread.archivedAt === null),
       environmentId: props.selectedEnvironmentId,
@@ -640,6 +643,7 @@ export function HomeScreen(props: HomeScreenProps) {
     props.threads,
     matchedThreadKeys,
     v2ScopedProjectGroup,
+    sessionGroupSettings,
   ]);
   // Re-partition the moment the earliest snooze expires (clamped to the
   // signed-32-bit setTimeout range; far-future wakes re-arm at the clamp).
@@ -762,6 +766,7 @@ export function HomeScreen(props: HomeScreenProps) {
           onNewThreadOnBranch={props.onNewThreadOnBranch}
           thread={thread}
           variant={item.item.variant}
+          organization={item.item.organization}
           hasQueuedMessages={item.hasQueuedMessages}
           snoozed={item.item.snoozed}
           pinned={item.item.pinned}
@@ -777,9 +782,8 @@ export function HomeScreen(props: HomeScreenProps) {
           )}
           providerInstance={resolveProviderInstance(thread)}
           environmentLabel={
-            Object.keys(props.savedConnectionsById).length > 1
-              ? (props.savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
-              : null
+            props.savedConnectionsById[thread.environmentId]?.environmentLabel ??
+            thread.environmentId
           }
           environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
           searchMatch={threadSearchMatchByKey.get(

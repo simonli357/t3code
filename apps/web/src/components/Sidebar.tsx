@@ -1,3 +1,12 @@
+import {
+  buildSessionHierarchy,
+  expandSessionGroups,
+  sessionKey,
+  sessionWorkerState,
+  summarizeSessionWorkers,
+} from "@t3tools/client-runtime/state/session-organization";
+import { SessionRoleLabel } from "./SessionRoleLabel";
+import { openSessionOrganization } from "./SessionOrganizationDialog";
 import { openMoveSession } from "./MoveSessionDialog";
 import { useForkConversation } from "../hooks/useForkConversation";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
@@ -1016,6 +1025,7 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
 
 const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
+  ownerPath: string | null;
   variant: "card" | "slim";
   // Slim rows are either settled (action: un-settle) or merely quiet
   // (seen Ready threads — action: settle).
@@ -1650,6 +1660,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           // Matches the h-9 row so unrendered rows never shift the list when they paint.
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_36px]",
           sortable?.isDragging && "relative z-20",
+          props.ownerPath !== null && "ml-3 border-l border-sidebar-border pl-1",
         )}
       >
         <Tooltip disabled={sortable?.isDragging}>
@@ -1659,7 +1670,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 ref={rowRef}
                 role="button"
                 tabIndex={0}
-                aria-label={accessibility.label}
+                aria-label={`${accessibility.label}${props.ownerPath ? `, Worker under ${props.ownerPath}` : ""}`}
                 aria-current={accessibility.current}
                 data-testid="sidebar-row-slim"
                 aria-busy={isRegeneratingTitle || undefined}
@@ -1685,7 +1696,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             </span>
             {draftIndicator}
             {title}
-            <ThreadEnvironmentLabel label={props.environmentLabel} />
+            <SessionRoleLabel thread={thread} />
+            <ThreadEnvironmentLabel label={props.environmentLabel ?? thread.environmentId} />
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -1807,6 +1819,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         // Matches the h-[4.875rem] content box; the py-0.5 padding is added on top.
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
         sortable?.isDragging && "relative z-20",
+        props.ownerPath !== null && "ml-3 border-l border-sidebar-border pl-1",
       )}
     >
       <Tooltip disabled={snoozeMenuOpen || sortable?.isDragging}>
@@ -1816,7 +1829,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ref={rowRef}
               role="button"
               tabIndex={0}
-              aria-label={accessibility.label}
+              aria-label={`${accessibility.label}${props.ownerPath ? `, Worker under ${props.ownerPath}` : ""}`}
               aria-current={accessibility.current}
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
@@ -1829,6 +1842,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           }
         >
           {accessibleTitle}
+          {props.ownerPath && (
+            <div className="truncate px-2 text-3xs text-muted-foreground">
+              Master: {props.ownerPath}
+            </div>
+          )}
           <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
               {draftIndicator}
@@ -2006,7 +2024,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <span className="flex-1" />
               )}
-              <ThreadEnvironmentLabel label={props.environmentLabel} />
+              <SessionRoleLabel thread={thread} />
+              <ThreadEnvironmentLabel label={props.environmentLabel ?? thread.environmentId} />
               {terminalStatusIcon}
               {prBadge}
               {diff ? (
@@ -2067,6 +2086,7 @@ function latestTurnDiff(
 
 const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   thread: SidebarThreadSummary;
+  ownerPath: string | null;
   project: EnvironmentProject | null;
   projectDisplayName: string | null;
   environmentLabel: string | null;
@@ -2165,7 +2185,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
               tabIndex={-1}
               aria-selected={props.isHighlighted}
               aria-current={accessibility.current}
-              aria-label={accessibility.label}
+              aria-label={`${accessibility.label}${props.ownerPath ? `, Worker under ${props.ownerPath}` : ""}`}
               onMouseMove={props.onHighlight}
               onClick={props.onSelect}
               className={cn(
@@ -2185,11 +2205,17 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="flex min-w-0 items-center gap-2.5">
               <span className="min-w-0 flex-1 truncate">{thread.title}</span>
-              <ThreadEnvironmentLabel label={props.environmentLabel} />
+              <SessionRoleLabel thread={thread} />
+              <ThreadEnvironmentLabel label={props.environmentLabel ?? thread.environmentId} />
               <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
                 {threadTimeLabel(thread)}
               </span>
             </span>
+            {props.ownerPath && (
+              <span className="truncate text-xs text-muted-foreground">
+                Master: {props.ownerPath}
+              </span>
+            )}
             {props.searchMatch ? (
               <ThreadSearchMatchExcerpt
                 match={{
@@ -2223,7 +2249,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useThreadShells();
+  const threadShells = useThreadShells();
+  const hierarchy = useMemo(() => buildSessionHierarchy(threadShells), [threadShells]);
+  const threads = useMemo(() => [...hierarchy.byKey.values()], [hierarchy]);
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -2341,6 +2369,57 @@ export default function Sidebar() {
   // Post-settle navigation validates against the CURRENT route, not the one
   // captured when the settle started: if the user navigated elsewhere while
   // the command was in flight, completing it must not yank them away.
+  const connectedEnvironments = useMemo(
+    () =>
+      new Set(
+        environments.filter((e) => e.connection.phase === "connected").map((e) => e.environmentId),
+      ),
+    [environments],
+  );
+  const [collapsedMasters, setCollapsedMasters] = useLocalStorage<
+    ReadonlyArray<string>,
+    ReadonlyArray<string>
+  >("sidebar-collapsed-masters", [], Schema.Array(Schema.String));
+  const [expandedFinished, setExpandedFinished] = useLocalStorage<
+    ReadonlyArray<string>,
+    ReadonlyArray<string>
+  >("sidebar-expanded-finished-workers", [], Schema.Array(Schema.String));
+  const collapsedMasterKeys = useMemo(() => new Set(collapsedMasters), [collapsedMasters]);
+  const expandedFinishedKeys = useMemo(() => new Set(expandedFinished), [expandedFinished]);
+  const rootRouteKey = routeThreadKey === null ? null : hierarchy.root(routeThreadKey);
+  const workerSummaries = useMemo(
+    () =>
+      new Map(
+        [...hierarchy.children.keys()].map((key) => [
+          key,
+          summarizeSessionWorkers(hierarchy, key, connectedEnvironments),
+        ]),
+      ),
+    [hierarchy, connectedEnvironments],
+  );
+  const expandRoots = useCallback(
+    (roots: ReadonlyArray<EnvironmentThreadShell>) =>
+      expandSessionGroups({
+        roots,
+        hierarchy,
+        collapsed: collapsedMasterKeys,
+        finishedExpanded: expandedFinishedKeys,
+        connected: connectedEnvironments,
+        selectedKey: routeThreadKey,
+      }),
+    [hierarchy, collapsedMasterKeys, expandedFinishedKeys, connectedEnvironments, routeThreadKey],
+  );
+  const ownerPath = (thread: EnvironmentThreadShell) => {
+    const path = hierarchy.path(sessionKey(thread));
+    return path.length
+      ? path
+          .map(
+            (key) =>
+              hierarchy.byKey.get(key)?.title ?? hierarchy.references.get(key)?.threadId ?? key,
+          )
+          .join(" / ")
+      : null;
+  };
   const routeThreadKeyRef = useRef(routeThreadKey);
   routeThreadKeyRef.current = routeThreadKey;
 
@@ -2623,7 +2702,9 @@ export default function Sidebar() {
     const visible = threads.filter(
       (thread) =>
         thread.archivedAt === null &&
-        (scopedProjectKeys === null ||
+        hierarchy.root(sessionKey(thread)) === sessionKey(thread) &&
+        (sessionKey(thread) === rootRouteKey ||
+          scopedProjectKeys === null ||
           scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
     );
     observeInboxReturns(workingShelfEnabled ? threads : null);
@@ -2638,6 +2719,12 @@ export default function Sidebar() {
     const settled: EnvironmentThreadShell[] = [];
     const draggable = new Set<string>();
     const activeReorderable = new Set<string>();
+    for (const thread of threads) {
+      const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
+      if (capabilities?.threadActiveReorder) activeReorderable.add(sessionKey(thread));
+      if (capabilities?.threadPinning && capabilities.threadPinReorder)
+        draggable.add(sessionKey(thread));
+    }
     for (const thread of visible) {
       const capabilities = serverConfigs.get(thread.environmentId)?.environment.capabilities;
       // Threads on servers without the settlement capability (old server,
@@ -2670,6 +2757,12 @@ export default function Sidebar() {
             ? projected
             : { ...projected, snoozedAt: thread.snoozedAt, snoozedUntil: thread.snoozedUntil },
         );
+      } else if (
+        (workerSummaries.get(threadKey)?.attention ?? 0) > 0 ||
+        (workerSummaries.get(threadKey)?.running ?? 0) > 0 ||
+        (workerSummaries.get(threadKey)?.unknown ?? 0) > 0
+      ) {
+        (thread.pinnedAt != null ? pinned : active).push(thread);
       } else if (supportsSnooze && effectiveSnoozed(thread, { now: preciseNow })) {
         // Snooze outranks settlement and pinning until the thread wakes.
         snoozed.push(thread);
@@ -2728,6 +2821,9 @@ export default function Sidebar() {
     nowMinute,
     optimisticDrop,
     scopedProjectKeys,
+    hierarchy,
+    rootRouteKey,
+    workerSummaries,
     serverConfigs,
     snoozeWakeTick,
     threads,
@@ -2739,14 +2835,21 @@ export default function Sidebar() {
   const [activeSearchResultIndex, setActiveSearchResultIndex] = useState(0);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   const searchableThreads = useMemo(
-    () => [
-      ...pinnedThreads,
-      ...activeThreads,
-      ...workingThreads,
-      ...snoozedThreads,
-      ...settledThreads,
-    ],
-    [activeThreads, pinnedThreads, settledThreads, snoozedThreads, workingThreads],
+    () =>
+      threads.filter(
+        (thread) =>
+          thread.archivedAt === null &&
+          (scopedProjectKeys === null ||
+            scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`) ||
+            (() => {
+              const root = hierarchy.byKey.get(hierarchy.root(sessionKey(thread)));
+              return (
+                root !== undefined &&
+                scopedProjectKeys.has(`${root.environmentId}:${root.projectId}`)
+              );
+            })()),
+      ),
+    [threads, scopedProjectKeys, hierarchy],
   );
   const searchEnvironmentIds = useMemo(
     () =>
@@ -2821,17 +2924,17 @@ export default function Sidebar() {
     // The open thread must never hide under "Show more": navigating into a
     // deep settled thread (search, deep link) pulls its row into the visible
     // tail so the highlight and the un-settle affordance stay reachable.
-    if (routeThreadKey !== null) {
+    if (rootRouteKey !== null) {
       const routeThread = settledThreads
         .slice(settledVisibleCount)
         .find(
           (thread) =>
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === rootRouteKey,
         );
       if (routeThread !== undefined) visible.push(routeThread);
     }
     return visible;
-  }, [routeThreadKey, settledThreads, settledVisibleCount]);
+  }, [rootRouteKey, settledThreads, settledVisibleCount]);
   const hiddenSettledCount = settledThreads.length - visibleSettledThreads.length;
   const showMoreSettled = useCallback(
     () => setSettledVisibleCount((count) => count + SETTLED_TAIL_PAGE_COUNT),
@@ -2848,13 +2951,12 @@ export default function Sidebar() {
   );
   const renderedSettledThreads = useMemo(() => {
     if (settledShelfExpanded) return visibleSettledThreads;
-    if (routeThreadKey === null) return EMPTY_THREADS;
+    if (rootRouteKey === null) return EMPTY_THREADS;
     const routeThread = visibleSettledThreads.find(
-      (thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+      (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === rootRouteKey,
     );
     return routeThread === undefined ? EMPTY_THREADS : [routeThread];
-  }, [routeThreadKey, settledShelfExpanded, visibleSettledThreads]);
+  }, [rootRouteKey, settledShelfExpanded, visibleSettledThreads]);
 
   // The snoozed shelf is collapsed by default: out of the way, never gone.
   // Collapsed threads don't render (and so don't participate in jump
@@ -2874,13 +2976,12 @@ export default function Sidebar() {
     // snoozed thread reached by route (deep link, open before snoozing
     // elsewhere) keeps its row — with highlight and wake affordance — same
     // exception the settled tail's "Show more" makes.
-    if (routeThreadKey === null) return EMPTY_THREADS;
+    if (rootRouteKey === null) return EMPTY_THREADS;
     const routeThread = snoozedThreads.find(
-      (thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+      (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === rootRouteKey,
     );
     return routeThread === undefined ? EMPTY_THREADS : [routeThread];
-  }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
+  }, [rootRouteKey, snoozedShelfExpanded, snoozedThreads]);
 
   // The Working shelf (beta) collapses the same way, with the same route
   // exception: sending a message folds the open thread into the shelf, and
@@ -2896,23 +2997,24 @@ export default function Sidebar() {
   );
   const visibleWorkingThreads = useMemo(() => {
     if (workingShelfExpanded) return workingThreads;
-    if (routeThreadKey === null) return EMPTY_THREADS;
+    if (rootRouteKey === null) return EMPTY_THREADS;
     const routeThread = workingThreads.find(
-      (thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+      (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === rootRouteKey,
     );
     return routeThread === undefined ? EMPTY_THREADS : [routeThread];
-  }, [routeThreadKey, workingShelfExpanded, workingThreads]);
+  }, [rootRouteKey, workingShelfExpanded, workingThreads]);
 
   const orderedThreads = useMemo(
-    () => [
-      ...pinnedThreads,
-      ...activeThreads,
-      ...visibleWorkingThreads,
-      ...visibleSnoozedThreads,
-      ...renderedSettledThreads,
-    ],
+    () =>
+      expandRoots([
+        ...pinnedThreads,
+        ...activeThreads,
+        ...visibleWorkingThreads,
+        ...visibleSnoozedThreads,
+        ...renderedSettledThreads,
+      ]),
     [
+      expandRoots,
       pinnedThreads,
       activeThreads,
       visibleWorkingThreads,
@@ -3345,21 +3447,41 @@ export default function Sidebar() {
     add(workingThreads, "working");
     add(snoozedThreads, "snoozed");
     add(settledThreads, "settled");
+    for (const thread of orderedThreads)
+      if (!map.has(sessionKey(thread)))
+        map.set(
+          sessionKey(thread),
+          effectiveSnoozed(thread, { now: snoozeNow })
+            ? "snoozed"
+            : thread.settledOverride === "settled"
+              ? "settled"
+              : thread.pinnedAt
+                ? "pinned"
+                : "active",
+        );
     return map;
-  }, [activeThreads, pinnedThreads, settledThreads, snoozedThreads, workingThreads]);
+  }, [
+    activeThreads,
+    pinnedThreads,
+    settledThreads,
+    snoozedThreads,
+    workingThreads,
+    orderedThreads,
+    snoozeNow,
+  ]);
   const pinnedKeys = useMemo(
     () =>
-      pinnedThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
-    [pinnedThreads],
+      orderedThreads
+        .filter((thread) => sectionByThreadKey.get(sessionKey(thread)) === "pinned")
+        .map(sessionKey),
+    [orderedThreads, sectionByThreadKey],
   );
   const activeKeys = useMemo(
     () =>
-      activeThreads.map((thread) =>
-        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-      ),
-    [activeThreads],
+      orderedThreads
+        .filter((thread) => sectionByThreadKey.get(sessionKey(thread)) === "active")
+        .map(sessionKey),
+    [orderedThreads, sectionByThreadKey],
   );
   useEffect(() => {
     if (optimisticDrop === null) return;
@@ -3506,9 +3628,19 @@ export default function Sidebar() {
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
     ): SidebarListItem[] =>
-      list.map((thread) => {
+      expandRoots(list).map((thread) => {
         const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
-        return { kind: "thread", key, section };
+        const childSection =
+          hierarchy.root(key) === key
+            ? section
+            : effectiveSnoozed(thread, { now: snoozeNow })
+              ? "snoozed"
+              : thread.settledOverride === "settled"
+                ? "settled"
+                : thread.pinnedAt != null
+                  ? "pinned"
+                  : "active";
+        return { kind: "thread", key, section: childSection };
       });
     if (
       pinnedThreads.length +
@@ -3541,6 +3673,10 @@ export default function Sidebar() {
     items.push(...settledRows);
     return items;
   }, [
+    expandRoots,
+    hierarchy,
+    connectedEnvironments,
+    snoozeNow,
     activeThreads,
     pinnedThreads,
     renderedSettledThreads,
@@ -3588,7 +3724,12 @@ export default function Sidebar() {
   const handleThreadDragOver = useCallback(
     (event: DragOverEvent) => {
       const target = event.over
-        ? resolveSidebarDropTarget(sidebarListItems, String(event.active.id), String(event.over.id))
+        ? resolveSidebarDropTarget(
+            sidebarListItems,
+            String(event.active.id),
+            String(event.over.id),
+            hierarchy.parentByKey,
+          )
         : null;
       setDragState((current) =>
         current === null || current.activeKey !== String(event.active.id)
@@ -3596,7 +3737,7 @@ export default function Sidebar() {
           : { ...current, targetSection: target?.section ?? null },
       );
     },
-    [sidebarListItems],
+    [sidebarListItems, hierarchy],
   );
   const sortableIds = useMemo(() => sidebarListItems.map(sidebarListItemId), [sidebarListItems]);
   const draggedSettledOrder = useMemo(() => {
@@ -3675,7 +3816,12 @@ export default function Sidebar() {
     if (source === undefined) return createSidebarCollisionDetection(() => false);
     return createSidebarCollisionDetection(
       (id) => {
-        const target = resolveSidebarDropTarget(sidebarListItems, draggedThreadKey, id);
+        const target = resolveSidebarDropTarget(
+          sidebarListItems,
+          draggedThreadKey,
+          id,
+          hierarchy.parentByKey,
+        );
         if (target === null) return false;
         return (
           planSidebarThreadDrop({
@@ -3693,7 +3839,8 @@ export default function Sidebar() {
             activeOrder: activeKeys,
             activeKeysById,
             activeReorderableKeys: activeReorderableThreadKeys,
-            activeTimeOrdered: workingShelfEnabled,
+            activeTimeOrdered: workingShelfEnabled && !hierarchy.parentByKey.has(draggedThreadKey),
+            groupByKey: hierarchy.parentByKey,
           }).kind !== "none"
         );
       },
@@ -3703,6 +3850,7 @@ export default function Sidebar() {
       },
     );
   }, [
+    hierarchy,
     activeKeysById,
     pinnedKeysById,
     serverConfigs,
@@ -3724,7 +3872,12 @@ export default function Sidebar() {
       const target =
         event.over === null
           ? null
-          : resolveSidebarDropTarget(sidebarListItems, activeKey, String(event.over.id));
+          : resolveSidebarDropTarget(
+              sidebarListItems,
+              activeKey,
+              String(event.over.id),
+              hierarchy.parentByKey,
+            );
       const activeThread = threadByKey.get(activeKey);
       if (activeSection === undefined || target === null || activeThread === undefined) return;
       const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
@@ -3743,7 +3896,8 @@ export default function Sidebar() {
         activeOrder: activeKeys,
         activeKeysById,
         activeReorderableKeys: activeReorderableThreadKeys,
-        activeTimeOrdered: workingShelfEnabled,
+        activeTimeOrdered: workingShelfEnabled && !hierarchy.parentByKey.has(activeKey),
+        groupByKey: hierarchy.parentByKey,
       });
       if (plan.kind === "none") return;
       if (plan.kind === "settle" && settlingThreadKeysRef.current.has(activeKey)) return;
@@ -3859,6 +4013,7 @@ export default function Sidebar() {
       })();
     },
     [
+      hierarchy,
       activeKeysById,
       pinnedKeysById,
       serverConfigs,
@@ -4244,6 +4399,7 @@ export default function Sidebar() {
               supports: {
                 forking: readThreadSupportsForking(threadRef),
                 moving: readThreadSupportsMoving(threadRef),
+                organization: thread.organization !== undefined,
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
@@ -4265,6 +4421,9 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "session-organization":
+            openSessionOrganization(threadRef);
+            return;
           case "move-session":
             openMoveSession(threadRef);
             return;
@@ -4776,6 +4935,7 @@ export default function Sidebar() {
                       <SidebarSearchResultRow
                         key={threadKey}
                         thread={thread}
+                        ownerPath={ownerPath(thread)}
                         project={
                           projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null
                         }
@@ -4877,6 +5037,7 @@ export default function Sidebar() {
                             // sortable wrapper keeps its identity during a drag.
                             key={`${threadKey}:${rowVariant}`}
                             thread={thread}
+                            ownerPath={ownerPath(thread)}
                             variant={rowVariant}
                             // Snoozed rows wake, settled rows un-settle, and cards settle.
                             variantAction={
@@ -4979,7 +5140,13 @@ export default function Sidebar() {
                             disabled={
                               renamingThreadKey === threadKey ||
                               section === "working" ||
-                              !draggableThreadKeys.has(threadKey) ||
+                              !(
+                                draggableThreadKeys.has(threadKey) ||
+                                (serverConfigs.get(thread.environmentId)?.environment.capabilities
+                                  .threadPinReorder === true &&
+                                  serverConfigs.get(thread.environmentId)?.environment.capabilities
+                                    .threadPinning === true)
+                              ) ||
                               optimisticDrop !== null
                             }
                           >
@@ -4998,9 +5165,102 @@ export default function Sidebar() {
                           onNavigateToDraft={navigateToDraft}
                         />,
                       ];
+                      const finishedControls = new Map<string, ReactNode>();
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
-                          items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
+                          const thread = threadByKey.get(item.key)!;
+                          items.push(renderThreadRow(thread, item.section));
+                          const summary = workerSummaries.get(item.key);
+                          if (summary && hierarchy.root(item.key) === item.key) {
+                            const revealed =
+                              routeThreadKey !== null &&
+                              hierarchy.path(routeThreadKey).includes(item.key);
+                            const expanded = !collapsedMasterKeys.has(item.key) || revealed;
+                            const activeChildren = expandRoots([thread])
+                              .filter(
+                                (child) =>
+                                  sessionKey(child) !== item.key &&
+                                  !sessionWorkerState(
+                                    child,
+                                    connectedEnvironments.has(child.environmentId),
+                                  ).finished,
+                              )
+                              .map(sessionKey);
+                            const finishedControl =
+                              summary.finished > 0 && expanded ? (
+                                <li
+                                  key={`${item.key}:finished`}
+                                  className="ml-5 list-none"
+                                  data-thread-selection-safe
+                                >
+                                  <button
+                                    type="button"
+                                    className="flex w-full items-center gap-1 rounded px-2 py-1 text-left text-xs text-muted-foreground focus-visible:outline-2"
+                                    aria-expanded={expandedFinishedKeys.has(item.key)}
+                                    onClick={() =>
+                                      setExpandedFinished((values) =>
+                                        values.includes(item.key)
+                                          ? values.filter((key) => key !== item.key)
+                                          : [...values, item.key],
+                                      )
+                                    }
+                                  >
+                                    <ChevronDownIcon
+                                      aria-hidden
+                                      className={cn(
+                                        "size-3",
+                                        !expandedFinishedKeys.has(item.key) && "-rotate-90",
+                                      )}
+                                    />
+                                    Finished ({summary.finished})
+                                  </button>
+                                </li>
+                              ) : null;
+                            items.push(
+                              <li
+                                key={`${item.key}:workers`}
+                                className="ml-3 list-none"
+                                data-thread-selection-safe
+                              >
+                                <button
+                                  type="button"
+                                  className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-2 py-1 text-left text-xs text-muted-foreground focus-visible:outline-2"
+                                  aria-expanded={expanded}
+                                  aria-label={`${expanded ? "Collapse" : "Expand"} workers of ${thread.title}: ${summary.running} running, ${summary.attention} needing attention, ${summary.unknown} offline or unknown`}
+                                  onClick={() =>
+                                    setCollapsedMasters((values) =>
+                                      values.includes(item.key)
+                                        ? values.filter((key) => key !== item.key)
+                                        : [...values, item.key],
+                                    )
+                                  }
+                                >
+                                  <ChevronDownIcon
+                                    aria-hidden
+                                    className={cn("size-3", !expanded && "-rotate-90")}
+                                  />
+                                  Workers ({summary.total})
+                                  {(summary.running > 0 || summary.unknown === 0) && (
+                                    <span>{summary.running} running</span>
+                                  )}
+                                  {summary.attention > 0 && (
+                                    <span className="text-warning-foreground">
+                                      {summary.attention} need attention
+                                    </span>
+                                  )}
+                                  {summary.unknown > 0 && (
+                                    <span>{summary.unknown} offline / unknown</span>
+                                  )}
+                                </button>
+                              </li>,
+                            );
+                            if (finishedControl && activeChildren.length === 0)
+                              items.push(finishedControl);
+                            else if (finishedControl)
+                              finishedControls.set(activeChildren.at(-1)!, finishedControl);
+                          }
+                          const finishedControl = finishedControls.get(item.key);
+                          if (finishedControl) items.push(finishedControl);
                           continue;
                         }
                         switch (item.marker) {

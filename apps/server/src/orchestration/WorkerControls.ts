@@ -1,4 +1,7 @@
 import {
+  SessionOwnershipInput,
+  SessionOwnershipResult,
+  SessionOwnershipError,
   CommandId,
   MessageId,
   ModelSelection,
@@ -9,6 +12,7 @@ import {
   TrimmedNonEmptyString,
   WorkerRenewalSettings,
 } from "@t3tools/contracts";
+import { makeSessionOrganizationQuery } from "./SessionOrganizationQuery.ts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -260,7 +264,7 @@ type Confirmation = {
 };
 type Worker = {
   thread_id: string;
-  owner_id: string;
+  owner_id: string | null;
   source_id: string | null;
   plan_json: string;
   baseline: number;
@@ -278,6 +282,9 @@ const Plan = Schema.Struct({
   environmentId: Schema.optional(Schema.String),
   /** On a worker owned by a peer master: that master's permission ceiling. */
   ownerRuntimeMode: Schema.optional(OrchestrationThreadShell.fields.runtimeMode),
+  /** Routing back to the authority proxy after a remote worker becomes independent. */
+  authorityEnvironmentId: Schema.optional(Schema.String),
+  authorityRevision: Schema.optional(Schema.Number),
 });
 const decodePlan = Schema.decodeUnknownSync(Schema.fromJsonString(Plan));
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -286,7 +293,17 @@ const encodeSessionInfo = Schema.encodeSync(Schema.fromJsonString(SessionInfo));
 const decodePolicy = Schema.decodeUnknownSync(Schema.fromJsonString(MessagePolicy));
 const decodeSessionInfo = Schema.decodeUnknownSync(SessionInfo);
 const decodeSessionInfoFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(SessionInfo));
-const decodeSessionAddress = Schema.decodeUnknownSync(SessionAddress);
+const decodeSessionAddress = Schema.decodeUnknownSync(Schema.NullOr(SessionAddress));
+const decodeOwnershipResult = Schema.decodeUnknownSync(
+  Schema.fromJsonString(SessionOwnershipResult),
+);
+const decodePeerOwnership = Schema.decodeUnknownSync(
+  Schema.Struct({
+    owner: Schema.NullOr(SessionAddress),
+    runtimeMode: Schema.NullOr(OrchestrationThreadShell.fields.runtimeMode),
+    revision: Schema.Number,
+  }),
+);
 const decodeReclaimResult = Schema.decodeUnknownSync(Schema.fromJsonString(ReclaimResult));
 const decodeReportIds = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Array(Schema.String)),
@@ -326,7 +343,8 @@ const failure = (cause: unknown) =>
 // Sessions in a linked environment are addressed as `peer:<environmentId>:<threadId>`
 // wherever a local thread ID would go (owners, message senders, job targets).
 const peerRef = (environmentId: string, threadId: string) => `peer:${environmentId}:${threadId}`;
-const parsePeerRef = (id: string) => {
+const parsePeerRef = (id: string | null) => {
+  if (id === null) return undefined;
   const at = id.startsWith("peer:") ? id.indexOf(":", 5) : -1;
   return at < 0
     ? undefined
@@ -342,6 +360,8 @@ export const PeerRequest = Schema.TaggedUnion({
   ping: {},
   sessionInfo: { threadId: ThreadId },
   workerOwner: { threadId: ThreadId },
+  ownership: { threadId: ThreadId },
+  synchronizeOwnership: { threadId: ThreadId },
   deliver: {
     jobId: TrimmedNonEmptyString,
     kind: Schema.Literals(["message", "notice", "done", "blocked"]),
@@ -380,6 +400,13 @@ const selectionKey = (value: typeof ModelSelection.Type) =>
 export class WorkerControls extends Context.Service<
   WorkerControls,
   {
+    readonly readOwnership: (
+      threadId: ThreadId,
+    ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
+    readonly changeOwnership: (
+      input: typeof SessionOwnershipInput.Type,
+      actor?: { readonly threadId: ThreadId; readonly userRequest: string },
+    ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
     readonly withCoordinationLock: <A, E>(
       effect: Effect.Effect<A, E>,
     ) => Effect.Effect<A, E | WorkerError>;
@@ -435,6 +462,7 @@ export class WorkerControls extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const querySessionOrganization = yield* makeSessionOrganizationQuery;
   const engine = yield* OrchestrationEngineService;
   const crypto = yield* Crypto.Crypto;
   const snapshots = yield* ProjectionSnapshotQuery;
@@ -458,7 +486,9 @@ const make = Effect.gen(function* () {
       row.thread_id,
       decodeHandoff(row.plan_json).sourceThreadId ?? row.owner_id,
     ]),
-    ...persisted.flatMap((worker) => [worker.thread_id, worker.owner_id]),
+    ...persisted.flatMap((worker) =>
+      worker.owner_id ? [worker.thread_id, worker.owner_id] : [worker.thread_id],
+    ),
     ...peerMessages.flatMap((job) => [job.worker_id, job.target_id]),
   ]);
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -505,7 +535,12 @@ const make = Effect.gen(function* () {
       });
     const local = yield* peers.localEnvironment;
     const record = (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${id}`)[0];
-    const ownerPeer = record ? parsePeerRef(record.owner_id) : undefined;
+    const ownerPeer = record
+      ? (parsePeerRef(record.owner_id) ??
+        (decodePlan(record.plan_json).authorityEnvironmentId
+          ? { environmentId: decodePlan(record.plan_json).authorityEnvironmentId! }
+          : undefined))
+      : undefined;
     const owner = ownerPeer
       ? yield* peers.call(ownerPeer.environmentId, { _tag: "workerOwner", threadId: id }).pipe(
           Effect.flatMap((raw) =>
@@ -518,7 +553,7 @@ const make = Effect.gen(function* () {
             }),
           ),
         )
-      : record
+      : record?.owner_id
         ? { environmentId: local.environmentId, threadId: ThreadId.make(record.owner_id) }
         : null;
     const project = yield* snapshots.getProjectShellById(value.projectId);
@@ -730,7 +765,7 @@ const make = Effect.gen(function* () {
               : (latest[0]?.state ?? "ready");
     return {
       threadId: plan.threadId,
-      ownerThreadId: ThreadId.make(worker.owner_id),
+      ownerThreadId: ThreadId.make(worker.owner_id ?? worker.thread_id),
       sourceThreadId: plan.sourceThreadId ?? null,
       title: plan.title,
       modelSelection: plan.modelSelection,
@@ -824,7 +859,8 @@ const make = Effect.gen(function* () {
     target: OrchestrationThreadShell,
   ) {
     const plan = decodePlan(worker.plan_json);
-    yield* checkPermissions(worker.owner_id, target, plan.ownerRuntimeMode);
+    if (worker.owner_id !== null)
+      yield* checkPermissions(worker.owner_id, target, plan.ownerRuntimeMode);
     if (
       selectionKey(target.modelSelection) !== selectionKey(plan.modelSelection) ||
       target.runtimeMode !== plan.runtimeMode ||
@@ -837,7 +873,7 @@ const make = Effect.gen(function* () {
     yield* checkSelection(plan.modelSelection);
   });
   const report = Effect.fn(function* (worker: Worker, job: Job, suffix: string, detail: string) {
-    if (!worker.notify) return;
+    if (!worker.notify || worker.owner_id === null) return;
     const plan = decodePlan(worker.plan_json);
     const createdAt = yield* now;
     yield* enqueue(
@@ -978,8 +1014,10 @@ const make = Effect.gen(function* () {
     const rows =
       yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${workerId} AND state = 'ready'`;
     const worker = rows[0];
-    if (!worker)
-      return yield* new WorkerError({ message: "This session is not a managed T3 worker." });
+    if (!worker || worker.owner_id === null)
+      return yield* new WorkerError({
+        message: "This session is not a managed T3 worker; it has no master to report to.",
+      });
     const plan = decodePlan(worker.plan_json);
     const source = yield* thread(workerId);
     const outcome =
@@ -1003,7 +1041,7 @@ const make = Effect.gen(function* () {
     // which retargets queued reports in one transaction.
     yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
         SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt(createdAt) + usage}, ${createdAt}, ${turnId}
-        FROM custom_workers WHERE thread_id = ${workerId}
+        FROM custom_workers WHERE thread_id = ${workerId} AND owner_id IS NOT NULL
         ON CONFLICT(id) DO NOTHING`;
     const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`)[0];
     // Retries retain the saved time, including headers from before timestamps.
@@ -1049,7 +1087,7 @@ const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const pending = yield* sql<Job>`SELECT j.* FROM custom_worker_jobs j
       JOIN custom_workers w ON w.thread_id = j.worker_id
-      WHERE j.kind = 'done' AND j.state = 'queued' AND j.target_id NOT LIKE 'peer:%' AND w.notify = 1
+      WHERE j.kind = 'done' AND j.state = 'queued' AND j.target_id NOT LIKE 'peer:%' AND w.notify = 1 AND w.owner_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM custom_session_moves m WHERE m.locked = 1
           AND (m.thread_id = j.worker_id OR m.thread_id = j.target_id))
         AND NOT EXISTS (SELECT 1 FROM orchestration_command_receipts r
@@ -1137,7 +1175,7 @@ const make = Effect.gen(function* () {
       if (job.kind !== "message") {
         // A master's record of a peer worker receives that worker's forwarded reports.
         if (!worker || (worker.state !== "ready" && worker.state !== "remote")) continue;
-        if (job.kind !== "work" && !worker.notify) continue;
+        if (job.kind !== "work" && (!worker.notify || worker.owner_id === null)) continue;
       }
       // Recheck at delivery: a queued message cannot outlive its confirmed
       // ownership/project context. Internal successor startup is not peer mail.
@@ -1294,12 +1332,70 @@ const make = Effect.gen(function* () {
       );
     }
   }, Effect.mapError(failure));
-  const drain = () => lock.withPermit(drainJobs());
+  const syncOwnershipChanges = Effect.fn(function* () {
+    const changes = yield* sql<{
+      id: string;
+      result_json: string;
+    }>`SELECT id, result_json FROM custom_session_ownership_changes WHERE announced = 0 ORDER BY rowid`;
+    const unavailable = new Set<string>();
+    for (const change of changes) {
+      const result = decodeOwnershipResult(change.result_json);
+      const worker =
+        (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${result.threadId}`)[0];
+      const environment =
+        worker?.state === "remote" ? decodePlan(worker.plan_json).environmentId : undefined;
+      if (environment) {
+        if (unavailable.has(environment)) continue;
+        const delivered = yield* peers
+          .call(environment, { _tag: "synchronizeOwnership", threadId: result.threadId })
+          .pipe(
+            Effect.as(true),
+            Effect.catch(() => {
+              unavailable.add(environment);
+              return Effect.succeed(false);
+            }),
+          );
+        if (!delivered) continue;
+      }
+      yield* sql`UPDATE custom_session_ownership_changes SET announced = 1 WHERE id = ${change.id}`;
+    }
+  });
+  const publishedOrganizations = new Map<string, string>();
+  const publishOrganizations = Effect.fn(function* () {
+    const ids = [...watched].filter((id): id is string => id !== null && !id.startsWith("peer:"));
+    if (!ids.length) return;
+    const local = yield* sql<{
+      thread_id: string;
+    }>`SELECT thread_id FROM projection_threads WHERE deleted_at IS NULL AND ${sql.in("thread_id", ids)}`;
+    const organizations = yield* querySessionOrganization(
+      local.map((row) => ThreadId.make(row.thread_id)),
+    );
+    for (const [id, value] of organizations) {
+      const serialized = encodeUnknown(value);
+      if (publishedOrganizations.get(id) === serialized) continue;
+      // A metadata-only event gives the normal shell stream a durable cursor.
+      // It neither appends a transcript nor wakes the agent. A restart republishes
+      // the compact projection, including changes committed before a crash.
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        threadId: id,
+        commandId: CommandId.make(`worker-organization:${yield* crypto.randomUUIDv4}`),
+      });
+      publishedOrganizations.set(id, serialized);
+    }
+  });
+  const drainAndPublish = () =>
+    drainJobs().pipe(
+      Effect.andThen(syncOwnershipChanges()),
+      Effect.andThen(publishOrganizations()),
+      Effect.mapError(failure),
+    );
+  const drain = () => lock.withPermit(drainAndPublish());
   // Tool calls never wait behind a running pass: they deliver now when the queue
   // is free and otherwise leave their already persisted work to the next pass.
   const kick = () =>
     lock
-      .withPermitsIfAvailable(1)(drainJobs())
+      .withPermitsIfAvailable(1)(drainAndPublish())
       .pipe(
         Effect.flatMap((ran) =>
           Option.isSome(ran) ? Effect.void : Queue.offer(drainRequests, undefined),
@@ -1783,6 +1879,246 @@ const make = Effect.gen(function* () {
     lock.withPermit,
     Effect.mapError(failure),
   );
+  const retargetReports = Effect.fn(function* (
+    ids: ReadonlyArray<string>,
+    owners: ReadonlyArray<string>,
+    owner: string | null,
+  ) {
+    // Split undelivered digests before moving a subset of their workers.
+    const digests = yield* sql<Job>`SELECT * FROM custom_worker_jobs
+      WHERE id LIKE 'digest:%' AND state = 'queued' AND ${sql.in("target_id", owners)}`;
+    for (const digest of digests) {
+      if (!ids.some((workerId) => digest.prompt.includes(`Worker: ${workerId}\n`))) continue;
+      if (!digest.report_ids_json)
+        return yield* new WorkerError({
+          message:
+            "A pending digest from an older build includes this worker. Review that digest before reclaiming it.",
+        });
+      const accepted = yield* sql`SELECT 1 FROM orchestration_command_receipts
+        WHERE command_id = ${`worker-job:${digest.id}:${digest.attempt}`} AND status = 'accepted'`;
+      yield* sql`UPDATE custom_worker_jobs SET state = ${accepted.length ? "completed" : "cancelled"} WHERE id = ${digest.id}`;
+      if (!accepted.length) {
+        const reports = decodeReportIds(digest.report_ids_json);
+        yield* sql`UPDATE custom_worker_jobs SET state = 'queued' WHERE ${sql.in("id", reports)} AND state = 'completed'`;
+      }
+    }
+    yield* sql`UPDATE custom_worker_jobs SET state = 'completed'
+      WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND ${sql.in("worker_id", ids)}
+        AND EXISTS (SELECT 1 FROM orchestration_command_receipts r
+          WHERE r.command_id = 'worker-job:' || custom_worker_jobs.id || ':' || custom_worker_jobs.attempt AND r.status = 'accepted')`;
+    yield* sql`UPDATE custom_worker_jobs SET target_id = COALESCE(${owner}, worker_id), attempt = attempt + 1, dispatched_at = NULL
+      WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND ${sql.in("worker_id", ids)}`;
+  });
+  const queueOwnershipSync = Effect.fn(function* (ids: ReadonlyArray<string>) {
+    if (!ids.length) return;
+    const records =
+      yield* sql<Worker>`SELECT * FROM custom_workers WHERE state = 'remote' AND ${sql.in("thread_id", ids)}`;
+    for (const record of records) {
+      if (parsePeerRef(record.owner_id)) continue;
+      const revision = (yield* authorityOf(record.thread_id))?.revision ?? 0;
+      const owner = record.owner_id === null ? null : ThreadId.make(record.owner_id);
+      const result = {
+        threadId: ThreadId.make(record.thread_id),
+        ownerThreadId: owner,
+        previousOwnerThreadId: owner,
+        revision,
+      };
+      yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json)
+        VALUES (${`sync:${record.thread_id}:${revision}`}, '{}', ${encodeUnknown(result)}) ON CONFLICT(id) DO NOTHING`;
+    }
+  });
+  const readOwnership = Effect.fn("WorkerControls.readOwnership")(
+    function* (threadId: ThreadId) {
+      const record =
+        (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${threadId}`)[0];
+      if (!record) yield* thread(threadId);
+      const authorityEnvironment = record
+        ? decodePlan(record.plan_json).authorityEnvironmentId
+        : undefined;
+      if (
+        authorityEnvironment &&
+        authorityEnvironment !== (yield* peers.localEnvironment).environmentId
+      )
+        return yield* new WorkerError({
+          message: `Read this relationship on its owning computer (${authorityEnvironment}).`,
+        });
+      if (parsePeerRef(record?.owner_id ?? null))
+        return yield* new WorkerError({
+          message: "Read this relationship on the current master's computer.",
+        });
+      const owner = record?.owner_id ? ThreadId.make(record.owner_id) : null;
+      return {
+        threadId,
+        ownerThreadId: owner,
+        previousOwnerThreadId: owner,
+        revision: (yield* authorityOf(threadId))?.revision ?? 0,
+      };
+    },
+    Effect.mapError((cause) => new SessionOwnershipError({ message: failure(cause).message })),
+  );
+  const changeOwnership = Effect.fn("WorkerControls.changeOwnership")(
+    function* (
+      input: typeof SessionOwnershipInput.Type,
+      actor?: { readonly threadId: ThreadId; readonly userRequest: string },
+    ) {
+      const id = `ownership:${actor?.threadId ?? "user"}:${input.clientRequestId}`;
+      const request = encodeUnknown(input);
+      const saved = (yield* sql<{ request_json: string; result_json: string }>`
+        SELECT * FROM custom_session_ownership_changes WHERE id = ${id}`)[0];
+      if (saved) {
+        if (saved.request_json !== request)
+          return yield* new WorkerError({
+            message: "This request ID already belongs to a different ownership change.",
+          });
+        return decodeOwnershipResult(saved.result_json);
+      }
+      const record =
+        (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${input.threadId}`)[0];
+      const authorityEnvironment = record
+        ? decodePlan(record.plan_json).authorityEnvironmentId
+        : undefined;
+      if (
+        authorityEnvironment &&
+        authorityEnvironment !== (yield* peers.localEnvironment).environmentId
+      )
+        return yield* new WorkerError({
+          message: `Change this relationship on its owning computer (${authorityEnvironment}).`,
+        });
+      const previous = record?.owner_id ?? null;
+      const revision = (yield* authorityOf(input.threadId))?.revision ?? 0;
+      if (previous !== input.expectedOwnerThreadId || revision !== input.expectedRevision)
+        return yield* new WorkerError({
+          message: "This relationship changed. Refresh it before trying again.",
+        });
+      if (parsePeerRef(previous))
+        return yield* new WorkerError({
+          message: "Change this relationship on the current master's computer.",
+        });
+      if (record && !["ready", "remote"].includes(record.state))
+        return yield* new WorkerError({
+          message: "Finish creating or recovering this worker before changing its owner.",
+        });
+      const target = record?.state === "remote" ? null : yield* thread(input.threadId);
+      if (actor) {
+        if (
+          previous !== actor.threadId &&
+          input.threadId !== actor.threadId &&
+          !(previous === null && input.ownerThreadId === actor.threadId)
+        )
+          return yield* new WorkerError({
+            message: "Only the worker or its current master can change an existing relationship.",
+          });
+        const instruction = (yield* sql<{
+          text: string;
+        }>`SELECT json_extract(e.payload_json, '$.text') AS text
+          FROM orchestration_events e WHERE e.stream_id = ${actor.threadId} AND e.event_type = 'thread.message-sent'
+          AND json_extract(e.payload_json, '$.role') = 'user'
+          AND json_extract(e.payload_json, '$.messageId') NOT LIKE 'worker-job:%'
+          AND e.command_id NOT LIKE 'worker-%'
+          AND EXISTS (SELECT 1 FROM orchestration_events started WHERE started.stream_id = e.stream_id
+            AND started.event_type = 'thread.turn-start-requested'
+            AND json_extract(started.payload_json, '$.messageId') = json_extract(e.payload_json, '$.messageId'))
+          ORDER BY e.sequence DESC LIMIT 1`)[0];
+        if (!actor.userRequest.trim() || !instruction?.text.includes(actor.userRequest))
+          return yield* new WorkerError({
+            message:
+              "Changing ownership requires an exact quote from the latest direct user instruction. Peer messages and inherited instructions cannot authorize adoption.",
+          });
+      }
+      const involved = new Set<string>([input.threadId]);
+      if (previous) involved.add(previous);
+      if (input.ownerThreadId !== null) {
+        const parent = yield* thread(input.ownerThreadId);
+        if (target) yield* checkPermissions(parent.id, target);
+        else if (
+          record &&
+          decodePlan(record.plan_json).runtimeMode === "full-access" &&
+          parent.runtimeMode !== "full-access"
+        )
+          return yield* new WorkerError({
+            message: "The worker has broader permissions than the new master.",
+          });
+        let ancestor: string | null = parent.id;
+        const seen = new Set<string>([input.threadId]);
+        while (ancestor !== null) {
+          if (seen.has(ancestor))
+            return yield* new WorkerError({
+              message: "A session cannot own itself or one of its ancestors.",
+            });
+          seen.add(ancestor);
+          involved.add(ancestor);
+          if (parsePeerRef(ancestor))
+            return yield* new WorkerError({
+              message:
+                "The new master's ancestry spans computers. Choose a master whose ancestry can be verified on this computer.",
+            });
+          ancestor =
+            (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${ancestor}`)[0]
+              ?.owner_id ?? null;
+        }
+        if (
+          previous === null &&
+          (yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${input.threadId} LIMIT 1`)
+            .length
+        )
+          return yield* new WorkerError({
+            message:
+              "This session already owns workers. Assign an independent session, or transfer an existing worker with its children.",
+          });
+      }
+      const ids = [...involved];
+      if (
+        (yield* sql`SELECT 1 FROM custom_session_moves WHERE locked = 1 AND ${sql.in("thread_id", ids)} LIMIT 1`)
+          .length
+      )
+        return yield* new WorkerError({
+          message: "Wait for the session move to finish before changing ownership.",
+        });
+      if (
+        (yield* sql`SELECT 1 FROM custom_orchestrator_handoffs WHERE state = 'queued' AND (${sql.in("owner_id", ids)} OR ${sql.in("thread_id", ids)}) LIMIT 1`)
+          .length
+      )
+        return yield* new WorkerError({
+          message: "Finish or cancel the pending master renewal before changing ownership.",
+        });
+      if (previous !== input.ownerThreadId) {
+        yield* retargetReports([input.threadId], previous ? [previous] : [], input.ownerThreadId);
+        if (record) {
+          yield* sql`UPDATE custom_workers SET owner_id = ${input.ownerThreadId} WHERE thread_id = ${input.threadId}`;
+        } else if (input.ownerThreadId !== null && target) {
+          const baseline = yield* engine.latestSequence;
+          const plan = encodePlan({
+            threadId: target.id,
+            projectId: target.projectId,
+            title: target.title,
+            modelSelection: target.modelSelection,
+            runtimeMode: target.runtimeMode,
+            interactionMode: target.interactionMode,
+            prompt: "Existing session assignment",
+          });
+          yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state, baseline, read_seq)
+            VALUES (${target.id}, ${input.ownerThreadId}, ${plan}, 'ready', ${baseline}, ${baseline})`;
+        }
+        // Invalidate confirmed peer messages and stale relationship editors, including ABA transfers.
+        yield* sql`INSERT INTO custom_orchestrator_authority (thread_id, revision) VALUES (${input.threadId}, 1)
+          ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
+      }
+      const result = {
+        threadId: input.threadId,
+        previousOwnerThreadId: previous === null ? null : ThreadId.make(previous),
+        ownerThreadId: input.ownerThreadId,
+        revision: revision + (previous === input.ownerThreadId ? 0 : 1),
+      };
+      yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json) VALUES (${id}, ${request}, ${encodeUnknown(result)})`;
+      for (const value of involved) watched.add(value);
+      return result;
+    },
+    sql.withTransaction,
+    lock.withPermit,
+    Effect.tap(() => kick()),
+    Effect.mapError((cause) => new SessionOwnershipError({ message: failure(cause).message })),
+  );
+
   const reclaim = Effect.fn("WorkerControls.reclaim")(
     function* (owner: ThreadId, input: typeof ReclaimInput.Type) {
       const ids = [...new Set(input.workerThreadIds)].sort();
@@ -1834,6 +2170,7 @@ const make = Effect.gen(function* () {
         if (
           !record ||
           !history.length ||
+          record.owner_id === null ||
           record.owner_id === owner ||
           !["ready", "remote"].includes(record.state)
         )
@@ -1857,34 +2194,16 @@ const make = Effect.gen(function* () {
         } else yield* checkPermissions(owner, yield* thread(workerId));
         selected.push(record);
       }
-      // Split undelivered digests before moving a subset of their workers.
-      const digests = yield* sql<Job>`SELECT * FROM custom_worker_jobs
-      WHERE id LIKE 'digest:%' AND state = 'queued' AND ${sql.in(
-        "target_id",
-        selected.map((worker) => worker.owner_id),
-      )}`;
-      for (const digest of digests) {
-        if (!ids.some((workerId) => digest.prompt.includes(`Worker: ${workerId}\n`))) continue;
-        if (!digest.report_ids_json)
-          return yield* new WorkerError({
-            message:
-              "A pending digest from an older build includes this worker. Review that digest before reclaiming it.",
-          });
-        const accepted = yield* sql`SELECT 1 FROM orchestration_command_receipts
-        WHERE command_id = ${`worker-job:${digest.id}:${digest.attempt}`} AND status = 'accepted'`;
-        yield* sql`UPDATE custom_worker_jobs SET state = ${accepted.length ? "completed" : "cancelled"} WHERE id = ${digest.id}`;
-        if (!accepted.length) {
-          const reports = decodeReportIds(digest.report_ids_json);
-          yield* sql`UPDATE custom_worker_jobs SET state = 'queued' WHERE ${sql.in("id", reports)} AND state = 'completed'`;
-        }
-      }
-      yield* sql`UPDATE custom_worker_jobs SET state = 'completed'
-      WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND ${sql.in("worker_id", ids)}
-        AND EXISTS (SELECT 1 FROM orchestration_command_receipts r
-          WHERE r.command_id = 'worker-job:' || custom_worker_jobs.id || ':' || custom_worker_jobs.attempt AND r.status = 'accepted')`;
-      yield* sql`UPDATE custom_worker_jobs SET target_id = ${owner}, attempt = attempt + 1, dispatched_at = NULL
-      WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND ${sql.in("worker_id", ids)}`;
+      yield* retargetReports(
+        ids,
+        selected.flatMap((worker) => (worker.owner_id === null ? [] : [worker.owner_id])),
+        owner,
+      );
       yield* sql`UPDATE custom_workers SET owner_id = ${owner} WHERE ${sql.in("thread_id", ids)}`;
+      for (const id of ids)
+        yield* sql`INSERT INTO custom_orchestrator_authority (thread_id, revision) VALUES (${id}, 1)
+        ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
+      yield* queueOwnershipSync(ids);
       yield* sql`UPDATE custom_orchestrator_authority SET active = 1, revision = revision + 1 WHERE thread_id = ${owner}`;
       const result = {
         ownerThreadId: owner,
@@ -2011,6 +2330,13 @@ const make = Effect.gen(function* () {
               });
           }
         }
+        const parentRecord =
+          (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${row.owner_id}`)[0];
+        if (parsePeerRef(parentRecord?.owner_id ?? null))
+          return yield* new WorkerError({
+            message:
+              "Renewing a nested worker whose master is on another computer requires a coordinated parent handoff. Its current ownership has been preserved.",
+          });
         yield* spawn(row.owner_id, parent, input, true);
         const workers =
           yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
@@ -2025,15 +2351,23 @@ const make = Effect.gen(function* () {
             WHERE target_id = ${row.owner_id} AND kind IN ('notice', 'done', 'blocked') AND state = 'queued'
             AND worker_id IN (SELECT thread_id FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id})`;
             yield* sql`UPDATE custom_workers SET owner_id = ${row.thread_id} WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
+            for (const id of transferred)
+              yield* sql`INSERT INTO custom_orchestrator_authority (thread_id, revision) VALUES (${id}, 1)
+              ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
+            yield* queueOwnershipSync(transferred);
             const retiredSequence = yield* engine.latestSequence;
             yield* sql`INSERT INTO custom_orchestrator_authority
               (thread_id, active, successor_id, retired_sequence, revision)
               VALUES (${row.owner_id}, 0, ${row.thread_id}, ${retiredSequence}, 1)
               ON CONFLICT(thread_id) DO UPDATE SET active = 0, successor_id = excluded.successor_id,
                 retired_sequence = excluded.retired_sequence, revision = revision + 1`;
-            // The successor is a master, not a worker reporting back to the old master.
+            // A nested successor keeps the real parent above this group. The old
+            // conversation remains accessible under that parent with its history.
             yield* sql`DELETE FROM custom_worker_jobs WHERE id = ${`spawn:${row.thread_id}`} AND state = 'queued'`;
-            yield* sql`DELETE FROM custom_workers WHERE thread_id = ${row.thread_id}`;
+            if (parentRecord?.owner_id) {
+              yield* sql`UPDATE custom_workers SET owner_id = ${parentRecord.owner_id} WHERE thread_id = ${row.thread_id}`;
+              watched.add(parentRecord.owner_id);
+            } else yield* sql`DELETE FROM custom_workers WHERE thread_id = ${row.thread_id}`;
             yield* enqueue(
               `handoff-start:${row.thread_id}`,
               { thread_id: row.owner_id },
@@ -2077,6 +2411,89 @@ const make = Effect.gen(function* () {
         return yield* peers.localEnvironment;
       case "sessionInfo":
         return yield* localSessionInfo(request.threadId);
+      case "synchronizeOwnership": {
+        const record =
+          (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.threadId}`)[0];
+        if (
+          !record ||
+          (parsePeerRef(record.owner_id)?.environmentId !== from &&
+            decodePlan(record.plan_json).authorityEnvironmentId !== from)
+        )
+          return yield* new WorkerError({
+            message: "This peer is not the worker's ownership authority.",
+          });
+        const ownership = yield* peers
+          .call(from, { _tag: "ownership", threadId: request.threadId })
+          .pipe(Effect.flatMap(peerResult(decodePeerOwnership)));
+        const owner = ownership.owner
+          ? peerRef(ownership.owner.environmentId, ownership.owner.threadId)
+          : null;
+        yield* Effect.gen(function* () {
+          const current =
+            (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${record.thread_id}`)[0];
+          if (
+            !current ||
+            (decodePlan(current.plan_json).authorityRevision ?? -1) >= ownership.revision
+          )
+            return;
+          if (
+            parsePeerRef(current.owner_id)?.environmentId !== from &&
+            decodePlan(current.plan_json).authorityEnvironmentId !== from
+          )
+            return yield* new WorkerError({
+              message: "Ownership authority moved while synchronizing.",
+            });
+          if (
+            (yield* sql`SELECT 1 FROM custom_session_moves WHERE thread_id = ${record.thread_id} AND locked = 1`)
+              .length
+          )
+            return yield* new WorkerError({
+              message: "Ownership synchronization will retry after the native move.",
+            });
+          yield* retargetReports(
+            [current.thread_id],
+            current.owner_id ? [current.owner_id] : [],
+            owner,
+          );
+          const { ownerRuntimeMode: _oldMode, ...plan } = decodePlan(current.plan_json);
+          yield* sql`UPDATE custom_workers SET owner_id = ${owner}, plan_json = ${encodePlan({
+            ...plan,
+            authorityEnvironmentId: from,
+            authorityRevision: ownership.revision,
+            ...(ownership.runtimeMode ? { ownerRuntimeMode: ownership.runtimeMode } : {}),
+          })} WHERE thread_id = ${record.thread_id}`;
+          yield* sql`INSERT INTO custom_orchestrator_authority (thread_id, revision) VALUES (${record.thread_id}, 1)
+            ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
+        }).pipe(sql.withTransaction, lock.withPermit);
+        watched.add(record.thread_id);
+        // Do not drain here: the caller holds its coordination lock. An immediate
+        // peer report/control could otherwise recurse into that same lock.
+        yield* Queue.offer(drainRequests, undefined);
+        return { synchronized: true };
+      }
+      case "ownership": {
+        const record =
+          (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.threadId} AND state = 'remote'`)[0];
+        if (!record || decodePlan(record.plan_json).environmentId !== from)
+          return yield* new WorkerError({
+            message: "This computer is not the worker's execution host.",
+          });
+        const local = yield* peers.localEnvironment;
+        const owner =
+          record.owner_id === null
+            ? null
+            : (parsePeerRef(record.owner_id) ?? {
+                environmentId: local.environmentId,
+                threadId: ThreadId.make(record.owner_id),
+              });
+        const runtimeMode =
+          record.owner_id === null ? null : (yield* thread(record.owner_id)).runtimeMode;
+        return {
+          owner,
+          runtimeMode,
+          revision: (yield* authorityOf(record.thread_id))?.revision ?? 0,
+        };
+      }
       case "workerOwner": {
         const record =
           (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.threadId} AND state = 'remote'`)[0];
@@ -2086,7 +2503,9 @@ const make = Effect.gen(function* () {
           });
         const local = yield* peers.localEnvironment;
         const remoteOwner = parsePeerRef(record.owner_id);
-        return remoteOwner ?? { environmentId: local.environmentId, threadId: record.owner_id };
+        return record.owner_id === null
+          ? null
+          : (remoteOwner ?? { environmentId: local.environmentId, threadId: record.owner_id });
       }
       case "spawn":
         return yield* spawn(
@@ -2146,7 +2565,7 @@ const make = Effect.gen(function* () {
               message: `No master here owns worker ${request.senderThreadId} in ${label}.`,
             });
           // The record's current owner, so a report reaches a handoff successor.
-          target = record.owner_id;
+          target = record.owner_id ?? record.thread_id;
           sender = record.thread_id;
           const existing = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`)[0];
           if (
@@ -2224,7 +2643,7 @@ const make = Effect.gen(function* () {
         if (plan.ownerRuntimeMode !== request.owner.runtimeMode)
           yield* sql`UPDATE custom_workers SET plan_json = ${encodePlan({ ...plan, ownerRuntimeMode: request.owner.runtimeMode })}
             WHERE thread_id = ${worker.thread_id}`;
-        const owner = ThreadId.make(worker.owner_id);
+        const owner = ThreadId.make(worker.owner_id ?? "");
         switch (request.op) {
           case "describe":
             return yield* describe(yield* owned(owner, worker.thread_id));
@@ -2271,7 +2690,7 @@ const make = Effect.gen(function* () {
     );
     // Local events cannot announce that a peer came back or that a held report
     // reached its deadline; retry those deliveries.
-    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND (target_id LIKE 'peer:%' OR kind = 'done') LIMIT 1`.pipe(
+    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND (target_id LIKE 'peer:%' OR kind = 'done') UNION ALL SELECT 1 FROM custom_session_ownership_changes WHERE announced = 0 LIMIT 1`.pipe(
       Effect.flatMap((rows) => (rows.length ? Queue.offer(drainRequests, undefined) : Effect.void)),
       Effect.catch((error) => Effect.logError("Peer delivery retry failed", error)),
       Effect.repeat(Schedule.spaced("30 seconds")),
@@ -2282,6 +2701,8 @@ const make = Effect.gen(function* () {
   const peerFor = (environment: string | undefined) =>
     environment ? resolvePeer(environment) : Effect.succeed(undefined);
   return WorkerControls.of({
+    readOwnership,
+    changeOwnership,
     withCoordinationLock: (effect) =>
       effect.pipe(
         Effect.tap(() =>
@@ -2289,7 +2710,7 @@ const make = Effect.gen(function* () {
             Effect.map((rows) => {
               for (const worker of rows) {
                 watched.add(worker.thread_id);
-                watched.add(worker.owner_id);
+                if (worker.owner_id !== null) watched.add(worker.owner_id);
               }
             }),
           ),

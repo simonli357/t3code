@@ -1,3 +1,4 @@
+import { SessionOrganizationDialogHost } from "../components/SessionOrganizationDialog";
 import { MoveSessionDialogHost } from "../components/MoveSessionDialog";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -182,6 +183,7 @@ function RootRouteView() {
           <ProviderAuthCallbackCoordinator />
           <CustomSnoozeDialogHost />
           <MoveSessionDialogHost />
+          <SessionOrganizationDialogHost />
           <CommandPalette>
             <AppSidebarLayout>
               <Outlet />
@@ -239,6 +241,7 @@ function RootRouteView() {
           <ConfirmDialogHost />
           <CustomSnoozeDialogHost />
           <MoveSessionDialogHost />
+          <SessionOrganizationDialogHost />
           <SlowRpcRequestToastCoordinator />
           <ProjectCloneToastCoordinator />
           <HostedStaticEnvironmentBootstrap />

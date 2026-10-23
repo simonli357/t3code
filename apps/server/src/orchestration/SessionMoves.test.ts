@@ -744,3 +744,81 @@ it.effect(
       ).toHaveLength(2);
     }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "moves a released remote worker while retaining its authority route for reassignment",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, gamma, input } = yield* fixture;
+      const master = ThreadId.make("detached-master");
+      yield* gamma.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-detached-master"),
+        threadId: master,
+        projectId: gamma.projectId,
+        title: "Master",
+        modelSelection: selection,
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+        branch: null,
+        worktreePath: null,
+        historyImport: true,
+        createdAt: timestamp,
+      });
+      const plan = {
+        threadId,
+        projectId: alpha.projectId,
+        title: "Existing worker",
+        modelSelection: selection,
+        prompt: "Continue",
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+        ownerRuntimeMode: "full-access",
+      };
+      yield* alpha.sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state)
+    VALUES (${threadId}, ${"peer:gamma:" + master}, ${encodeUnknown(plan)}, 'ready')`;
+      yield* gamma.sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state)
+    VALUES (${threadId}, ${master}, ${encodeUnknown({ ...plan, environmentId: "alpha" })}, 'remote')`;
+      yield* gamma.workers.changeOwnership({
+        clientRequestId: "release-before-move",
+        threadId,
+        ownerThreadId: null,
+        expectedOwnerThreadId: master,
+        expectedRevision: 0,
+      });
+      expect(
+        Option.getOrThrow(yield* alpha.snapshots.getThreadShellById(threadId)).organization,
+      ).toMatchObject({ owner: null, authorityEnvironmentId: "gamma" });
+      yield* alpha.moves.request(input);
+      yield* alpha.moves.drain();
+      expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+        state: "complete",
+        error: null,
+      });
+      expect(
+        Option.getOrThrow(yield* beta.snapshots.getThreadShellById(threadId)).organization,
+      ).toMatchObject({ owner: null, authorityEnvironmentId: "gamma" });
+      expect(
+        (yield* beta.workers
+          .changeOwnership({
+            clientRequestId: "wrong-authority",
+            threadId,
+            ownerThreadId: null,
+            expectedOwnerThreadId: null,
+            expectedRevision: 2,
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("owning computer");
+      yield* gamma.workers.changeOwnership({
+        clientRequestId: "reassign-after-move",
+        threadId,
+        ownerThreadId: master,
+        expectedOwnerThreadId: null,
+        expectedRevision: 1,
+      });
+      expect(
+        Option.getOrThrow(yield* beta.snapshots.getThreadShellById(threadId)).organization?.owner,
+      ).toEqual({ environmentId: "gamma", threadId: master });
+      expect((yield* gamma.workers.list(master))[0]?.environment).toBe("beta");
+    }).pipe(Effect.scoped),
+);

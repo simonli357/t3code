@@ -2634,3 +2634,53 @@ describe("Working shelf (beta)", () => {
     });
   });
 });
+
+describe("managed worker drag organization", () => {
+  it("reorders siblings without reparenting or rewriting another master's rows", () => {
+    const groups = new Map([
+      ["a", "master"],
+      ["b", "master"],
+      ["other", "another-master"],
+    ]);
+    const items: SidebarListItem[] = [
+      { kind: "marker", marker: "pinned-divider" },
+      ...["master", "a", "b", "another-master", "other"].map((key) => ({
+        kind: "thread" as const,
+        key,
+        section: "active" as const,
+      })),
+    ];
+    const target = resolveSidebarDropTarget(items, "b", "a", groups)!;
+    expect(target.activeOrder).toEqual(["b", "a"]);
+    const plan = planSidebarThreadDrop({
+      activeKey: "b",
+      activeSection: "active",
+      target,
+      activeOrder: ["master", "a", "b", "another-master", "other"],
+      pinnedOrder: [],
+      activeKeysById: new Map(),
+      pinnedKeysById: new Map(),
+      groupByKey: groups,
+    });
+    expect(plan.kind).toBe("move-active");
+    if (plan.kind === "move-active") {
+      expect(plan.order).toEqual(["b", "a"]);
+      expect(plan.assignments.every((row) => ["a", "b"].includes(row.id))).toBe(true);
+    }
+    expect(groups.get("b")).toBe("master");
+  });
+  it("keeps worker pin controls inside an active master's group", () => {
+    const groups = new Map([
+      ["a", "master"],
+      ["b", "master"],
+    ]);
+    const items: SidebarListItem[] = [
+      { kind: "marker", marker: "pinned-divider" },
+      { kind: "thread", key: "master", section: "active" },
+      { kind: "thread", key: "a", section: "pinned" },
+      { kind: "thread", key: "b", section: "active" },
+    ];
+    const target = resolveSidebarDropTarget(items, "b", "a", groups)!;
+    expect(target).toMatchObject({ section: "pinned", pinnedOrder: ["b", "a"], activeOrder: [] });
+  });
+});

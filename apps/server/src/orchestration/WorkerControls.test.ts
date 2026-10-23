@@ -3002,3 +3002,366 @@ it.effect(
       ).toBe(false);
     }).pipe(Effect.scoped),
 );
+it.layer(testLayer)("session organization", (it) => {
+  it.effect(
+    "assigns an existing independent conversation without changing its identity, settings or history",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const directory = yield* ProviderSessionDirectory;
+        const { owner, source } = yield* seed("organization-adopt");
+        const before = Option.getOrThrow(yield* snapshots.getThreadDetailById(source));
+        const native = yield* directory.getBinding(source);
+        const input = {
+          clientRequestId: "adopt",
+          threadId: source,
+          ownerThreadId: owner,
+          expectedOwnerThreadId: null,
+          expectedRevision: 0,
+        };
+        const result = yield* service.changeOwnership(input);
+        expect(yield* service.changeOwnership(input)).toEqual(result);
+        expect(result.revision).toBe(1);
+        const after = Option.getOrThrow(yield* snapshots.getThreadDetailById(source));
+        expect(after.messages).toEqual(before.messages);
+        expect(after.modelSelection).toEqual(before.modelSelection);
+        expect(after.worktreePath).toEqual(before.worktreePath);
+        expect(yield* directory.getBinding(source)).toEqual(native);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(source)).organization?.owner
+            ?.threadId,
+        ).toBe(owner);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(owner)).organization?.workers.map(
+            (w) => w.threadId,
+          ),
+        ).toEqual([source]);
+        const shell = yield* snapshots.getShellSnapshot();
+        expect(shell.threads.find((t) => t.id === source)?.organization?.owner?.threadId).toBe(
+          owner,
+        );
+        expect((yield* service.list(owner)).map((worker) => worker.threadId)).toEqual([source]);
+      }),
+  );
+  it.effect(
+    "transfers and releases ownership atomically while preserving running and queued work and held reports",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const sql = yield* SqlClient.SqlClient;
+        const { owner, source, worker, input } = yield* seed("organization-transfer");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "organization-active");
+        const queued = yield* service.send(owner, {
+          threadId: worker,
+          clientRequestId: "queued",
+          prompt: "Already authorized follow-up",
+        });
+        yield* service.control(owner, { threadId: worker, notifications: false });
+        const report = yield* service.report(worker, {
+          clientRequestId: "held",
+          outcome: "blocked",
+          summary: "Signing decision required",
+        });
+        const before =
+          (yield* sql`SELECT plan_json, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0];
+        const moved = yield* service.changeOwnership({
+          clientRequestId: "transfer",
+          threadId: worker,
+          ownerThreadId: source,
+          expectedOwnerThreadId: owner,
+          expectedRevision: 0,
+        });
+        expect(yield* service.list(owner)).toHaveLength(0);
+        expect(
+          (yield* service
+            .send(owner, { threadId: worker, clientRequestId: "stale", prompt: "Unauthorized" })
+            .pipe(Effect.flip)).message,
+        ).toContain("not a worker owned");
+        expect(
+          (yield* sql`SELECT target_id FROM custom_worker_jobs WHERE id = ${report.requestId}`)[0],
+        ).toEqual({ target_id: source });
+        yield* service.changeOwnership({
+          clientRequestId: "release",
+          threadId: worker,
+          ownerThreadId: null,
+          expectedOwnerThreadId: source,
+          expectedRevision: moved.revision,
+        });
+        expect(yield* service.list(source)).toHaveLength(0);
+        expect(
+          (yield* service
+            .report(worker, {
+              clientRequestId: "late",
+              outcome: "done",
+              summary: "No longer owned",
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("no master");
+        expect(
+          (yield* sql`SELECT state, target_id FROM custom_worker_jobs WHERE id = ${queued.requestId}`)[0],
+        ).toEqual({ state: "queued", target_id: worker });
+        expect(
+          (yield* sql`SELECT plan_json, read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
+        ).toEqual(before);
+        yield* service.changeOwnership({
+          clientRequestId: "reassign",
+          threadId: worker,
+          ownerThreadId: owner,
+          expectedOwnerThreadId: null,
+          expectedRevision: moved.revision + 1,
+        });
+        expect(
+          (yield* sql`SELECT target_id FROM custom_worker_jobs WHERE id = ${report.requestId}`)[0],
+        ).toEqual({ target_id: owner });
+      }),
+  );
+  it.effect(
+    "allows only one racing assignment and rejects stale ABA editors and ancestor cycles",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const { owner, source, worker, input } = yield* seed("organization-race");
+        yield* service.spawn(owner, input);
+        const contenders = yield* Effect.all(
+          [
+            service
+              .changeOwnership({
+                clientRequestId: "a",
+                threadId: worker,
+                ownerThreadId: source,
+                expectedOwnerThreadId: owner,
+                expectedRevision: 0,
+              })
+              .pipe(Effect.exit),
+            service
+              .changeOwnership({
+                clientRequestId: "b",
+                threadId: worker,
+                ownerThreadId: null,
+                expectedOwnerThreadId: owner,
+                expectedRevision: 0,
+              })
+              .pipe(Effect.exit),
+          ],
+          { concurrency: "unbounded" },
+        );
+        expect(contenders.filter(Exit.isSuccess)).toHaveLength(1);
+        const state = yield* service.readOwnership(worker);
+        yield* service.changeOwnership({
+          clientRequestId: "back",
+          threadId: worker,
+          ownerThreadId: owner,
+          expectedOwnerThreadId: state.ownerThreadId,
+          expectedRevision: state.revision,
+        });
+        expect(
+          (yield* service
+            .changeOwnership({
+              clientRequestId: "stale",
+              threadId: worker,
+              ownerThreadId: source,
+              expectedOwnerThreadId: owner,
+              expectedRevision: 0,
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("changed");
+        const child = ThreadId.make("organization-child");
+        yield* service.spawn(worker, {
+          threadId: child,
+          title: "Child",
+          modelSelection: input.modelSelection,
+          prompt: "Child work",
+        });
+        const current = yield* service.readOwnership(worker);
+        expect(
+          (yield* service
+            .changeOwnership({
+              clientRequestId: "cycle",
+              threadId: worker,
+              ownerThreadId: child,
+              expectedOwnerThreadId: owner,
+              expectedRevision: current.revision,
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("ancestors");
+        yield* service.changeOwnership({
+          clientRequestId: "with-child",
+          threadId: worker,
+          ownerThreadId: source,
+          expectedOwnerThreadId: owner,
+          expectedRevision: current.revision,
+        });
+        expect((yield* service.list(worker)).map((row) => row.threadId)).toEqual([child]);
+      }),
+  );
+  it.effect("renews a nested master without detaching its successor from the parent group", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, source, worker, input } = yield* seed("organization-renewal");
+      yield* service.spawn(owner, input);
+      const child = ThreadId.make("organization-renewal-child");
+      yield* service.spawn(worker, {
+        threadId: child,
+        title: "Child",
+        modelSelection: input.modelSelection,
+        prompt: "Keep working",
+      });
+      const successor = ThreadId.make("organization-renewal-successor");
+      expect(
+        (yield* service.handoff(worker, {
+          threadId: successor,
+          sourceThreadId: source,
+          title: "Successor",
+          modelSelection: input.modelSelection,
+          prompt: "Continue this group",
+        })).state,
+      ).toBe("completed");
+      expect((yield* service.readOwnership(successor)).ownerThreadId).toBe(owner);
+      expect((yield* service.readOwnership(child)).ownerThreadId).toBe(successor);
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadShellById(successor)).organization,
+      ).toMatchObject({ owner: { threadId: owner }, workers: [{ threadId: child }] });
+      const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+      expect((yield* restarted.readOwnership(child)).ownerThreadId).toBe(successor);
+    }),
+  );
+  it.effect(
+    "exposes direct worker input in the shell without copying its message into the master conversation",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("organization-direct-input");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "initial");
+        yield* session(worker, "ready", "initial-finished");
+        yield* service.drain();
+        const before = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+        yield* directInput(worker, "user-assignment", "Check this additional detail");
+        yield* session(worker, "running", "direct-assignment");
+        yield* service.drain();
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).organization
+            ?.directInputAt,
+        ).toBe(timestamp);
+        expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toEqual(
+          before,
+        );
+        yield* service.send(owner, {
+          threadId: worker,
+          clientRequestId: "next-managed-work",
+          prompt: "Then finish the original task",
+        });
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).organization
+            ?.directInputAt,
+        ).toBeNull();
+      }),
+  );
+  it.effect("rejects permission expansion and agent adoption without direct user provenance", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const { owner, source } = yield* seed("organization-permissions");
+      const input = {
+        clientRequestId: "adopt",
+        threadId: source,
+        ownerThreadId: owner,
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      };
+      expect(
+        (yield* service
+          .changeOwnership(input, { threadId: owner, userRequest: "Adopt this session" })
+          .pipe(Effect.flip)).message,
+      ).toContain("direct user");
+      yield* directInput(owner, "organization-user", "Adopt this session");
+      yield* service.changeOwnership(input, { threadId: owner, userRequest: "Adopt this session" });
+      const limited = ThreadId.make("organization-limited");
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("organization-limited"),
+        threadId: limited,
+        projectId: ProjectId.make("organization-permissions"),
+        title: "Limited master",
+        modelSelection: selections[0]!,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        historyImport: true,
+        createdAt: timestamp,
+      });
+      expect(
+        (yield* service
+          .changeOwnership({
+            clientRequestId: "limited",
+            threadId: source,
+            ownerThreadId: limited,
+            expectedOwnerThreadId: owner,
+            expectedRevision: 1,
+          })
+          .pipe(Effect.flip)).message,
+      ).toContain("broader permissions");
+      expect((yield* service.readOwnership(source)).ownerThreadId).toBe(owner);
+    }),
+  );
+});
+
+it.effect(
+  "retains remote hierarchy offline and synchronizes transfer/release through the authority proxy",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, betaSnapshots } =
+        yield* linkedPair;
+      const a = yield* seed("organization-alpha").pipe(Effect.provide(alpha));
+      const b = yield* seed("organization-beta").pipe(Effect.provide(beta));
+      yield* alphaWorkers.spawn(a.owner, { ...b.input, environment: "beta" });
+      offline.add("env-beta");
+      yield* alphaWorkers.changeOwnership({
+        clientRequestId: "remote-transfer",
+        threadId: b.worker,
+        ownerThreadId: a.source,
+        expectedOwnerThreadId: a.owner,
+        expectedRevision: 0,
+      });
+      expect(
+        Option.getOrThrow(yield* alphaSnapshots.getThreadShellById(a.source)).organization?.workers,
+      ).toContainEqual({ environmentId: "env-beta", threadId: b.worker });
+      expect((yield* alphaWorkers.list(a.source))[0]?.state).toBe("unreachable");
+      offline.delete("env-beta");
+      yield* alphaWorkers.drain();
+      expect(
+        Option.getOrThrow(yield* betaSnapshots.getThreadShellById(b.worker)).organization?.owner,
+      ).toEqual({ environmentId: "env-alpha", threadId: a.source });
+      yield* alphaWorkers.changeOwnership({
+        clientRequestId: "remote-release",
+        threadId: b.worker,
+        ownerThreadId: null,
+        expectedOwnerThreadId: a.source,
+        expectedRevision: 1,
+      });
+      expect(
+        Option.getOrThrow(yield* betaSnapshots.getThreadShellById(b.worker)).organization?.owner,
+      ).toBeNull();
+      expect(
+        (yield* betaWorkers
+          .report(b.worker, { clientRequestId: "late", outcome: "done", summary: "No owner" })
+          .pipe(Effect.flip)).message,
+      ).toContain("no master");
+      yield* alphaWorkers.changeOwnership({
+        clientRequestId: "remote-reassign",
+        threadId: b.worker,
+        ownerThreadId: a.owner,
+        expectedOwnerThreadId: null,
+        expectedRevision: 2,
+      });
+      expect(
+        Option.getOrThrow(yield* betaSnapshots.getThreadShellById(b.worker)).organization?.owner
+          ?.threadId,
+      ).toBe(a.owner);
+    }).pipe(Effect.scoped),
+);

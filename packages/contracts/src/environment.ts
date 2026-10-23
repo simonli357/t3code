@@ -143,6 +143,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   workerReclaim: Schema.optionalKey(Schema.Boolean),
   workerRetirementWarning: Schema.optionalKey(Schema.Boolean),
   nativeSessionMoves: Schema.optionalKey(Schema.Boolean),
+  sessionOrganization: Schema.optionalKey(Schema.Boolean),
   orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
   /** Worker tools and session messages can reach linked peer environments. */
   peerEnvironments: Schema.optionalKey(Schema.Boolean),

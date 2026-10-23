@@ -1,3 +1,4 @@
+import { useSessionGroupSettings } from "../../state/session-organization";
 import { useAndroidControlSizing } from "../../components/useAndroidControlSizing";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { computeThreadMoveAvailability } from "./threadOrder";
@@ -131,6 +132,7 @@ function ThreadNavigationSidebarPane(
   props: ThreadNavigationSidebarProps & { readonly nativeChrome: boolean },
 ) {
   const { themeVariables: materialTheme } = useAppearancePreferences();
+  const sessionGroupSettings = useSessionGroupSettings();
   const drawerColor = materialTheme["--color-drawer"];
 
   const insets = useSafeAreaInsets();
@@ -428,6 +430,7 @@ function ThreadNavigationSidebarPane(
   ]);
   const threadListV2Layout = useMemo(() => {
     return buildThreadListV2Items({
+      organization: sessionGroupSettings,
       pendingOrder,
       threads: threads.filter((thread) => thread.archivedAt === null),
       environmentId: options.selectedEnvironmentId,
@@ -459,6 +462,7 @@ function ThreadNavigationSidebarPane(
     snoozeEnvironmentIds,
     threads,
     selectedProjectScope,
+    sessionGroupSettings,
   ]);
   // Re-partition the moment the earliest snooze expires (clamped to the
   // signed-32-bit setTimeout range; far-future wakes re-arm at the clamp).
@@ -741,6 +745,7 @@ function ThreadNavigationSidebarPane(
               onNewThreadOnBranch={props.onNewThreadOnBranch}
               thread={thread}
               variant={item.item.variant}
+              organization={item.item.organization}
               hasQueuedMessages={item.hasQueuedMessages}
               snoozed={item.item.snoozed}
               pinned={item.item.pinned}
@@ -751,9 +756,7 @@ function ThreadNavigationSidebarPane(
               projectTitle={projectTitleByProjectKey.get(scopeKey)}
               providerInstance={resolveProviderInstance(thread)}
               environmentLabel={
-                Object.keys(savedConnectionsById).length > 1
-                  ? (savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
-                  : null
+                savedConnectionsById[thread.environmentId]?.environmentLabel ?? thread.environmentId
               }
               environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
               searchMatch={threadSearchMatchByKey.get(

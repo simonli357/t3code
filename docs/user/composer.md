@@ -65,6 +65,33 @@ Some providers require a new chat to change models within their native session.
 Managed workers retain the account/model specified by their spawning plan;
 changing one manually does not rewrite that plan or reroute queued assignments.
 
+## Masters and workers
+
+New conversations are independent. Assigning a worker makes its owner a master.
+A worker can own other workers while remaining a worker of its own master; task
+names such as reviewer or researcher do not change these roles.
+
+Open **Session organization** from a conversation's menu (long-press on mobile),
+or select its role in the web/desktop chat header. Choose an eligible master on
+the current owning computer, or **Independent** to release a worker. The dialog
+shows the current relationship and confirms the change. Assignment preserves
+the conversation, workspace, provider/account/model and running or queued work;
+future reports follow the new owner. Cross-computer workers can be transferred
+between masters on their owning computer. Changing the owning computer itself
+uses the existing native session move flow.
+
+The sidebar groups workers under their master while keeping each worker's actual
+project and computer. Collapsed groups show running work, attention requests and
+offline/unknown workers. **Finished** retains completed workers and their history.
+Search and direct conversation links reveal the selected worker and its owner
+path. Pins, snoozes and settlement still apply within the group. Collapsing a
+group or closing a tab does not stop its workers.
+
+You can message a worker directly; its master sees a compact direct-input marker.
+Renewing a master transfers its workers to the successor. A nested master with a
+parent on another computer currently requires coordination through that parent;
+T3 preserves its relationship and explains this restriction instead of detaching it.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

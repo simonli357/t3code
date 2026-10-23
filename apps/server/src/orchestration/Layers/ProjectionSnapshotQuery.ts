@@ -1,3 +1,4 @@
+import { makeSessionOrganizationQuery } from "../SessionOrganizationQuery.ts";
 import {
   AgentSessionImportSource,
   ApprovalRequestId,
@@ -495,6 +496,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
+  const querySessionOrganization = yield* makeSessionOrganizationQuery;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
@@ -2749,6 +2751,11 @@ pending_approval_requests AS (
 
               const repositoryIdentities =
                 yield* resolveRepositoryIdentitiesForProjects(projectRows);
+              const organizations = yield* querySessionOrganization(
+                threadRows.map((row) => row.threadId),
+              ).pipe(
+                Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization")),
+              );
               const latestTurnByThread = new Map(
                 latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
               );
@@ -2773,6 +2780,7 @@ pending_approval_requests AS (
                   row.deletedAt === null
                     ? Result.succeed({
                         id: row.threadId,
+                        organization: organizations.get(row.threadId),
                         projectId: row.projectId,
                         title: row.title,
                         modelSelection: row.modelSelection,
@@ -2941,6 +2949,11 @@ pending_approval_requests AS (
               const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
                 projectRows.filter((row) => activeProjectIds.has(row.projectId)),
               );
+              const organizations = yield* querySessionOrganization(
+                threadRows.map((row) => row.threadId),
+              ).pipe(
+                Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization")),
+              );
               const latestTurnByThread = new Map(
                 latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
               );
@@ -2959,6 +2972,7 @@ pending_approval_requests AS (
                 ),
                 threads: threadRows.map((row): OrchestrationThreadShell => ({
                   id: row.threadId,
+                  organization: organizations.get(row.threadId),
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
@@ -3305,6 +3319,9 @@ pending_approval_requests AS (
 
       return Option.some({
         id: threadRow.value.threadId,
+        organization: (yield* querySessionOrganization([threadId]).pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization")),
+        )).get(threadId),
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,

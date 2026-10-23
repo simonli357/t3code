@@ -9,6 +9,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 export type ThreadActionMenuId =
   | "fork-conversation"
   | "move-session"
+  | "session-organization"
   | "new-thread-on-branch"
   | "filter-by-project"
   | "project-settings"
@@ -55,6 +56,7 @@ export interface ThreadActionMenuState {
   readonly supports: {
     readonly forking?: boolean;
     readonly moving?: boolean;
+    readonly organization?: boolean;
     readonly settlement: boolean;
     /** Server understands thread.auto-settle.set. */
     readonly autoSettleOptOut: boolean;
@@ -74,6 +76,15 @@ export function buildThreadActionMenuItems(
   state: ThreadActionMenuState,
 ): ReadonlyArray<ContextMenuItem<ThreadActionMenuId>> {
   return [
+    ...(state.supports.organization
+      ? [
+          {
+            id: "session-organization" as const,
+            label: "Session organization…",
+            icon: "git-branch",
+          },
+        ]
+      : []),
     ...(state.supports.moving
       ? [{ id: "move-session" as const, label: "Move to computer…", icon: "arrow-right" }]
       : []),

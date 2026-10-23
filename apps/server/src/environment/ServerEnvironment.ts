@@ -240,6 +240,7 @@ export const make = Effect.gen(function* () {
       workerReclaim: true,
       workerRetirementWarning: true,
       nativeSessionMoves: true,
+      sessionOrganization: true,
       orchestratorHandoff: true,
       peerEnvironments: true,
       computers: true,

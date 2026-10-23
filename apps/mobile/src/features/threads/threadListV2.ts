@@ -1,3 +1,10 @@
+import {
+  buildSessionHierarchy,
+  expandSessionGroups,
+  sessionKey,
+  sessionWorkerState,
+  summarizeSessionWorkers,
+} from "@t3tools/client-runtime/state/session-organization";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import {
   canSnooze,
@@ -194,7 +201,15 @@ export function getThreadListV2OrderedSection(input: {
   return applyPendingThreadOrder(ordered, input.section, pending);
 }
 
+export interface ThreadListV2Organization {
+  readonly ownerPath: string | null;
+  readonly summaryLabel: string | null;
+  readonly expanded: boolean;
+  readonly finishedCount: number;
+  readonly finishedExpanded: boolean;
+}
 export interface ThreadListV2Item {
+  readonly organization?: ThreadListV2Organization;
   readonly thread: EnvironmentThreadShell;
   readonly variant: "card" | "slim";
   /** Snoozed-shelf row: shows the wake countdown and offers Wake. */
@@ -322,6 +337,11 @@ export function threadListV2ListItemsAreEqual(
         previous.key === item.key &&
         previous.item.thread === item.item.thread &&
         previous.item.variant === item.item.variant &&
+        previous.item.organization?.ownerPath === item.item.organization?.ownerPath &&
+        previous.item.organization?.summaryLabel === item.item.organization?.summaryLabel &&
+        previous.item.organization?.expanded === item.item.organization?.expanded &&
+        previous.item.organization?.finishedCount === item.item.organization?.finishedCount &&
+        previous.item.organization?.finishedExpanded === item.item.organization?.finishedExpanded &&
         previous.item.snoozed === item.item.snoozed &&
         previous.item.pinned === item.item.pinned &&
         previous.snoozeWakeLabelText === item.snoozeWakeLabelText &&
@@ -495,6 +515,11 @@ export function buildThreadListV2ListItems(input: {
  * the settled recency tail, matching the web v2 list.
  */
 export function buildThreadListV2Items(input: {
+  readonly organization?: {
+    readonly collapsed: ReadonlySet<string>;
+    readonly finishedExpanded: ReadonlySet<string>;
+    readonly connected: ReadonlySet<string>;
+  };
   readonly pendingOrder?: PendingThreadOrder | null;
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
   readonly environmentId: EnvironmentId | null;
@@ -528,6 +553,41 @@ export function buildThreadListV2Items(input: {
   readonly queuedThreadKeys?: ReadonlySet<string>;
 }): ThreadListV2Layout {
   const now = input.now;
+  const hierarchy = buildSessionHierarchy(input.threads);
+  const grouped = input.organization !== undefined && input.searchQuery.trim().length === 0;
+  const rootSelectedKey = input.selectedThreadKey ? hierarchy.root(input.selectedThreadKey) : null;
+  const groupSettings = input.organization;
+  const expand = (roots: ReadonlyArray<EnvironmentThreadShell>) =>
+    grouped && groupSettings
+      ? expandSessionGroups({
+          ...groupSettings,
+          roots,
+          hierarchy,
+          selectedKey: input.selectedThreadKey ?? null,
+        })
+      : roots;
+  const metadata = (thread: EnvironmentThreadShell): ThreadListV2Organization => {
+    const key = sessionKey(thread);
+    const path = hierarchy.path(key);
+    const summary = summarizeSessionWorkers(hierarchy, key, groupSettings?.connected ?? new Set());
+    return {
+      ownerPath: path.length
+        ? path
+            .map(
+              (key) =>
+                hierarchy.byKey.get(key)?.title ?? hierarchy.references.get(key)?.threadId ?? key,
+            )
+            .join(" / ")
+        : null,
+      summaryLabel:
+        grouped && hierarchy.root(key) === key && summary.total > 0
+          ? `${summary.total} workers${summary.running > 0 || summary.unknown === 0 ? ` · ${summary.running} running` : ""} · ${summary.attention} need attention${summary.unknown ? ` · ${summary.unknown} offline / unknown` : ""}`
+          : null,
+      expanded: !groupSettings?.collapsed.has(key) || key === rootSelectedKey,
+      finishedCount: summary.finished,
+      finishedExpanded: groupSettings?.finishedExpanded.has(key) ?? false,
+    };
+  };
   const pending =
     input.pendingOrder == null
       ? null
@@ -549,10 +609,20 @@ export function buildThreadListV2Items(input: {
   const settled: EnvironmentThreadShell[] = [];
   const snoozed: EnvironmentThreadShell[] = [];
   let nextSnoozeWakeAt: string | null = null;
-  for (const thread of input.threads) {
+  for (const thread of hierarchy.byKey.values()) {
+    if (grouped && hierarchy.root(sessionKey(thread)) !== sessionKey(thread)) continue;
     // Callers pass live shells. The server stamps settledOverride for the tail.
-    if (input.environmentId !== null && thread.environmentId !== input.environmentId) continue;
-    if (projectKeys !== null && !projectKeys.has(`${thread.environmentId}:${thread.projectId}`)) {
+    if (
+      input.environmentId !== null &&
+      thread.environmentId !== input.environmentId &&
+      sessionKey(thread) !== rootSelectedKey
+    )
+      continue;
+    if (
+      projectKeys !== null &&
+      !projectKeys.has(`${thread.environmentId}:${thread.projectId}`) &&
+      sessionKey(thread) !== rootSelectedKey
+    ) {
       continue;
     }
     if (
@@ -572,6 +642,14 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
+    const summary =
+      grouped && groupSettings
+        ? summarizeSessionWorkers(hierarchy, sessionKey(thread), groupSettings.connected)
+        : null;
+    if (summary && (summary.attention || summary.running || summary.unknown)) {
+      (thread.pinnedAt ? pinned : active).push(thread);
+      continue;
+    }
     // Snooze outranks settlement and pinning until the thread wakes.
     if (supportsSnooze && effectiveSnoozed(thread, { now })) {
       snoozed.push(thread);
@@ -600,7 +678,7 @@ export function buildThreadListV2Items(input: {
     (left, right) =>
       parseTimestampMs(left.snoozedUntil ?? "") - parseTimestampMs(right.snoozedUntil ?? ""),
   );
-  const selectedThreadKey = input.selectedThreadKey ?? null;
+  const selectedThreadKey = grouped ? rootSelectedKey : (input.selectedThreadKey ?? null);
   const visibleSnoozed =
     input.snoozedShelfExpanded === true
       ? orderedSnoozed
@@ -623,12 +701,11 @@ export function buildThreadListV2Items(input: {
         );
 
   const items: ThreadListV2Item[] = [];
-  for (const thread of applyPendingThreadOrder(
-    sortPinnedThreadsByOrderKey(pinned),
-    "pinned",
-    pending,
+  for (const thread of expand(
+    applyPendingThreadOrder(sortPinnedThreadsByOrderKey(pinned), "pinned", pending),
   )) {
     items.push({
+      ...(input.organization || thread.organization ? { organization: metadata(thread) } : {}),
       thread,
       variant: "card",
       snoozed: false,
@@ -636,8 +713,9 @@ export function buildThreadListV2Items(input: {
       isLast: false,
     });
   }
-  for (const thread of orderedActive) {
+  for (const thread of expand(orderedActive)) {
     items.push({
+      ...(input.organization || thread.organization ? { organization: metadata(thread) } : {}),
       thread,
       variant: "card",
       snoozed: false,
@@ -646,8 +724,9 @@ export function buildThreadListV2Items(input: {
     });
   }
   const snoozedShelfHeaderIndex = orderedSnoozed.length > 0 ? items.length : null;
-  for (const thread of visibleSnoozed) {
+  for (const thread of expand(visibleSnoozed)) {
     items.push({
+      ...(input.organization || thread.organization ? { organization: metadata(thread) } : {}),
       thread,
       variant: "slim",
       snoozed: true,
@@ -656,8 +735,9 @@ export function buildThreadListV2Items(input: {
     });
   }
   const settledShelfHeaderIndex = orderedSettled.length > 0 ? items.length : null;
-  for (const thread of visibleSettled) {
+  for (const thread of expand(visibleSettled)) {
     items.push({
+      ...(input.organization || thread.organization ? { organization: metadata(thread) } : {}),
       thread,
       variant: "slim",
       snoozed: false,
@@ -665,6 +745,22 @@ export function buildThreadListV2Items(input: {
       isLast: false,
     });
   }
+  if (grouped && groupSettings)
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index]!;
+      if (hierarchy.root(sessionKey(item.thread)) === sessionKey(item.thread)) continue;
+      const snoozed = effectiveSnoozed(item.thread, { now });
+      const finished = sessionWorkerState(
+        item.thread,
+        groupSettings.connected.has(item.thread.environmentId),
+      ).finished;
+      items[index] = {
+        ...item,
+        variant: snoozed || finished ? "slim" : "card",
+        snoozed,
+        pinned: item.thread.pinnedAt != null,
+      };
+    }
   const last = items.at(-1);
   if (last) {
     items[items.length - 1] = { ...last, isLast: true };

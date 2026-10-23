@@ -1,3 +1,4 @@
+import { openSessionOrganization } from "../components/SessionOrganizationDialog";
 import { openMoveSession } from "../components/MoveSessionDialog";
 import { useForkConversation } from "./useForkConversation";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
@@ -140,6 +141,7 @@ export function useThreadActionMenu(input: {
         const supports = {
           forking: readThreadSupportsForking(threadRef),
           moving: readThreadSupportsMoving(threadRef),
+          organization: thread.organization !== undefined,
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
@@ -188,6 +190,9 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "session-organization":
+            openSessionOrganization(threadRef);
+            return;
           case "move-session":
             openMoveSession(threadRef);
             return;

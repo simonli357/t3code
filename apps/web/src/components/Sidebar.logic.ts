@@ -190,14 +190,33 @@ export function resolveSidebarDropTarget(
   items: readonly SidebarListItem[],
   activeKey: string,
   overId: string,
+  groupByKey?: ReadonlyMap<string, string>,
 ): SidebarDropTarget | null {
   const activeIndex = items.findIndex((item) => sidebarListItemId(item) === activeKey);
   const overIndex = items.findIndex((item) => sidebarListItemId(item) === overId);
   if (activeIndex === -1 || overIndex === -1 || items[activeIndex]?.kind !== "thread") return null;
   const moved = items.filter((_, index) => index !== activeIndex);
   moved.splice(overIndex, 0, items[activeIndex]!);
-  const section = sectionAtSidebarSlot(moved, overIndex);
+  const over = items[overIndex];
+  const group = groupByKey?.get(activeKey);
+  const section =
+    group !== undefined && over?.kind === "thread" && groupByKey?.get(over.key) === group
+      ? over.section
+      : sectionAtSidebarSlot(moved, overIndex);
   if (section === "working" || section === "snoozed") return null;
+  if (groupByKey) {
+    const rows = moved.filter(
+      (item): item is Extract<SidebarListItem, { kind: "thread" }> =>
+        item.kind === "thread" && groupByKey.get(item.key) === group,
+    );
+    const sectionOf = (item: (typeof rows)[number]) =>
+      item.key === activeKey ? section : item.section;
+    return {
+      section,
+      pinnedOrder: rows.filter((row) => sectionOf(row) === "pinned").map((row) => row.key),
+      activeOrder: rows.filter((row) => sectionOf(row) === "active").map((row) => row.key),
+    };
+  }
   const pinnedOrder: string[] = [];
   const activeOrder: string[] = [];
   let currentSection: SidebarSection = "pinned";
@@ -278,7 +297,22 @@ export function planSidebarThreadDrop(input: {
   readonly activeReorderableKeys?: ReadonlySet<string>;
   /** Working beta: the inbox sorts by time, so drops only change lifecycle. */
   readonly activeTimeOrdered?: boolean;
+  readonly groupByKey?: ReadonlyMap<string, string>;
 }): SidebarThreadDropPlan {
+  if (input.groupByKey) {
+    const { groupByKey, ...rest } = input;
+    const sameGroup = (key: string) => groupByKey.get(key) === groupByKey.get(input.activeKey);
+    return planSidebarThreadDrop({
+      ...rest,
+      pinnedOrder: input.pinnedOrder.filter(sameGroup),
+      activeOrder: input.activeOrder.filter(sameGroup),
+      target: {
+        ...input.target,
+        pinnedOrder: input.target.pinnedOrder.filter(sameGroup),
+        activeOrder: input.target.activeOrder.filter(sameGroup),
+      },
+    });
+  }
   const {
     activeKey,
     activeSection,
