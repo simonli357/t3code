@@ -71,6 +71,7 @@ function scopedWindow(
 ): ServerProviderUsageWindow {
   return {
     id: scopedWindowId(displayName),
+    modelScope: displayName,
     kind: "weekly",
     label: `Weekly · ${displayName}`,
     windowDurationMins: WEEK_MINS,
@@ -147,6 +148,8 @@ export function claudeRateLimitEventToUpdate(
   if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
     return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
   }
+  if (type.startsWith("seven_day_") && type !== OVERAGE_INCLUDED_EVENT_TYPE)
+    return { windows: [scopedWindow(type.slice("seven_day_".length), usedPercent, resetsAt)] };
   return undefined;
 }
 
@@ -170,6 +173,26 @@ export function claudeUsageResponseToLimits(input: {
     const window = response.rate_limits[id as "five_hour" | "seven_day"];
     if (!window || typeof window.utilization !== "number") continue;
     windows.push(makeWindow(id, window.utilization, isoFromString(window.resets_at)));
+  }
+  for (const [id, value] of Object.entries(response.rate_limits)) {
+    if (
+      !id.startsWith("seven_day_") ||
+      id === OVERAGE_INCLUDED_EVENT_TYPE ||
+      !value ||
+      typeof value !== "object" ||
+      !("utilization" in value) ||
+      typeof value.utilization !== "number"
+    )
+      continue;
+    windows.push(
+      scopedWindow(
+        id.slice("seven_day_".length),
+        value.utilization,
+        "resets_at" in value && typeof value.resets_at === "string"
+          ? isoFromString(value.resets_at)
+          : undefined,
+      ),
+    );
   }
   // The CLI filters `model_scoped` to the overage-included allowlist, which
   // today holds one model; the first entry is the one the event refers to.

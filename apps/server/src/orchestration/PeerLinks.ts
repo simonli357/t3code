@@ -40,6 +40,7 @@ export class PeerRejected extends Schema.TaggedError<PeerRejected>()("PeerReject
 export class PeerLinks extends Context.Service<
   PeerLinks,
   {
+    readonly list: Effect.Effect<ReadonlyArray<Pick<PeerEnvironment, "environmentId" | "label">>>;
     readonly localEnvironment: Effect.Effect<{
       readonly environmentId: string;
       readonly label: string;
@@ -87,6 +88,11 @@ export const layer = Layer.effect(
       })),
     );
     return PeerLinks.of({
+      list: peers.pipe(
+        Effect.map((entries) =>
+          entries.map(({ environmentId, label }) => ({ environmentId, label })),
+        ),
+      ),
       localEnvironment,
       resolve: (nameOrId) => peers.pipe(Effect.map((list) => findPeer(list, nameOrId))),
       call: Effect.fn("PeerLinks.call")(function* (environmentId, request, timeoutMs = 15_000) {

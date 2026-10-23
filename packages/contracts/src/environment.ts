@@ -138,6 +138,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadPinning: Schema.optionalKey(Schema.Boolean),
   threadForking: Schema.optionalKey(Schema.Boolean),
   workerFreshSessions: Schema.optionalKey(Schema.Boolean),
+  providerAllocation: Schema.optionalKey(Schema.Boolean),
   boundedSessionHistory: Schema.optionalKey(Schema.Boolean),
   sessionMessageConfirmation: Schema.optionalKey(Schema.Boolean),
   workerReclaim: Schema.optionalKey(Schema.Boolean),

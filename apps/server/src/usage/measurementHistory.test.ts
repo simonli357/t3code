@@ -61,6 +61,24 @@ const tokens = {
   cachedInputTokens: 10000,
   reasoningTokens: 1000,
 };
+it("reports prediction error only after comparable quota intervals, including external burn changes", () => {
+  const h = new MeasurementHistory();
+  h.setAllowed(["codex"]);
+  for (const [minutes, used] of [
+    [0, 10],
+    [5, 11],
+    [10, 12],
+    [15, 20],
+    [20, 30],
+  ])
+    h.recordProviders([provider("codex", minutes!, used!)]);
+  const rate = h.report({}, base + 20 * 60_000).accounts[0]!.windows[0]!.rate;
+  expect(rate.predictionErrorPointsPerHour).toBeGreaterThan(0);
+  h.recordProviders([provider("codex", 25, 0, iso(400))]);
+  expect(
+    h.report({}, base + 25 * 60_000).accounts[0]!.windows[0]!.rate.predictionErrorPointsPerHour,
+  ).toBeNull();
+});
 function history() {
   const h = new MeasurementHistory();
   h.setAllowed(["codex", "claudeAgent"]);
@@ -69,6 +87,20 @@ function history() {
 }
 
 describe("usage measurements", () => {
+  it("uses a window's actual timestamp rather than a newer sparse snapshot time", () => {
+    const h = history();
+    const next = provider("codex", 20, 25);
+    h.recordProviders([
+      {
+        ...next,
+        usageLimits: {
+          ...next.usageLimits!,
+          windows: next.usageLimits!.windows.map((w) => ({ ...w, checkedAt: iso(5) })),
+        },
+      },
+    ]);
+    expect(h.report({}, base + 20 * 60_000).accounts[0]?.windows[0]?.checkedAt).toBe(iso(5));
+  });
   it("collects nothing without an explicit account allowlist", () => {
     const h = new MeasurementHistory();
     h.recordProviders([provider("codex", 0, 10)]);

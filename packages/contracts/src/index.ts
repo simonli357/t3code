@@ -51,3 +51,4 @@ export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
 
 export * from "./computers.ts";
+export * from "./providerAllocation.ts";

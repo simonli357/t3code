@@ -238,6 +238,17 @@ export function CommandPalette(props: {
           }),
       },
       {
+        key: "allocation",
+        kind: "action",
+        title: "Provider allocation",
+        searchTerms: ["quota", "pacing", "accounts"],
+        run: () =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: { screen: "SettingsAllocation" },
+          }),
+      },
+      {
         key: "archive",
         kind: "action",
         title: "Archived threads",

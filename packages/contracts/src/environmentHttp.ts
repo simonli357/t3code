@@ -1,5 +1,12 @@
 import * as Context from "effect/Context";
 import {
+  AllocationOperation,
+  AllocationResponse,
+  AllocationError,
+  AllocationStart,
+  AllocationStartResult,
+} from "./providerAllocation.ts";
+import {
   SessionMoveError,
   SessionMoveInput,
   SessionMoveResult,
@@ -632,7 +639,22 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
-    // Server-to-server worker traffic; the request is validated by WorkerControls.
+    HttpApiEndpoint.post("providerAllocation", "/api/provider-allocation", {
+      headers: OptionalBearerHeaders,
+      payload: AllocationOperation,
+      success: AllocationResponse,
+      error: [EnvironmentScopeRequiredError, AllocationError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("providerAllocationStart", "/api/provider-allocation/start", {
+      headers: OptionalBearerHeaders,
+      payload: Schema.Struct({ ...AllocationStart.fields, kind: Schema.Literal("session") }),
+      success: AllocationStartResult,
+      error: [EnvironmentScopeRequiredError, AllocationError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.post("peer", "/api/peer/v1", {
       headers: OptionalBearerHeaders,
       payload: Schema.Struct({ from: TrimmedNonEmptyString, request: Schema.Unknown }),

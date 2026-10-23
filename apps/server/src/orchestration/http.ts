@@ -1,3 +1,5 @@
+import * as ProviderAllocation from "../allocation/ProviderAllocation.ts";
+import * as AllocationAssignments from "../allocation/AllocationAssignments.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -36,11 +38,27 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
     const measurements = yield* UsageMeasurements.UsageMeasurements;
     const workers = yield* WorkerControls;
+    const allocation = yield* ProviderAllocation.ProviderAllocation;
+    const allocationAssignments = yield* AllocationAssignments.AllocationAssignments;
     const moves = yield* SessionMoves;
     const settledThreadPurge = yield* SettledThreadPurge;
     const history = yield* ThreadHistory.ThreadHistory;
 
     return handlers
+      .handle(
+        "providerAllocationStart",
+        Effect.fn("environment.providerAllocationStart")(function* (args) {
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* allocationAssignments.start(args.payload);
+        }),
+      )
+      .handle(
+        "providerAllocation",
+        Effect.fn("environment.providerAllocation")(function* (args) {
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* allocation.execute(args.payload);
+        }),
+      )
       .handle(
         "moveSession",
         Effect.fn("environment.sessionMove")(function* (args) {
@@ -71,6 +89,16 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
           const request = args.payload.request;
+          if (
+            request &&
+            typeof request === "object" &&
+            "_tag" in request &&
+            typeof request._tag === "string" &&
+            request._tag.startsWith("allocation")
+          )
+            return yield* allocation
+              .receive(args.payload.from, request)
+              .pipe(Effect.mapError((e) => new PeerRequestError({ message: e.message })));
           if (
             request &&
             typeof request === "object" &&

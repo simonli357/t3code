@@ -41,6 +41,11 @@ import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDi
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Workers from "./WorkerControls.ts";
+import * as Allocation from "../allocation/ProviderAllocation.ts";
+import * as AllocationStore from "../allocation/AllocationStore.ts";
+import * as AllocationAssignments from "../allocation/AllocationAssignments.ts";
+import { defaultAllocationPolicy } from "@t3tools/contracts";
+import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { PeerLinks, PeerRejected, PeerUnavailable, findPeer } from "./PeerLinks.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -131,6 +136,7 @@ const registry = Layer.mock(ProviderRegistry)({
 const noPeers = Layer.succeed(
   PeerLinks,
   PeerLinks.of({
+    list: Effect.succeed([]),
     localEnvironment: Effect.succeed({ environmentId: "env-local", label: "local" }),
     resolve: () => Effect.succeedNone,
     call: () => Effect.fail(new PeerRejected({ message: "No peers in this test." })),
@@ -143,6 +149,166 @@ const testLayer = Workers.layer.pipe(
   Layer.provideMerge(noPeers),
 );
 const timestamp = "2026-10-06T12:00:00.000Z";
+
+const allocationRegistry = Layer.mock(ProviderRegistry)({
+  getProviders: Effect.succeed(
+    providers.map((p) => ({
+      ...p,
+      auth: { ...p.auth, email: `${p.instanceId}@example.test`, status: "authenticated" as const },
+      usageLimits: {
+        checkedAt: "1970-01-01T00:00:00.000Z",
+        windows: [
+          {
+            id: "weekly",
+            kind: "weekly" as const,
+            label: "Weekly",
+            usedPercent: 0,
+            resetsAt: "1970-01-07T00:00:00.000Z",
+            windowDurationMins: 10080,
+          },
+          {
+            id: "short",
+            kind: "session" as const,
+            label: "Short",
+            usedPercent: 0,
+            resetsAt: "1970-01-01T04:00:00.000Z",
+            windowDurationMins: 300,
+          },
+        ],
+      },
+    })),
+  ),
+});
+const allocatedWorkerLayer = AllocationAssignments.layer.pipe(
+  Layer.provideMerge(Allocation.layer),
+  Layer.provideMerge(AllocationStore.layer),
+  Layer.provideMerge(Workers.layer),
+  Layer.provideMerge(infrastructure),
+  Layer.provideMerge(providerLayer),
+  Layer.provideMerge(allocationRegistry),
+  Layer.provideMerge(noPeers),
+  Layer.provide(
+    Layer.succeed(UsageMeasurements, {
+      read: () =>
+        Effect.succeed({
+          observedAt: "1970-01-01T00:00:00.000Z",
+          monitoredInstanceIds: [],
+          retentionDays: 14,
+          persistenceError: null,
+          accounts: [],
+          turns: [],
+          totalMatchingTurns: 0,
+          profiles: [],
+          limitations: [],
+        }),
+    }),
+  ),
+);
+
+it.effect(
+  "allocated fresh workers use real ownership, dispatch and idempotent startup receipts",
+  () =>
+    Effect.gen(function* () {
+      const { owner, worker } = yield* seed("allocated-fresh", 1);
+      yield* (yield* Settings.ServerSettingsService).updateSettings({
+        allocationCoordinatorEnvironmentId: "env-local",
+      });
+      const store = yield* AllocationStore.AllocationStore;
+      yield* store.savePolicy({
+        expectedVersion: 0,
+        policy: {
+          ...defaultAllocationPolicy,
+          coordinatorEnvironmentId: "env-local",
+          mode: "automatic",
+        },
+      });
+      const assignments = yield* AllocationAssignments.AllocationAssignments;
+      const request = {
+        kind: "worker" as const,
+        projectId: ProjectId.make("allocated-fresh"),
+        title: "allocated_astra",
+        prompt: "perform allocated work",
+        request: {
+          assignmentId: "integrated-start",
+          environmentId: "env-local",
+          threadId: worker,
+          driver: ProviderDriverKind.make("codex"),
+          model: selections[1]!.model,
+          options: selections[1]!.options,
+        },
+      };
+      expect((yield* assignments.start(request, owner)).state).toBe("submitted");
+      const workers = yield* Workers.WorkerControls;
+      yield* workers.drain();
+      const shell = Option.getOrThrow(
+        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
+      );
+      expect(shell.modelSelection).toEqual(selections[1]);
+      expect(shell.messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect((yield* workers.list(owner))[0]?.threadId).toBe(worker);
+      yield* assignments.start(request, owner);
+      yield* workers.drain();
+      const repeated = Option.getOrThrow(
+        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
+      );
+      expect(repeated.messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(yield* store.reservations).toHaveLength(1);
+    }).pipe(Effect.provide(allocatedWorkerLayer)),
+);
+
+it.effect(
+  "allocated human sessions preserve their profile and release rejected startup from real receipts",
+  () =>
+    Effect.gen(function* () {
+      yield* seed("allocated-human", 1);
+      yield* (yield* Settings.ServerSettingsService).updateSettings({
+        allocationCoordinatorEnvironmentId: "env-local",
+      });
+      const store = yield* AllocationStore.AllocationStore;
+      yield* store.savePolicy({
+        expectedVersion: 0,
+        policy: {
+          ...defaultAllocationPolicy,
+          coordinatorEnvironmentId: "env-local",
+          mode: "automatic",
+        },
+      });
+      const assignments = yield* AllocationAssignments.AllocationAssignments;
+      const input = {
+        kind: "session" as const,
+        projectId: ProjectId.make("missing-project"),
+        title: "new session",
+        prompt: "task",
+        request: {
+          assignmentId: "human-failed",
+          threadId: ThreadId.make("human-failed"),
+          environmentId: "env-local",
+          driver: ProviderDriverKind.make("codex"),
+          model: selections[1]!.model,
+          options: selections[1]!.options,
+        },
+      };
+      expect(Exit.isFailure(yield* Effect.exit(assignments.start(input)))).toBe(true);
+      yield* (yield* Allocation.ProviderAllocation).execute({ _tag: "snapshot" });
+      expect((yield* store.reservations)[0]?.state).toBe("released");
+      const valid = {
+        ...input,
+        projectId: ProjectId.make("allocated-human"),
+        request: {
+          ...input.request,
+          assignmentId: "human-created",
+          threadId: ThreadId.make("human-created"),
+        },
+      };
+      expect((yield* assignments.start(valid)).state).toBe("submitted");
+      expect((yield* assignments.start(valid)).state).toBe("submitted");
+      const thread = Option.getOrThrow(
+        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(valid.request.threadId),
+      );
+      expect(thread.modelSelection).toEqual(selections[1]);
+      expect(thread.messages.filter((m) => m.role === "user")).toHaveLength(1);
+    }).pipe(Effect.provide(allocatedWorkerLayer)),
+);
 const seed = Effect.fn(function* (prefix: string, index = 0) {
   const engine = yield* OrchestrationEngineService;
   const directory = yield* ProviderSessionDirectory;
@@ -2643,6 +2809,9 @@ const environmentLayer = (environmentId: string) =>
       Layer.succeed(
         PeerLinks,
         PeerLinks.of({
+          list: Effect.succeed(
+            linkedEnvironments.filter((peer) => peer.environmentId !== environmentId),
+          ),
           localEnvironment: Effect.succeed({
             environmentId,
             label: linkedEnvironments.find((peer) => peer.environmentId === environmentId)!.label,

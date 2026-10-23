@@ -1,6 +1,9 @@
 import * as Computers from "./computers/Computers.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
+import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
+import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
+import * as PeerLinks from "./orchestration/PeerLinks.ts";
 import * as SessionMoves from "./orchestration/SessionMoves.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
@@ -636,12 +639,19 @@ export const makeRoutesLayer = Layer.mergeAll(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(Computers.layer.pipe(Layer.provide(ProcessRunner.layer))),
+  Layer.provide(
+    AllocationAssignments.layer.pipe(
+      Layer.provide(WorkerControls.liveLayer),
+      Layer.provide(PeerLinks.layer),
+    ),
+  ),
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),
   Layer.provide(commandReadinessLayer),
   Layer.provide(browserApiCorsLayer),
   Layer.provide(httpCompressionLayer),
+  Layer.provide(ProviderAllocation.liveLayer),
 );
 
 const makeServerLayer = Layer.unwrap(

@@ -41,6 +41,31 @@ results appear as each one responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+## Allocate accounts for new work
+
+Open **Settings → Provider allocation** to preview which account can safely run a new assignment
+with your chosen model, reasoning options and execution computer. Allocation starts in
+**Observation** mode: it records the proposed choice without starting a session. Choose one
+linked environment as coordinator and connect every participating environment to it. The
+coordinator must remain reachable; missing host or quota readings prevent automatic admission.
+
+Preview policy changes before saving. **Automatic** mode lets you start a new session from the
+allocation page, or let an agent create an allocated worker. Existing threads, forks and retries
+keep their selected account. Stop or cancel ongoing work before releasing its capacity; unused
+reservations expire automatically.
+
+Claude's sustainable preset spreads usable allowance across its reported cycle. The aggressive
+17-points-per-day preset can run out before seven days. Codex defaults to an initial 30-point
+allowance plus 10 points per elapsed day. Reserves and bounded borrowing protect ongoing work;
+weekly underuse never overrides an unsafe short window. Temporary use-by targets expire, and
+reset plans do not replenish quota until the provider confirms it. Allocation never redeems
+reset credits or enables paid overage.
+
+Forecasts show their freshness and sample coverage. Sparse evidence uses conservative estimates;
+token costs are not subscription percentages. History charts are available only for accounts
+already opted into retained usage measurements. Native mobile supports inspection and assignment
+preview; use the linked web page for tuning, charts and creating sessions.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,

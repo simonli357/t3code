@@ -125,7 +125,7 @@ export class MeasurementHistory {
           accountKey,
           identityKnown: Boolean(identity),
           instanceId: provider.instanceId,
-          checkedAt: limits.checkedAt,
+          checkedAt: window.checkedAt ?? limits.checkedAt,
           window,
         });
       }
@@ -446,7 +446,27 @@ function quotaRate(
       : null;
   const consumedSinceReading =
     rate === null ? 0 : (rate * Math.max(0, now - Date.parse(latest.checkedAt))) / HOUR;
+  // One-step error within this same observed reset cycle. Account-level only:
+  // external traffic and quantized readings are deliberately included.
+  const errors: number[] = [];
+  if (reason === null && eligible.length >= 5) {
+    for (let i = 2; i < eligible.length; i++) {
+      const a = eligible[i - 2]!;
+      const b = eligible[i - 1]!;
+      const c = eligible[i]!;
+      const previousHours = (Date.parse(b.checkedAt) - Date.parse(a.checkedAt)) / HOUR;
+      const nextHours = (Date.parse(c.checkedAt) - Date.parse(b.checkedAt)) / HOUR;
+      if (previousHours > 0 && nextHours > 0)
+        errors.push(
+          Math.abs(
+            (c.window.usedPercent - b.window.usedPercent) / nextHours -
+              (b.window.usedPercent - a.window.usedPercent) / previousHours,
+          ),
+        );
+    }
+  }
   return {
+    predictionErrorPointsPerHour: errors.length ? percentile(errors, 0.9) : null,
     sampleCount: eligible.length,
     intervalMinutes,
     percentagePointsPerHour: rate,

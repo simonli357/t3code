@@ -40,6 +40,7 @@ export const UsageTurnMeasurement = Schema.Struct({
 export type UsageTurnMeasurement = typeof UsageTurnMeasurement.Type;
 
 const RateEstimate = Schema.Struct({
+  predictionErrorPointsPerHour: Schema.optional(Schema.NullOr(Schema.Number)),
   sampleCount: NonNegativeInt,
   intervalMinutes: Schema.Number,
   percentagePointsPerHour: Schema.NullOr(Schema.Number),

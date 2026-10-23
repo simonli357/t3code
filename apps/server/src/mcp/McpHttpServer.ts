@@ -1,4 +1,5 @@
 import * as SessionMovesToolkit from "./toolkits/sessionMoves/tools.ts";
+import * as AllocationToolkit from "./toolkits/allocation/tools.ts";
 import * as HistoryToolkit from "./toolkits/history/tools.ts";
 import * as UsageToolkit from "./toolkits/usage/tools.ts";
 import * as ThreadHistory from "../orchestration/ContextHandoff.ts";
@@ -680,6 +681,9 @@ export const layer = Layer.mergeAll(
     Layer.provide(ThreadHistory.layer),
   ),
   McpServer.toolkit(WorkersToolkit.WorkersToolkit).pipe(Layer.provide(WorkersToolkit.handlers)),
+  McpServer.toolkit(AllocationToolkit.AllocationToolkit).pipe(
+    Layer.provide(AllocationToolkit.handlers),
+  ),
   McpServer.toolkit(SessionMovesToolkit.SessionMovesToolkit).pipe(
     Layer.provide(SessionMovesToolkit.handlers),
   ),

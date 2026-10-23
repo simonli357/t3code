@@ -235,6 +235,7 @@ export const make = Effect.gen(function* () {
       threadPinning: true,
       threadForking: true,
       workerFreshSessions: true,
+      providerAllocation: true,
       boundedSessionHistory: true,
       sessionMessageConfirmation: true,
       workerReclaim: true,

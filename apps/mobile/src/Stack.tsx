@@ -1,3 +1,4 @@
+import { SettingsAllocationRouteScreen } from "./features/settings/SettingsAllocationRouteScreen";
 import {
   createPathConfigForStaticNavigation,
   getPathFromState,
@@ -329,6 +330,11 @@ const SettingsContentStack = createNativeStackNavigator({
       options: {
         title: "Usage",
       },
+    }),
+    SettingsAllocation: createNativeStackScreen({
+      screen: SettingsAllocationRouteScreen,
+      linking: "allocation",
+      options: { title: "Provider allocation" },
     }),
   },
 });

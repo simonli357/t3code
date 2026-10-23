@@ -1120,6 +1120,9 @@ export const WorkerRenewalSettings = Schema.Struct({
 export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
 
 export const ServerSettings = Schema.Struct({
+  allocationCoordinatorEnvironmentId: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
   usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1488,6 +1491,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  allocationCoordinatorEnvironmentId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(

@@ -21,6 +21,23 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  it("keeps omitted window age and model scope through repeated sparse updates", () => {
+    const first = applyUsageLimitsUpdate({
+      previous: published,
+      checkedAt: "2026-09-03T12:10:00.000Z",
+      update: { windows: [{ ...weekly, usedPercent: 25, applicableModels: ["astra"] }] },
+    });
+    const second = applyUsageLimitsUpdate({
+      previous: first,
+      checkedAt: "2026-09-03T12:15:00.000Z",
+      update: { windows: [{ ...weekly, usedPercent: 30 }] },
+    });
+    expect(second?.windows.find((w) => w.id === session.id)?.checkedAt).toBe(checkedAt);
+    expect(second?.windows.find((w) => w.id === weekly.id)).toMatchObject({
+      checkedAt: "2026-09-03T12:15:00.000Z",
+      applicableModels: ["astra"],
+    });
+  });
   it("returns the published object itself when no window moved", () => {
     // Codex repeats the same numbers beside every token-usage tick; the
     // ingestion path relies on identity to skip the publish.
@@ -48,7 +65,10 @@ describe("applyUsageLimitsUpdate", () => {
     expect(next).not.toBe(published);
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [
+        { ...session, usedPercent: 55, checkedAt: "2026-09-03T12:00:05.000Z" },
+        { ...weekly, checkedAt },
+      ],
     });
   });
 
@@ -72,7 +92,10 @@ describe("applyUsageLimitsUpdate", () => {
 
     expect(next).toEqual({
       checkedAt: "2026-09-03T12:00:05.000Z",
-      windows: [{ ...session, usedPercent: 55 }, weekly],
+      windows: [
+        { ...session, usedPercent: 55, checkedAt: "2026-09-03T12:00:05.000Z" },
+        { ...weekly, checkedAt },
+      ],
       resetCredits,
     });
   });

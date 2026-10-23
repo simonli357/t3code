@@ -1,4 +1,11 @@
 import {
+  AllocationOperation,
+  AllocationResponse,
+  AllocationError,
+  AllocationStart,
+  AllocationStartResult,
+} from "./providerAllocation.ts";
+import {
   SessionOwnershipReadInput,
   SessionOwnershipInput,
   SessionOwnershipResult,
@@ -311,6 +318,8 @@ import {
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  providerAllocation: "providerAllocation.execute",
+  providerAllocationStart: "providerAllocation.start",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -1084,6 +1093,16 @@ const WsAgentSessionsForkRpc = Rpc.make(WS_METHODS.agentSessionsFork, {
   success: AgentSessionForkResult,
   error: Schema.Union([AgentSessionForkError, EnvironmentAuthorizationError]),
 });
+const WsProviderAllocationRpc = Rpc.make(WS_METHODS.providerAllocation, {
+  payload: AllocationOperation,
+  success: AllocationResponse,
+  error: AllocationError,
+});
+const WsProviderAllocationStartRpc = Rpc.make(WS_METHODS.providerAllocationStart, {
+  payload: AllocationStart,
+  success: AllocationStartResult,
+  error: AllocationError,
+});
 const WsSessionOwnershipReadRpc = Rpc.make(WS_METHODS.sessionOwnershipRead, {
   payload: SessionOwnershipReadInput,
   success: SessionOwnershipResult,
@@ -1616,6 +1635,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsImportRpc,
   WsAgentSessionsForkRpc,
   WsSessionOwnershipReadRpc,
+  WsProviderAllocationRpc,
+  WsProviderAllocationStartRpc,
   WsSessionOwnershipChangeRpc,
   WsSessionMovesRequestRpc,
   WsSessionMovesStatusRpc,

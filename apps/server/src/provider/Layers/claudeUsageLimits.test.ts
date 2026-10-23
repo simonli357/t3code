@@ -56,11 +56,20 @@ describe("claudeUsageResponseToLimits", () => {
           },
           {
             id: "seven_day_fable",
+            modelScope: "Fable",
             kind: "weekly",
             label: "Weekly · Fable",
             usedPercent: 73,
             windowDurationMins: 10080,
             resetsAt: "2026-07-24T08:59:00.000Z",
+          },
+          {
+            id: "seven_day_opus",
+            modelScope: "opus",
+            kind: "weekly",
+            label: "Weekly · opus",
+            usedPercent: 3,
+            windowDurationMins: 10080,
           },
         ],
       },
@@ -157,6 +166,7 @@ describe("claudeRateLimitEventToUpdate", () => {
       windows: [
         {
           id: "seven_day_fable",
+          modelScope: "Fable",
           kind: "weekly",
           label: "Weekly · Fable",
           usedPercent: 40,
@@ -166,13 +176,13 @@ describe("claudeRateLimitEventToUpdate", () => {
     });
   });
 
-  it("ignores windows the page does not render and events without a utilization", () => {
+  it("retains model-scoped events and ignores events without a utilization", () => {
     expect(
       claudeRateLimitEventToUpdate(
         { status: "allowed", rateLimitType: "seven_day_opus", utilization: 0.1 },
         noNames,
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ windows: [{ id: "seven_day_opus", modelScope: "opus", usedPercent: 10 }] });
     expect(
       claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
     ).toBeUndefined();

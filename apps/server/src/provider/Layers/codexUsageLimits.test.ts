@@ -63,7 +63,7 @@ describe("codexRateLimitsToLimits", () => {
     ]);
   });
 
-  it("selects the main Codex allowance and leaves Spark out", () => {
+  it("keeps model-specific buckets separate from the main Codex allowance", () => {
     const spark = {
       limitId: "codex_bengalfox",
       primary: { usedPercent: 0, windowDurationMins: 300 },
@@ -79,6 +79,22 @@ describe("codexRateLimitsToLimits", () => {
         },
       }).windows,
     ).toEqual([
+      {
+        id: "codex_bengalfox:primary",
+        modelScope: "codex_bengalfox",
+        kind: "session",
+        label: "Session · codex_bengalfox",
+        usedPercent: 0,
+        windowDurationMins: 300,
+      },
+      {
+        id: "codex_bengalfox:secondary",
+        modelScope: "codex_bengalfox",
+        kind: "weekly",
+        label: "Weekly · codex_bengalfox",
+        usedPercent: 90,
+        windowDurationMins: 10080,
+      },
       {
         id: "secondary",
         kind: "weekly",
@@ -108,7 +124,9 @@ describe("codexRateLimitsToLimits", () => {
           secondary: { usedPercent: 90 },
         },
       }).windows,
-    ).toEqual([]);
+    ).toMatchObject([
+      { id: "codex_bengalfox:secondary", usedPercent: 90, modelScope: "codex_bengalfox" },
+    ]);
   });
 });
 
@@ -132,14 +150,19 @@ describe("codexRateLimitsToUpdate", () => {
     expect(codexRateLimitsToUpdate({ planType: "plus" })).toBeUndefined();
   });
 
-  it("ignores Spark notifications so they cannot overwrite the main allowance", () => {
+  it("isolates Spark notifications so they cannot overwrite the main allowance", () => {
     expect(
       codexRateLimitsToUpdate({
         limitId: "codex_bengalfox",
         primary: { usedPercent: 0, windowDurationMins: 300 },
         secondary: { usedPercent: 90, windowDurationMins: 10080 },
       }),
-    ).toBeUndefined();
+    ).toMatchObject({
+      windows: [
+        { id: "codex_bengalfox:primary", usedPercent: 0 },
+        { id: "codex_bengalfox:secondary", usedPercent: 90 },
+      ],
+    });
     expect(
       codexRateLimitsToUpdate({
         limitId: "codex",

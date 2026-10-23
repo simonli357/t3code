@@ -196,6 +196,11 @@ function SettingsIndexSections() {
 
       <SettingsSection title="App">
         <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
+        <SettingsRow
+          icon="chart.bar.xaxis"
+          label="Provider allocation"
+          target="SettingsAllocation"
+        />
         <SettingsRow icon="info.circle" label="About T3 Code" target="SettingsAbout" />
       </SettingsSection>
     </>

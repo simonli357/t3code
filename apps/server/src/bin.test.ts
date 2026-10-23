@@ -42,6 +42,8 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import { ProviderAllocation } from "./allocation/ProviderAllocation.ts";
+import { AllocationAssignments } from "./allocation/AllocationAssignments.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as UsageMeasurements from "./usage/UsageMeasurements.ts";
@@ -374,6 +376,8 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(
         orchestrationHttpApiLayer.pipe(
+          Layer.provide(Layer.mock(ProviderAllocation)({})),
+          Layer.provide(Layer.mock(AllocationAssignments)({})),
           Layer.provide(Layer.mock(SessionMoves)({})),
           Layer.provide(
             Layer.succeed(UsageMeasurements.UsageMeasurements, {

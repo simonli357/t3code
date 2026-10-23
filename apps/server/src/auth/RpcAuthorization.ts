@@ -125,6 +125,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.agentSessionsImport]: AuthOrchestrationOperateScope,
   [WS_METHODS.agentSessionsFork]: AuthOrchestrationOperateScope,
   [WS_METHODS.sessionOwnershipRead]: AuthOrchestrationReadScope,
+  [WS_METHODS.providerAllocation]: AuthOrchestrationOperateScope,
+  [WS_METHODS.providerAllocationStart]: AuthOrchestrationOperateScope,
   [WS_METHODS.sessionOwnershipChange]: AuthOrchestrationOperateScope,
   [WS_METHODS.sessionMovesRequest]: AuthOrchestrationOperateScope,
   [WS_METHODS.sessionMovesStatus]: AuthOrchestrationOperateScope,

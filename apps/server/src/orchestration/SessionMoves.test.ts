@@ -146,6 +146,7 @@ const fixture = Effect.gen(function* () {
     const peerLayer = Layer.succeed(
       PeerLinks,
       PeerLinks.of({
+        list: Effect.succeed(peers.filter((entry) => entry.environmentId !== id)),
         localEnvironment: Effect.succeed({ environmentId: id, label: id }),
         resolve: (name) =>
           Effect.succeed(

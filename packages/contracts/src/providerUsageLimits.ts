@@ -18,6 +18,10 @@ import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
  * `kind` only orders and labels the bar.
  */
 export const ServerProviderUsageWindow = Schema.Struct({
+  /** Provider-reported bucket name; unresolved scope is conservatively account-wide. */
+  modelScope: Schema.optional(TrimmedNonEmptyString),
+  checkedAt: Schema.optional(IsoDateTime),
+  applicableModels: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   id: TrimmedNonEmptyString,
   kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
   label: TrimmedNonEmptyString,
@@ -48,6 +52,7 @@ export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
  * last good bars for the latter and clear them for the former.
  */
 export const ServerProviderUsageLimits = Schema.Struct({
+  shortWindowAbsent: Schema.optional(Schema.Boolean),
   checkedAt: IsoDateTime,
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
   /** Opaque credential identity when the provider does not report an account. */

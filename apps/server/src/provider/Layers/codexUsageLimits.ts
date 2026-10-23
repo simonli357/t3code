@@ -70,9 +70,9 @@ function labelForKind(kind: ServerProviderUsageWindow["kind"]): string {
 function codexRateLimitsToWindows(
   snapshot: CodexRateLimitSnapshot,
 ): ReadonlyArray<ServerProviderUsageWindow> {
-  // Show the main allowance only. Model-specific notifications (such as Spark)
-  // must not replace its primary/secondary rows. Older CLIs omit the limit id.
-  if (snapshot.limitId && snapshot.limitId !== "codex") return [];
+  // A model bucket has its own IDs; it must never replace the main allowance.
+  const modelScope =
+    snapshot.limitId && snapshot.limitId !== "codex" ? snapshot.limitId : undefined;
   const isMonthlyPlan = snapshot.planType === "free" || snapshot.planType === "go";
   const positions = [
     ["primary", snapshot.primary, isMonthlyPlan ? MONTH_MINS : SESSION_MINS],
@@ -86,9 +86,10 @@ function codexRateLimitsToWindows(
     const kind = kindForDuration(windowDurationMins);
     const resetsAt = isoFromEpochSeconds(window.resetsAt);
     windows.push({
-      id,
+      id: modelScope ? `${modelScope}:${id}` : id,
+      ...(modelScope ? { modelScope } : {}),
       kind,
-      label: labelForKind(kind),
+      label: modelScope ? `${labelForKind(kind)} · ${modelScope}` : labelForKind(kind),
       usedPercent: clampPercent(window.usedPercent),
       windowDurationMins,
       ...(resetsAt ? { resetsAt } : {}),
@@ -123,8 +124,12 @@ export function codexRateLimitsToLimits(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits {
   const resetCredits = codexResetCreditsToContract(input.resetCredits);
-  // Select the main bucket explicitly; the legacy snapshot can name another limit.
-  const windows = codexRateLimitsToWindows(input.rateLimitsByLimitId?.codex ?? input.snapshot);
+  const buckets = new Map(Object.entries(input.rateLimitsByLimitId ?? {}));
+  if (!buckets.has(input.snapshot.limitId ?? "codex"))
+    buckets.set(input.snapshot.limitId ?? "codex", input.snapshot);
+  const windows = [...buckets]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .flatMap(([limitId, snapshot]) => codexRateLimitsToWindows({ ...snapshot, limitId }));
   return {
     ...makeUsageLimits({
       checkedAt: input.checkedAt,
