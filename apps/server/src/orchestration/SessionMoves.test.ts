@@ -331,6 +331,9 @@ const fixture = Effect.gen(function* () {
     wrongResume: () => {
       wrongNativeId = true;
     },
+    restoreResume: () => {
+      wrongNativeId = false;
+    },
     holdChunk: (value: NonNullable<typeof chunkGate>) => {
       chunkGate = value;
     },
@@ -685,5 +688,59 @@ it.effect(
           (message) => message.text.includes("Finished on the new computer"),
         ),
       ).toHaveLength(1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("retries a cancelled copy to the same computer without losing newer source context", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, input, wrongResume, restoreResume } = yield* fixture;
+    yield* alpha.moves.request(input);
+    wrongResume();
+    yield* alpha.moves.drain();
+    yield* alpha.moves.status({ requestId: input.requestId, cancel: true });
+    yield* io(() =>
+      NodeFSP.appendFile(
+        NodePath.join(alpha.home, transcriptName),
+        "\nnew source context after cancellation\n",
+      ),
+    );
+    restoreResume();
+    const retry = { ...input, requestId: CommandId.make("retry-after-cancel") };
+    yield* alpha.moves.request(retry);
+    yield* alpha.moves.drain();
+    expect(yield* alpha.moves.status({ requestId: retry.requestId })).toMatchObject({
+      state: "complete",
+      error: null,
+    });
+    expect(
+      yield* io(() => NodeFSP.readFile(NodePath.join(beta.home, transcriptName), "utf8")),
+    ).toContain("new source context after cancellation");
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "retries the original request after native resume appended private destination metadata",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, input, wrongResume, restoreResume, bytes } = yield* fixture;
+      yield* alpha.moves.request(input);
+      wrongResume();
+      yield* alpha.moves.drain();
+      yield* io(() =>
+        NodeFSP.appendFile(NodePath.join(beta.home, transcriptName), "\nnative resume metadata\n"),
+      );
+      restoreResume();
+      yield* alpha.moves.request(input);
+      yield* alpha.moves.drain();
+      expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+        state: "complete",
+        error: null,
+      });
+      expect(yield* io(() => NodeFSP.readFile(NodePath.join(beta.home, transcriptName)))).toEqual(
+        bytes,
+      );
+      expect(
+        Option.getOrThrow(yield* beta.snapshots.getThreadDetailById(threadId)).messages,
+      ).toHaveLength(2);
     }).pipe(Effect.scoped),
 );

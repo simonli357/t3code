@@ -183,7 +183,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const lock = yield* Semaphore.make(1);
   const incomingLock = yield* Semaphore.make(1);
-  const work = yield* Queue.unbounded<void>();
+  const work = yield* Queue.dropping<void>(1);
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
   const local = yield* peers.localEnvironment;
   const row = Effect.fn(function* (id: string) {
@@ -298,7 +298,7 @@ const make = Effect.gen(function* () {
     const existing =
       yield* sql`SELECT 1 FROM projection_threads WHERE thread_id = ${input.threadId}`;
     const parked = yield* sql`SELECT 1 FROM custom_session_moves WHERE thread_id = ${input.threadId}
-      AND direction = 'out' AND state = 'complete' AND locked = 1`;
+      AND locked = 1 AND ((direction = 'out' AND state = 'complete') OR (direction = 'in' AND state = 'cancelled'))`;
     if (existing.length && !parked.length)
       return yield* new SessionMoveError({
         message: "The destination already has an independent session with this ID.",
@@ -556,9 +556,14 @@ const make = Effect.gen(function* () {
       }),
     );
     const home = yield* configuration(manifest.modelSelection.instanceId, manifest.driver);
+    const imported =
+      yield* sql`SELECT 1 FROM orchestration_events WHERE stream_id = ${manifest.input.threadId}
+      AND json_extract(metadata_json, '$.sessionMoveId') = ${value.id} LIMIT 1`;
+    if (imported.length && Option.isSome(yield* directory.getBinding(manifest.input.threadId)))
+      yield* provider.stopSession({ threadId: manifest.input.threadId });
     const parked =
       yield* sql`SELECT 1 FROM custom_session_moves WHERE thread_id = ${manifest.input.threadId}
-      AND direction = 'out' AND state = 'complete'`;
+      AND ((direction = 'out' AND state = 'complete') OR (direction = 'in' AND state = 'cancelled' AND EXISTS (SELECT 1 FROM projection_threads WHERE thread_id = ${manifest.input.threadId})))`;
     const nativeState =
       manifest.driver === "codex"
         ? (decodeCodexState(
@@ -578,7 +583,13 @@ const make = Effect.gen(function* () {
     yield* fs.makeDirectory(nativeRoot, { recursive: true });
     for (const file of manifest.files.filter((entry) => entry.kind === "native"))
       yield* io(() =>
-        Files.installMoveFile(staging, file, nativeRoot, file.name, parked.length > 0),
+        Files.installMoveFile(
+          staging,
+          file,
+          nativeRoot,
+          file.name,
+          parked.length > 0 || imported.length > 0,
+        ),
       );
     if (manifest.driver === "claudeAgent") {
       const workerArgs = isExecutable
@@ -605,9 +616,6 @@ const make = Effect.gen(function* () {
     }
     const existing =
       yield* sql`SELECT 1 FROM projection_threads WHERE thread_id = ${manifest.input.threadId}`;
-    const imported =
-      yield* sql`SELECT 1 FROM orchestration_events WHERE stream_id = ${manifest.input.threadId}
-      AND json_extract(metadata_json, '$.sessionMoveId') = ${value.id} LIMIT 1`;
     if (!imported.length) {
       const events = yield* decodeEvents(
         yield* fs.readFileString(path.join(staging, "history", "events.json")),
@@ -770,7 +778,7 @@ const make = Effect.gen(function* () {
           sql.withTransaction(
             Effect.gen(function* () {
               yield* sql`UPDATE custom_session_moves SET locked = 0 WHERE thread_id = ${manifest.input.threadId}
-          AND direction = 'out' AND state = 'complete'`;
+          AND ((direction = 'out' AND state = 'complete') OR (direction = 'in' AND state = 'cancelled'))`;
               yield* sql`INSERT INTO custom_session_moves
           (id, thread_id, target_thread_id, direction, peer_environment_id, state, input_json, manifest_json, created_at, updated_at)
           VALUES (${request.requestId}, ${manifest.input.threadId}, ${manifest.input.threadId}, 'in', ${from}, 'copying', ${encode(manifest.input)}, ${encode(manifest)}, ${yield* now}, ${yield* now})`;
@@ -1097,6 +1105,10 @@ const make = Effect.gen(function* () {
   const start = Effect.fn("SessionMoves.start")(function* () {
     const changes = yield* engine.subscribeDomainEvents;
     yield* changes.pipe(
+      Stream.filter(
+        (event) =>
+          event.type === "thread.session-set" || event.type === "thread.turn-diff-completed",
+      ),
       Stream.runForEach(() => Queue.offer(work, undefined)),
       Effect.forkScoped,
     );
