@@ -201,6 +201,11 @@ function SettingsIndexSections() {
           label="Provider allocation"
           target="SettingsAllocation"
         />
+        <SettingsRow
+          icon="chart.bar.xaxis"
+          label="Model selection"
+          target="SettingsModelSelection"
+        />
         <SettingsRow icon="info.circle" label="About T3 Code" target="SettingsAbout" />
       </SettingsSection>
     </>

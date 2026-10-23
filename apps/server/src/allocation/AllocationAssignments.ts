@@ -4,6 +4,8 @@ import {
   AllocationError,
   type AllocationStart,
   type AllocationStartResult,
+  type AllocationRequest,
+  type ModelRoutingDecision,
   CommandId,
   MessageId,
   type ThreadId,
@@ -42,18 +44,35 @@ const make = Effect.gen(function* () {
   const local = yield* peers.localEnvironment;
   const starts = yield* Semaphore.make(1);
   return AllocationAssignments.of({
-    start: Effect.fn("AllocationAssignments.start")(function* (input, owner) {
+    start: Effect.fn("AllocationAssignments.start")(function* (raw, owner) {
       const invalid = (detail: string) => new AllocationError({ code: "invalid", detail });
-      if (input.kind === "worker" && !owner)
+      if (raw.kind === "worker" && !owner)
         return yield* invalid("Managed allocation requires the authenticated master.");
-      if (input.kind === "session" && input.request.environmentId !== local.environmentId)
+      if (raw.kind === "session" && raw.request.environmentId !== local.environmentId)
         return yield* invalid("Create a human session through its execution environment.");
-      // This entry point only creates fresh sessions. Forks, retries and native
-      // resumes keep using their existing explicit selection and lifecycle.
-      if (input.request.nativeInstanceId)
+      if (raw.request.nativeInstanceId)
         return yield* invalid(
-          "Fresh allocation cannot change a native session. Use the existing explicit resume path.",
+          "Fresh automatic startup cannot replace a bound native session. Use the explicit resume path.",
         );
+      let selectionDecision: ModelRoutingDecision | undefined;
+      let request: AllocationRequest;
+      if (raw.request.selection === "automatic") {
+        const response = yield* allocation.execute({ _tag: "modelAllocate", request: raw.request });
+        selectionDecision = response.selection;
+        if (!selectionDecision) return yield* invalid("Model selection returned no decision.");
+        if (!selectionDecision.allocation || selectionDecision.allocation.mode === "observation")
+          return {
+            allocation: selectionDecision.allocation,
+            selection: selectionDecision,
+            threadId: raw.request.threadId,
+            state:
+              selectionDecision.allocation?.mode === "observation"
+                ? ("observation" as const)
+                : ("unavailable" as const),
+          };
+        request = selectionDecision.allocation.decision.request;
+      } else request = raw.request;
+      const input = { ...raw, request };
       if (input.request.environmentId === local.environmentId) {
         const existing = yield* projection
           .getThreadShellById(input.request.threadId)
@@ -75,12 +94,14 @@ const make = Effect.gen(function* () {
       if (result.mode === "observation")
         return {
           allocation: result,
+          ...(selectionDecision ? { selection: selectionDecision } : {}),
           threadId: input.request.threadId,
           state: "observation" as const,
         };
       if (!result.reservation || !result.decision.selectedInstanceId)
         return {
           allocation: result,
+          ...(selectionDecision ? { selection: selectionDecision } : {}),
           threadId: input.request.threadId,
           state: "unavailable" as const,
         };
@@ -88,7 +109,7 @@ const make = Effect.gen(function* () {
       // Hash the complete start intent, including the authenticated owner. Prompt
       // bodies never enter allocation logs or replay snapshots.
       const intentJson = stableStringify({
-        input,
+        input: raw,
         owner: owner ?? null,
       });
       const startIntent = NodeCrypto.createHash("sha256").update(intentJson).digest("hex");
@@ -193,7 +214,12 @@ const make = Effect.gen(function* () {
             }),
         ),
       );
-      return { allocation: result, threadId: input.request.threadId, state: "submitted" as const };
+      return {
+        allocation: result,
+        ...(selectionDecision ? { selection: selectionDecision } : {}),
+        threadId: input.request.threadId,
+        state: "submitted" as const,
+      };
     }, starts.withPermit),
   });
 });

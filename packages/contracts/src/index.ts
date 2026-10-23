@@ -52,3 +52,4 @@ export * from "./worktreeSetup.ts";
 
 export * from "./computers.ts";
 export * from "./providerAllocation.ts";
+export * from "./modelRouting.ts";

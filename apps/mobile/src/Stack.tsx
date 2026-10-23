@@ -1,3 +1,4 @@
+import { SettingsModelSelectionRouteScreen } from "./features/settings/SettingsModelSelectionRouteScreen";
 import { SettingsAllocationRouteScreen } from "./features/settings/SettingsAllocationRouteScreen";
 import {
   createPathConfigForStaticNavigation,
@@ -330,6 +331,11 @@ const SettingsContentStack = createNativeStackNavigator({
       options: {
         title: "Usage",
       },
+    }),
+    SettingsModelSelection: createNativeStackScreen({
+      screen: SettingsModelSelectionRouteScreen,
+      linking: "model-selection",
+      options: { title: "Model selection" },
     }),
     SettingsAllocation: createNativeStackScreen({
       screen: SettingsAllocationRouteScreen,

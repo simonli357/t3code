@@ -25,6 +25,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { readQuotaEvidence, type QuotaEvidence } from "./quotaEvidence.ts";
 import { allocationInventory } from "./inventory.ts";
 import { decideAllocation } from "./decision.ts";
+import { modelCandidates } from "./modelDecision.ts";
 
 const PeerInput = Schema.TaggedUnion({
   allocation: { operation: AllocationOperation },
@@ -238,6 +239,83 @@ const make = Effect.gen(function* () {
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
     const policy = yield* store.policy;
     const authorityAvailable = policy.coordinatorEnvironmentId === local.environmentId;
+    if (
+      operation._tag === "modelSnapshot" ||
+      operation._tag === "modelPolicy" ||
+      operation._tag === "modelRevert" ||
+      operation._tag === "modelPreview" ||
+      operation._tag === "modelAllocate"
+    ) {
+      const modelPolicy = yield* store.modelPolicy;
+      yield* reconcile();
+      let inventories = yield* collect();
+      const coordinated =
+        authorityAvailable &&
+        inventories.every((i) => i.complete && i.coordinatorEnvironmentId === local.environmentId);
+      if (operation._tag === "modelSnapshot")
+        return {
+          modelSnapshot: {
+            policy: modelPolicy,
+            policies: yield* store.modelPolicies,
+            history: yield* store.modelHistory,
+            inventories,
+            authorityAvailable: coordinated,
+          },
+        };
+      if (operation._tag === "modelPolicy" || operation._tag === "modelRevert") {
+        if (!coordinated) return yield* unavailable();
+        return {
+          modelPolicy: yield* store.saveModelPolicy({
+            expectedVersion: operation.expectedVersion,
+            inventories,
+            ...(operation._tag === "modelPolicy"
+              ? { policy: operation.policy }
+              : { revertVersion: operation.version }),
+          }),
+        };
+      }
+      if (operation._tag === "modelAllocate" && !coordinated) return yield* unavailable();
+      // Preserve the allocator's measured profile uncertainty for each eligible
+      // family. Catalog/quota selection below still uses one shared snapshot.
+      const effectiveModelPolicy =
+        operation._tag === "modelPreview" ? (operation.policy ?? modelPolicy) : modelPolicy;
+      for (const candidate of modelCandidates(effectiveModelPolicy, operation.request, inventories)
+        .candidates) {
+        const measured = yield* collect(candidate.request);
+        inventories = inventories.map((host) => ({
+          ...host,
+          complete:
+            host.complete &&
+            measured.every((i) => i.complete && i.coordinatorEnvironmentId === local.environmentId),
+          accounts: host.accounts.map((account) => {
+            const profile = measured
+              .find((i) => i.environmentId === host.environmentId)
+              ?.accounts.find((a) => a.instanceId === account.instanceId);
+            return profile && account.driver === candidate.request.driver
+              ? {
+                  ...account,
+                  profileSamples: profile.profileSamples,
+                  profileUncertainty: profile.profileUncertainty,
+                }
+              : account;
+          }),
+        }));
+      }
+      return {
+        selection: yield* store.selectModel({
+          at: yield* now,
+          request: operation.request,
+          inventories,
+          authorityAvailable: coordinated,
+          reserve: operation._tag === "modelAllocate",
+          expectedPolicyVersion: policy.version,
+          expectedModelVersion: modelPolicy.version,
+          ...(operation._tag === "modelPreview" && operation.policy
+            ? { previewPolicy: operation.policy }
+            : {}),
+        }),
+      };
+    }
     if (operation._tag === "policy") {
       if (operation.input.policy.coordinatorEnvironmentId !== local.environmentId)
         return yield* new AllocationError({

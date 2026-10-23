@@ -238,6 +238,17 @@ export function CommandPalette(props: {
           }),
       },
       {
+        key: "model-selection",
+        kind: "action",
+        title: "Model selection",
+        searchTerms: ["difficulty", "stakes", "reasoning", "model"],
+        run: () =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: { screen: "SettingsModelSelection" },
+          }),
+      },
+      {
         key: "allocation",
         kind: "action",
         title: "Provider allocation",

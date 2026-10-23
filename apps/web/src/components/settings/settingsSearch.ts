@@ -19,6 +19,7 @@ export type SettingsPath =
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/allocation"
+  | "/settings/model-selection"
   | "/settings/integrations"
   | "/settings/source-control"
   | "/settings/storage"
@@ -91,6 +92,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
   "/settings/allocation": "Provider allocation",
+  "/settings/model-selection": "Model selection",
   "/settings/integrations": "Integrations",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
@@ -131,6 +133,13 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
  * that may not be mounted point at their nearest stable section instead.
  */
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "model-selection",
+    title: "Model selection",
+    to: "/settings/model-selection",
+    scope: "environment",
+    searchTerms: ["difficulty", "stakes", "reasoning", "model", "profiles", "automatic"],
+  },
   {
     id: "provider-allocation",
     title: "Provider allocation",
@@ -856,6 +865,7 @@ const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id,
 
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
   "/settings/allocation": "environment",
+  "/settings/model-selection": "environment",
   "/settings/projects": "project",
   "/settings/general": null,
   "/settings/appearance": null,

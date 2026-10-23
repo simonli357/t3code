@@ -310,6 +310,10 @@
     "./device/duo-control": {
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
+    },
+    "./state/model-routing": {
+      "types": "./src/state/modelRouting.ts",
+      "default": "./src/state/modelRouting.ts"
     }
   },
   "scripts": {

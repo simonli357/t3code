@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import Migration0063 from "./Migrations/063_ProviderAllocation.ts";
+import Migration0065 from "./Migrations/065_ModelSelection.ts";
 import Migration0064 from "./Migrations/064_AllocationStartReceipts.ts";
 
 // Import all migrations statically
@@ -88,6 +89,7 @@ import Migration0061 from "./Migrations/061_SessionOrganization.ts";
  * returns migrations sorted by ID.
  */
 const migrationEntries = [
+  [65, "ModelSelection", Migration0065],
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],

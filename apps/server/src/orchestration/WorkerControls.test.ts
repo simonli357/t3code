@@ -2,6 +2,7 @@ import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/unstable/ai";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as WorkerTools from "../mcp/toolkits/workers/tools.ts";
+import * as AllocationTools from "../mcp/toolkits/allocation/tools.ts";
 import * as Invocation from "../mcp/McpInvocationContext.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -205,110 +206,138 @@ const allocatedWorkerLayer = AllocationAssignments.layer.pipe(
   ),
 );
 
-it.effect(
-  "allocated fresh workers use real ownership, dispatch and idempotent startup receipts",
-  () =>
-    Effect.gen(function* () {
-      const { owner, worker } = yield* seed("allocated-fresh", 1);
-      yield* (yield* Settings.ServerSettingsService).updateSettings({
-        allocationCoordinatorEnvironmentId: "env-local",
-      });
-      const store = yield* AllocationStore.AllocationStore;
-      yield* store.savePolicy({
-        expectedVersion: 0,
-        policy: {
-          ...defaultAllocationPolicy,
-          coordinatorEnvironmentId: "env-local",
-          mode: "automatic",
-        },
-      });
-      const assignments = yield* AllocationAssignments.AllocationAssignments;
-      const request = {
-        kind: "worker" as const,
-        projectId: ProjectId.make("allocated-fresh"),
-        title: "allocated_astra",
-        prompt: "perform allocated work",
-        request: {
-          assignmentId: "integrated-start",
-          environmentId: "env-local",
-          threadId: worker,
-          driver: ProviderDriverKind.make("codex"),
-          model: selections[1]!.model,
-          options: selections[1]!.options,
-        },
-      };
-      expect((yield* assignments.start(request, owner)).state).toBe("submitted");
-      const workers = yield* Workers.WorkerControls;
-      yield* workers.drain();
-      const shell = Option.getOrThrow(
-        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
-      );
-      expect(shell.modelSelection).toEqual(selections[1]);
-      expect(shell.messages.filter((m) => m.role === "user")).toHaveLength(1);
-      expect((yield* workers.list(owner))[0]?.threadId).toBe(worker);
-      yield* assignments.start(request, owner);
-      yield* workers.drain();
-      const repeated = Option.getOrThrow(
-        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
-      );
-      expect(repeated.messages.filter((m) => m.role === "user")).toHaveLength(1);
-      expect(yield* store.reservations).toHaveLength(1);
-    }).pipe(Effect.provide(allocatedWorkerLayer)),
-);
+for (const automatic of [false, true])
+  it.effect(
+    `allocated fresh workers use real ownership, dispatch and idempotent startup receipts (${automatic ? "model-selected" : "exact"})`,
+    () =>
+      Effect.gen(function* () {
+        const { owner, worker } = yield* seed("allocated-fresh", 1);
+        yield* (yield* Settings.ServerSettingsService).updateSettings({
+          allocationCoordinatorEnvironmentId: "env-local",
+        });
+        const store = yield* AllocationStore.AllocationStore;
+        yield* store.savePolicy({
+          expectedVersion: 0,
+          policy: {
+            ...defaultAllocationPolicy,
+            coordinatorEnvironmentId: "env-local",
+            mode: "automatic",
+          },
+        });
+        const assignments = yield* AllocationAssignments.AllocationAssignments;
+        const request = {
+          kind: "worker" as const,
+          projectId: ProjectId.make("allocated-fresh"),
+          title: "allocated_astra",
+          prompt: "perform allocated work",
+          request: {
+            assignmentId: "integrated-start",
+            environmentId: "env-local",
+            threadId: worker,
+            ...(automatic
+              ? {
+                  selection: "automatic" as const,
+                  allowedDrivers: [ProviderDriverKind.make("codex")],
+                  assessment: {
+                    difficulty: 8,
+                    stakes: 8,
+                    difficultyReason: "Interacting state machines",
+                    stakesReason: "Consequential startup",
+                  },
+                }
+              : {
+                  driver: ProviderDriverKind.make("codex"),
+                  model: selections[1]!.model,
+                  options: selections[1]!.options,
+                }),
+          },
+        };
+        expect((yield* assignments.start(request, owner)).state).toBe("submitted");
+        const workers = yield* Workers.WorkerControls;
+        yield* workers.drain();
+        const shell = Option.getOrThrow(
+          yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
+        );
+        expect(shell.modelSelection).toEqual(selections[1]);
+        expect(shell.messages.filter((m) => m.role === "user")).toHaveLength(1);
+        expect((yield* workers.list(owner))[0]?.threadId).toBe(worker);
+        yield* assignments.start(request, owner);
+        yield* workers.drain();
+        const repeated = Option.getOrThrow(
+          yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
+        );
+        expect(repeated.messages.filter((m) => m.role === "user")).toHaveLength(1);
+        expect(yield* store.reservations).toHaveLength(1);
+      }).pipe(Effect.provide(allocatedWorkerLayer)),
+  );
 
-it.effect(
-  "allocated human sessions preserve their profile and release rejected startup from real receipts",
-  () =>
-    Effect.gen(function* () {
-      yield* seed("allocated-human", 1);
-      yield* (yield* Settings.ServerSettingsService).updateSettings({
-        allocationCoordinatorEnvironmentId: "env-local",
-      });
-      const store = yield* AllocationStore.AllocationStore;
-      yield* store.savePolicy({
-        expectedVersion: 0,
-        policy: {
-          ...defaultAllocationPolicy,
-          coordinatorEnvironmentId: "env-local",
-          mode: "automatic",
-        },
-      });
-      const assignments = yield* AllocationAssignments.AllocationAssignments;
-      const input = {
-        kind: "session" as const,
-        projectId: ProjectId.make("missing-project"),
-        title: "new session",
-        prompt: "task",
-        request: {
-          assignmentId: "human-failed",
-          threadId: ThreadId.make("human-failed"),
-          environmentId: "env-local",
-          driver: ProviderDriverKind.make("codex"),
-          model: selections[1]!.model,
-          options: selections[1]!.options,
-        },
-      };
-      expect(Exit.isFailure(yield* Effect.exit(assignments.start(input)))).toBe(true);
-      yield* (yield* Allocation.ProviderAllocation).execute({ _tag: "snapshot" });
-      expect((yield* store.reservations)[0]?.state).toBe("released");
-      const valid = {
-        ...input,
-        projectId: ProjectId.make("allocated-human"),
-        request: {
-          ...input.request,
-          assignmentId: "human-created",
-          threadId: ThreadId.make("human-created"),
-        },
-      };
-      expect((yield* assignments.start(valid)).state).toBe("submitted");
-      expect((yield* assignments.start(valid)).state).toBe("submitted");
-      const thread = Option.getOrThrow(
-        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(valid.request.threadId),
-      );
-      expect(thread.modelSelection).toEqual(selections[1]);
-      expect(thread.messages.filter((m) => m.role === "user")).toHaveLength(1);
-    }).pipe(Effect.provide(allocatedWorkerLayer)),
-);
+for (const automatic of [false, true])
+  it.effect(
+    `allocated human sessions preserve their profile and release rejected startup from real receipts (${automatic ? "model-selected" : "exact"})`,
+    () =>
+      Effect.gen(function* () {
+        yield* seed("allocated-human", 1);
+        yield* (yield* Settings.ServerSettingsService).updateSettings({
+          allocationCoordinatorEnvironmentId: "env-local",
+        });
+        const store = yield* AllocationStore.AllocationStore;
+        yield* store.savePolicy({
+          expectedVersion: 0,
+          policy: {
+            ...defaultAllocationPolicy,
+            coordinatorEnvironmentId: "env-local",
+            mode: "automatic",
+          },
+        });
+        const assignments = yield* AllocationAssignments.AllocationAssignments;
+        const input = {
+          kind: "session" as const,
+          projectId: ProjectId.make("missing-project"),
+          title: "new session",
+          prompt: "task",
+          request: {
+            assignmentId: "human-failed",
+            threadId: ThreadId.make("human-failed"),
+            environmentId: "env-local",
+            ...(automatic
+              ? {
+                  selection: "automatic" as const,
+                  allowedDrivers: [ProviderDriverKind.make("codex")],
+                  assessment: {
+                    difficulty: 8,
+                    stakes: 8,
+                    difficultyReason: "Interacting state machines",
+                    stakesReason: "Consequential startup",
+                  },
+                }
+              : {
+                  driver: ProviderDriverKind.make("codex"),
+                  model: selections[1]!.model,
+                  options: selections[1]!.options,
+                }),
+          },
+        };
+        expect(Exit.isFailure(yield* Effect.exit(assignments.start(input)))).toBe(true);
+        yield* (yield* Allocation.ProviderAllocation).execute({ _tag: "snapshot" });
+        expect((yield* store.reservations)[0]?.state).toBe("released");
+        const valid = {
+          ...input,
+          projectId: ProjectId.make("allocated-human"),
+          request: {
+            ...input.request,
+            assignmentId: "human-created",
+            threadId: ThreadId.make("human-created"),
+          },
+        };
+        expect((yield* assignments.start(valid)).state).toBe("submitted");
+        expect((yield* assignments.start(valid)).state).toBe("submitted");
+        const thread = Option.getOrThrow(
+          yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(valid.request.threadId),
+        );
+        expect(thread.modelSelection).toEqual(selections[1]);
+        expect(thread.messages.filter((m) => m.role === "user")).toHaveLength(1);
+      }).pipe(Effect.provide(allocatedWorkerLayer)),
+  );
 const seed = Effect.fn(function* (prefix: string, index = 0) {
   const engine = yield* OrchestrationEngineService;
   const directory = yield* ProviderSessionDirectory;
@@ -2600,6 +2629,95 @@ const mcpLayer = McpServer.toolkit(WorkerTools.WorkersToolkit).pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(testLayer),
 );
+it.effect(
+  "model selection MCP previews and starts exactly one worker owned by the authenticated master",
+  () =>
+    Effect.gen(function* () {
+      const { owner, worker } = yield* seed("model-mcp", 1);
+      yield* (yield* Settings.ServerSettingsService).updateSettings({
+        allocationCoordinatorEnvironmentId: "env-local",
+      });
+      const store = yield* AllocationStore.AllocationStore;
+      yield* store.savePolicy({
+        expectedVersion: 0,
+        policy: {
+          ...defaultAllocationPolicy,
+          coordinatorEnvironmentId: "env-local",
+          mode: "automatic",
+        },
+      });
+      const server = yield* McpServer.McpServer;
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        clientCapabilities: {},
+        clientInfo: { name: "model-test", version: "1" },
+        protocolVersion: "2025-06-18",
+        initializePayload: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "model-test", version: "1" },
+        },
+        getClient: Effect.die("unused"),
+      });
+      const call = (name: string, args: Record<string, unknown>) =>
+        server.callTool({ name, arguments: args }).pipe(
+          Effect.provideService(Invocation.McpInvocationContext, {
+            environmentId: EnvironmentId.make("env-local"),
+            threadId: owner,
+            providerSessionId: "session",
+            providerInstanceId: ProviderInstanceId.make("codex_antoine"),
+            capabilities: new Set<Invocation.McpCapability>(),
+            issuedAt: 1,
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      const request = {
+        selection: "automatic",
+        assignmentId: "mcp-selected",
+        threadId: worker,
+        environmentId: "env-local",
+        allowedDrivers: ["codex"],
+        assessment: {
+          difficulty: 8,
+          stakes: 8,
+          difficultyReason: "Interacting behavior",
+          stakesReason: "Hard-to-detect failures",
+        },
+      };
+      expect((yield* call("t3_allocate_account", { request, preview: true })).isError).not.toBe(
+        true,
+      );
+      expect(yield* store.reservations).toHaveLength(0);
+      const input = {
+        request,
+        kind: "worker",
+        projectId: "model-mcp",
+        title: "Selected worker",
+        prompt: "Perform the scoped assignment",
+        ownerThreadId: "forged-owner",
+      };
+      expect((yield* call("t3_start_allocated_assignment", input)).isError).not.toBe(true);
+      const workers = yield* Workers.WorkerControls;
+      yield* workers.drain();
+      expect((yield* workers.list(owner)).map((w) => w.threadId)).toEqual([worker]);
+      expect((yield* call("t3_start_allocated_assignment", input)).isError).not.toBe(true);
+      yield* workers.drain();
+      const thread = Option.getOrThrow(
+        yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker),
+      );
+      expect(thread.modelSelection).toEqual(selections[1]);
+      expect(thread.messages.filter((m) => m.role === "user")).toHaveLength(1);
+      expect(yield* store.reservations).toHaveLength(1);
+    }).pipe(
+      Effect.provide(
+        McpServer.toolkit(AllocationTools.AllocationToolkit).pipe(
+          Layer.provide(AllocationTools.handlers),
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(allocatedWorkerLayer),
+        ),
+      ),
+    ),
+);
 it.layer(mcpLayer)("worker MCP", (it) => {
   for (const fresh of [false, true]) {
     it.effect(
@@ -3975,169 +4093,183 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-it.effect(
-  "reconciles a real remote pre-start refusal by intent and retains uncertain transport starts",
-  () =>
-    Effect.gen(function* () {
-      const { alpha, beta, gamma, alphaWorkers, betaSnapshots } = yield* linkedPair;
-      const scope = yield* Scope.make();
-      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
-      const allocationLayer = AllocationAssignments.layer.pipe(
-        Layer.provideMerge(Allocation.layer),
-        Layer.provideMerge(AllocationStore.layer),
-        Layer.provide(allocationRegistry),
-        Layer.provide(
-          Layer.succeed(UsageMeasurements, {
-            read: () =>
-              Effect.succeed({
-                observedAt: "1970-01-01T00:00:00.000Z",
-                monitoredInstanceIds: [],
-                retentionDays: 14,
-                persistenceError: null,
-                accounts: [],
-                turns: [],
-                totalMatchingTurns: 0,
-                profiles: [],
-                limitations: [],
-              }),
-          }),
-        ),
-      );
-      const allocations = [];
-      for (const [id, context] of [
-        ["env-alpha", alpha],
-        ["env-beta", beta],
-        ["env-gamma", gamma],
-      ] as const) {
-        yield* (yield* Settings.ServerSettingsService.pipe(Effect.provide(context))).updateSettings(
-          { allocationCoordinatorEnvironmentId: "env-alpha" },
+for (const automatic of [false, true])
+  it.effect(
+    `reconciles a real remote pre-start refusal by intent and retains uncertain transport starts (${automatic ? "model-selected" : "exact"})`,
+    () =>
+      Effect.gen(function* () {
+        const { alpha, beta, gamma, alphaWorkers, betaSnapshots } = yield* linkedPair;
+        const scope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+        const allocationLayer = AllocationAssignments.layer.pipe(
+          Layer.provideMerge(Allocation.layer),
+          Layer.provideMerge(AllocationStore.layer),
+          Layer.provide(allocationRegistry),
+          Layer.provide(
+            Layer.succeed(UsageMeasurements, {
+              read: () =>
+                Effect.succeed({
+                  observedAt: "1970-01-01T00:00:00.000Z",
+                  monitoredInstanceIds: [],
+                  retentionDays: 14,
+                  persistenceError: null,
+                  accounts: [],
+                  turns: [],
+                  totalMatchingTurns: 0,
+                  profiles: [],
+                  limitations: [],
+                }),
+            }),
+          ),
         );
-        const services = yield* Layer.build(allocationLayer).pipe(
-          Effect.provide(context),
-          Scope.provide(scope),
-        );
-        const allocation = yield* Allocation.ProviderAllocation.pipe(Effect.provide(services));
-        const store = yield* AllocationStore.AllocationStore.pipe(Effect.provide(services));
-        const assignments = yield* AllocationAssignments.AllocationAssignments.pipe(
-          Effect.provide(services),
-        );
-        yield* store.savePolicy({
-          expectedVersion: 0,
-          policy: {
-            ...defaultAllocationPolicy,
-            mode: "automatic",
-            coordinatorEnvironmentId: "env-alpha",
+        const allocations = [];
+        for (const [id, context] of [
+          ["env-alpha", alpha],
+          ["env-beta", beta],
+          ["env-gamma", gamma],
+        ] as const) {
+          yield* (yield* Settings.ServerSettingsService.pipe(
+            Effect.provide(context),
+          )).updateSettings({ allocationCoordinatorEnvironmentId: "env-alpha" });
+          const services = yield* Layer.build(allocationLayer).pipe(
+            Effect.provide(context),
+            Scope.provide(scope),
+          );
+          const allocation = yield* Allocation.ProviderAllocation.pipe(Effect.provide(services));
+          const store = yield* AllocationStore.AllocationStore.pipe(Effect.provide(services));
+          const assignments = yield* AllocationAssignments.AllocationAssignments.pipe(
+            Effect.provide(services),
+          );
+          yield* store.savePolicy({
+            expectedVersion: 0,
+            policy: {
+              ...defaultAllocationPolicy,
+              mode: "automatic",
+              coordinatorEnvironmentId: "env-alpha",
+            },
+          });
+          const workerHandler = peerHandlers.get(id)!;
+          peerHandlers.set(id, (from, request) =>
+            typeof request === "object" &&
+            request !== null &&
+            "_tag" in request &&
+            typeof request._tag === "string" &&
+            request._tag.startsWith("allocation")
+              ? allocation
+                  .receive(from, request)
+                  .pipe(Effect.mapError((e) => new Workers.WorkerError({ message: e.message })))
+              : workerHandler(from, request),
+          );
+          allocations.push({ allocation, store, assignments });
+        }
+        const { owner } = yield* seed("allocate-remote-owner", 1).pipe(Effect.provide(alpha));
+        yield* seed("allocate-remote-project", 1).pipe(Effect.provide(beta));
+        const { allocation, store, assignments } = allocations[0]!;
+        const input = {
+          kind: "worker" as const,
+          projectId: ProjectId.make("missing-project"),
+          title: "allocated remote",
+          prompt: "task",
+          request: {
+            assignmentId: "remote-refused",
+            environmentId: "env-beta",
+            threadId: ThreadId.make("remote-refused"),
+            ...(automatic
+              ? {
+                  selection: "automatic" as const,
+                  allowedDrivers: [ProviderDriverKind.make("codex")],
+                  assessment: {
+                    difficulty: 8,
+                    stakes: 8,
+                    difficultyReason: "Interacting state machines",
+                    stakesReason: "Consequential startup",
+                  },
+                }
+              : {
+                  driver: ProviderDriverKind.make("codex"),
+                  model: selections[1]!.model,
+                  options: selections[1]!.options,
+                }),
           },
-        });
-        const workerHandler = peerHandlers.get(id)!;
-        peerHandlers.set(id, (from, request) =>
-          typeof request === "object" &&
-          request !== null &&
-          "_tag" in request &&
-          typeof request._tag === "string" &&
-          request._tag.startsWith("allocation")
-            ? allocation
-                .receive(from, request)
-                .pipe(Effect.mapError((e) => new Workers.WorkerError({ message: e.message })))
-            : workerHandler(from, request),
+        };
+        expect(Exit.isFailure(yield* Effect.exit(assignments.start(input, owner)))).toBe(true);
+        expect((yield* store.reservations)[0]?.state).toBe("starting");
+        const sql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+        expect(
+          yield* sql`SELECT assignment_id, thread_id FROM provider_allocation_start_rejections`,
+        ).toEqual([{ assignment_id: "remote-refused", thread_id: "remote-refused" }]);
+        expect(
+          yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = 'remote-refused'`,
+        ).toHaveLength(0);
+        expect(Option.isNone(yield* betaSnapshots.getThreadShellById(input.request.threadId))).toBe(
+          true,
         );
-        allocations.push({ allocation, store, assignments });
-      }
-      const { owner } = yield* seed("allocate-remote-owner", 1).pipe(Effect.provide(alpha));
-      yield* seed("allocate-remote-project", 1).pipe(Effect.provide(beta));
-      const { allocation, store, assignments } = allocations[0]!;
-      const input = {
-        kind: "worker" as const,
-        projectId: ProjectId.make("missing-project"),
-        title: "allocated remote",
-        prompt: "task",
-        request: {
-          assignmentId: "remote-refused",
-          environmentId: "env-beta",
-          threadId: ThreadId.make("remote-refused"),
-          driver: ProviderDriverKind.make("codex"),
-          model: selections[1]!.model,
-          options: selections[1]!.options,
-        },
-      };
-      expect(Exit.isFailure(yield* Effect.exit(assignments.start(input, owner)))).toBe(true);
-      expect((yield* store.reservations)[0]?.state).toBe("starting");
-      const sql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
-      expect(
-        yield* sql`SELECT assignment_id, thread_id FROM provider_allocation_start_rejections`,
-      ).toEqual([{ assignment_id: "remote-refused", thread_id: "remote-refused" }]);
-      expect(
-        yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = 'remote-refused'`,
-      ).toHaveLength(0);
-      expect(Option.isNone(yield* betaSnapshots.getThreadShellById(input.request.threadId))).toBe(
-        true,
-      );
-      expect(
-        yield* allocations[1]!.allocation.receive("env-alpha", {
-          _tag: "allocationProbe",
+        expect(
+          yield* allocations[1]!.allocation.receive("env-alpha", {
+            _tag: "allocationProbe",
+            threadId: input.request.threadId,
+            assignmentId: input.request.assignmentId,
+            since: "1970-01-01T00:00:00.000Z",
+            startIntent: "wrong-intent",
+          }),
+        ).toEqual({ state: "unknown" });
+        yield* allocation.execute({ _tag: "snapshot" });
+        expect((yield* store.reservations)[0]?.state).toBe("released");
+        expect(Exit.isFailure(yield* Effect.exit(assignments.start(input, owner)))).toBe(true);
+        // The target refuses replay even if the caller tries to repair the project in place.
+        const corrected = {
           threadId: input.request.threadId,
-          assignmentId: input.request.assignmentId,
-          since: "1970-01-01T00:00:00.000Z",
-          startIntent: "wrong-intent",
-        }),
-      ).toEqual({ state: "unknown" });
-      yield* allocation.execute({ _tag: "snapshot" });
-      expect((yield* store.reservations)[0]?.state).toBe("released");
-      expect(Exit.isFailure(yield* Effect.exit(assignments.start(input, owner)))).toBe(true);
-      // The target refuses replay even if the caller tries to repair the project in place.
-      const corrected = {
-        threadId: input.request.threadId,
-        projectId: ProjectId.make("allocate-remote-project"),
-        title: input.title,
-        prompt: input.prompt,
-        modelSelection: selections[1]!,
-        environment: "beta",
-        allocation: {
-          assignmentId: "remote-refused",
-          startIntent: (yield* store.reservations)[0]!.startIntent!,
-        },
-      };
-      expect(Exit.isFailure(yield* Effect.exit(alphaWorkers.spawn(owner, corrected)))).toBe(true);
-      const restartedTarget = yield* Workers.WorkerControls.pipe(
-        Effect.provide(Workers.layer),
-        Effect.provide(beta),
-      );
-      expect(
-        (yield* restartedTarget
-          .receive("env-alpha", {
-            _tag: "spawn",
-            owner: { threadId: owner, runtimeMode: "full-access", interactionMode: "default" },
-            input: corrected,
-          })
-          .pipe(Effect.asVoid, Effect.flip)).code,
-      ).toBe("allocation_start_rejected");
-      const accepted = {
-        ...input,
-        projectId: ProjectId.make("allocate-remote-project"),
-        request: {
-          ...input.request,
-          assignmentId: "remote-uncertain",
-          threadId: ThreadId.make("remote-uncertain"),
-        },
-      };
-      lostReplies.add("env-beta:spawn");
-      expect(Exit.isFailure(yield* Effect.exit(assignments.start(accepted, owner)))).toBe(true);
-      expect(
-        yield* sql`SELECT 1 FROM provider_allocation_start_rejections WHERE assignment_id = 'remote-uncertain'`,
-      ).toHaveLength(0);
-      offline.add("env-beta");
-      yield* allocation.execute({ _tag: "snapshot" });
-      expect(
-        (yield* store.reservations).find((r) => r.assignmentId === "remote-uncertain")?.state,
-      ).toBe("starting");
-      offline.delete("env-beta");
-      yield* allocation.execute({ _tag: "snapshot" });
-      expect(
-        (yield* store.reservations).find((r) => r.assignmentId === "remote-uncertain")?.state,
-      ).toBe("starting");
-      expect(
-        Option.getOrThrow(yield* betaSnapshots.getThreadShellById(accepted.request.threadId))
-          .modelSelection,
-      ).toEqual(selections[1]);
-    }).pipe(Effect.scoped),
-);
+          projectId: ProjectId.make("allocate-remote-project"),
+          title: input.title,
+          prompt: input.prompt,
+          modelSelection: selections[1]!,
+          environment: "beta",
+          allocation: {
+            assignmentId: "remote-refused",
+            startIntent: (yield* store.reservations)[0]!.startIntent!,
+          },
+        };
+        expect(Exit.isFailure(yield* Effect.exit(alphaWorkers.spawn(owner, corrected)))).toBe(true);
+        const restartedTarget = yield* Workers.WorkerControls.pipe(
+          Effect.provide(Workers.layer),
+          Effect.provide(beta),
+        );
+        expect(
+          (yield* restartedTarget
+            .receive("env-alpha", {
+              _tag: "spawn",
+              owner: { threadId: owner, runtimeMode: "full-access", interactionMode: "default" },
+              input: corrected,
+            })
+            .pipe(Effect.asVoid, Effect.flip)).code,
+        ).toBe("allocation_start_rejected");
+        const accepted = {
+          ...input,
+          projectId: ProjectId.make("allocate-remote-project"),
+          request: {
+            ...input.request,
+            assignmentId: "remote-uncertain",
+            threadId: ThreadId.make("remote-uncertain"),
+          },
+        };
+        lostReplies.add("env-beta:spawn");
+        expect(Exit.isFailure(yield* Effect.exit(assignments.start(accepted, owner)))).toBe(true);
+        expect(
+          yield* sql`SELECT 1 FROM provider_allocation_start_rejections WHERE assignment_id = 'remote-uncertain'`,
+        ).toHaveLength(0);
+        offline.add("env-beta");
+        yield* allocation.execute({ _tag: "snapshot" });
+        expect(
+          (yield* store.reservations).find((r) => r.assignmentId === "remote-uncertain")?.state,
+        ).toBe("starting");
+        offline.delete("env-beta");
+        yield* allocation.execute({ _tag: "snapshot" });
+        expect(
+          (yield* store.reservations).find((r) => r.assignmentId === "remote-uncertain")?.state,
+        ).toBe("starting");
+        expect(
+          Option.getOrThrow(yield* betaSnapshots.getThreadShellById(accepted.request.threadId))
+            .modelSelection,
+        ).toEqual(selections[1]);
+      }).pipe(Effect.scoped),
+  );

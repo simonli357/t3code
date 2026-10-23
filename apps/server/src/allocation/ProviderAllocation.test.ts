@@ -102,7 +102,7 @@ const provider = Schema.decodeUnknownSync(ServerProvider)({
     ],
   },
 });
-const startInput: AllocationStart = {
+const startInput = {
   kind: "worker",
   projectId: ProjectId.make("project"),
   title: "task",
@@ -118,7 +118,7 @@ const startInput: AllocationStart = {
       { id: "serviceTier", value: "priority" },
     ],
   },
-};
+} satisfies AllocationStart;
 
 function fixture(options: { remote?: boolean; fail?: boolean } = {}) {
   const calls: Array<typeof Workers.RemoteSpawnInput.Type> = [];

@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { ModelRoutingPolicy, ModelRoutingRequest } from "./modelRouting.ts";
 import {
   IsoDateTime,
   NonNegativeInt,
@@ -13,6 +14,7 @@ const Points = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }
 const Hours = Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 }));
 const Names = Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(100));
 export const AllocationRequest = Schema.Struct({
+  selection: Schema.optional(Schema.Literal("explicit")),
   assignmentId: TrimmedNonEmptyString,
   environmentId: TrimmedNonEmptyString,
   threadId: ThreadId,
@@ -225,6 +227,35 @@ export const AllocationResult = Schema.Struct({
   mode: Schema.Literals(["observation", "automatic"]),
 });
 export type AllocationResult = typeof AllocationResult.Type;
+export const ModelRoutingDecision = Schema.Struct({
+  at: IsoDateTime,
+  policyVersion: NonNegativeInt,
+  request: ModelRoutingRequest,
+  revision: NonNegativeInt,
+  selectedProfile: Schema.NullOr(Schema.Int),
+  rule: Schema.String,
+  profiles: Schema.Array(
+    Schema.Struct({
+      driver: ProviderDriverKind,
+      profile: Schema.NullOr(Schema.Int),
+      model: Schema.String,
+      options: Schema.Array(ProviderOptionSelection),
+      reason: Schema.String,
+      eligible: Schema.Boolean,
+    }),
+  ).check(Schema.isMaxLength(2)),
+  reasons: Schema.Array(Schema.String),
+  allocation: Schema.NullOr(AllocationResult),
+});
+export type ModelRoutingDecision = typeof ModelRoutingDecision.Type;
+export const ModelRoutingSnapshot = Schema.Struct({
+  policy: ModelRoutingPolicy,
+  policies: Schema.Array(ModelRoutingPolicy),
+  history: Schema.Array(ModelRoutingDecision),
+  inventories: Schema.Array(AllocationInventory),
+  authorityAvailable: Schema.Boolean,
+});
+export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AllocationSnapshot = Schema.Struct({
   policy: AllocationPolicy,
   inventories: Schema.Array(AllocationInventory),
@@ -246,7 +277,7 @@ export const AllocationLifecycle = Schema.Struct({
   action: Schema.Literals(["start", "consume", "release"]),
 });
 export const AllocationStart = Schema.Struct({
-  request: AllocationRequest,
+  request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
   kind: Schema.Literals(["session", "worker"]),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -254,12 +285,18 @@ export const AllocationStart = Schema.Struct({
 });
 export type AllocationStart = typeof AllocationStart.Type;
 export const AllocationStartResult = Schema.Struct({
-  allocation: AllocationResult,
+  allocation: Schema.NullOr(AllocationResult),
+  selection: Schema.optional(ModelRoutingDecision),
   threadId: ThreadId,
   state: Schema.Literals(["observation", "unavailable", "submitted"]),
 });
 export type AllocationStartResult = typeof AllocationStartResult.Type;
 export const AllocationOperation = Schema.TaggedUnion({
+  modelSnapshot: {},
+  modelPolicy: { expectedVersion: NonNegativeInt, policy: ModelRoutingPolicy },
+  modelRevert: { expectedVersion: NonNegativeInt, version: NonNegativeInt },
+  modelPreview: { request: ModelRoutingRequest, policy: Schema.optional(ModelRoutingPolicy) },
+  modelAllocate: { request: ModelRoutingRequest },
   connections: {},
   snapshot: {},
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
@@ -270,6 +307,9 @@ export const AllocationOperation = Schema.TaggedUnion({
 });
 export type AllocationOperation = typeof AllocationOperation.Type;
 export const AllocationResponse = Schema.Struct({
+  modelSnapshot: Schema.optional(ModelRoutingSnapshot),
+  modelPolicy: Schema.optional(ModelRoutingPolicy),
+  selection: Schema.optional(ModelRoutingDecision),
   connections: Schema.optional(
     Schema.Struct({
       coordinatorEnvironmentId: Schema.NullOr(Schema.String),

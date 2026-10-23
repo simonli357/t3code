@@ -98,7 +98,11 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
         <p className="text-sm text-muted-foreground">{scope.message}</p>
       </SettingsPageContainer>
     );
-  if (scope.kind === "environment" && connectedEnvironments.length === 0) {
+  if (
+    scope.kind === "environment" &&
+    connectedEnvironments.length === 0 &&
+    pathname !== "/settings/model-selection"
+  ) {
     return (
       <SettingsPageContainer>
         <p className="text-sm text-muted-foreground">
@@ -153,7 +157,11 @@ function SettingsRouteLayout() {
   return (
     <SettingsScopeProvider
       search={rawSearch}
-      singleEnvironment={pathname === "/settings/providers" || pathname === "/settings/allocation"}
+      singleEnvironment={
+        pathname === "/settings/providers" ||
+        pathname === "/settings/allocation" ||
+        pathname === "/settings/model-selection"
+      }
       onChange={(next) => {
         // Send every axis so the retain middleware sees an explicit target
         // even when the choice is "all", which is the absence of a key.

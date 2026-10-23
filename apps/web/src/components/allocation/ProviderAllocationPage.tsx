@@ -229,7 +229,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         );
         return;
       }
-      setDecision(result.value.allocation.decision);
+      setDecision(result.value.allocation?.decision ?? null);
       if (result.value.state === "submitted")
         void navigate({
           to: "/$environmentId/$threadId",

@@ -140,6 +140,49 @@ or endpoint configurations do not report subscription limits.
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 
+## Model selection
+
+Open **Settings ? Model selection** beside Provider allocation, or find it through
+Settings search or the command palette. Choose the shared coordinator in Provider
+allocation first. The model editor has independent Codex and Claude profiles and a
+six-band difficulty ? stakes table. Select a difficulty row to edit its stakes
+entries on any screen size. Automatic selection is opt-in through this page or an
+agent automatic request; ordinary model pickers keep their explicit choices.
+
+Assess the scoped assignment on two integer axes, each from 0 to 10, with a short
+reason. Difficulty measures reasoning, uncertainty and interactions. Stakes measures
+failure impact, reversibility and detectability. Use 0?3 for routine/low, 4?6 for
+moderate, 7 for demanding/high, 8 for very demanding/very high, 9 for extreme, and
+10 only for exceptional assignments. Missing assessments cannot start automatic work.
+
+Preview shows the exact model, effort, rule and account admission. Save the policy
+before starting a new assignment. Observation mode records the proposal without
+starting a session. Exact user overrides remain authoritative; conflicts are shown
+for you to resolve. Automatic selection excludes Luna, Haiku and Fable. A missing
+capability uses only an explicitly configured alternative; low quota never chooses
+a weaker profile or another computer. Profile numbers do not rank cost or capability
+across providers.
+
+Saving, restoring defaults and reverting create new policy versions. Existing
+sessions and assignment retries retain their selections. If another editor saves,
+keep your draft, refresh the saved version, compare it, and preview again before
+saving. Unavailable catalog values remain readable; reconnect the target or choose
+an advertised profile. The recent decision history can start an explicit reassessment
+as a new session after substantive failure or a justified scope change, within the
+configured bound. A provider-family change requires explicit consent. Transport or
+installation failures alone are not reasons to escalate.
+
+Agents use the same preview and managed startup services through
+`t3_allocate_account` and `t3_start_allocated_assignment`, supplying an automatic
+assessment or retaining their existing exact request. Retry the identical IDs and
+intent after a lost response; use new IDs for new work. Native mobile provides
+assessment preview and profile/table editing in **Settings ? Model selection**,
+including relay connections. The same version and catalog checks apply. Use the
+web editor for human-session startup, exact-override and reassessment controls,
+previous-policy reverts, and full history. A direct connection offers an editor
+link; relay and SSH connections require opening this custom build's web client
+and selecting the same environment. Pair the browser if prompted.
+
 ## Connect a CLIProxyAPI hub
 
 To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
