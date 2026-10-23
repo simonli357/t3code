@@ -370,7 +370,7 @@ export function ComputerPanel({
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-2 px-4 sm:px-5">
+          <div className="grid grid-cols-1 gap-2 px-4 sm:grid-cols-2 sm:px-5">
             <MetricTile
               label="CPU"
               value={metrics.cpu.percent === null ? null : formatPercent(metrics.cpu.percent)}
@@ -399,7 +399,7 @@ export function ComputerPanel({
                   memoryPercent === null ? null : formatPercent(memoryPercent),
                 ]
                   .filter((part) => part !== null)
-                  .join(" · ") || null
+                  .join(" Â· ") || null
               }
               samples={metrics.memory.history}
               stale={stale}
