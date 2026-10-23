@@ -94,6 +94,14 @@ describe("resolveSidebarRowAccessibility", () => {
       isActive: false,
       expected: { label: "Untitled task", current: undefined },
     },
+    {
+      title: "The audit is done",
+      statusLabel: null,
+      projectDisplayName: "T3 Code",
+      environmentLabel: "Lab workstation",
+      isActive: true,
+      expected: { label: "The audit is done, T3 Code, Lab workstation", current: "page" },
+    },
   ])("leads with the title without folding row actions into its name: %j", (input) => {
     const { expected, ...state } = input;
     expect(resolveSidebarRowAccessibility(state)).toEqual(expected);

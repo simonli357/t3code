@@ -162,6 +162,7 @@ import {
 } from "./ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { ThreadEnvironmentLabel } from "./ThreadEnvironmentLabel";
 import {
   SidebarContent,
   SidebarGroup,
@@ -801,6 +802,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             </Tooltip>
           )}
         </div>
+        <ThreadEnvironmentLabel label={environment?.label ?? null} />
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {discoveredPorts.length > 0 && (
             <Tooltip>
