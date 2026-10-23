@@ -1,3 +1,4 @@
+import { openMoveSession } from "./MoveSessionDialog";
 import { useForkConversation } from "../hooks/useForkConversation";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
@@ -134,6 +135,7 @@ import { useNowMinute } from "../hooks/useNowMinute";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
 import {
   readThreadSupportsForking,
+  readThreadSupportsMoving,
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
   useProjects,
@@ -4239,6 +4241,7 @@ export default function Sidebar() {
                 thread.session?.status === "running" && thread.session.activeTurnId != null,
               supports: {
                 forking: readThreadSupportsForking(threadRef),
+                moving: readThreadSupportsMoving(threadRef),
                 settlement: supportsSettlement,
                 autoSettleOptOut: supportsAutoSettleOptOut,
                 snooze: supportsSnooze,
@@ -4260,6 +4263,9 @@ export default function Sidebar() {
           return;
         }
         switch (clicked.value) {
+          case "move-session":
+            openMoveSession(threadRef);
+            return;
           case "fork-conversation":
             await forkConversation(threadRef);
             return;

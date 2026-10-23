@@ -1,4 +1,10 @@
 import * as Context from "effect/Context";
+import {
+  SessionMoveError,
+  SessionMoveInput,
+  SessionMoveResult,
+  SessionMoveStatusInput,
+} from "./sessionMoves.ts";
 import { UsageMeasurementsReport } from "./usageMeasurements.ts";
 import {
   SESSION_HISTORY_MAX_MESSAGES,
@@ -532,6 +538,22 @@ const EnvironmentOrchestrationThreadSnapshotQuery = {
 };
 
 export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
+  .add(
+    HttpApiEndpoint.post("moveSession", "/api/orchestration/session-moves", {
+      headers: OptionalBearerHeaders,
+      payload: SessionMoveInput,
+      success: SessionMoveResult,
+      error: [EnvironmentScopeRequiredError, SessionMoveError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sessionMoveStatus", "/api/orchestration/session-moves/status", {
+      headers: OptionalBearerHeaders,
+      payload: SessionMoveStatusInput,
+      success: SessionMoveResult,
+      error: [EnvironmentScopeRequiredError, SessionMoveError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("sessionHistory", "/api/orchestration/threads/:threadId/messages", {
       headers: OptionalBearerHeaders,

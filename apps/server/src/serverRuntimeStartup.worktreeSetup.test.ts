@@ -95,6 +95,7 @@ const run = (activities: ReadonlyArray<ReturnType<typeof recordedSetup>>) =>
             dispatched.push(command);
             return { sequence: dispatched.length };
           }),
+        streamClientEvents: Stream.empty,
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),

@@ -1,6 +1,7 @@
 import * as Computers from "./computers/Computers.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
+import * as SessionMoves from "./orchestration/SessionMoves.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
@@ -271,6 +272,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   // Purging drains the deletion reactor and runtime ingestion below it.
   Layer.provideMerge(SettledThreadPurge.layer),
   Layer.provideMerge(OrchestrationReactorLive),
+  Layer.provideMerge(SessionMoves.liveLayer),
   Layer.provideMerge(WorkerControls.liveLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),

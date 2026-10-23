@@ -88,6 +88,7 @@ const makeDependencies = (
     Layer.mock(OrchestrationEngineService)({
       readEvents: () => Stream.empty,
       dispatch,
+      streamClientEvents: Stream.empty,
       streamDomainEvents: Stream.empty,
       latestSequence: Effect.succeed(0),
     }),

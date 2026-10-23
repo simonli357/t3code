@@ -1,3 +1,4 @@
+import { openMoveSession } from "../components/MoveSessionDialog";
 import { useForkConversation } from "./useForkConversation";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { scopeProjectRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -23,6 +24,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsAutoSettleOptOut,
   readThreadSupportsForking,
+  readThreadSupportsMoving,
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
@@ -137,6 +139,7 @@ export function useThreadActionMenu(input: {
         const now = new Date();
         const supports = {
           forking: readThreadSupportsForking(threadRef),
+          moving: readThreadSupportsMoving(threadRef),
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
@@ -185,6 +188,9 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "move-session":
+            openMoveSession(threadRef);
+            return;
           case "fork-conversation":
             await forkConversation(threadRef);
             return;

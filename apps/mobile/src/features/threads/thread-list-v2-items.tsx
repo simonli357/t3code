@@ -1,3 +1,4 @@
+import { useNativeSessionMove } from "./useNativeSessionMove";
 import {
   THREAD_LIST_V2_MONO_FONT as MONO_FONT,
   THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME,
@@ -699,15 +700,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : [],
     [props.autoSettleOptOutSupported, thread.autoSettleDisabledAt],
   );
+  const nativeMove = useNativeSessionMove(thread);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      ...nativeMove.menuItems,
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [props.titleRegenerationSupported, thread.titleRegeneration, nativeMove.menuItems],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -769,6 +772,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event.startsWith("native-move")) nativeMove.onAction(nativeEvent.event);
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "settle") handleSettle();
       if (nativeEvent.event === "unsettle") handleUnsettle();
@@ -806,6 +810,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       onNewThreadOnBranch,
       thread,
       handleArchive,
+      nativeMove,
       handleDelete,
       handleRegenerateTitle,
       handleRename,

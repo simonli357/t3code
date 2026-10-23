@@ -340,6 +340,8 @@ export const PeerRequest = Schema.TaggedUnion({
     recipientThreadId: ThreadId,
     prompt: TrimmedNonEmptyString,
     policy: Schema.optional(MessagePolicy),
+    forwardedFrom: Schema.optional(Schema.String),
+    relayedFor: Schema.optional(ThreadId),
   },
   spawn: { owner: PeerOwner, input: SpawnInput },
   worker: {
@@ -347,6 +349,7 @@ export const PeerRequest = Schema.TaggedUnion({
     workerThreadId: ThreadId,
     op: Schema.Literals(["describe", "read", "send", "wait", "control"]),
     input: Schema.Unknown,
+    forwardedFrom: Schema.optional(Schema.String),
   },
 });
 const decodePeerRequest = Schema.decodeUnknownSync(PeerRequest);
@@ -368,6 +371,9 @@ const selectionKey = (value: typeof ModelSelection.Type) =>
 export class WorkerControls extends Context.Service<
   WorkerControls,
   {
+    readonly withCoordinationLock: <A, E>(
+      effect: Effect.Effect<A, E>,
+    ) => Effect.Effect<A, E | WorkerError>;
     readonly spawn: (
       owner: ThreadId,
       input: typeof RemoteSpawnInput.Type,
@@ -1028,6 +1034,8 @@ const make = Effect.gen(function* () {
     const pending = yield* sql<Job>`SELECT j.* FROM custom_worker_jobs j
       JOIN custom_workers w ON w.thread_id = j.worker_id
       WHERE j.kind = 'done' AND j.state = 'queued' AND j.target_id NOT LIKE 'peer:%' AND w.notify = 1
+        AND NOT EXISTS (SELECT 1 FROM custom_session_moves m WHERE m.locked = 1
+          AND (m.thread_id = j.worker_id OR m.thread_id = j.target_id))
         AND NOT EXISTS (SELECT 1 FROM orchestration_command_receipts r
           WHERE r.command_id = 'worker-report-visible:' || j.id AND r.status = 'accepted')
       ORDER BY j.rowid`;
@@ -1096,6 +1104,13 @@ const make = Effect.gen(function* () {
     const unreachable = new Set<string>();
     for (const job of jobs) {
       if (blocked.has(job.target_id) || held.has(job.id)) continue;
+      // Transfers park pending assignments/reports instead of turning a move
+      // into a failed assignment. The move owns routing until commit/cancel.
+      if (
+        (yield* sql`SELECT 1 FROM custom_session_moves WHERE locked = 1 AND
+        (thread_id = ${job.target_id} OR thread_id = ${job.worker_id}) LIMIT 1`).length
+      )
+        continue;
       const workers =
         yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
       const worker = workers[0];
@@ -1126,17 +1141,31 @@ const make = Effect.gen(function* () {
       const remote = parsePeerRef(job.target_id);
       if (remote) {
         if (unreachable.has(remote.environmentId)) continue;
+        const relocated =
+          job.kind !== "message" &&
+          (yield* sql`SELECT 1 FROM custom_session_moves
+          WHERE direction = 'out' AND thread_id = ${remote.threadId} AND peer_environment_id = ${remote.environmentId}
+          AND state IN ('committing', 'complete') LIMIT 1`).length > 0;
+        const origin =
+          relocated && worker?.state === "remote"
+            ? decodePlan(worker.plan_json).environmentId
+            : undefined;
+        const originalPrefix = origin ? `peer:${origin}:` : undefined;
+        const forwardedFrom =
+          originalPrefix && job.id.startsWith(originalPrefix) ? origin : undefined;
         yield* peers
           .call(
             remote.environmentId,
             encodePeerRequest({
               _tag: "deliver",
-              jobId: job.id,
+              jobId: forwardedFrom ? job.id.slice(originalPrefix!.length) : job.id,
               kind: job.kind as "message" | "notice" | "done" | "blocked",
               senderThreadId: ThreadId.make(job.worker_id),
               recipientThreadId: remote.threadId,
               prompt: job.prompt,
               ...(job.policy_json ? { policy: decodePolicy(job.policy_json) } : {}),
+              ...(relocated ? { relayedFor: remote.threadId } : {}),
+              ...(forwardedFrom ? { forwardedFrom } : {}),
             }),
           )
           .pipe(
@@ -1335,6 +1364,7 @@ const make = Effect.gen(function* () {
     result: typeof WorkerResult.Type,
   ) {
     const environment = yield* peerLabel(decodePlan(worker.plan_json).environmentId ?? "");
+    yield* sql`UPDATE custom_workers SET notify = ${result.notifications ? 1 : 0} WHERE thread_id = ${worker.thread_id}`;
     return { ...result, ownerThreadId: owner, environment };
   });
   const describeRemote = Effect.fn(function* (owner: ThreadId, worker: Worker) {
@@ -1935,6 +1965,11 @@ const make = Effect.gen(function* () {
       yield* sql<Handoff>`SELECT * FROM custom_orchestrator_handoffs WHERE state = 'queued' ORDER BY rowid`;
     for (const row of rows) {
       yield* Effect.gen(function* () {
+        if (
+          (yield* sql`SELECT 1 FROM custom_session_moves WHERE thread_id = ${row.owner_id} AND locked = 1`)
+            .length
+        )
+          return;
         const input = decodeHandoff(row.plan_json);
         const parent = yield* thread(row.owner_id);
         if (parent.archivedAt !== null || parent.snoozedUntil !== null) return;
@@ -2034,7 +2069,8 @@ const make = Effect.gen(function* () {
             message: "This environment does not own that linked worker.",
           });
         const local = yield* peers.localEnvironment;
-        return { environmentId: local.environmentId, threadId: record.owner_id };
+        const remoteOwner = parsePeerRef(record.owner_id);
+        return remoteOwner ?? { environmentId: local.environmentId, threadId: record.owner_id };
       }
       case "spawn":
         return yield* spawn(
@@ -2046,7 +2082,23 @@ const make = Effect.gen(function* () {
           Effect.tap(() => kick()),
         );
       case "deliver": {
-        const id = `peer:${from}:${request.jobId}`;
+        const relay =
+          request.relayedFor &&
+          request.relayedFor === request.recipientThreadId &&
+          (yield* sql`SELECT 1 FROM custom_session_moves WHERE direction = 'in'
+            AND thread_id = ${request.relayedFor} AND peer_environment_id = ${from}
+            AND state IN ('prepared', 'complete') LIMIT 1`).length > 0;
+        if ((request.forwardedFrom || request.relayedFor) && !relay)
+          return yield* new WorkerError({
+            message: "The caller cannot relay this moved session's reports.",
+          });
+        const effectiveFrom = request.forwardedFrom ?? from;
+        const incomingId = `peer:${effectiveFrom}:${request.jobId}`;
+        const alias = (yield* sql<{
+          job_id: string;
+        }>`SELECT job_id FROM custom_session_move_job_aliases
+          WHERE incoming_id = ${incomingId} AND thread_id = ${request.recipientThreadId}`)[0];
+        const id = alias?.job_id ?? incomingId;
         let target: string;
         let sender: string;
         let prompt: string;
@@ -2070,7 +2122,9 @@ const make = Effect.gen(function* () {
         } else {
           const records =
             yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.senderThreadId} AND state = 'remote'`;
-          const record = records.find((row) => decodePlan(row.plan_json).environmentId === from);
+          const record = records.find(
+            (row) => decodePlan(row.plan_json).environmentId === effectiveFrom || relay,
+          );
           if (!record)
             return yield* new WorkerError({
               message: `No master here owns worker ${request.senderThreadId} in ${label}.`,
@@ -2078,6 +2132,16 @@ const make = Effect.gen(function* () {
           // The record's current owner, so a report reaches a handoff successor.
           target = record.owner_id;
           sender = record.thread_id;
+          const existing = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`)[0];
+          if (
+            existing &&
+            existing.worker_id === sender &&
+            existing.target_id === target &&
+            existing.kind === request.kind &&
+            (existing.prompt === request.prompt ||
+              existing.prompt.startsWith(request.prompt + "\nWorker environment:"))
+          )
+            return { requestId: id, state: existing.state };
           prompt = `${request.prompt}\nWorker environment: ${label}${request.kind === "notice" ? "" : yield* masterLine(target)}`;
         }
         const createdAt = yield* now;
@@ -2095,14 +2159,52 @@ const make = Effect.gen(function* () {
         return { requestId: id, state: saved.state };
       }
       case "worker": {
+        let effectiveFrom = from;
+        if (request.forwardedFrom) {
+          if (
+            !(yield* sql`SELECT 1 FROM custom_session_moves WHERE direction = 'in'
+            AND thread_id = ${request.workerThreadId} AND peer_environment_id = ${from}
+            AND state IN ('prepared', 'complete') LIMIT 1`).length
+          )
+            return yield* new WorkerError({
+              message: "The caller cannot forward this worker's controls.",
+            });
+          effectiveFrom = request.forwardedFrom;
+        }
         const rows =
-          yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.workerThreadId} AND owner_id LIKE ${`peer:${from}:%`}`;
-        const worker = rows[0];
+          yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.workerThreadId} AND owner_id LIKE ${`peer:${effectiveFrom}:%`}`;
+        let worker = rows[0];
         if (!worker)
           return yield* new WorkerError({
             message: `Thread ${request.workerThreadId} is not a worker owned from ${label}.`,
           });
         const plan = decodePlan(worker.plan_json);
+        if (
+          worker.state === "remote" &&
+          plan.environmentId &&
+          worker.owner_id === peerRef(effectiveFrom, request.owner.threadId) &&
+          (yield* sql`SELECT 1 FROM custom_session_moves WHERE direction = 'out'
+            AND thread_id = ${worker.thread_id} AND peer_environment_id = ${plan.environmentId}
+            AND state IN ('committing', 'complete') LIMIT 1`).length
+        )
+          return yield* peers.call(
+            plan.environmentId,
+            { ...request, forwardedFrom: effectiveFrom },
+            70_000,
+          );
+        const currentOwner = (yield* localSessionInfo(request.workerThreadId)).owner;
+        if (
+          currentOwner?.environmentId !== effectiveFrom ||
+          currentOwner.threadId !== request.owner.threadId
+        )
+          return yield* new WorkerError({
+            message: "This caller is not the worker's current master.",
+          });
+        const currentOwnerId = peerRef(effectiveFrom, request.owner.threadId);
+        if (worker.owner_id !== currentOwnerId) {
+          yield* sql`UPDATE custom_workers SET owner_id = ${currentOwnerId} WHERE thread_id = ${worker.thread_id}`;
+          worker = { ...worker, owner_id: currentOwnerId };
+        }
         if (plan.ownerRuntimeMode !== request.owner.runtimeMode)
           yield* sql`UPDATE custom_workers SET plan_json = ${encodePlan({ ...plan, ownerRuntimeMode: request.owner.runtimeMode })}
             WHERE thread_id = ${worker.thread_id}`;
@@ -2164,6 +2266,21 @@ const make = Effect.gen(function* () {
   const peerFor = (environment: string | undefined) =>
     environment ? resolvePeer(environment) : Effect.succeed(undefined);
   return WorkerControls.of({
+    withCoordinationLock: (effect) =>
+      effect.pipe(
+        Effect.tap(() =>
+          sql<Worker>`SELECT thread_id, owner_id FROM custom_workers`.pipe(
+            Effect.map((rows) => {
+              for (const worker of rows) {
+                watched.add(worker.thread_id);
+                watched.add(worker.owner_id);
+              }
+            }),
+          ),
+        ),
+        lock.withPermit,
+        Effect.mapError(failure),
+      ),
     spawn: (owner, { environment, ...input }) =>
       peerFor(environment).pipe(
         Effect.flatMap((peer) =>

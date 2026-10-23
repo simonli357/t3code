@@ -209,6 +209,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets returns existing project and threa
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        streamClientEvents: Stream.empty,
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),
@@ -340,6 +341,7 @@ it.effect.each([
           Ref.update(dispatchCalls, (calls) => [...calls, command]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        streamClientEvents: Stream.empty,
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),
@@ -414,6 +416,7 @@ it.effect(
             Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
               Effect.as({ sequence: 1 }),
             ),
+          streamClientEvents: Stream.empty,
           streamDomainEvents: Stream.empty,
           subscribeDomainEvents: Effect.succeed(Stream.empty),
           latestSequence: Effect.succeed(0),
@@ -480,6 +483,7 @@ it.effect("resolveAutoBootstrapWelcomeTargets preserves typed UUID generation fa
           Ref.update(dispatchCalls, (calls) => [...calls, command.type]).pipe(
             Effect.as({ sequence: 1 }),
           ),
+        streamClientEvents: Stream.empty,
         streamDomainEvents: Stream.empty,
         subscribeDomainEvents: Effect.succeed(Stream.empty),
         latestSequence: Effect.succeed(0),

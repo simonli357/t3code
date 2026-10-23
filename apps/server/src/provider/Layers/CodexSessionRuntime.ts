@@ -84,6 +84,8 @@ function configuredMcpToolAvailability(
 
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
+  requireNativeResume: Schema.optional(Schema.Boolean),
+  rolloutPath: Schema.optional(Schema.String),
 });
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
@@ -725,6 +727,7 @@ interface CodexThreadOpenClient {
       method: "thread/resume",
       payload: CodexRpc.ClientRequestParamsByMethod["thread/resume"] & {
         readonly excludeTurns?: boolean;
+        readonly path?: string;
       },
     ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
   };
@@ -745,6 +748,8 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly requireNativeResume?: boolean;
+  readonly rolloutPath?: string;
 }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -764,6 +769,7 @@ export const openCodexThread = (input: {
   return input.client.raw
     .request("thread/resume", {
       threadId: resumeThreadId,
+      ...(input.rolloutPath ? { path: input.rolloutPath } : {}),
       ...startParams,
       excludeTurns: true,
     })
@@ -779,14 +785,16 @@ export const openCodexThread = (input: {
           ),
         ),
       ),
-      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
-        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
-          threadId: input.threadId,
-          requestedRuntimeMode: input.runtimeMode,
-          resumeThreadId,
-          recoverable: true,
-          cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+      Effect.catchIf(
+        (error) => !input.requireNativeResume && isRecoverableThreadResumeError(error),
+        (error) =>
+          Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+            threadId: input.threadId,
+            requestedRuntimeMode: input.runtimeMode,
+            resumeThreadId,
+            recoverable: true,
+            cause: error,
+          }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
       ),
     );
 };
@@ -2075,7 +2083,7 @@ export const makeCodexSessionRuntime = (
             return Effect.void;
           }
           return updateSession(sessionRef, {
-            resumeCursor: { threadId: payload.thread.id },
+            resumeCursor: { ...options.resumeCursor, threadId: payload.thread.id },
           });
         }),
       ),
@@ -2522,6 +2530,10 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.resumeCursor?.requireNativeResume ? { requireNativeResume: true } : {}),
+        ...(options.resumeCursor?.rolloutPath
+          ? { rolloutPath: options.resumeCursor.rolloutPath }
+          : {}),
       });
 
       const providerThreadId = opened.thread.id;
@@ -2530,7 +2542,7 @@ export const makeCodexSessionRuntime = (
         status: "ready",
         cwd: opened.cwd,
         model: opened.model,
-        resumeCursor: { threadId: providerThreadId },
+        resumeCursor: { ...options.resumeCursor, threadId: providerThreadId },
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
@@ -2636,7 +2648,7 @@ export const makeCodexSessionRuntime = (
             threadId: options.threadId,
             turnId,
             ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
+              ? { resumeCursor: { ...options.resumeCursor, threadId: resumedProviderThreadId } }
               : {}),
           } satisfies ProviderTurnStartResult;
         }),

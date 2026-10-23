@@ -281,3 +281,11 @@ export function readThreadSupportsForking(threadRef: ScopedThreadRef): boolean {
     ?.providers.find((entry) => entry.instanceId === instanceId);
   return provider?.driver === "codex" || provider?.driver === "claudeAgent";
 }
+
+export function readThreadSupportsMoving(threadRef: ScopedThreadRef): boolean {
+  return (
+    readThreadSupportsForking(threadRef) &&
+    appAtomRegistry.get(environmentServerConfigsAtom).get(threadRef.environmentId)?.environment
+      .capabilities.nativeSessionMoves === true
+  );
+}

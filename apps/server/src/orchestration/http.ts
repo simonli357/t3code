@@ -24,6 +24,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import { WorkerControls } from "./WorkerControls.ts";
+import { SessionMoves } from "./SessionMoves.ts";
 import { SettledThreadPurge } from "./SettledThreadPurge.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
@@ -35,10 +36,27 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
     const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
     const measurements = yield* UsageMeasurements.UsageMeasurements;
     const workers = yield* WorkerControls;
+    const moves = yield* SessionMoves;
     const settledThreadPurge = yield* SettledThreadPurge;
     const history = yield* ThreadHistory.ThreadHistory;
 
     return handlers
+      .handle(
+        "moveSession",
+        Effect.fn("environment.sessionMove")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* moves.request(args.payload);
+        }),
+      )
+      .handle(
+        "sessionMoveStatus",
+        Effect.fn("environment.sessionMoveStatus")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* moves.status(args.payload);
+        }),
+      )
       .handle(
         "sessionHistory",
         Effect.fn("environment.orchestration.sessionHistory")(function* (args) {
@@ -52,8 +70,18 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.peer")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const request = args.payload.request;
+          if (
+            request &&
+            typeof request === "object" &&
+            "_tag" in request &&
+            request._tag === "sessionMove"
+          )
+            return yield* moves
+              .receive(args.payload.from, request)
+              .pipe(Effect.mapError((error) => new PeerRequestError({ message: error.message })));
           return yield* workers
-            .receive(args.payload.from, args.payload.request)
+            .receive(args.payload.from, request)
             .pipe(Effect.mapError((error) => new PeerRequestError({ message: error.message })));
         }),
       )

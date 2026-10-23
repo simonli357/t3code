@@ -239,6 +239,7 @@ export const make = Effect.gen(function* () {
       sessionMessageConfirmation: true,
       workerReclaim: true,
       workerRetirementWarning: true,
+      nativeSessionMoves: true,
       orchestratorHandoff: true,
       peerEnvironments: true,
       computers: true,

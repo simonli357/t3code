@@ -229,6 +229,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
     Layer.mock(OrchestrationEngineService)({
       readEvents: () => Stream.empty,
       dispatch,
+      streamClientEvents: Stream.empty,
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: PubSub.subscribe(events).pipe(
         Effect.map((subscription) => Stream.fromSubscription(subscription)),

@@ -1,3 +1,4 @@
+import { MoveSessionDialogHost } from "../components/MoveSessionDialog";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -180,6 +181,7 @@ function RootRouteView() {
           <FontAppearanceSync />
           <ProviderAuthCallbackCoordinator />
           <CustomSnoozeDialogHost />
+          <MoveSessionDialogHost />
           <CommandPalette>
             <AppSidebarLayout>
               <Outlet />
@@ -236,6 +238,7 @@ function RootRouteView() {
           <QueuedMessageSender />
           <ConfirmDialogHost />
           <CustomSnoozeDialogHost />
+          <MoveSessionDialogHost />
           <SlowRpcRequestToastCoordinator />
           <ProjectCloneToastCoordinator />
           <HostedStaticEnvironmentBootstrap />

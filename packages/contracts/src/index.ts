@@ -45,6 +45,7 @@ export * from "./usage.ts";
 export * from "./usageMeasurements.ts";
 export * from "./threadPurge.ts";
 export * from "./sessionHistory.ts";
+export * from "./sessionMoves.ts";
 export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
 

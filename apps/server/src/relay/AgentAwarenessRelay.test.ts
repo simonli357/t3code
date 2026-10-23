@@ -556,6 +556,7 @@ describe("signRelayAgentActivityPublishProof", { concurrent: false }, () => {
           readThreadEvents: () => Stream.empty,
           getThreadReplayStats: () => Effect.die("unused thread replay stats"),
           dispatch: () => Effect.succeed({ sequence: 1 }),
+          streamClientEvents: Stream.empty,
           streamDomainEvents: Stream.fromQueue(events),
           subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
           latestSequence: Effect.succeed(0),
@@ -782,6 +783,7 @@ describe("signRelayAgentActivityPublishProof", { concurrent: false }, () => {
             readThreadEvents: () => Stream.empty,
             getThreadReplayStats: () => Effect.die("unused thread replay stats"),
             dispatch: () => Effect.succeed({ sequence: 1 }),
+            streamClientEvents: Stream.empty,
             streamDomainEvents: Stream.fromQueue(events),
             subscribeDomainEvents: Effect.succeed(Stream.fromQueue(events)),
             latestSequence: Effect.succeed(0),
@@ -1002,6 +1004,7 @@ describe("startup catch-up", { concurrent: false }, () => {
             getDescriptor: Effect.die("unused descriptor"),
           }),
           Layer.succeed(OrchestrationEngineService, {
+            streamClientEvents: Stream.empty,
             streamDomainEvents: Stream.never,
           } as unknown as OrchestrationEngineShape),
           Layer.succeed(ProjectionSnapshotQuery, {

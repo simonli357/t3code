@@ -81,6 +81,7 @@ export interface OrchestrationEngineShape {
    * This is a hot runtime stream (new events only), not a historical replay.
    */
   readonly streamDomainEvents: Stream.Stream<OrchestrationEvent>;
+  readonly streamClientEvents: Stream.Stream<OrchestrationEvent>;
 
   /**
    * Acquire a domain-event subscription before starting a consumer.
@@ -133,3 +134,17 @@ export class OrchestrationThreadPurge extends Context.Service<
   OrchestrationThreadPurge,
   OrchestrationThreadPurgeShape
 >()("t3/orchestration/Services/OrchestrationEngine/OrchestrationThreadPurge") {}
+
+/** Serialized maintenance preserves the same command/transaction boundary as dispatch. */
+export class OrchestrationThreadMaintenance extends Context.Service<
+  OrchestrationThreadMaintenance,
+  {
+    readonly run: <A, E>(operation: Effect.Effect<A, E>) => Effect.Effect<A, E>;
+    readonly importEvents: (input: {
+      readonly threadId: ThreadId;
+      readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly replaceExisting?: boolean;
+      readonly allowExisting?: boolean;
+    }) => Effect.Effect<void, import("@t3tools/contracts").SessionMoveError>;
+  }
+>()("t3/orchestration/Services/OrchestrationEngine/OrchestrationThreadMaintenance") {}

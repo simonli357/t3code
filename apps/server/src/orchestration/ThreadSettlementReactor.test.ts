@@ -303,6 +303,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     Layer.mock(OrchestrationEngineService)({
       readEvents: () => Stream.empty,
       dispatch,
+      streamClientEvents: Stream.empty,
       streamDomainEvents: Stream.empty,
       subscribeDomainEvents: PubSub.subscribe(domainEvents).pipe(
         Effect.map((subscription) => Stream.fromSubscription(subscription)),

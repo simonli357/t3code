@@ -1,6 +1,7 @@
 import * as Computers from "./computers/Computers.ts";
 import { AgentTaskStopError } from "@t3tools/contracts";
 import { forkThread } from "./project/ThreadFork.ts";
+import { SessionMoves } from "./orchestration/SessionMoves.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -636,6 +637,7 @@ const makeWsRpcLayer = (
         | WorkspacePaths.WorkspacePaths
       >();
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
+      const sessionMoves = yield* SessionMoves;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -2315,7 +2317,7 @@ const makeWsRpcLayer = (
                 Effect.forkScoped,
               );
               yield* Effect.forkScoped(
-                orchestrationEngine.streamDomainEvents.pipe(
+                orchestrationEngine.streamClientEvents.pipe(
                   Stream.map(toShellEvent),
                   Stream.runForEach((event) =>
                     liveBudget.retain({ kind: "event" as const, event }, event).pipe(
@@ -2458,7 +2460,7 @@ const makeWsRpcLayer = (
                 event.aggregateId === input.threadId &&
                 isThreadDetailEvent(event);
 
-              const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+              const liveStream = orchestrationEngine.streamClientEvents.pipe(
                 Stream.filter(isThisThreadDetailEvent),
                 Stream.map((event) => ({
                   kind: "event" as const,
@@ -3466,6 +3468,14 @@ const makeWsRpcLayer = (
               .stopTask(input)
               .pipe(Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message }))),
           ),
+        [WS_METHODS.sessionMovesRequest]: (input) =>
+          observeRpcEffect(WS_METHODS.sessionMovesRequest, sessionMoves.request(input), {
+            "rpc.aggregate": "thread",
+          }),
+        [WS_METHODS.sessionMovesStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.sessionMovesStatus, sessionMoves.status(input), {
+            "rpc.aggregate": "thread",
+          }),
         [WS_METHODS.agentSessionsFork]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentSessionsFork,

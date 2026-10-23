@@ -1,4 +1,4 @@
-import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, getSessionMessages, getSessionInfo } from "@anthropic-ai/claude-agent-sdk";
 import * as Schema from "effect/Schema";
 
 // A separate process gives SDK history helpers the provider's environment without
@@ -26,12 +26,14 @@ export async function runClaudeHistoryWorker(
   const options = decodeHistoryOptions(rawOptions ?? "{}");
   if (!sessionId) throw new Error("Claude history session id is required.");
   const result =
-    method === "getSessionMessages"
-      ? await getSessionMessages(sessionId, options)
-      : method === "forkSession"
-        ? await forkSession(sessionId, options)
-        : (() => {
-            throw new Error("Unknown Claude history operation.");
-          })();
+    method === "getSessionInfo"
+      ? await getSessionInfo(sessionId, options)
+      : method === "getSessionMessages"
+        ? await getSessionMessages(sessionId, options)
+        : method === "forkSession"
+          ? await forkSession(sessionId, options)
+          : (() => {
+              throw new Error("Unknown Claude history operation.");
+            })();
   process.stdout.write(JSON.stringify(result));
 }

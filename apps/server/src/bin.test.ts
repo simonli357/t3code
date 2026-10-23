@@ -1,3 +1,4 @@
+import { SessionMoves } from "./orchestration/SessionMoves.ts";
 // @effect-diagnostics nodeBuiltinImport:off - CLI integration exercises Node HTTP and filesystem boundaries.
 import * as NodeHttp from "node:http";
 import * as NodeFS from "node:fs";
@@ -373,6 +374,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
       Layer.provide(
         orchestrationHttpApiLayer.pipe(
+          Layer.provide(Layer.mock(SessionMoves)({})),
           Layer.provide(
             Layer.succeed(UsageMeasurements.UsageMeasurements, {
               read: (input) => Effect.sync(() => new MeasurementHistory().report(input, 0)),

@@ -1,4 +1,5 @@
 import * as WorkerControls from "../WorkerControls.ts";
+import * as SessionMoves from "../SessionMoves.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -26,6 +27,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
   const workers = yield* WorkerControls.WorkerControls;
+  const moves = yield* SessionMoves.SessionMoves;
   const storageCleanup = yield* StorageCleanup.StorageCleanup;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
@@ -39,6 +41,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* agentAwarenessRelay.start();
     yield* storageCleanup.start();
     yield* workers.start().pipe(Effect.orDie);
+    yield* moves.start().pipe(Effect.orDie);
   });
 
   return {

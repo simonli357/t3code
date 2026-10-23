@@ -13,6 +13,12 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import {
+  SessionMoveInput,
+  SessionMoveStatusInput,
+  SessionMoveResult,
+  SessionMoveError,
+} from "./sessionMoves.ts";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -319,6 +325,8 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   agentSessionsFork: "agentSessions.fork",
+  sessionMovesRequest: "sessionMoves.request",
+  sessionMovesStatus: "sessionMoves.status",
   agentTasksStop: "agentTasks.stop",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1068,6 +1076,16 @@ const WsAgentSessionsForkRpc = Rpc.make(WS_METHODS.agentSessionsFork, {
   success: AgentSessionForkResult,
   error: Schema.Union([AgentSessionForkError, EnvironmentAuthorizationError]),
 });
+const WsSessionMovesRequestRpc = Rpc.make(WS_METHODS.sessionMovesRequest, {
+  payload: SessionMoveInput,
+  success: SessionMoveResult,
+  error: Schema.Union([SessionMoveError, EnvironmentAuthorizationError]),
+});
+const WsSessionMovesStatusRpc = Rpc.make(WS_METHODS.sessionMovesStatus, {
+  payload: SessionMoveStatusInput,
+  success: SessionMoveResult,
+  error: Schema.Union([SessionMoveError, EnvironmentAuthorizationError]),
+});
 
 const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   payload: AgentSessionImportInput,
@@ -1579,6 +1597,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAgentSessionsForkRpc,
+  WsSessionMovesRequestRpc,
+  WsSessionMovesStatusRpc,
   WsAgentTasksStopRpc,
   WsAssetsCreateUrlRpc,
   WsAttachmentsCreateUploadUrlRpc,

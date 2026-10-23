@@ -1064,6 +1064,36 @@ describe("openCodexThread", () => {
     }),
   );
 
+  it.effect("never falls back to a fresh conversation for a moved native session", () =>
+    Effect.gen(function* () {
+      const error = yield* openCodexThread({
+        client: {
+          raw: {
+            request: (_method, params) => {
+              NodeAssert.equal(params.path, "/destination/rollout.jsonl");
+              return Effect.fail(
+                new CodexErrors.CodexAppServerRequestError({
+                  code: -32603,
+                  errorMessage: "thread not found",
+                }),
+              );
+            },
+          },
+          request: () => Effect.die("A native move must never start a fresh thread"),
+        },
+        threadId: ThreadId.make("moved-thread"),
+        runtimeMode: "full-access",
+        cwd: "/destination",
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: undefined,
+        resumeThreadId: "saved-thread",
+        requireNativeResume: true,
+        rolloutPath: "/destination/rollout.jsonl",
+      }).pipe(Effect.flip);
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+    }),
+  );
+
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {

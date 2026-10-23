@@ -33,3 +33,11 @@ export const agentTaskStop = createEnvironmentRpcCommand(connectionAtomRuntime, 
   label: "environment-data:agent-tasks:stop",
   tag: WS_METHODS.agentTasksStop,
 });
+export const sessionMoveRequest = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:session-moves:request",
+  tag: WS_METHODS.sessionMovesRequest,
+});
+export const sessionMoveStatus = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:session-moves:status",
+  tag: WS_METHODS.sessionMovesStatus,
+});

@@ -2021,6 +2021,9 @@ export const OrchestrationEventMetadata = Schema.Struct({
   requestId: Schema.optional(ApprovalRequestId),
   ingestedAt: Schema.optional(IsoDateTime),
   historyImport: Schema.optional(Schema.Boolean),
+  sessionMoveImport: Schema.optional(Schema.Boolean),
+  moveSourceSequence: Schema.optional(NonNegativeInt),
+  sessionMoveId: Schema.optional(Schema.String),
   /**
    * The user message was persisted ahead of its turn (worktree bootstrap).
    * Reactors that key off a user message as "turn is starting" wait for the

@@ -1,3 +1,4 @@
+import { SessionMoves } from "../src/orchestration/SessionMoves.ts";
 import * as WorkerControls from "../src/orchestration/WorkerControls.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeChildProcess from "node:child_process";
@@ -385,6 +386,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(VcsProcess.layer),
     );
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
+      Layer.provide(Layer.mock(SessionMoves)({ start: () => Effect.void })),
       Layer.provide(Layer.mock(WorkerControls.WorkerControls)({ start: () => Effect.void })),
       Layer.provideMerge(
         Layer.succeed(StorageCleanup.StorageCleanup, {

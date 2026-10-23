@@ -5,7 +5,7 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { OrchestrationCommand } from "@t3tools/contracts";
+import { OrchestrationCommand, SessionMoveError } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -49,6 +49,7 @@ import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts"
 import {
   OrchestrationEngineService,
   OrchestrationThreadPurge,
+  OrchestrationThreadMaintenance,
   type OrchestrationEngineShape,
   type OrchestrationThreadPurgeShape,
 } from "../Services/OrchestrationEngine.ts";
@@ -192,6 +193,34 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandType: envelope.command.type,
             detail: "Worker dispatch precondition changed; retry after reading current state.",
           });
+        }
+
+        // Checked on the serialized command queue, so a turn cannot slip between
+        // transfer reservation and capture. Existing turns can finish normally.
+        if (
+          aggregateRef.aggregateKind === "thread" &&
+          [
+            "thread.create",
+            "thread.turn.start",
+            "thread.message.user.append",
+            "thread.meta.update",
+            "thread.delete",
+            "thread.archive",
+            "thread.unarchive",
+            "thread.runtime-mode.set",
+            "thread.interaction-mode.set",
+            "thread.checkpoint.revert",
+            "thread.conversation.revert",
+            "thread.history.import",
+          ].includes(envelope.command.type)
+        ) {
+          const moving = yield* sql<{ state: string }>`SELECT state FROM custom_session_moves
+            WHERE thread_id = ${aggregateRef.aggregateId} AND locked = 1 LIMIT 1`;
+          if (moving.length)
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: envelope.command.type,
+              detail: `This session is moving or has moved to another computer (${moving[0]!.state}). Use the move receipt to continue or cancel the transfer.`,
+            });
         }
 
         if (
@@ -504,11 +533,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     readThreadEvents,
     getThreadReplayStats,
     dispatch,
-    subscribeDomainEvents: PubSub.subscribe(eventPubSub).pipe(Effect.map(Stream.fromSubscription)),
+    subscribeDomainEvents: PubSub.subscribe(eventPubSub).pipe(
+      Effect.map((subscription) =>
+        Stream.fromSubscription(subscription).pipe(
+          Stream.filter((event) => !event.metadata.sessionMoveImport),
+        ),
+      ),
+    ),
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (wsServer, ProviderRuntimeIngestion, CheckpointReactor, etc.)
     // each independently receive all domain events.
     get streamDomainEvents(): OrchestrationEngineShape["streamDomainEvents"] {
+      return Stream.fromPubSub(eventPubSub).pipe(
+        Stream.filter((event) => !event.metadata.sessionMoveImport),
+      );
+    },
+    get streamClientEvents(): OrchestrationEngineShape["streamClientEvents"] {
       return Stream.fromPubSub(eventPubSub);
     },
     // The command read model's snapshotSequence tracks the latest committed
@@ -517,7 +557,111 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     // atomic on the single-threaded event loop.
     latestSequence: Effect.sync(() => commandReadModel.snapshotSequence),
   } satisfies OrchestrationEngineShape;
+  const exclusive = <A, E>(operation: Effect.Effect<A, E>) =>
+    Effect.gen(function* () {
+      const result = yield* Deferred.make<A, E>();
+      yield* Queue.offer(commandQueue, {
+        exclusive: operation.pipe(
+          Effect.exit,
+          Effect.flatMap((exit) => Deferred.done(result, exit)),
+          Effect.asVoid,
+        ),
+      });
+      return yield* Deferred.await(result);
+    });
+  const importEvents = Effect.fn("OrchestrationEngine.importMovedThread")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly events: ReadonlyArray<OrchestrationEvent>;
+      readonly replaceExisting?: boolean;
+      readonly allowExisting?: boolean;
+    }) {
+      const imported = yield* sql.withTransaction(
+        Effect.gen(function* () {
+          if (
+            !input.allowExisting &&
+            !input.replaceExisting &&
+            commandReadModel.threads.some((thread) => thread.id === input.threadId)
+          )
+            return yield* new SessionMoveError({
+              message: "The destination session already exists.",
+            });
+          if (input.replaceExisting) {
+            // The move service verifies this is a parked copy of the same logical
+            // session. Keep related workers and external links; replace its own history.
+            for (const table of [
+              "projection_thread_messages",
+              "projection_thread_activities",
+              "projection_thread_proposed_plans",
+              "projection_turns",
+              "projection_thread_sessions",
+              "projection_pending_approvals",
+              "checkpoint_diff_blobs",
+              "projection_thread_pull_requests",
+              "projection_threads",
+            ])
+              yield* sql.unsafe(`DELETE FROM ${table} WHERE thread_id = ?`, [input.threadId]);
+            yield* sql`DELETE FROM orchestration_events WHERE aggregate_kind = 'thread' AND stream_id = ${input.threadId}`;
+            yield* sql`DELETE FROM orchestration_command_receipts WHERE aggregate_kind = 'thread' AND aggregate_id = ${input.threadId}`;
+          }
+          let next = input.replaceExisting
+            ? {
+                ...commandReadModel,
+                threads: commandReadModel.threads.filter((thread) => thread.id !== input.threadId),
+              }
+            : commandReadModel;
+          const committed: OrchestrationEvent[] = [];
+          const cleanups: Effect.Effect<void>[] = [];
+          for (const event of input.events) {
+            if (event.aggregateKind !== "thread" || event.aggregateId !== input.threadId)
+              return yield* new SessionMoveError({
+                message: "A session transfer contained an unrelated event.",
+              });
+            const saved = yield* eventStore.append({
+              ...event,
+              metadata: { ...event.metadata, sessionMoveImport: true },
+            });
+            next = yield* projectEvent(next, saved);
+            cleanups.push(yield* projectionPipeline.projectEventDeferred(saved));
+            committed.push(saved);
+          }
+          for (const event of committed) {
+            if (event.commandId !== null) {
+              const conflict =
+                yield* sql`SELECT 1 FROM orchestration_command_receipts WHERE command_id = ${event.commandId}
+                AND (aggregate_kind != 'thread' OR aggregate_id != ${input.threadId})`;
+              if (conflict.length)
+                return yield* new SessionMoveError({
+                  message: "A moved command receipt belongs to another conversation.",
+                });
+              yield* commandReceiptRepository.upsert({
+                commandId: event.commandId,
+                aggregateKind: "thread",
+                aggregateId: input.threadId,
+                acceptedAt: event.occurredAt,
+                resultSequence: event.sequence,
+                status: "accepted",
+                error: null,
+              });
+            }
+          }
+          return { next, committed, cleanups };
+        }),
+      );
+      commandReadModel = imported.next;
+      for (const cleanup of imported.cleanups) yield* cleanup;
+      // Clients see the copied conversation; historical requests never reach reactors.
+      for (const event of imported.committed) yield* PubSub.publish(eventPubSub, event);
+    },
+    exclusive,
+    Effect.mapError((cause) =>
+      Schema.is(SessionMoveError)(cause)
+        ? cause
+        : new SessionMoveError({ message: "Could not restore the moved session's event history." }),
+    ),
+  );
   return Context.make(OrchestrationEngineService, engine).pipe(
+    Context.add(OrchestrationThreadMaintenance, { run: exclusive, importEvents }),
     Context.add(OrchestrationThreadPurge, {
       purgeThreads,
     } satisfies OrchestrationThreadPurgeShape),

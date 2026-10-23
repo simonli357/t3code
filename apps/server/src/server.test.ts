@@ -1,3 +1,4 @@
+import { SessionMoves } from "./orchestration/SessionMoves.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -775,6 +776,7 @@ const buildAppUnderTest = (options?: {
       // Viewed-file marks for a host that keeps none of its own are rows, so the routes want a
       // database. Its own, in memory: nothing here shares a table with the auth store.
       makeRoutesLayer.pipe(
+        Layer.provide(Layer.mock(SessionMoves)({})),
         Layer.provide(Layer.mergeAll(serviceLauncherClientLayer, SqlitePersistenceMemory)),
       ),
       {
@@ -1011,6 +1013,7 @@ const buildAppUnderTest = (options?: {
                 hasCreateEvent: false,
               }),
             dispatch: () => Effect.succeed({ sequence: 0 }),
+            streamClientEvents: Stream.empty,
             streamDomainEvents: Stream.empty,
             latestSequence: Effect.succeed(0),
             ...options?.layers?.orchestrationEngine,
@@ -1087,7 +1090,7 @@ const buildAppUnderTest = (options?: {
     );
 
     const appLayer = servedRoutesLayer.pipe(
-      Layer.provide(resourceTelemetryLayer),
+      Layer.provide(Layer.mergeAll(resourceTelemetryLayer, Layer.mock(SessionMoves)({}))),
       Layer.provide(
         Layer.mergeAll(
           UsageService.layerTest,
@@ -9527,6 +9530,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         yield* buildAppUnderTest({
           layers: {
             orchestrationEngine: {
+              streamClientEvents: Stream.fromPubSub(liveEvents),
               streamDomainEvents: Stream.fromPubSub(liveEvents),
               latestSequence: Effect.succeed(3),
               getThreadReplayStats: () =>
@@ -9644,6 +9648,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {
@@ -9706,6 +9711,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {
@@ -9771,6 +9777,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         yield* buildAppUnderTest({
           layers: {
             orchestrationEngine: {
+              streamClientEvents: Stream.empty,
               streamDomainEvents: Stream.concat(Stream.make(event), Stream.never),
             },
             projectionSnapshotQuery: {
@@ -9841,6 +9848,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {
@@ -9881,6 +9889,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {
@@ -9987,6 +9996,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {
@@ -10134,6 +10144,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           layers: {
             orchestrationEngine: {
               latestSequence: Effect.sync(() => headSequence),
+              streamClientEvents: Stream.empty,
               streamDomainEvents: Stream.unwrap(
                 Effect.gen(function* () {
                   const subscription = yield* PubSub.subscribe(liveEvents);
@@ -10289,6 +10300,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           orchestrationEngine: {
             latestSequence: Effect.sync(() => headSequence),
+            streamClientEvents: Stream.empty,
             streamDomainEvents: Stream.fromPubSub(liveEvents).pipe(
               Stream.ensuring(Deferred.succeed(detached, undefined)),
             ),
@@ -10643,6 +10655,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         layers: {
           orchestrationEngine: {
             latestSequence: Effect.sync(() => headSequence),
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
             getThreadReplayStats: () =>
               Effect.sync(() => {
@@ -10994,6 +11007,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           orchestrationEngine: {
+            streamClientEvents: Stream.fromPubSub(liveEvents),
             streamDomainEvents: Stream.fromPubSub(liveEvents),
           },
           projectionSnapshotQuery: {

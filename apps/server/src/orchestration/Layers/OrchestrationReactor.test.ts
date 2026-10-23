@@ -1,3 +1,4 @@
+import { SessionMoves } from "../SessionMoves.ts";
 import * as WorkerControls from "../WorkerControls.ts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -33,6 +34,7 @@ describe("OrchestrationReactor", () => {
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
+        Layer.provide(Layer.mock(SessionMoves)({ start: () => Effect.void })),
         Layer.provide(Layer.mock(WorkerControls.WorkerControls)({ start: () => Effect.void })),
         Layer.provideMerge(
           Layer.succeed(StorageCleanup, {
