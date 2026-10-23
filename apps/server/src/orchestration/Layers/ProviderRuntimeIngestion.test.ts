@@ -4115,7 +4115,14 @@ describe("ProviderRuntimeIngestion", () => {
         provider: ProviderDriverKind.make("claudeAgent"),
         createdAt: "2026-01-01T00:00:00.000Z",
         threadId: asThreadId("thread-1"),
-        payload: { limits: { windows: [], states: [{ windowId: "five_hour", status }] } },
+        payload: {
+          limits: {
+            windows: [],
+            states: [
+              { windowId: "seven_day_overage_included", usageWindowId: "seven_day_fable", status },
+            ],
+          },
+        },
       });
       const thread = await waitForThread(harness.readModel, (entry) =>
         entry.activities.some((a) => a.id === `quota-${status}`),
@@ -4123,7 +4130,11 @@ describe("ProviderRuntimeIngestion", () => {
       expect(
         thread.activities.find((a: ProviderRuntimeTestActivity) => a.id === `quota-${status}`)
           ?.payload,
-      ).toMatchObject({ quotaStates: [{ windowId: "five_hour", status }] });
+      ).toMatchObject({
+        quotaStates: [
+          { windowId: "seven_day_overage_included", usageWindowId: "seven_day_fable", status },
+        ],
+      });
     }
   });
 

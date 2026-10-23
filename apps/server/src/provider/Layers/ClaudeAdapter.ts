@@ -29,7 +29,11 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
-import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
+import {
+  type ClaudeScopedLimitNames,
+  claudeRateLimitEventToUpdate,
+  claudeEnforcementUsageWindowId,
+} from "./claudeUsageLimits.ts";
 import {
   ApprovalRequestId,
   classifyTaskAgentKind,
@@ -4175,6 +4179,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? yield* Ref.get(options.scopedLimitNames)
         : { overageIncluded: undefined };
       const limits = claudeRateLimitEventToUpdate(rateLimitInfo, names);
+      const usageWindowId = claudeEnforcementUsageWindowId(rateLimitInfo.rateLimitType, names);
       const state =
         rateLimitInfo.status === "rejected"
           ? "rejected"
@@ -4200,6 +4205,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                       {
                         // Enforcement identity stays stable even before a probe names a model bucket.
                         windowId: rateLimitInfo.rateLimitType ?? "unknown",
+                        ...(usageWindowId ? { usageWindowId } : {}),
                         status: state,
                         ...(stateReset ? { resetsAt: stateReset } : {}),
                       },

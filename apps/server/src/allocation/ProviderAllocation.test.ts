@@ -30,6 +30,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Workers from "../orchestration/WorkerControls.ts";
+import { claudeUsageResponseToLimits } from "../provider/Layers/claudeUsageLimits.ts";
 import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
 import { applyUsageLimitsUpdate } from "../provider/providerUsageLimits.ts";
 
@@ -643,3 +644,66 @@ it.effect("recovers real-shaped historical Codex errors only after fresh confirm
     expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect(
+  "a stopped Claude session recovers through a fresh scoped probe, including mapping learned after rejection",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const sql = yield* SqlClient.SqlClient;
+      const oldReset = "1970-01-01T00:30:00.000Z";
+      const now = "1970-01-01T01:00:00.000Z";
+      const read = (named: boolean, checkedAt = now) =>
+        claudeUsageResponseToLimits({
+          checkedAt,
+          response: {
+            rate_limits_available: true,
+            rate_limits: {
+              five_hour: { utilization: 0, resets_at: "1970-01-01T05:00:00.000Z" },
+              seven_day: { utilization: 0, resets_at: "1970-01-08T00:30:00.000Z" },
+              ...({
+                model_scoped: named
+                  ? [
+                      {
+                        display_name: "Fable",
+                        utilization: 0,
+                        resets_at: "1970-01-08T00:30:00.000Z",
+                      },
+                    ]
+                  : [],
+              } as object),
+            },
+          },
+        }).limits;
+      f.state.threads = [
+        { ...shell("ready"), session: { ...shell("ready").session!, status: "stopped" } },
+      ];
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES ('scoped-reject', 'worker', 'info', 'account.quota-state', '', ${encodeUnknown({ providerInstanceId: "chosen", quotaStates: [{ windowId: "seven_day_overage_included", status: "rejected", resetsAt: oldReset }] })}, ${at})`;
+      yield* TestClock.adjust("1 hour");
+      const preview = () =>
+        allocation.execute({
+          _tag: "preview",
+          request: {
+            ...startInput.request,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            explicitInstanceId: provider.instanceId,
+          },
+        });
+      const setLimits = (usageLimits: typeof provider.usageLimits) => {
+        f.state.providers = [
+          { ...provider, driver: ProviderDriverKind.make("claudeAgent"), usageLimits },
+        ];
+      };
+      setLimits(read(false));
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+      setLimits(read(true, at));
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+      setLimits(read(true));
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBe("chosen");
+      // An independently rejected weekly window must not be cleared by the scoped reset.
+      yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES ('other-reject', 'worker', 'info', 'account.quota-state', '', ${encodeUnknown({ providerInstanceId: "chosen", quotaStates: [{ windowId: "seven_day", status: "rejected", resetsAt: "1970-01-08T00:30:00.000Z" }] })}, ${at})`;
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+    }).pipe(Effect.provide(f.layer));
+  },
+);

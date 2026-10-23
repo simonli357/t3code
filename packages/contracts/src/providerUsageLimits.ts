@@ -18,6 +18,10 @@ import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
  * `kind` only orders and labels the bar.
  */
 export const ServerProviderUsageWindow = Schema.Struct({
+  /** Proven enforcement-to-numeric bucket association from a complete provider probe. */
+  enforcement: Schema.optional(
+    Schema.Struct({ windowId: TrimmedNonEmptyString, checkedAt: IsoDateTime }),
+  ),
   /** Provider-reported bucket name; unresolved scope is conservatively account-wide. */
   modelScope: Schema.optional(TrimmedNonEmptyString),
   checkedAt: Schema.optional(IsoDateTime),
@@ -84,6 +88,8 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
  */
 export const ProviderQuotaState = Schema.Struct({
   windowId: TrimmedNonEmptyString,
+  /** Exact numeric bucket identity already established when this event arrived. */
+  usageWindowId: Schema.optional(TrimmedNonEmptyString),
   status: Schema.Literals(["rejected", "allowed"]),
   resetsAt: Schema.optional(IsoDateTime),
 });

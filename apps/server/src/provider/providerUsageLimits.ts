@@ -94,6 +94,11 @@ export function applyUsageLimitsUpdate(input: {
       ...(window.modelScope === undefined && existing?.modelScope !== undefined
         ? { modelScope: existing.modelScope }
         : {}),
+      ...(window.enforcement === undefined &&
+      existing?.enforcement !== undefined &&
+      (window.modelScope === undefined || window.modelScope === existing.modelScope)
+        ? { enforcement: existing.enforcement }
+        : {}),
     };
     if (existing === undefined || !usageWindowEquals(existing, next)) {
       merged.set(window.id, next);
@@ -123,6 +128,8 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
     a.usedPercent === b.usedPercent &&
     a.resetsAt === b.resetsAt &&
     a.windowDurationMins === b.windowDurationMins &&
+    a.enforcement?.windowId === b.enforcement?.windowId &&
+    a.enforcement?.checkedAt === b.enforcement?.checkedAt &&
     JSON.stringify(a.applicableModels) === JSON.stringify(b.applicableModels) &&
     a.modelScope === b.modelScope
   );

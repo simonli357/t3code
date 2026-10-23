@@ -82,7 +82,23 @@ export function unresolvedQuotaRejections(
     const windows =
       e.windowId === "unknown"
         ? (limits?.windows ?? [])
-        : (limits?.windows ?? []).filter((w) => w.id === e.windowId);
+        : (limits?.windows ?? []).filter((w) =>
+            e.usageWindowId
+              ? w.id === e.usageWindowId
+              : w.id === e.windowId || w.enforcement?.windowId === e.windowId,
+          );
+    // A known event binding cannot migrate to another model. Otherwise a later
+    // complete probe can establish it, but multiple possible buckets stay unknown.
+    if (e.windowId !== "unknown" && windows.length !== 1) return true;
+    if (!e.usageWindowId && windows[0]?.id !== e.windowId && e.windowId !== "unknown") {
+      const mappedAt = Date.parse(windows[0]?.enforcement?.checkedAt ?? "");
+      if (
+        !Number.isFinite(mappedAt) ||
+        mappedAt > Date.parse(at) ||
+        Date.parse(at) - mappedAt > maxAgeMinutes * 60_000
+      )
+        return true;
+    }
     // A passed timestamp is not replenishment. For legacy errors without a reset,
     // every reported window must prove a cycle beginning after the rejection.
     return (

@@ -52,7 +52,7 @@ import {
 } from "../ClaudeModelCatalog.testFixtures.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
-import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
+import { recordClaudeUsageResponse, type ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -1661,7 +1661,13 @@ describe("ClaudeAdapterLive", () => {
       harness.query.emit(resultMessage("result-2"));
       assert.deepStrictEqual(limitsUpdates(yield* Fiber.join(secondTurnFiber)), [
         {
-          states: [{ windowId: "seven_day_overage_included", status: "allowed" }],
+          states: [
+            {
+              windowId: "seven_day_overage_included",
+              usageWindowId: "seven_day_fable",
+              status: "allowed",
+            },
+          ],
           windows: [
             {
               id: "seven_day_fable",
@@ -5460,14 +5466,33 @@ describe("ClaudeAdapterLive", () => {
         [],
       );
 
-      yield* Ref.set(scopedLimitNames, { overageIncluded: "Model A" });
       const nowMs = yield* Clock.currentTimeMillis;
+      const probed = yield* recordClaudeUsageResponse(scopedLimitNames, {
+        checkedAt: "1970-01-01T00:00:00.000Z",
+        response: {
+          rate_limits_available: true,
+          rate_limits: {
+            ...({
+              model_scoped: [
+                {
+                  display_name: "Model A",
+                  utilization: 100,
+                  resets_at: "1970-01-01T01:00:00.000Z",
+                },
+              ],
+            } as object),
+          },
+        },
+      });
+      assert.deepEqual(probed.windows[0]?.enforcement, {
+        windowId: "seven_day_overage_included",
+        checkedAt: "1970-01-01T00:00:00.000Z",
+      });
       harness.query.emit({
         type: "rate_limit_event",
         rate_limit_info: {
           status: "rejected",
           rateLimitType: "seven_day_overage_included",
-          utilization: 1,
           resetsAt: Math.floor(nowMs / 1000) + 3600,
         },
         session_id: "sdk-session-unmapped-limit",
@@ -5488,7 +5513,7 @@ describe("ClaudeAdapterLive", () => {
         runtimeEvents.flatMap((event) =>
           event.type === "account.rate-limits.updated" ? event.payload.limits.windows : [],
         ).length,
-        1,
+        0,
       );
       assert.deepEqual(
         runtimeEvents
@@ -5498,6 +5523,11 @@ describe("ClaudeAdapterLive", () => {
           .map((state) => state.windowId),
         ["seven_day_overage_included", "future_window", "seven_day_overage_included"],
       );
+      const states = runtimeEvents.flatMap((e) =>
+        e.type === "account.rate-limits.updated" ? (e.payload.limits.states ?? []) : [],
+      );
+      assert.equal(states[0]?.usageWindowId, undefined);
+      assert.equal(states.at(-1)?.usageWindowId, "seven_day_model_a");
       runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
