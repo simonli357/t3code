@@ -10,6 +10,7 @@ import {
   AllocationPolicy,
   defaultAllocationPolicy,
   type AllocationDecision,
+  type AllocationCurve,
   type AllocationOperation,
   type AllocationRequest,
   type AllocationSnapshot,
@@ -33,7 +34,8 @@ const commands = createAllocationCommands(connectionAtomRuntime);
 const decodePolicy = Schema.decodeUnknownSync(AllocationPolicy);
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("en-CA", { timeZone: "America/Toronto" }) : "Unknown";
-const field = "rounded border bg-background px-2 py-1 text-sm";
+const field =
+  "block w-full min-w-0 max-w-full rounded border bg-background px-2 py-1 text-sm disabled:opacity-60";
 
 export function ProviderAllocationPage({ environmentId }: { environmentId: EnvironmentId }) {
   return <AllocationEditor key={environmentId} environmentId={environmentId} />;
@@ -244,7 +246,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     }
   };
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-6 p-4 sm:p-8">
+    <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-6 p-4 [overflow-wrap:anywhere] sm:p-8 [&>*]:min-w-0 [&_label]:grid [&_label]:min-w-0 [&_label]:grid-cols-1 [&_label]:gap-1 [&_fieldset]:min-w-0">
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
@@ -272,7 +274,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </p>
         </details>
       )}
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="grid min-w-0 grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
         <label>
           Coordinator
           <select
@@ -296,6 +298,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </select>
         </label>
         <Button
+          size="sm-multiline"
           disabled={busy || !coordinator || !connections}
           onClick={async () => {
             if (await call({ _tag: "connect", coordinatorEnvironmentId: coordinator })) {
@@ -307,7 +310,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         >
           Connect coordinator
         </Button>
-        <Button variant="outline" disabled={busy} onClick={() => void load()}>
+        <Button size="sm-multiline" variant="outline" disabled={busy} onClick={() => void load()}>
           Refresh
         </Button>
       </div>
@@ -327,7 +330,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       </p>
       <section className="flex flex-col gap-3">
         <h2 className="font-semibold">Try this assignment</h2>
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
           <label>
             Provider
             <select
@@ -438,7 +441,11 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
             />
           </label>
         </div>
-        <Button disabled={busy || !request.model} onClick={() => void preview()}>
+        <Button
+          size="sm-multiline"
+          disabled={busy || !request.model}
+          onClick={() => void preview()}
+        >
           Preview assignment and policy
         </Button>
         {decision && (
@@ -450,7 +457,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         )}
         <details>
           <summary>Start a new session with this assignment</summary>
-          <div className="mt-3 grid gap-3">
+          <div className="mt-3 grid min-w-0 grid-cols-1 gap-3">
             <label>
               Project
               <select
@@ -480,6 +487,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
               />
             </label>
             <Button
+              size="sm-multiline"
               disabled={busy || !request.model || !projectId || !prompt || !title}
               onClick={() => void startSession()}
             >
@@ -511,16 +519,29 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </select>
         </label>
         {(["claude", "codex", "other"] as const).map((family) => (
-          <fieldset key={family} className="grid gap-3 rounded border p-3 sm:grid-cols-3">
+          <fieldset
+            key={family}
+            className="grid min-w-0 grid-cols-1 gap-3 rounded border p-3 sm:grid-cols-3"
+          >
             <legend>{family}</legend>
             <label>
               Preset
               <select
                 className={field}
                 value={policy[family].preset}
-                onChange={(e) =>
-                  setPolicy({ ...policy, [family]: { ...policy[family], preset: e.target.value } })
-                }
+                onChange={(e) => {
+                  const preset = e.target.value as AllocationCurve["preset"];
+                  setPolicy({
+                    ...policy,
+                    [family]: {
+                      ...policy[family],
+                      preset,
+                      ...(preset === "aggressive17"
+                        ? { dailyPoints: 17, burstPoints: 0, burstHours: 0 }
+                        : {}),
+                    },
+                  });
+                }}
               >
                 <option value="sustainable">Sustainable cycle</option>
                 <option value="aggressive17">Aggressive 17/day (119/week)</option>
@@ -544,19 +565,55 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 <input
                   className={field}
                   type="number"
+                  disabled={
+                    (policy[family].preset === "sustainable" &&
+                      (key === "dailyPoints" || key === "burstPoints" || key === "burstHours")) ||
+                    (policy[family].preset === "aggressive17" &&
+                      (key === "burstPoints" || key === "burstHours"))
+                  }
+                  aria-describedby={`${family}-curve-help`}
+                  placeholder={
+                    policy[family].preset === "sustainable" && key === "dailyPoints"
+                      ? "Derived from cycle"
+                      : undefined
+                  }
                   min="0"
                   max={key === "burstHours" ? 168 : 100}
                   step="0.1"
-                  value={policy[family][key]}
-                  onChange={(e) =>
+                  value={
+                    policy[family].preset === "sustainable" && key === "dailyPoints"
+                      ? ""
+                      : (policy[family].preset === "sustainable" ||
+                            policy[family].preset === "aggressive17") &&
+                          (key === "burstPoints" || key === "burstHours")
+                        ? 0
+                        : policy[family].preset === "aggressive17" && key === "dailyPoints"
+                          ? 17
+                          : policy[family][key]
+                  }
+                  onChange={(e) => {
+                    const curve = policy[family];
                     setPolicy({
                       ...policy,
-                      [family]: { ...policy[family], [key]: Number(e.target.value) },
-                    })
-                  }
+                      [family]: {
+                        ...curve,
+                        ...(curve.preset === "aggressive17" && key === "dailyPoints"
+                          ? { preset: "custom", burstPoints: 0, burstHours: 0 }
+                          : {}),
+                        [key]: Number(e.target.value),
+                      },
+                    });
+                  }}
                 />
               </label>
             ))}
+            <p id={`${family}-curve-help`} className="text-xs text-muted-foreground sm:col-span-3">
+              {policy[family].preset === "sustainable"
+                ? "Daily release is calculated from each allowance cycle after its reserve. There is no initial burst. Choose Custom rate to set fixed daily and burst values."
+                : policy[family].preset === "aggressive17"
+                  ? "This preset releases 17 points per day with no burst. Editing the daily rate switches to Custom rate so your new value takes effect."
+                  : "Your daily rate and burst values apply as entered, capped by the allowance after its reserve."}
+            </p>
           </fieldset>
         ))}
         <p className="text-xs text-muted-foreground">
@@ -564,7 +621,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           17-point daily preset can exhaust a weekly allowance before seven days. Borrowing is
           bounded; targets never override short-window safety.
         </p>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
           {(
             [
               "coldShortPointsPerHour",
@@ -592,7 +649,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         </div>
         <details>
           <summary>Temporary targets and reset plans</summary>
-          <div className="my-3 grid gap-3 sm:grid-cols-2">
+          <div className="my-3 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
             <label>
               Account
               <select
@@ -663,7 +720,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 <option value="manual-confirmed">Manual reset reported</option>
               </select>
             </label>
-            <Button variant="outline" onClick={addOverride}>
+            <Button size="sm-multiline" variant="outline" onClick={addOverride}>
               Add temporary target
             </Button>
           </div>
@@ -682,7 +739,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 onChange={(e) => setOverrides(e.target.value)}
               />
             </label>
-            <Button variant="outline" onClick={() => setOverrides("[]")}>
+            <Button size="sm-multiline" variant="outline" onClick={() => setOverrides("[]")}>
               End all temporary targets on save
             </Button>
           </details>
@@ -707,6 +764,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           ))}
         </details>
         <Button
+          size="sm-multiline"
           disabled={busy || !canSave || !snapshot?.authorityAvailable}
           onClick={() => void save()}
         >
@@ -832,7 +890,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           .map((r) => (
             <div
               key={r.assignmentId}
-              className="flex flex-wrap items-center gap-3 rounded border p-2 text-sm"
+              className="grid min-w-0 grid-cols-1 items-center gap-3 rounded border p-2 text-sm"
             >
               <span>
                 {accountLabel(r.request.environmentId, r.instanceId)} · {r.request.model} ·{" "}
@@ -842,6 +900,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
               </span>
               {r.state === "reserved" && (
                 <Button
+                  size="sm-multiline"
                   variant="outline"
                   disabled={busy}
                   onClick={async () => {

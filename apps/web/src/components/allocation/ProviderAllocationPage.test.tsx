@@ -155,6 +155,99 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 describe("Provider allocation editor", () => {
+  it("turns a 17-to-40 edit into a custom daily rate and retains it after preview and successful save", async () => {
+    let savedPolicy = snapshot.policy;
+    const inventories: AllocationSnapshot["inventories"] = [
+      {
+        ...snapshot.inventories[0]!,
+        accounts: [
+          {
+            ...snapshot.inventories[0]!.accounts[0]!,
+            driver: ProviderDriverKind.make("claudeAgent"),
+          },
+        ],
+      },
+    ];
+    state.execute.mockImplementation(
+      async ({ input: operation }: { input: AllocationOperation }) => {
+        if (operation._tag === "snapshot")
+          return {
+            _tag: "Success",
+            value: { snapshot: { ...snapshot, policy: savedPolicy, inventories } },
+          };
+        if (operation._tag === "preview")
+          return {
+            _tag: "Success",
+            value: {
+              result: {
+                mode: "observation",
+                reservation: null,
+                decision: decision(operation.request),
+              },
+            },
+          };
+        if (operation._tag === "policy") {
+          savedPolicy = { ...operation.input.policy, version: savedPolicy.version + 1 };
+          return { _tag: "Success", value: { policy: savedPolicy } };
+        }
+        return { _tag: "Failure" };
+      },
+    );
+    await act(() => button("Refresh").click());
+    await change("Provider", "claudeAgent");
+    await change("Model", "astra");
+    await change("Effort", "high");
+    await change("Preset", "aggressive17");
+    expect(input("Points per 24h").value).toBe("17");
+    await act(() => button("Preview assignment and policy").click());
+    expect(button("Save previewed policy").disabled).toBe(false);
+    await change("Points per 24h", "40");
+    expect(input("Preset").value).toBe("custom");
+    expect(button("Save previewed policy").disabled).toBe(true);
+    await act(() => button("Preview assignment and policy").click());
+    await act(() => button("Save previewed policy").click());
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "Saved policy version 5",
+    );
+    expect(input("Preset").value).toBe("custom");
+    expect(input("Points per 24h").value).toBe("40");
+    expect(savedPolicy.claude).toMatchObject({
+      preset: "custom",
+      dailyPoints: 40,
+      burstPoints: 0,
+      burstHours: 0,
+    });
+    expect(input("Model").value).toBe("astra");
+    expect(input("Effort").value).toBe("high");
+  });
+
+  it("explains derived sustainable values and restores fixed values when Custom is selected again", async () => {
+    expect(input("Points per 24h").disabled).toBe(true);
+    expect(input("Points per 24h").value).toBe("");
+    expect(input("Initial burst points").disabled).toBe(true);
+    expect(input("Burst release hours").disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Daily release is calculated from each allowance cycle",
+    );
+    await change("Preset", "custom");
+    await change("Points per 24h", "40");
+    await change("Initial burst points", "8");
+    await change("Burst release hours", "6");
+    await change("Preset", "sustainable");
+    expect(input("Points per 24h").disabled).toBe(true);
+    expect(input("Initial burst points").value).toBe("0");
+    await change("Preset", "custom");
+    expect(input("Points per 24h").value).toBe("40");
+    expect(input("Initial burst points").value).toBe("8");
+    expect(input("Burst release hours").value).toBe("6");
+    await change("Preset", "aggressive17");
+    expect(input("Points per 24h").value).toBe("17");
+    expect(input("Initial burst points").disabled).toBe(true);
+    expect(input("Initial burst points").value).toBe("0");
+    await change("Points per 24h", "40");
+    expect(input("Initial burst points").value).toBe("0");
+    expect(input("Burst release hours").value).toBe("0");
+  });
   it("chooses a named linked coordinator without exposing IDs and preserves edits when connection fails", async () => {
     const coordinator = input("Coordinator") as HTMLSelectElement;
     expect([...coordinator.options].map((o) => o.textContent)).toEqual([
