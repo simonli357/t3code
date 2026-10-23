@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { MetricSample } from "./computersViewModel";
-import { buildSparkline, describeSparkline } from "./sparkline";
+import { buildSparkline, describeSparkline } from "./sparklineGeometry";
 
 const T0 = Date.parse("2026-10-22T12:00:00.000Z");
 const sample = (secondsIn: number, percent: number | null): MetricSample => ({

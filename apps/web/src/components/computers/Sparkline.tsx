@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { cn } from "~/lib/utils";
 import { formatWindow } from "./computersFormat";
 import type { MetricSample } from "./computersViewModel";
-import { buildSparkline, describeSparkline } from "./sparkline";
+import { buildSparkline, describeSparkline } from "./sparklineGeometry";
 
 /**
  * A percent history as a line on a fixed 0-100% scale, so a quiet computer looks quiet. Runs of
