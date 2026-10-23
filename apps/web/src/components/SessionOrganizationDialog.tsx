@@ -46,11 +46,14 @@ const changeOwnership = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "session-ownership:change",
   tag: WS_METHODS.sessionOwnershipChange,
 });
-const dialog = create<{ source: ScopedThreadRef | null }>(() => ({ source: null }));
-export const openSessionOrganization = (source: ScopedThreadRef) => dialog.setState({ source });
-const close = () => dialog.setState({ source: null });
+const useSessionOrganizationDialog = create<{ source: ScopedThreadRef | null }>(() => ({
+  source: null,
+}));
+export const openSessionOrganization = (source: ScopedThreadRef) =>
+  useSessionOrganizationDialog.setState({ source });
+const close = () => useSessionOrganizationDialog.setState({ source: null });
 export function SessionOrganizationDialogHost() {
-  const source = dialog((state) => state.source);
+  const source = useSessionOrganizationDialog((state) => state.source);
   return source ? (
     <SessionOrganizationDialog key={`${source.environmentId}:${source.threadId}`} source={source} />
   ) : null;
