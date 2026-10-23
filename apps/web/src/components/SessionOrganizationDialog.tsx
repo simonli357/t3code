@@ -98,6 +98,18 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
       !(candidate.id === source.threadId && candidate.environmentId === source.environmentId) &&
       !hierarchy.path(sessionKey(candidate)).includes(thread ? sessionKey(thread) : ""),
   );
+  const masterOptions = [
+    { value: "independent", label: "Independent" },
+    ...candidates.map((candidate) => ({
+      value: JSON.stringify([candidate.environmentId, candidate.id]),
+      label: `${candidate.title} · ${projects.find((p) => p.id === candidate.projectId && p.environmentId === candidate.environmentId)?.title ?? "Project unavailable"} · ${environments.find((e) => e.environmentId === candidate.environmentId)?.label ?? "Computer unavailable"}`,
+    })),
+  ];
+  const selectedMasterLabel =
+    masterOptions.find((option) => option.value === destination)?.label ??
+    (destination === JSON.stringify([ownerEnvironment, currentOwner])
+      ? `${owner?.title ?? "Current master unavailable"} · ${environments.find((e) => e.environmentId === ownerEnvironment)?.label ?? "Computer unavailable"}`
+      : "Selected master unavailable");
   useEffect(() => {
     let disposed = false;
     if (connected)
@@ -215,22 +227,12 @@ function SessionOrganizationDialog({ source }: { source: ScopedThreadRef }) {
                 disabled={busy || pending !== null}
               >
                 <SelectTrigger id="session-master">
-                  <SelectValue />
+                  <SelectValue>{selectedMasterLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
-                  <SelectItem value="independent">Independent</SelectItem>
-                  {candidates.map((candidate) => (
-                    <SelectItem
-                      key={sessionKey(candidate)}
-                      value={JSON.stringify([candidate.environmentId, candidate.id])}
-                    >
-                      {candidate.title} ·{" "}
-                      {projects.find(
-                        (p) =>
-                          p.id === candidate.projectId &&
-                          p.environmentId === candidate.environmentId,
-                      )?.title ?? candidate.projectId}{" "}
-                      · {label(candidate.environmentId)}
+                  {masterOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
                     </SelectItem>
                   ))}
                 </SelectPopup>
