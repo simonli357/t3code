@@ -583,6 +583,13 @@ export function CommandPalette({ children }: { children: ReactNode }) {
         void navigate({ to: "/usage" });
         return;
       }
+      if (command === "computers.open") {
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        void navigate({ to: "/computers" });
+        return;
+      }
       const mode = overlayModeForCommand(command);
       if (mode === null) {
         return;
@@ -2238,6 +2245,18 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:computers",
+    searchTerms: ["computers", "storage", "disks", "cpu", "memory", "files", "backups"],
+    title: "Open computers",
+    icon: <MonitorIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "computers.open",
+    run: async () => {
+      await navigate({ to: "/computers" });
     },
   });
 

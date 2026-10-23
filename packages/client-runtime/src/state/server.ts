@@ -1053,6 +1053,19 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:process-diagnostics",
       tag: WS_METHODS.serverGetProcessDiagnostics,
     }),
+    computerInspection: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:computers:inspect",
+      tag: WS_METHODS.computersInspect,
+      staleTimeMs: 10_000,
+    }),
+    computerAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:computers:act",
+      tag: WS_METHODS.computersAct,
+    }),
+    computerRead: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:computers:read",
+      tag: WS_METHODS.computersInspect,
+    }),
     hostResources: createEnvironmentQueryAtomFamily(runtime, {
       label: "environment-data:server:host-resources",
       idleTtlMs: 0,

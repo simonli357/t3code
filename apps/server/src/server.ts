@@ -1,3 +1,4 @@
+import * as Computers from "./computers/Computers.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
 // @effect-diagnostics nodeBuiltinImport:off
@@ -628,6 +629,7 @@ export const makeRoutesLayer = Layer.mergeAll(
 ).pipe(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
+  Layer.provide(Computers.layer.pipe(Layer.provide(ProcessRunner.layer))),
   Layer.provide(PullRequestServiceLive),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(DesktopAppUpdateLayerLive))),

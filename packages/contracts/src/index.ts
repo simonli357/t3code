@@ -47,3 +47,5 @@ export * from "./threadPurge.ts";
 export * from "./sessionHistory.ts";
 export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
+
+export * from "./computers.ts";

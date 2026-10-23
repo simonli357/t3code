@@ -7218,6 +7218,39 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
   );
 
+  it.effect(
+    "inspects this computer and reports a refused action as a typed error over websocket",
+    () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest({
+          layers: { projectionSnapshotQuery: { getProjectShells: () => Effect.succeed([]) } },
+        });
+        const fileSystem = yield* FileSystem.FileSystem;
+        const folder = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-computers-ws-" });
+        yield* fileSystem.writeFileString(`${folder}/note.txt`, "ten bytes!");
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            Effect.all({
+              overview: client[WS_METHODS.computersInspect]({ section: "overview" }),
+              folders: client[WS_METHODS.computersInspect]({ section: "folders", path: folder }),
+              refused: client[WS_METHODS.computersAct]({
+                action: "keep",
+                path: "relative/path",
+                reason: "why",
+              }).pipe(Effect.flip),
+            }),
+          ),
+        );
+        assert.isAbove(result.overview.resources?.cpuCount ?? 0, 0);
+        assert.deepEqual(
+          result.folders.files.map((file) => [file.name, file.sizeBytes, file.directory]),
+          [["note.txt", 10, false]],
+        );
+        assert.equal(result.refused._tag, "ComputerOperationError");
+      }).pipe(Effect.provide(NodeHttpServer.layerTest), TestClock.withLive),
+  );
+
   it.effect("counts macOS reclaimable memory once and shares concurrent samples", () =>
     Effect.gen(function* () {
       const commandCalls = yield* Ref.make(0);

@@ -1,3 +1,4 @@
+import * as Computers from "./computers/Computers.ts";
 import { AgentTaskStopError } from "@t3tools/contracts";
 import { forkThread } from "./project/ThreadFork.ts";
 import {
@@ -672,6 +673,7 @@ const makeWsRpcLayer = (
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
+      const computers = yield* Computers.Computers;
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
@@ -2928,6 +2930,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetProcessDiagnostics, processDiagnostics.read, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.computersInspect]: (input) =>
+          observeRpcEffect(WS_METHODS.computersInspect, computers.inspect(input), {
+            "rpc.aggregate": "computers",
+          }),
+        [WS_METHODS.computersAct]: (input) =>
+          observeRpcEffect(WS_METHODS.computersAct, computers.act(input), {
+            "rpc.aggregate": "computers",
+          }),
         [WS_METHODS.serverGetHostResources]: (_input) =>
           observeRpcEffect(WS_METHODS.serverGetHostResources, hostResources.read, {
             "rpc.aggregate": "server",
@@ -4136,6 +4146,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           ),
         ),
     });
+    const computers = yield* Computers.Computers;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
@@ -4185,6 +4196,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              Layer.provide(Layer.succeed(Computers.Computers, computers)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(
