@@ -158,6 +158,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
+import { ThreadEnvironmentLabel } from "./ThreadEnvironmentLabel";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
@@ -1253,10 +1254,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     ? getTriggerDisplayModelLabel(selectedModel)
     : thread.modelSelection.model;
 
-  // The local environment is "this machine" and needs no marker; every other
-  // one gets its machine glyph. With no local environment (the hosted app)
-  // that is every thread, which is the point: the glyph is what tells rows on
-  // different machines apart.
+  // Remote rows keep their machine glyph alongside the visible environment name.
   const isRemote = thread.environmentId !== props.currentEnvironmentId;
 
   const detailsTooltip = (
@@ -1508,6 +1506,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     title: thread.title,
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
+    environmentLabel: props.environmentLabel,
     isActive: props.isActive,
   });
 
@@ -1686,6 +1685,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             </span>
             {draftIndicator}
             {title}
+            <ThreadEnvironmentLabel label={props.environmentLabel} />
             {pinIndicator}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
@@ -2006,6 +2006,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ) : (
                 <span className="flex-1" />
               )}
+              <ThreadEnvironmentLabel label={props.environmentLabel} />
               {terminalStatusIcon}
               {prBadge}
               {diff ? (
@@ -2085,6 +2086,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
     title: thread.title,
     statusLabel: null,
     projectDisplayName: props.projectDisplayName,
+    environmentLabel: props.environmentLabel,
     isActive: props.isRouteActive,
   });
   const threadRef = useMemo(
@@ -2094,8 +2096,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(
     props.isHighlighted || props.isRouteActive,
   );
-  // Same details tooltip as the regular rows: a search hit is still a thread,
-  // and the hover card is how you disambiguate identically-titled results.
+  // Search hits share regular rows' environment labels and details tooltip.
   const gitCwd = thread.worktreePath ?? props.project?.workspaceRoot ?? null;
   const gitStatus = useEnvironmentQuery(
     leaseLiveStatus && (thread.branch != null || thread.worktreePath !== null) && gitCwd !== null
@@ -2184,6 +2185,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           <span className="flex min-w-0 flex-1 flex-col">
             <span className="flex min-w-0 items-center gap-2.5">
               <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+              <ThreadEnvironmentLabel label={props.environmentLabel} />
               <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
                 {threadTimeLabel(thread)}
               </span>

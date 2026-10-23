@@ -31,6 +31,15 @@ import { forkThread } from "../project/ThreadFork.ts";
 import { PeerLinks, layer as peerLinksLayer } from "./PeerLinks.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 
+const reportTime = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Toronto",
+  hourCycle: "h23",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const reportHeader = (title: string, createdAt?: string) =>
+  `[T3 worker report — ${title}${createdAt ? ` — ${DateTime.formatIntl(DateTime.makeUnsafe(createdAt), reportTime)}` : ""}]`;
+
 export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError", {
   message: Schema.String,
   code: Schema.optional(Schema.String),
@@ -830,12 +839,13 @@ const make = Effect.gen(function* () {
   const report = Effect.fn(function* (worker: Worker, job: Job, suffix: string, detail: string) {
     if (!worker.notify) return;
     const plan = decodePlan(worker.plan_json);
+    const createdAt = yield* now;
     yield* enqueue(
       `notice:${job.id}:${suffix}`,
       worker,
       worker.owner_id,
       "notice",
-      `[T3 worker report — ${plan.title}]\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
+      `${reportHeader(plan.title, createdAt)}\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
     );
   });
 
@@ -976,7 +986,8 @@ const make = Effect.gen(function* () {
       input.outcome === "done"
         ? "done"
         : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
-    const prompt = `[T3 worker report — ${plan.title}]\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
+    const prompt = (createdAt?: string) =>
+      `${reportHeader(plan.title, createdAt)}\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
     const reportId = `report:${workerId}:${input.clientRequestId}`;
     const limits = yield* renewal;
     const work = yield* workOf(workerId, limits);
@@ -991,12 +1002,17 @@ const make = Effect.gen(function* () {
     // pass. Reading the owner in the insert keeps it consistent with a handoff,
     // which retargets queued reports in one transaction.
     yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
-        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt + usage}, ${createdAt}, ${turnId}
+        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${prompt(createdAt) + usage}, ${createdAt}, ${turnId}
         FROM custom_workers WHERE thread_id = ${workerId}
         ON CONFLICT(id) DO NOTHING`;
     const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`)[0];
-    // Retries match on the report itself; the working-time lines change over time.
-    if (!job || job.kind !== input.outcome || !job.prompt.startsWith(prompt))
+    // Retries retain the saved time, including headers from before timestamps.
+    // The working-time lines change over time and are excluded from the match.
+    if (
+      !job ||
+      job.kind !== input.outcome ||
+      (!job.prompt.startsWith(prompt(job.created_at)) && !job.prompt.startsWith(prompt()))
+    )
       return yield* new WorkerError({
         message: "This report ID already belongs to a different assignment.",
       });

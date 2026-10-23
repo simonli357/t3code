@@ -222,7 +222,7 @@ const confirmedMessage = Effect.fn(function* (
 });
 const session = Effect.fn(function* (
   threadId: ThreadId,
-  status: "running" | "ready" | "error" | "stopped",
+  status: "running" | "ready" | "error" | "stopped" | "interrupted",
   suffix: string,
   providerInstanceId?: ProviderInstanceId,
 ) {
@@ -728,7 +728,9 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.report(owner, report).pipe(Effect.flip)).message).toContain(
         "not a managed",
       );
+      yield* TestClock.setTime(Date.parse("2026-01-15T18:05:00Z"));
       const first = yield* service.report(worker, report);
+      yield* TestClock.adjust("2 minutes");
       const second = yield* service.report(worker, report);
       expect(first.requestId).toBe(second.requestId);
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
@@ -742,12 +744,68 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* service.drain();
       const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
       expect(messages).toHaveLength(1);
+      expect(messages[0]!.text.split("\n")[0]).toBe(`[T3 worker report — ${input.title} — 13:05]`);
       expect(messages[0]!.text).toContain("Outcome: blocked");
       expect(messages[0]!.text).toContain(report.summary);
       yield* service.drain();
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
         1,
       );
+    }),
+  );
+  for (const [instant, localTime, outcome] of [
+    ["2026-01-15T18:05:59Z", "13:05", "done"],
+    ["2026-07-15T18:05:59Z", "14:05", "blocked"],
+    ["2026-07-16T00:05:00Z", "20:05", "done"],
+    ["2026-01-16T05:00:00Z", "00:00", "blocked"],
+  ] as const) {
+    it.effect(`timestamps ${outcome} reports at ${instant} as ${localTime}`, () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed(`timestamp-${instant}`);
+        yield* service.spawn(owner, input);
+        yield* TestClock.setTime(Date.parse(instant));
+        yield* service.report(worker, {
+          clientRequestId: "timed",
+          outcome,
+          summary: "Timestamped result.",
+        });
+        yield* service.drain();
+        const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+        expect(messages).toHaveLength(1);
+        expect(messages[0]!.text.split("\n")[0]).toBe(
+          `[T3 worker report — ${input.title} — ${localTime}]`,
+        );
+      }),
+    );
+  }
+  it.effect("retries reports saved before timestamps without changing their text", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("legacy-timestamp");
+      yield* service.spawn(owner, input);
+      yield* service.control(owner, { threadId: worker, notifications: false });
+      const report = { clientRequestId: "legacy", outcome: "done" as const, summary: "Done." };
+      const first = yield* service.report(worker, report);
+      const saved = (yield* sql<{ prompt: string }>`SELECT prompt FROM custom_worker_jobs
+        WHERE id = ${first.requestId}`)[0]!.prompt;
+      const legacy = saved.replace(
+        /^\[T3 worker report[^\n]*\]/,
+        `[T3 worker report — ${input.title}]`,
+      );
+      yield* sql`UPDATE custom_worker_jobs SET prompt = ${legacy} WHERE id = ${first.requestId}`;
+      yield* TestClock.adjust("1 day");
+      expect((yield* service.report(worker, report)).requestId).toBe(first.requestId);
+      expect(
+        (yield* sql<{ prompt: string }>`SELECT prompt FROM custom_worker_jobs
+        WHERE id = ${first.requestId}`)[0]!.prompt,
+      ).toBe(legacy);
+      expect(
+        (yield* service.report(worker, { ...report, summary: "Changed." }).pipe(Effect.flip))
+          .message,
+      ).toContain("different assignment");
     }),
   );
   it.effect("delivers explicit reports without waiting for background liveness", () =>
@@ -1394,12 +1452,14 @@ it.layer(testLayer)("persistent workers", (it) => {
       const starts = () =>
         sql`SELECT 1 FROM orchestration_events WHERE stream_id = ${owner} AND event_type = 'thread.turn-start-requested' AND command_id LIKE 'worker-job:%'`;
 
+      yield* TestClock.setTime(Date.parse("2026-07-16T00:05:00Z"));
       yield* replyAndReport(worker, "digest-first", "First part finished");
       yield* service.drain();
       expect((yield* ownerTexts()).some((text) => text.includes("First part finished"))).toBe(
         false,
       );
 
+      yield* TestClock.adjust("2 minutes");
       yield* service.report(second, {
         clientRequestId: "digest-blocked",
         outcome: "blocked",
@@ -1412,7 +1472,9 @@ it.layer(testLayer)("persistent workers", (it) => {
       );
       expect(blocked).toHaveLength(1);
       expect(blocked[0]).toContain("blocked, needs the user");
+      expect(blocked[0]!.split("\n")[0]).toBe("[T3 worker report — digest_WORKER_2 — 20:07]");
 
+      yield* TestClock.adjust("3 minutes");
       yield* replyAndReport(second, "digest-second", "Second part finished");
       yield* service.drain();
       const digests = (yield* ownerTexts()).filter((text) =>
@@ -1421,6 +1483,13 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(digests).toHaveLength(1);
       expect(digests[0]).toContain("First part finished");
       expect(digests[0]).toContain("Second part finished");
+      expect(
+        digests[0]!.split("\n").filter((line) => line.startsWith("[T3 worker report")),
+      ).toEqual([
+        "[T3 worker reports — 2 finished]",
+        `[T3 worker report — ${input.title} — 20:05]`,
+        "[T3 worker report — digest_WORKER_2 — 20:10]",
+      ]);
       expect(yield* starts()).toHaveLength(2);
       expect((yield* service.list(owner)).map((entry) => entry.pendingReports)).toEqual([0, 0]);
     }),
@@ -1436,6 +1505,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         threadId: ThreadId.make("digest-wait-worker-2"),
         title: "digest_wait_WORKER_2",
       });
+      yield* TestClock.setTime(Date.parse("2026-01-16T04:55:00Z"));
       yield* replyAndReport(worker, "digest-wait-first", "Finished alone");
       const delivered = () =>
         snapshots
@@ -1450,6 +1520,11 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* TestClock.adjust("21 minutes");
       yield* service.drain();
       expect(yield* delivered()).toBe(true);
+      expect(
+        Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages[0]!.text.split(
+          "\n",
+        )[0],
+      ).toBe(`[T3 worker report — ${input.title} — 23:55]`);
     }),
   );
   it.effect("rejects report summaries over 500 characters", () =>
@@ -2066,6 +2141,40 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.list(owner))[0]!.latestRequest!.state).toBe("error");
     }),
   );
+  for (const state of ["error", "interrupted"] as const) {
+    it.effect(`preserves the ${state} report time across delayed delivery and restart`, () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const { owner, worker, input } = yield* seed(`runtime-time-${state}`);
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", `timed-${state}-turn`);
+        yield* session(worker, state, `timed-${state}-end`);
+        // An in-flight session move parks delivery without suppressing report creation.
+        yield* sql`INSERT INTO custom_session_moves
+          (id, thread_id, target_thread_id, direction, peer_environment_id, input_json, created_at, updated_at)
+          VALUES (${"hold-" + state}, ${owner}, ${owner}, 'out', 'peer', '{}', ${timestamp}, ${timestamp})`;
+        yield* TestClock.setTime(Date.parse("2026-07-16T00:05:00Z"));
+        yield* service.drain();
+        const notices = yield* sql<{ prompt: string; state: string }>`SELECT prompt, state
+          FROM custom_worker_jobs WHERE worker_id = ${worker} AND kind = 'notice'`;
+        expect(notices).toHaveLength(1);
+        expect(notices[0]!.prompt.split("\n")[0]).toBe(
+          `[T3 worker report — ${input.title} — 20:05]`,
+        );
+        expect(notices[0]!.prompt).toContain(`Runtime state: ${state}`);
+        expect(notices[0]!.state).toBe("queued");
+        yield* TestClock.adjust("1 hour");
+        yield* sql`UPDATE custom_session_moves SET locked = 0 WHERE id = ${"hold-" + state}`;
+        const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+        yield* restarted.drain();
+        const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+        expect(messages).toHaveLength(1);
+        expect(messages[0]!.text).toBe(notices[0]!.prompt);
+      }),
+    );
+  }
   it.effect("cancels queued work and can pause completion reports", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
