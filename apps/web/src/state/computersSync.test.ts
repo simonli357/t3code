@@ -276,6 +276,40 @@ describe("keeping a computer's snapshot current", () => {
     expect(overviews).toBe(2);
   });
 
+  it.each(["activity", "files"] as const)(
+    "publishes advancing telemetry while a %s read is still pending",
+    async (section) => {
+      const detailStarted = deferred<void>();
+      const detail = deferred<ComputerInspection>();
+      const firstOverview = deferred<void>();
+      const secondOverview = deferred<void>();
+      let measurement = 0;
+      const t = harness((input) => {
+        if (input.section === section) {
+          detailStarted.resolve();
+          return detail.promise;
+        }
+        return inspection({ sampledAt: input.section === "overview" ? ++measurement : 0 });
+      });
+      const unsubscribe = t.sync.subscribe(() => {
+        if (t.snapshot()?.overview?.sampledAt === 1) firstOverview.resolve();
+        if (t.snapshot()?.overview?.sampledAt === 2) secondOverview.resolve();
+      });
+      const first = t.sync.refresh([computer]);
+      await detailStarted.promise;
+      await firstOverview.promise;
+      // Let the completed telemetry cache write drain while the detail request stays held.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const poll = t.sync.refresh([computer]);
+      await secondOverview.promise;
+      expect(t.snapshot()?.overview?.sampledAt).toBe(2);
+      expect(t.calls.filter((input) => input.section === section)).toHaveLength(1);
+      detail.resolve(inspection());
+      await Promise.all([first, poll]);
+      unsubscribe();
+    },
+  );
+
   it("stops paging a file index when stopped, without saving the part it had", async () => {
     let reads = 0;
     const t = harness((input) => {

@@ -53,7 +53,8 @@ const archiveSignature = (snapshot: ComputerInspection | null | undefined) =>
  * Keeps one snapshot per computer fresh and saved for offline use. It is the page's only owner of
  * network and IndexedDB work: React subscribes to `getState`, so nothing here sets React state.
  *
- * A computer is read at most once at a time. Its saved copy is loaded before the first read so an old
+ * Each computer has one telemetry read and one detail refresh at a time, so slow activity or file
+ * reads cannot stall telemetry. Its saved copy is loaded before the first read so an old
  * copy can never replace a newer answer, and a file index is replaced only by a complete one: while
  * the computer is reindexing, the last complete index stays and is marked as indexing.
  */
@@ -70,6 +71,9 @@ export function createComputersSync({
   const cacheLoads = new Map<string, Promise<void>>();
   const flights = new Map<string, Promise<void>>();
   const queued = new Map<string, boolean>();
+  const overviewFlights = new Map<string, Promise<void>>();
+  const overviewErrors = new Map<string, string>();
+  const detailErrors = new Map<string, string>();
   const filesDue = new Set<string>();
 
   const update = (next: ComputersSyncState) => {
@@ -153,18 +157,47 @@ export function createComputersSync({
     if (!signal.aborted && !page.indexing) filesDue.delete(id);
   }
 
+  function noteReadError(id: string, lane: Map<string, string>, message: string | null) {
+    if (message) lane.set(id, message);
+    else lane.delete(id);
+    note(
+      "errors",
+      id,
+      [overviewErrors.get(id), detailErrors.get(id)].filter(Boolean).join("; ") || null,
+    );
+  }
+
+  function refreshOverview(id: EnvironmentId, signal: AbortSignal): Promise<void> {
+    const pending = overviewFlights.get(id);
+    if (pending) return pending;
+    const started = (async () => {
+      await loadOffline(id, signal);
+      if (signal.aborted) return;
+      try {
+        const overview = await read(id, { section: "overview" });
+        if (signal.aborted) return;
+        await save(id, { overview }, signal);
+        if (!signal.aborted) noteReadError(id, overviewErrors, null);
+      } catch (error) {
+        if (!signal.aborted) noteReadError(id, overviewErrors, failure(error));
+      }
+    })().finally(() => {
+      if (overviewFlights.get(id) === started) overviewFlights.delete(id);
+    });
+    overviewFlights.set(id, started);
+    return started;
+  }
+
   async function syncOnce(id: EnvironmentId, force: boolean, signal: AbortSignal) {
     await loadOffline(id, signal);
     if (signal.aborted) return;
-    const [overview, activity] = await Promise.allSettled([
-      read(id, { section: "overview" }),
+    const [, activity] = await Promise.allSettled([
+      refreshOverview(id, signal),
       read(id, { section: "activity" }),
     ]);
     if (signal.aborted) return;
     const patch: { -readonly [K in keyof ComputerCache]?: ComputerCache[K] } = {};
     const failures: string[] = [];
-    if (overview.status === "fulfilled") patch.overview = overview.value;
-    else failures.push(failure(overview.reason));
     if (activity.status === "fulfilled") patch.activity = activity.value;
     else failures.push(failure(activity.reason));
     const before = archiveSignature(state.snapshots[id]?.activity);
@@ -190,7 +223,7 @@ export function createComputersSync({
       }
     }
     if (signal.aborted) return;
-    note("errors", id, failures.join("; ") || null);
+    noteReadError(id, detailErrors, failures.join("; ") || null);
   }
 
   function refreshOne(id: EnvironmentId, options: RefreshOptions) {
@@ -200,7 +233,7 @@ export function createComputersSync({
     if (flight) {
       if (options.force || options.queue)
         queued.set(id, queued.get(id) === true || options.force === true);
-      return flight;
+      return Promise.all([flight, refreshOverview(id, signal)]).then(() => undefined);
     }
     const started = (async () => {
       let force: boolean | undefined = options.force === true;
@@ -235,6 +268,9 @@ export function createComputersSync({
       const current = controller;
       cacheLoads.clear();
       flights.clear();
+      overviewFlights.clear();
+      overviewErrors.clear();
+      detailErrors.clear();
       queued.clear();
       return () => current.abort();
     },
