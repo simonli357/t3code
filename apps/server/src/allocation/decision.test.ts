@@ -320,7 +320,7 @@ describe("deterministic admission", () => {
       ...input(),
       inventories: [
         inventory([
-          account("a", { shortWindow: "known-absent", windows: [window({ usedPoints: 50 })] }),
+          account("a", { shortWindow: "known-absent", windows: [window({ usedPoints: 42 })] }),
         ]),
       ],
     });
@@ -448,4 +448,81 @@ describe("shared host and window reconciliation", () => {
       decideAllocation({ ...input(), inventories: [inventory([next])] }).selectedInstanceId,
     ).toBeNull();
   });
+});
+
+it("preserves fresh same-cycle aggregate burn when a newer alias has only percentages", () => {
+  const measured = account("a", {
+    windows: [
+      window({
+        checkedAt: "2026-10-23T11:59:59.000Z",
+        ratePointsPerHour: 20,
+        predictionErrorPointsPerHour: 1,
+        samples: 8,
+        rateAgeMinutes: 0,
+      }),
+    ],
+    shortWindow: "known-absent",
+  });
+  const alias = {
+    ...account("alias", { accountKey: "a", windows: [window()], shortWindow: "known-absent" }),
+    environmentId: "other",
+  };
+  const run = (a = measured) =>
+    decideAllocation({
+      ...input(),
+      inventories: [inventory([a]), { ...inventory([alias]), environmentId: "other" }],
+    });
+  const alone = decideAllocation({ ...input(), inventories: [inventory([measured])] });
+  const merged = run();
+  expect(merged.selectedInstanceId).toBeNull();
+  expect(merged.candidates[0]?.windows[0]?.forecastPoints).toBeCloseTo(
+    alone.candidates[0]?.windows[0]?.forecastPoints ?? 0,
+    1,
+  );
+  expect(merged.candidates[0]?.windows[0]?.forecastPoints).toBeGreaterThan(250);
+  // Neither expired measurement evidence nor a previous cycle may be transplanted.
+  for (const patch of [
+    { rateAgeMinutes: 60 },
+    { samples: 1 },
+    { cycleStartedAt: "2026-10-15T12:00:00.000Z", resetsAt: "2026-10-22T12:00:00.000Z" },
+  ])
+    expect(
+      run({ ...measured, windows: measured.windows.map((w) => ({ ...w, ...patch })) })
+        .selectedInstanceId,
+    ).toBe("a");
+  const duplicate = {
+    ...measured,
+    environmentId: "other",
+    instanceId: ProviderInstanceId.make("alias"),
+  };
+  const replay = decideAllocation({
+    ...input(),
+    inventories: [{ ...inventory([duplicate]), environmentId: "other" }, inventory([measured])],
+  });
+  expect(replay.candidates[0]?.windows[0]?.forecastPoints).toBe(
+    alone.candidates[0]?.windows[0]?.forecastPoints,
+  );
+});
+
+it("charges completed borrowing against cumulative consumption and preserves explicit pacing override", () => {
+  const run = (usedPoints: number, explicit = false) =>
+    decideAllocation({
+      ...input(),
+      request: {
+        ...request,
+        ...(explicit ? { explicitInstanceId: ProviderInstanceId.make("a") } : {}),
+      },
+      inventories: [
+        inventory([
+          account("a", { shortWindow: "known-absent", windows: [window({ usedPoints })] }),
+        ]),
+      ],
+    });
+  const first = run(42);
+  expect(first.selectedInstanceId).toBe("a");
+  const consumed = 42 + first.candidates[0]!.windows[0]!.forecastPoints;
+  expect(run(consumed).selectedInstanceId).toBeNull();
+  expect(run(80).selectedInstanceId).toBeNull();
+  expect(run(80, true).selectedInstanceId).toBe("a");
+  expect(run(95, true).selectedInstanceId).toBeNull();
 });

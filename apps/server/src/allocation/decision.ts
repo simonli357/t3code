@@ -143,6 +143,53 @@ export function decideAllocation(input: {
           )
             windowsById.set(w.id, w);
         }
+      for (const [id, observation] of windowsById) {
+        // Observation and measurement clocks are independent; rates are aggregate
+        // account burn, so choose one conservative same-cycle estimate, never sum hosts.
+        const measured = siblings
+          .flatMap((sibling) => {
+            const hostAt = inventories.find(
+              (i) => i.environmentId === sibling.environmentId,
+            )?.observedAt;
+            return sibling.windows
+              .filter(
+                (w) =>
+                  w.id === id &&
+                  observation.cycleStartedAt !== null &&
+                  w.cycleStartedAt === observation.cycleStartedAt &&
+                  w.resetsAt === observation.resetsAt &&
+                  w.durationHours === observation.durationHours &&
+                  w.samples >= policy.minimumSamples &&
+                  w.ratePointsPerHour !== null &&
+                  w.rateAgeMinutes !== null &&
+                  hostAt,
+              )
+              .map((w) => ({
+                ...w,
+                rateAgeMinutes:
+                  w.rateAgeMinutes! + Math.max(0, (now - Date.parse(hostAt!)) / 60_000),
+              }));
+          })
+          .filter((w) => w.rateAgeMinutes >= 0 && w.rateAgeMinutes <= policy.maxReadingAgeMinutes)
+          .sort(
+            (a, b) =>
+              (b.ratePointsPerHour ?? 0) +
+                (b.predictionErrorPointsPerHour ?? 0) -
+                ((a.ratePointsPerHour ?? 0) + (a.predictionErrorPointsPerHour ?? 0)) ||
+              (b.ratePointsPerHour ?? 0) - (a.ratePointsPerHour ?? 0) ||
+              a.rateAgeMinutes - b.rateAgeMinutes ||
+              b.samples - a.samples ||
+              compare(b.checkedAt, a.checkedAt),
+          );
+        const rate = measured[0];
+        windowsById.set(id, {
+          ...observation,
+          ratePointsPerHour: rate?.ratePointsPerHour ?? null,
+          predictionErrorPointsPerHour: rate?.predictionErrorPointsPerHour ?? null,
+          rateAgeMinutes: rate?.rateAgeMinutes ?? null,
+          samples: rate?.samples ?? 0,
+        });
+      }
       const account = {
         ...localAccount,
         windows: [...windowsById.values()].sort((a, b) => compare(a.id, b.id)),
@@ -301,18 +348,17 @@ export function decideAllocation(input: {
             blockedUntil.push(window.resetsAt);
           else canWait = false;
         }
-        // Borrowing caps outstanding demand, including a single useful assignment
-        // when all accounts are ahead. It never authorizes an unlimited catch-up
-        // surge. An explicit account may override pacing, but never hard headroom.
+        // Borrowing includes already consumed debt plus committed demand. Completing
+        // work cannot renew that allowance. Explicit selection overrides pacing only.
         if (
           !short &&
           window.cycleStartedAt &&
           !request.explicitInstanceId &&
-          forecastPoints > Math.max(0, target - window.usedPoints) + curve.borrowPoints
+          window.usedPoints + forecastPoints > target + curve.borrowPoints
         ) {
           canWait = false;
           issues.push(
-            "Forecast exceeds the pacing deficit plus bounded borrowing. Reduce the assignment or tune borrowing.",
+            "Projected consumption exceeds the target plus bounded borrowing. Reduce the assignment or tune borrowing.",
           );
         }
         reasons.push(...issues.map((r) => `${window.label}: ${r}`));

@@ -14,7 +14,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
-import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
+import { ProviderUsageLimitsUpdate, ProviderQuotaState } from "./providerUsageLimits.ts";
 import { ProviderApprovalOption } from "./orchestration.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
@@ -810,6 +810,7 @@ const RuntimeWarningPayload = Schema.Struct({
 export type RuntimeWarningPayload = typeof RuntimeWarningPayload.Type;
 
 const RuntimeErrorPayload = Schema.Struct({
+  quotaStates: Schema.optional(Schema.Array(ProviderQuotaState)),
   message: TrimmedNonEmptyStringSchema,
   code: Schema.optional(TrimmedNonEmptyStringSchema),
   class: Schema.optional(RuntimeErrorClass),

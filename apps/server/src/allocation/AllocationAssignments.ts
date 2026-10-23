@@ -112,6 +112,7 @@ const make = Effect.gen(function* () {
         input.kind === "worker" && owner
           ? workers
               .spawn(owner, {
+                allocation: { assignmentId: input.request.assignmentId, startIntent },
                 threadId: input.request.threadId,
                 projectId: input.projectId,
                 title: input.title,

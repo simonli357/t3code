@@ -22,13 +22,19 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { readQuotaEvidence, type QuotaEvidence } from "./quotaEvidence.ts";
 import { allocationInventory } from "./inventory.ts";
 import { decideAllocation } from "./decision.ts";
 
 const PeerInput = Schema.TaggedUnion({
   allocation: { operation: AllocationOperation },
   allocationInventory: { request: Schema.optional(AllocationRequest) },
-  allocationProbe: { threadId: ThreadId, assignmentId: Schema.String, since: Schema.String },
+  allocationProbe: {
+    threadId: ThreadId,
+    assignmentId: Schema.String,
+    since: Schema.String,
+    startIntent: Schema.optional(Schema.String),
+  },
 });
 const Probe = Schema.Struct({
   state: Schema.Literals(["pending", "running", "terminal", "unknown"]),
@@ -70,29 +76,33 @@ const make = Effect.gen(function* () {
     request: AllocationRequest | undefined,
   ) {
     const threads = (yield* projection.getShellSnapshot()).threads;
-    const rejectedUntil = new Map<string, string>();
-    for (const thread of threads) {
-      if (
-        thread.session?.status !== "error" ||
-        !/usage.?limit|rate.?limit|quota/i.test(thread.session.lastError ?? "")
-      )
-        continue;
-      const rows = yield* sql<{
-        reset_seconds: number | null;
-      }>`SELECT json_extract(payload_json, '$.detail.resetsAt') AS reset_seconds FROM projection_thread_activities WHERE thread_id = ${thread.id} AND kind = 'runtime.error' ORDER BY created_at DESC LIMIT 1`;
-      const reset = rows[0]?.reset_seconds;
-      if (typeof reset === "number" && Number.isFinite(reset)) {
-        const key = thread.session.providerInstanceId ?? thread.modelSelection.instanceId;
-        const time = DateTime.formatIso(DateTime.makeUnsafe(reset * 1000));
-        if (time > (rejectedUntil.get(key) ?? "")) rejectedUntil.set(key, time);
-      }
+    const quotaEvidence: QuotaEvidence[] = [];
+    const byThread = new Map(threads.map((t) => [t.id, t]));
+    const rows = threads.length
+      ? yield* sql<{
+          payload_json: string;
+          created_at: string;
+          kind: string;
+          ordinal: number;
+          thread_id: ThreadId;
+        }>`SELECT payload_json, created_at, kind, rowid AS ordinal, thread_id FROM projection_thread_activities WHERE ${sql.in("thread_id", [...byThread.keys()])} AND (kind = 'account.quota-state' OR kind = 'runtime.error' OR (kind = 'runtime.warning' AND json_extract(payload_json, '$.detail.status') = 'rejected')) ORDER BY created_at DESC, rowid DESC`
+      : [];
+    for (const row of rows) {
+      const thread = byThread.get(row.thread_id)!;
+      quotaEvidence.push(
+        ...readQuotaEvidence(
+          row,
+          thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
+        ).map((e) => ({ ...e, threadId: thread.id })),
+      );
     }
     const current = allocationInventory({
       environmentId: local.environmentId,
       at: yield* now,
       providers: yield* providers.getProviders,
       threads,
-      rejectedUntil,
+      quotaEvidence,
+      maxReadingAgeMinutes: (yield* store.policy).maxReadingAgeMinutes,
       measurements: yield* measurements.read({ lookbackHours: 168, turnLimit: 1 }),
       ...(request ? { request } : {}),
     });
@@ -126,12 +136,17 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     assignmentId: string,
     since: string,
+    startIntent?: string,
   ) {
     const rejected =
       yield* sql`SELECT 1 FROM orchestration_command_receipts WHERE command_id IN (${`allocation:${assignmentId}`}, ${`allocation:${assignmentId}:create`}) AND aggregate_id = ${threadId} AND status = 'rejected'`;
     const failedStart =
       yield* sql`SELECT 1 FROM provider_allocation_failed_starts WHERE assignment_id = ${assignmentId} AND thread_id = ${threadId}`;
-    if (rejected.length || failedStart.length) return { state: "terminal" as const };
+    const remoteRefusal = startIntent
+      ? yield* sql`SELECT 1 FROM provider_allocation_start_rejections WHERE assignment_id = ${assignmentId} AND thread_id = ${threadId} AND start_intent = ${startIntent}`
+      : [];
+    if (rejected.length || failedStart.length || remoteRefusal.length)
+      return { state: "terminal" as const };
     const jobs = yield* sql<{
       state: string;
     }>`SELECT state FROM custom_worker_jobs WHERE id = ${`spawn:${threadId}`} AND target_id = ${threadId} AND kind = 'work'`;
@@ -189,10 +204,11 @@ const make = Effect.gen(function* () {
       if (r.state !== "starting" && r.state !== "consumed") continue;
       const stateEffect =
         r.request.environmentId === local.environmentId
-          ? probe(r.request.threadId, r.assignmentId, r.createdAt)
+          ? probe(r.request.threadId, r.assignmentId, r.createdAt, r.startIntent ?? undefined)
           : peers
               .call(r.request.environmentId, {
                 _tag: "allocationProbe",
+                ...(r.startIntent ? { startIntent: r.startIntent } : {}),
                 threadId: r.request.threadId,
                 assignmentId: r.assignmentId,
                 since: r.createdAt,
@@ -416,7 +432,12 @@ const make = Effect.gen(function* () {
         case "allocationInventory":
           return yield* inventory(request.request);
         case "allocationProbe":
-          return yield* probe(request.threadId, request.assignmentId, request.since);
+          return yield* probe(
+            request.threadId,
+            request.assignmentId,
+            request.since,
+            request.startIntent,
+          );
         case "allocation":
           return yield* executeLocal(request.operation);
       }

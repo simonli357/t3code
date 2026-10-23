@@ -4081,6 +4081,9 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         message: "runtime activity exploded",
         code: "subscription_sharing_usage_limit_exceeded",
+        quotaStates: [
+          { windowId: "secondary", status: "rejected", resetsAt: "2026-01-02T00:00:00.000Z" },
+        ],
       },
     });
 
@@ -4098,6 +4101,30 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.kind).toBe("runtime.error");
     expect(activityPayload?.message).toBe("runtime activity exploded");
     expect(activityPayload?.code).toBe("subscription_sharing_usage_limit_exceeded");
+    expect(activityPayload?.quotaStates).toEqual([
+      { windowId: "secondary", status: "rejected", resetsAt: "2026-01-02T00:00:00.000Z" },
+    ]);
+  });
+
+  it("projects typed per-window rejection and recovery without a percentage or failed session", async () => {
+    const harness = await createHarness();
+    for (const status of ["rejected", "allowed"] as const) {
+      harness.emit({
+        type: "account.rate-limits.updated",
+        eventId: asEventId(`quota-${status}`),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId: asThreadId("thread-1"),
+        payload: { limits: { windows: [], states: [{ windowId: "five_hour", status }] } },
+      });
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some((a) => a.id === `quota-${status}`),
+      );
+      expect(
+        thread.activities.find((a: ProviderRuntimeTestActivity) => a.id === `quota-${status}`)
+          ?.payload,
+      ).toMatchObject({ quotaStates: [{ windowId: "five_hour", status }] });
+    }
   });
 
   it("keeps the session running when a runtime.warning arrives during an active turn", async () => {

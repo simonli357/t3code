@@ -2956,6 +2956,9 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
         if (event.type === "runtime.error") {
           NodeAssert.equal(event.payload.message, expected);
           NodeAssert.equal(event.payload.detail, CODEX_OUT_OF_CREDITS);
+          NodeAssert.equal(event.payload.quotaStates?.[0]?.windowId, "secondary");
+          NodeAssert.equal(event.payload.quotaStates?.[0]?.status, "rejected");
+          NodeAssert.ok(event.payload.quotaStates?.[0]?.resetsAt);
         }
         if (event.type === "turn.completed") {
           NodeAssert.equal(event.payload.errorMessage, expected);

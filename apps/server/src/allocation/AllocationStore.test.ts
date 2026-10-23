@@ -70,7 +70,12 @@ const setup = Effect.gen(function* () {
   const store = yield* Store.AllocationStore;
   yield* store.savePolicy({
     expectedVersion: 0,
-    policy: { ...defaultAllocationPolicy, mode: "automatic", coordinatorEnvironmentId: "a" },
+    policy: {
+      ...defaultAllocationPolicy,
+      mode: "automatic",
+      coordinatorEnvironmentId: "a",
+      codex: { ...defaultAllocationPolicy.codex, burstPoints: 80 },
+    },
   });
   return store;
 });

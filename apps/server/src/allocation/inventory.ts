@@ -1,3 +1,4 @@
+import { unresolvedQuotaRejections, type QuotaEvidence } from "./quotaEvidence.ts";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import type {
@@ -35,7 +36,8 @@ export function allocationInventory(input: {
   providers: readonly ServerProvider[];
   threads: readonly OrchestrationThreadShell[];
   measurements: UsageMeasurementsReport;
-  rejectedUntil?: ReadonlyMap<string, string>;
+  quotaEvidence?: readonly QuotaEvidence[];
+  maxReadingAgeMinutes?: number;
   request?: AllocationRequest;
 }): AllocationInventory {
   const { environmentId, at, providers, threads, measurements, request } = input;
@@ -53,27 +55,42 @@ export function allocationInventory(input: {
         )
       : undefined;
     const limits = p.usageLimits;
-    const limitedUntil = input.rejectedUntil?.get(p.instanceId) ?? null;
-    const replenished =
-      limitedUntil !== null &&
-      limitedUntil < at &&
-      (limits?.windows.length ?? 0) > 0 &&
-      limits!.windows.every(
-        (w) =>
-          (w.checkedAt ?? limits!.checkedAt) > limitedUntil &&
-          w.resetsAt !== undefined &&
-          w.resetsAt > limitedUntil &&
-          w.usedPercent < 100,
-      );
-    const failed = threads.find(
-      (t) =>
+    const evidence = (input.quotaEvidence ?? []).filter((e) => e.instanceId === p.instanceId);
+    // Legacy shells without projected receipts still need conservative protection.
+    for (const t of threads) {
+      if (
         (t.session?.providerInstanceId ?? t.modelSelection.instanceId) === p.instanceId &&
         t.session?.status === "error" &&
-        /usage.?limit|rate.?limit|quota|unauthori[sz]ed|authentication/i.test(
-          t.session.lastError ?? "",
-        ) &&
-        !(replenished && /usage.?limit|rate.?limit|quota/i.test(t.session.lastError ?? "")),
+        /usage.?limit|rate.?limit|quota/i.test(t.session.lastError ?? "") &&
+        !evidence.some((e) => e.threadId === t.id && e.at >= t.session!.updatedAt)
+      )
+        evidence.push({
+          instanceId: p.instanceId,
+          windowId: "unknown",
+          status: "rejected",
+          at: t.session.updatedAt,
+        });
+    }
+    const rejected = unresolvedQuotaRejections(
+      evidence,
+      limits,
+      at,
+      input.maxReadingAgeMinutes ?? 15,
     );
+    const limitedUntil =
+      rejected
+        .map((e) => e.resetsAt)
+        .filter((v): v is string => !!v)
+        .sort()
+        .at(-1) ?? null;
+    const failed =
+      rejected.length > 0 ||
+      threads.some(
+        (t) =>
+          (t.session?.providerInstanceId ?? t.modelSelection.instanceId) === p.instanceId &&
+          t.session?.status === "error" &&
+          /unauthori[sz]ed|authentication/i.test(t.session.lastError ?? ""),
+      );
     const available =
       p.enabled &&
       p.installed &&
@@ -96,7 +113,7 @@ export function allocationInventory(input: {
         : failed
           ? "Provider rejected an ongoing session for quota/auth; resolve the rejection before new admission."
           : "Provider is not authenticated, healthy, or reporting quota.",
-      limitedUntil: replenished ? null : limitedUntil,
+      limitedUntil,
       models: p.models.map(({ slug, capabilities }) => ({ slug, capabilities })),
       shortWindow: limits?.windows.some(
         (w) =>
@@ -118,7 +135,13 @@ export function allocationInventory(input: {
               .filter((m) => `-${normalize(m.slug)}-`.includes(`-${scope}-`))
               .map((m) => m.slug)
           : [];
-        const rate = measured?.windows.find((v) => v.window.id === w.id);
+        const rate = measured?.windows.find(
+          (v) =>
+            v.window.id === w.id &&
+            w.resetsAt !== undefined &&
+            v.window.resetsAt === w.resetsAt &&
+            v.window.windowDurationMins === w.windowDurationMins,
+        );
         const duration =
           w.windowDurationMins !== undefined && w.windowDurationMins > 0
             ? w.windowDurationMins / 60

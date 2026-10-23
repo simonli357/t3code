@@ -561,6 +561,24 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "account.rate-limits.updated": {
+      if (!event.payload.limits.states?.length) return [];
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "account.quota-state",
+          summary: "Provider allowance state",
+          payload: {
+            quotaStates: event.payload.limits.states,
+            providerInstanceId: event.providerInstanceId,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
     case "runtime.error": {
       return [
         {
@@ -572,6 +590,12 @@ export function runtimeEventToActivities(
           payload: {
             message: truncateDetail(event.payload.message),
             ...(event.payload.code ? { code: event.payload.code } : {}),
+            ...(event.payload.quotaStates
+              ? {
+                  quotaStates: event.payload.quotaStates,
+                  providerInstanceId: event.providerInstanceId,
+                }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

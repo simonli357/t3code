@@ -88,3 +88,51 @@ it("retains per-window age, scopes reported model buckets and does not opt share
   expect(a.windows.find((w) => w.id === "week")?.cycleStartedAt).toBe("2026-10-23T17:00:00.000Z");
   expect(a.profileSamples).toBe(0);
 });
+
+it("does not transplant retained rate evidence from a prior cycle onto a refreshed quota window", () => {
+  const p = provider("a@example.test");
+  const quota = p.usageLimits!.windows[0]!;
+  const report: UsageMeasurementsReport = {
+    ...measurements,
+    accounts: [
+      {
+        accountKey: "a",
+        instanceIds: [p.instanceId],
+        identityKnown: true,
+        windows: [
+          {
+            window: quota,
+            checkedAt: at,
+            ageSeconds: 1,
+            rate: {
+              sampleCount: 8,
+              intervalMinutes: 10,
+              percentagePointsPerHour: 20,
+              predictionErrorPointsPerHour: 2,
+              hoursUntilExhaustion: 4,
+              hoursUntilReset: 167,
+              projectedUsedPercentAtReset: 100,
+              reason: null,
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const read = (m: UsageMeasurementsReport) =>
+    allocationInventory({ environmentId: "host", at, providers: [p], threads: [], measurements: m })
+      .accounts[0]!.windows[0]!;
+  expect(read(report).ratePointsPerHour).toBe(20);
+  const oldCycle = {
+    ...report,
+    accounts: report.accounts.map((a) => ({
+      ...a,
+      windows: a.windows.map((w) => ({
+        ...w,
+        window: { ...w.window, resetsAt: "2026-10-23T17:00:00.000Z" },
+      })),
+    })),
+  };
+  expect(read(oldCycle).ratePointsPerHour).toBeNull();
+  expect(read(oldCycle).samples).toBe(0);
+});

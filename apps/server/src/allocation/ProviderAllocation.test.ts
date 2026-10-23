@@ -33,6 +33,7 @@ import * as Workers from "../orchestration/WorkerControls.ts";
 import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
 import { applyUsageLimitsUpdate } from "../provider/providerUsageLimits.ts";
 
+const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const at = "1970-01-01T00:00:00.000Z";
 const report: UsageMeasurementsReport = {
   observedAt: at,
@@ -552,5 +553,93 @@ it.effect("duplicate starts retain the original intent and cannot change the tas
     ).toBe(true);
     expect(f.calls).toHaveLength(1);
     expect(yield* store.reservations).toHaveLength(1);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("honors persisted paused-Claude rejections and recovers only the allowed window", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    f.state.providers = [{ ...provider, driver: ProviderDriverKind.make("claudeAgent") }];
+    f.state.threads = [shell()];
+    const sql = yield* SqlClient.SqlClient;
+    const write = (id: string, kind: string, payload: unknown) =>
+      sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES (${id}, 'worker', 'info', ${kind}, '', ${encodeUnknown(payload)}, ${at})`;
+    const preview = () =>
+      allocation.execute({
+        _tag: "preview",
+        request: {
+          ...startInput.request,
+          driver: ProviderDriverKind.make("claudeAgent"),
+          explicitInstanceId: provider.instanceId,
+        },
+      });
+    yield* write("legacy", "runtime.warning", {
+      message: "Claude usage limit reached",
+      detail: { status: "rejected", rateLimitType: "short", resetsAt: 3600 },
+    });
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+    for (const windowId of ["short", "weekly"])
+      yield* write(`reject-${windowId}`, "account.quota-state", {
+        quotaStates: [{ windowId, status: "rejected" }],
+      });
+    yield* write("allow-short", "account.quota-state", {
+      quotaStates: [{ windowId: "short", status: "allowed" }],
+    });
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+    yield* write("allow-week", "account.quota-state", {
+      quotaStates: [{ windowId: "weekly", status: "allowed" }],
+    });
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBe("chosen");
+    yield* write("rejected-again", "account.quota-state", {
+      quotaStates: [{ windowId: "short", status: "rejected" }],
+    });
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("recovers real-shaped historical Codex errors only after fresh confirmed cycles", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const failed = shell("error");
+    const errorAt = "1969-12-30T00:00:00.000Z";
+    f.state.threads = [
+      {
+        ...failed,
+        session: {
+          ...failed.session!,
+          lastError: "Codex usage limit reached.",
+          updatedAt: errorAt,
+        },
+      },
+    ];
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES ('codex-error', 'worker', 'error', 'runtime.error', '', '{"message":"Codex usage limit reached."}', ${errorAt})`;
+    const preview = () => allocation.execute({ _tag: "preview", request: startInput.request });
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBe("chosen");
+    // Missing reset evidence cannot turn a same-cycle low percentage into recovery.
+    f.state.providers = [
+      {
+        ...provider,
+        usageLimits: {
+          ...provider.usageLimits!,
+          windows: provider.usageLimits!.windows.map((w) =>
+            w.id === "weekly" ? { ...w, resetsAt: "1970-01-02T00:00:00.000Z" } : w,
+          ),
+        },
+      },
+    ];
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
+    // New structured receipts support recovery as soon as that rejected window resets.
+    yield* sql`UPDATE projection_thread_activities SET payload_json = ${encodeUnknown({ message: "Codex usage limit reached.", quotaStates: [{ windowId: "short", status: "rejected", resetsAt: "1969-12-31T23:00:00.000Z" }] })}`;
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBe("chosen");
+    f.state.providers = [
+      {
+        ...provider,
+        usageLimits: { ...provider.usageLimits!, checkedAt: "1969-12-31T22:00:00.000Z" },
+      },
+    ];
+    expect((yield* preview()).result?.decision.selectedInstanceId).toBeNull();
   }).pipe(Effect.provide(f.layer));
 });

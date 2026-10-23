@@ -2451,6 +2451,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   payload: {
                     message: usageLimitMessage,
                     class: "provider_error",
+                    quotaStates: (() => {
+                      const windows = rateLimits
+                        ? (codexRateLimitsToUpdate(rateLimits)?.windows ?? [])
+                        : [];
+                      const exhausted = windows.filter((w) => w.usedPercent >= 100);
+                      return exhausted.length
+                        ? exhausted.map((w) => ({
+                            windowId: w.id,
+                            status: "rejected" as const,
+                            ...(w.resetsAt ? { resetsAt: w.resetsAt } : {}),
+                          }))
+                        : [{ windowId: "unknown", status: "rejected" as const }];
+                    })(),
                     ...(turnError.message ? { detail: turnError.message } : {}),
                   },
                 };

@@ -82,8 +82,16 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
  * a time and Codex documents its notification as a partial. Windows merge by
  * `id` onto the instance's published snapshot; omitted windows are unchanged.
  */
+export const ProviderQuotaState = Schema.Struct({
+  windowId: TrimmedNonEmptyString,
+  status: Schema.Literals(["rejected", "allowed"]),
+  resetsAt: Schema.optional(IsoDateTime),
+});
+export type ProviderQuotaState = typeof ProviderQuotaState.Type;
+
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
+  states: Schema.optional(Schema.Array(ProviderQuotaState)),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

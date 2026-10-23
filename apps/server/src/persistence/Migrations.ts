@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import Migration0063 from "./Migrations/063_ProviderAllocation.ts";
+import Migration0064 from "./Migrations/064_AllocationStartReceipts.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -150,6 +151,7 @@ const migrationEntries = [
   [61, "SessionOrganization", Migration0061],
   [62, "OwnershipTransactions", Migration0062],
   [63, "ProviderAllocation", Migration0063],
+  [64, "AllocationStartReceipts", Migration0064],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

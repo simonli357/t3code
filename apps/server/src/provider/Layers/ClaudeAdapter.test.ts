@@ -1645,7 +1645,9 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
       harness.query.emit(rateLimitEvent(0.2));
       harness.query.emit(resultMessage("result-1"));
-      assert.deepStrictEqual(limitsUpdates(yield* Fiber.join(firstTurnFiber)), []);
+      assert.deepStrictEqual(limitsUpdates(yield* Fiber.join(firstTurnFiber)), [
+        { windows: [], states: [{ windowId: "seven_day_overage_included", status: "allowed" }] },
+      ]);
 
       // The status probe reads `get_usage` and records the model it saw.
       yield* Ref.set(scopedLimitNames, { overageIncluded: "Fable" });
@@ -1659,9 +1661,11 @@ describe("ClaudeAdapterLive", () => {
       harness.query.emit(resultMessage("result-2"));
       assert.deepStrictEqual(limitsUpdates(yield* Fiber.join(secondTurnFiber)), [
         {
+          states: [{ windowId: "seven_day_overage_included", status: "allowed" }],
           windows: [
             {
               id: "seven_day_fable",
+              modelScope: "Fable",
               kind: "weekly",
               label: "Weekly · Fable",
               usedPercent: 40,
@@ -5281,6 +5285,27 @@ describe("ClaudeAdapterLive", () => {
         ],
       );
 
+      const quotaStates = () =>
+        runtimeEvents.flatMap((e) =>
+          e.type === "account.rate-limits.updated" ? (e.payload.limits.states ?? []) : [],
+        );
+      assert.deepEqual(
+        quotaStates().map((s) => [s.windowId, s.status]),
+        [
+          ["five_hour", "rejected"],
+          ["seven_day", "rejected"],
+          ["five_hour", "rejected"],
+        ],
+      );
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed", rateLimitType: "five_hour" },
+        session_id: "sdk-session-interleaved",
+        uuid: "recovered-five",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      assert.deepEqual(quotaStates().at(-1), { windowId: "five_hour", status: "allowed" });
+
       runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -5429,7 +5454,9 @@ describe("ClaudeAdapterLive", () => {
       }
       yield* drainSdkMessages;
       assert.deepEqual(
-        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated"),
+        runtimeEvents.flatMap((event) =>
+          event.type === "account.rate-limits.updated" ? event.payload.limits.windows : [],
+        ),
         [],
       );
 
@@ -5458,8 +5485,18 @@ describe("ClaudeAdapterLive", () => {
         ],
       );
       assert.equal(
-        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
+        runtimeEvents.flatMap((event) =>
+          event.type === "account.rate-limits.updated" ? event.payload.limits.windows : [],
+        ).length,
         1,
+      );
+      assert.deepEqual(
+        runtimeEvents
+          .flatMap((event) =>
+            event.type === "account.rate-limits.updated" ? (event.payload.limits.states ?? []) : [],
+          )
+          .map((state) => state.windowId),
+        ["seven_day_overage_included", "future_window", "seven_day_overage_included"],
       );
       runtimeEventsFiber.interruptUnsafe();
     }).pipe(

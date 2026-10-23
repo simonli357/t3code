@@ -61,6 +61,16 @@ weekly underuse never overrides an unsafe short window. Temporary use-by targets
 reset plans do not replenish quota until the provider confirms it. Allocation never redeems
 reset credits or enables paid overage.
 
+A provider rejection remains blocked until that window reports recovery or fresh readings confirm
+its reset. Older errors without a recorded reset recover after fresh readings confirm that all
+reported allowance cycles began after the error; the old conversation can stay failed. Refresh
+provider usage after replenishment. Completing work does not renew borrowed allowance: consumed
+usage and pending work both count against the target plus borrowing.
+
+If worker creation is definitively refused before startup, inspection releases its reservation.
+Correct the request and create a new assignment. A lost response stays reserved until the execution
+computer can confirm what happened.
+
 Forecasts show their freshness and sample coverage. Sparse evidence uses conservative estimates;
 token costs are not subscription percentages. History charts are available only for accounts
 already opted into retained usage measurements. Native mobile supports inspection and assignment

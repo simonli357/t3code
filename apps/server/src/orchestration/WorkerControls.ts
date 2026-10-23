@@ -50,6 +50,9 @@ export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError"
   successorThreadId: Schema.optional(ThreadId),
 }) {}
 export const SpawnInput = Schema.Struct({
+  allocation: Schema.optional(
+    Schema.Struct({ assignmentId: TrimmedNonEmptyString, startIntent: TrimmedNonEmptyString }),
+  ),
   sourceThreadId: Schema.optional(ThreadId),
   projectId: Schema.optional(ProjectId),
   threadId: ThreadId,
@@ -3210,12 +3213,41 @@ const make = Effect.gen(function* () {
       case "workerOwner":
         return (yield* canonicalOrganization(request.threadId)).owner;
       case "spawn":
-        yield* assertTopologyAvailable();
-        return yield* spawn(
-          peerRef(from, request.owner.threadId),
-          { ...request.owner, peerOwner: true },
-          request.input,
-        ).pipe(
+        return yield* Effect.gen(function* () {
+          const owner = peerRef(from, request.owner.threadId);
+          const allocation = request.input.allocation;
+          if (allocation) {
+            const receipt = (yield* sql<{
+              reason: string;
+            }>`SELECT reason FROM provider_allocation_start_rejections WHERE assignment_id = ${allocation.assignmentId}`)[0];
+            if (receipt)
+              return yield* new WorkerError({
+                code: "allocation_start_rejected",
+                message: receipt.reason,
+              });
+          }
+          return yield* spawn(owner, { ...request.owner, peerOwner: true }, request.input).pipe(
+            Effect.catchTag("WorkerError", (error) =>
+              Effect.gen(function* () {
+                // spawn inserts its durable worker row before any dispatch. Only a
+                // typed refusal with neither row nor thread proves no start occurred.
+                if (
+                  allocation &&
+                  !(yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = ${request.input.threadId}`)
+                    .length &&
+                  Option.isNone(yield* snapshots.getThreadShellById(request.input.threadId))
+                ) {
+                  yield* sql`INSERT INTO provider_allocation_start_rejections (assignment_id, thread_id, start_intent, owner_id, reason) VALUES (${allocation.assignmentId}, ${request.input.threadId}, ${allocation.startIntent}, ${owner}, ${error.message})`;
+                  return yield* new WorkerError({
+                    code: "allocation_start_rejected",
+                    message: error.message,
+                  });
+                }
+                return yield* error;
+              }),
+            ),
+          );
+        }).pipe(
           lock.withPermit,
           Effect.tap(() => kick()),
         );

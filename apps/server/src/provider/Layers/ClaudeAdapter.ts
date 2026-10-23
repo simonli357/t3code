@@ -76,6 +76,7 @@ import { HostProcessIsExecutable } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -4174,11 +4175,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? yield* Ref.get(options.scopedLimitNames)
         : { overageIncluded: undefined };
       const limits = claudeRateLimitEventToUpdate(rateLimitInfo, names);
-      if (limits) {
+      const state =
+        rateLimitInfo.status === "rejected"
+          ? "rejected"
+          : rateLimitInfo.status === "allowed" || rateLimitInfo.status === "allowed_warning"
+            ? "allowed"
+            : undefined;
+      const stateReset =
+        rateLimitInfo.resetsAt === undefined
+          ? undefined
+          : Option.getOrUndefined(
+              Option.map(DateTime.make(rateLimitInfo.resetsAt * 1000), DateTime.formatIso),
+            );
+      if (limits || state) {
         yield* offerRuntimeEvent({
           ...base,
           type: "account.rate-limits.updated",
-          payload: { limits },
+          payload: {
+            limits: {
+              windows: limits?.windows ?? [],
+              ...(state
+                ? {
+                    states: [
+                      {
+                        // Enforcement identity stays stable even before a probe names a model bucket.
+                        windowId: rateLimitInfo.rateLimitType ?? "unknown",
+                        status: state,
+                        ...(stateReset ? { resetsAt: stateReset } : {}),
+                      },
+                    ],
+                  }
+                : {}),
+            },
+          },
         });
       }
       // A rejected window parks the turn inside the SDK: no further messages
