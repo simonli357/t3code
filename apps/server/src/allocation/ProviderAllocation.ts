@@ -26,6 +26,7 @@ import { readQuotaEvidence, type QuotaEvidence } from "./quotaEvidence.ts";
 import { allocationInventory } from "./inventory.ts";
 import { decideAllocation } from "./decision.ts";
 import { modelCandidates } from "./modelDecision.ts";
+import { stableStringify } from "@t3tools/shared/relaySigning";
 
 const PeerInput = Schema.TaggedUnion({
   allocation: { operation: AllocationOperation },
@@ -279,8 +280,20 @@ const make = Effect.gen(function* () {
       // family. Catalog/quota selection below still uses one shared snapshot.
       const effectiveModelPolicy =
         operation._tag === "modelPreview" ? (operation.policy ?? modelPolicy) : modelPolicy;
-      for (const candidate of modelCandidates(effectiveModelPolicy, operation.request, inventories)
-        .candidates) {
+      const prior =
+        operation._tag === "modelAllocate" || !operation.policy
+          ? yield* store.modelDecisionById(operation.request.assignmentId)
+          : undefined;
+      const retained =
+        prior && stableStringify(prior.request) === stableStringify(operation.request)
+          ? prior
+          : undefined;
+      for (const candidate of modelCandidates(
+        effectiveModelPolicy,
+        operation.request,
+        inventories,
+        retained,
+      ).candidates) {
         const measured = yield* collect(candidate.request);
         inventories = inventories.map((host) => ({
           ...host,

@@ -6,6 +6,7 @@ import {
   type AllocationRequest,
   type ModelRoutingPolicy,
   type ModelRoutingRequest,
+  type ModelRoutingDecision,
   type RoutingProfile,
 } from "@t3tools/contracts";
 
@@ -24,6 +25,7 @@ export function modelCandidates(
   policy: ModelRoutingPolicy,
   request: ModelRoutingRequest,
   inventories: readonly AllocationInventory[],
+  retained?: ModelRoutingDecision,
 ) {
   const row = scoreBand(request.assessment.difficulty);
   const column = scoreBand(request.assessment.stakes);
@@ -39,6 +41,28 @@ export function modelCandidates(
     reassessment: _reassessment,
     ...constraints
   } = request;
+  // Admission retries reuse the resolved exact capabilities, even after policy or
+  // catalog changes. The allocator still validates today's account capabilities.
+  if (retained) {
+    const selected = retained.allocation?.decision.request;
+    const profiles = selected
+      ? retained.profiles.filter((p) => p.driver === selected.driver)
+      : retained.profiles;
+    return {
+      rule: retained.rule,
+      reasons: profiles.length ? [] : [...retained.reasons],
+      candidates: profiles.map((p) => ({
+        request: selected ?? {
+          ...constraints,
+          driver: p.driver,
+          model: p.model,
+          options: p.options,
+        },
+        profile: p.profile,
+        reason: p.reason,
+      })),
+    };
+  }
   if (new Set(allowedDrivers).size !== allowedDrivers.length)
     return { rule, candidates, reasons: ["Allowed provider families must be unique."] };
   if (override) {

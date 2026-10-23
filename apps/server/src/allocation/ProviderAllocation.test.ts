@@ -244,6 +244,91 @@ it.effect(
     }).pipe(Effect.provide(f.layer));
   },
 );
+it.effect(
+  "automatic quota recovery starts the unchanged exact override and keeps its durable intent",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { assignments, store } = yield* f.setup;
+      const input: AllocationStart = {
+        ...startInput,
+        request: {
+          selection: "automatic",
+          assignmentId: startInput.request.assignmentId,
+          environmentId: startInput.request.environmentId,
+          threadId: startInput.request.threadId,
+          allowedDrivers: [startInput.request.driver],
+          policyVersion: 0,
+          assessment: {
+            difficulty: 8,
+            stakes: 8,
+            difficultyReason: "Interacting state",
+            stakesReason: "Consequential",
+          },
+          override: {
+            driver: startInput.request.driver,
+            model: startInput.request.model,
+            options: startInput.request.options,
+            reason: "Exact priority profile",
+          },
+        },
+      };
+      f.state.providers = [
+        {
+          ...provider,
+          usageLimits: {
+            ...provider.usageLimits!,
+            windows: provider.usageLimits!.windows.map((w) => ({ ...w, usedPercent: 100 })),
+          },
+        },
+      ];
+      expect((yield* assignments.start(input, ThreadId.make("master"))).state).toBe("unavailable");
+      expect(f.calls).toHaveLength(0);
+      expect(yield* store.reservations).toHaveLength(0);
+      yield* TestClock.adjust("7 days");
+      const recoveredAt = "1970-01-08T00:00:00.000Z";
+      f.state.providers = [
+        {
+          ...provider,
+          checkedAt: recoveredAt,
+          usageLimits: {
+            ...provider.usageLimits!,
+            checkedAt: recoveredAt,
+            windows: provider.usageLimits!.windows.map((w) => ({
+              ...w,
+              resetsAt:
+                w.kind === "weekly" ? "1970-01-14T00:00:00.000Z" : "1970-01-08T04:00:00.000Z",
+            })),
+          },
+        },
+      ];
+      const recovered = yield* assignments.start(input, ThreadId.make("master"));
+      expect(recovered.state).toBe("submitted");
+      expect(recovered.threadId).toBe(startInput.request.threadId);
+      expect(f.calls[0]?.modelSelection).toEqual({
+        instanceId: "chosen",
+        model: "astra",
+        options: startInput.request.options,
+      });
+      const intent = (yield* store.reservations)[0]?.startIntent;
+      expect(intent).toBeTruthy();
+      yield* assignments.start(input, ThreadId.make("master"));
+      expect((yield* store.reservations)[0]?.startIntent).toBe(intent);
+      expect(yield* store.reservations).toHaveLength(1);
+      expect(
+        f.calls.every(
+          (call) =>
+            call.threadId === startInput.request.threadId &&
+            call.allocation?.startIntent === intent,
+        ),
+      ).toBe(true);
+      const changed = yield* assignments
+        .start({ ...input, prompt: "Changed intent" }, ThreadId.make("master"))
+        .pipe(Effect.flip);
+      expect(changed.code).toBe("conflict");
+    }).pipe(Effect.provide(f.layer));
+  },
+);
 
 it.effect(
   "complete weekly-only reads admit an exact assignment, while partial, stale and five-hour evidence stays conservative",

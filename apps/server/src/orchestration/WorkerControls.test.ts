@@ -208,7 +208,7 @@ const allocatedWorkerLayer = AllocationAssignments.layer.pipe(
 
 for (const automatic of [false, true])
   it.effect(
-    `allocated fresh workers use real ownership, dispatch and idempotent startup receipts (${automatic ? "model-selected" : "exact"})`,
+    `allocated fresh workers use real ownership, dispatch and idempotent startup receipts (${automatic ? "model-selected observation recovery" : "exact"})`,
     () =>
       Effect.gen(function* () {
         const { owner, worker } = yield* seed("allocated-fresh", 1);
@@ -252,6 +252,19 @@ for (const automatic of [false, true])
                 }),
           },
         };
+        if (automatic) {
+          const policy = yield* store.policy;
+          yield* store.savePolicy({
+            expectedVersion: 1,
+            policy: { ...policy, mode: "observation" },
+          });
+          expect((yield* assignments.start(request, owner)).state).toBe("observation");
+          expect(yield* store.reservations).toHaveLength(0);
+          expect(
+            Option.isNone(yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(worker)),
+          ).toBe(true);
+          yield* store.savePolicy({ expectedVersion: 2, policy: { ...policy, mode: "automatic" } });
+        }
         expect((yield* assignments.start(request, owner)).state).toBe("submitted");
         const workers = yield* Workers.WorkerControls;
         yield* workers.drain();
@@ -268,6 +281,8 @@ for (const automatic of [false, true])
         );
         expect(repeated.messages.filter((m) => m.role === "user")).toHaveLength(1);
         expect(yield* store.reservations).toHaveLength(1);
+        expect((yield* store.reservations)[0]?.request.assignmentId).toBe("integrated-start");
+        expect((yield* store.reservations)[0]?.request.threadId).toBe(worker);
       }).pipe(Effect.provide(allocatedWorkerLayer)),
   );
 

@@ -81,6 +81,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const key = modelPreviewKey(policy, request, `${connection}:${connectionState.epoch}`);
   const validPreview = preview?.key === key && connection === "connected" ? preview.decision : null;
   const ready = snapshot?.authorityAvailable && connection === "connected";
+  const overrideEffortId = request.override?.driver === "codex" ? "reasoningEffort" : "effort";
   const table = policy[driver];
   const accounts =
     snapshot?.inventories
@@ -492,23 +493,35 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               Override effort
               <input
                 className={field}
-                value={String(request.override.options[0]?.value ?? "")}
+                value={String(
+                  request.override.options.find((o) => o.id === overrideEffortId)?.value ?? "",
+                )}
                 onChange={(e) =>
                   setRequest({
                     ...request,
                     override: {
                       ...request.override!,
-                      options: [
-                        {
-                          id: request.override!.driver === "codex" ? "reasoningEffort" : "effort",
-                          value: e.target.value,
-                        },
-                      ],
+                      options: request.override!.options.some((o) => o.id === overrideEffortId)
+                        ? request.override!.options.map((o) =>
+                            o.id === overrideEffortId ? { ...o, value: e.target.value } : o,
+                          )
+                        : [
+                            ...request.override!.options,
+                            { id: overrideEffortId, value: e.target.value },
+                          ],
                     },
                   })
                 }
               />
             </label>
+            <p>
+              Retained exact constraints:{" "}
+              {request.override.options
+                .filter((o) => o.id !== overrideEffortId)
+                .map((o) => `${o.id}: ${String(o.value)}`)
+                .join(", ") || "none"}
+              . Editing effort preserves these options.
+            </p>
             <label>
               Override reason
               <textarea
@@ -690,13 +703,15 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             {validPreview.profiles?.map((p) => (
               <p key={p.driver}>
                 {p.driver === "codex" ? "Codex" : "Claude"}: {p.model} /{" "}
-                {p.options.map((o) => o.value).join(", ")} ?{" "}
+                {p.options.map((o) => o.value).join(", ")};{" "}
                 {p.eligible ? "eligible" : "unavailable"}. {p.reason}
               </p>
             ))}
-            {validPreview.reasons.map((reason) => (
-              <p key={reason}>{reason}</p>
-            ))}
+            {validPreview.reasons
+              .filter((reason) => !validPreview.profiles?.some((p) => p.reason === reason))
+              .map((reason) => (
+                <p key={reason}>{reason}</p>
+              ))}
           </div>
         ) : (
           <p>Preview required after input, policy or connection changes.</p>

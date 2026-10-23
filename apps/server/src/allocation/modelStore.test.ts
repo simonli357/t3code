@@ -113,6 +113,213 @@ const args = {
   expectedPolicyVersion: 1,
   expectedModelVersion: 0,
 };
+it.effect("retains family consent through denied lineage after store reconstruction", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      expect((yield* store.selectModel(args)).allocation?.decision.request.driver).toBe(
+        "claudeAgent",
+      );
+      const next = {
+        ...request,
+        assignmentId: "denied",
+        threadId: ThreadId.make("denied"),
+        allowedDrivers: [ProviderDriverKind.make("codex")],
+        reassessment: {
+          previousAssignmentId: "one",
+          cause: "scope-change" as const,
+          reason: "New interactions",
+          allowFreshProviderSession: false,
+        },
+      };
+      expect((yield* store.selectModel({ ...args, request: next })).allocation).toBeNull();
+      const third = {
+        ...next,
+        assignmentId: "denied-again",
+        threadId: ThreadId.make("denied-again"),
+        reassessment: { ...next.reassessment, previousAssignmentId: "denied" },
+      };
+      const denied = yield* store
+        .selectModel({ ...args, request: third })
+        .pipe(Effect.provide(Store.layer));
+      expect(denied.allocation).toBeNull();
+      expect(denied.reasons.join(" ")).toContain("explicit consent");
+      expect(yield* store.reservations).toHaveLength(1);
+      const consented = yield* store.selectModel({
+        ...args,
+        request: {
+          ...third,
+          assignmentId: "consented",
+          threadId: ThreadId.make("consented"),
+          reassessment: { ...third.reassessment, allowFreshProviderSession: true },
+        },
+      });
+      expect(consented.allocation?.decision.request.driver).toBe("codex");
+      expect(consented.revision).toBe(2);
+    }),
+  ),
+);
+it.effect(
+  "retries never-reserved quota denial with frozen profiles and version after reconstruction",
+  () =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* setup;
+        const pinned = {
+          ...request,
+          policyVersion: 0,
+          explicitInstanceId: ProviderInstanceId.make("codex"),
+        };
+        const blocked = {
+          ...inventory,
+          accounts: inventory.accounts.map((a) => ({
+            ...a,
+            windows: a.windows.map((w) => ({ ...w, usedPoints: 100 })),
+          })),
+        };
+        const first = yield* store.selectModel({
+          ...args,
+          request: pinned,
+          inventories: [blocked],
+        });
+        expect(first.allocation).toBeNull();
+        expect(yield* store.reservations).toHaveLength(0);
+        yield* store.saveModelPolicy({
+          expectedVersion: 0,
+          inventories: [inventory],
+          policy: {
+            ...defaultModelRoutingPolicy,
+            codex: {
+              ...defaultModelRoutingPolicy.codex,
+              grid: defaultModelRoutingPolicy.codex.grid.map((row) => row.map(() => 1)),
+            },
+          },
+        });
+        const recoveredAt = "2026-10-29T18:00:00.000Z";
+        const recovered = {
+          ...inventory,
+          observedAt: recoveredAt,
+          accounts: inventory.accounts.map((a) => ({
+            ...a,
+            shortWindowAbsentCheckedAt: recoveredAt,
+            windows: a.windows.map((w) => ({
+              ...w,
+              checkedAt: recoveredAt,
+              cycleStartedAt: "2026-10-29T12:00:00.000Z",
+              resetsAt: "2026-11-05T12:00:00.000Z",
+            })),
+          })),
+        };
+        const retryArgs = {
+          ...args,
+          request: pinned,
+          at: recoveredAt,
+          inventories: [recovered],
+          expectedModelVersion: 1,
+        };
+        const missingExact = yield* store.selectModel({
+          ...retryArgs,
+          inventories: [
+            {
+              ...recovered,
+              accounts: recovered.accounts.map((a) => ({
+                ...a,
+                models: a.models.filter((m) => m.slug !== "gpt-6-astra"),
+              })),
+            },
+          ],
+        });
+        expect(missingExact.allocation).toBeNull();
+        expect(missingExact.profiles.map((p) => p.model)).toEqual(["gpt-6-astra"]);
+        expect(yield* store.reservations).toHaveLength(0);
+        const [retry, concurrent] = yield* Effect.all(
+          [store.selectModel(retryArgs), store.selectModel(retryArgs)],
+          { concurrency: "unbounded" },
+        ).pipe(Effect.provide(Store.layer));
+        expect(concurrent).toEqual(retry);
+        expect(retry.allocation?.reservation).not.toBeNull();
+        expect(retry.allocation?.decision.request).toMatchObject({
+          assignmentId: "one",
+          threadId: "one",
+          explicitInstanceId: "codex",
+          model: "gpt-6-astra",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        });
+        expect(retry.policyVersion).toBe(0);
+        expect(retry.request).toEqual(pinned);
+        expect(yield* store.reservations).toHaveLength(1);
+        expect(yield* store.selectModel({ ...retryArgs, inventories: [blocked] })).toEqual(retry);
+        for (const action of ["start", "consume", "release"] as const) {
+          yield* store.lifecycle(
+            {
+              assignmentId: "one",
+              environmentId: "host",
+              threadId: pinned.threadId,
+              action,
+              ...(action === "start" ? { startIntent: "original-start-intent" } : {}),
+            },
+            recoveredAt,
+          );
+          expect(yield* store.selectModel(retryArgs).pipe(Effect.provide(Store.layer))).toEqual(
+            retry,
+          );
+          expect(yield* store.reservations).toHaveLength(1);
+        }
+        const finished = yield* store
+          .allocate({ ...retryArgs, request: retry.allocation!.decision.request })
+          .pipe(Effect.flip);
+        expect(finished.message).toContain("finished or expired");
+      }),
+    ),
+);
+it.effect("admits an observed exact profile after mode recovery without changing identity", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      const policy = yield* store.policy;
+      yield* store.savePolicy({ expectedVersion: 1, policy: { ...policy, mode: "observation" } });
+      const observed = yield* store.selectModel({ ...args, expectedPolicyVersion: 2 });
+      expect(observed.allocation?.mode).toBe("observation");
+      expect(yield* store.reservations).toHaveLength(0);
+      yield* store.savePolicy({ expectedVersion: 2, policy: { ...policy, mode: "automatic" } });
+      const denied = yield* store.selectModel({
+        ...args,
+        expectedPolicyVersion: 3,
+        inventories: [
+          {
+            ...inventory,
+            accounts: inventory.accounts.map((a) =>
+              a.driver === "claudeAgent"
+                ? { ...a, available: false, unavailableReason: "Provider rejected" }
+                : a,
+            ),
+          },
+        ],
+      });
+      expect(denied.allocation).toBeNull();
+      expect(denied.profiles.map((p) => p.driver)).toEqual(["claudeAgent"]);
+      expect(yield* store.reservations).toHaveLength(0);
+      const changed = yield* store
+        .selectModel({
+          ...args,
+          expectedPolicyVersion: 3,
+          request: { ...request, expectedHours: 2 },
+        })
+        .pipe(Effect.flip);
+      expect(changed.message).toContain("different assessment or constraints");
+      const retried = yield* store
+        .selectModel({ ...args, expectedPolicyVersion: 3 })
+        .pipe(Effect.provide(Store.layer));
+      expect(retried.allocation?.mode).toBe("automatic");
+      expect(retried.allocation?.reservation?.request).toEqual(
+        observed.allocation?.decision.request,
+      );
+      expect(retried.policyVersion).toBe(observed.policyVersion);
+      expect(yield* store.reservations).toHaveLength(1);
+      expect((yield* store.history).some((d) => d.selectedInstanceId === null)).toBe(true);
+    }),
+  ),
+);
 it.effect(
   "rejects a stale preview for new work while replaying the original version for an existing assignment",
   () =>

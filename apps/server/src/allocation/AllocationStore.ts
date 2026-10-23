@@ -39,6 +39,9 @@ export class AllocationStore extends Context.Service<
     readonly modelPolicy: Effect.Effect<ModelRoutingPolicy, AllocationError>;
     readonly modelPolicies: Effect.Effect<readonly ModelRoutingPolicy[], AllocationError>;
     readonly modelHistory: Effect.Effect<readonly ModelRoutingDecision[], AllocationError>;
+    readonly modelDecisionById: (
+      id: string,
+    ) => Effect.Effect<ModelRoutingDecision | undefined, AllocationError>;
     readonly saveModelPolicy: (input: {
       expectedVersion: number;
       policy?: ModelRoutingPolicy;
@@ -309,6 +312,7 @@ const make = Effect.gen(function* () {
     modelPolicy,
     modelPolicies,
     modelHistory,
+    modelDecisionById,
     saveModelPolicy: (input) =>
       sql
         .withTransaction(
@@ -349,14 +353,17 @@ const make = Effect.gen(function* () {
         .withTransaction(
           Effect.gen(function* () {
             const prior = yield* modelDecisionById(input.request.assignmentId);
+            const existingReservation = yield* reservationById(input.request.assignmentId);
             if (input.reserve && prior) {
               if (stableStringify(prior.request) !== stableStringify(input.request))
                 return yield* conflict(
                   "Assignment ID already belongs to a different assessment or constraints. Use a new assignment ID for reassessment.",
                 );
-              return prior;
+              // A reservation of any state fixes execution, including uncertain or
+              // finished work. Only intents that never reserved may retry admission.
+              if (existingReservation || prior.allocation?.reservation) return prior;
             }
-            if (input.reserve && (yield* reservationById(input.request.assignmentId)))
+            if (input.reserve && existingReservation)
               return yield* conflict(
                 "This assignment identity already belongs to an explicit allocation. Use a new identity for automatic selection.",
               );
@@ -370,7 +377,14 @@ const make = Effect.gen(function* () {
                 "Policy changed while collecting target catalogs. Refresh and retry.",
               );
             const effective = input.previewPolicy ?? current;
+            const retained =
+              prior &&
+              !input.previewPolicy &&
+              stableStringify(prior.request) === stableStringify(input.request)
+                ? prior
+                : undefined;
             if (
+              !retained &&
               input.request.policyVersion !== undefined &&
               input.request.policyVersion !== current.version
             )
@@ -390,7 +404,7 @@ const make = Effect.gen(function* () {
                   "Reassessment starts a fresh assignment session; retain the existing session or choose a new destination thread.",
                 );
               revision = previous.revision + 1;
-              if (revision > effective.maxReassessments)
+              if (!retained && revision > effective.maxReassessments)
                 return yield* invalid(
                   "The configured reassessment bound is reached. Review the assignment manually.",
                 );
@@ -412,12 +426,25 @@ const make = Effect.gen(function* () {
                   "Reassessment cannot discard an exact user override. Retain it or supply a new explicit override with its reason.",
                 );
             }
-            const resolved = modelCandidates(effective, input.request, input.inventories);
+            // Failed reassessments do not grant consent or erase the last selected
+            // family. Revisions decrease on each durable predecessor (at most 3).
+            let anchor = previous;
+            while (anchor && !anchor.allocation && anchor.request.reassessment) {
+              const predecessor = yield* modelDecisionById(
+                anchor.request.reassessment.previousAssignmentId,
+              );
+              if (!predecessor || predecessor.revision >= anchor.revision)
+                return yield* invalid(
+                  "Reassessment lineage is unavailable. Review the previous assignment.",
+                );
+              anchor = predecessor;
+            }
+            const resolved = modelCandidates(effective, input.request, input.inventories, retained);
             const proposals = [];
             for (const candidate of resolved.candidates) {
               if (
-                previous?.allocation &&
-                previous.allocation.decision.request.driver !== candidate.request.driver &&
+                anchor?.allocation &&
+                anchor.allocation.decision.request.driver !== candidate.request.driver &&
                 !input.request.reassessment?.allowFreshProviderSession
               ) {
                 resolved.reasons.push(
@@ -426,10 +453,13 @@ const make = Effect.gen(function* () {
                 continue;
               }
               const result = yield* allocate({
-                ...input,
+                at: input.at,
+                inventories: input.inventories,
+                authorityAvailable: input.authorityAvailable,
+                expectedPolicyVersion: input.expectedPolicyVersion,
                 request: candidate.request,
                 reserve: false,
-                previewPolicy: allocationPolicy,
+                ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
                 stableSelection: true,
               });
               proposals.push({ ...candidate, result });
@@ -467,7 +497,7 @@ const make = Effect.gen(function* () {
               : null;
             const decision: ModelRoutingDecision = {
               at: input.at,
-              policyVersion: effective.version,
+              policyVersion: retained?.policyVersion ?? effective.version,
               request: input.request,
               revision,
               selectedProfile: chosen?.profile ?? null,
@@ -520,7 +550,11 @@ const make = Effect.gen(function* () {
                     },
                   }
                 : decision;
-              yield* sql`INSERT INTO model_selection_decisions (assignment_id, created_at, decision_json) VALUES (${input.request.assignmentId}, ${input.at}, ${json(retained)})`;
+              // Keep the original resolved intent until admission commits. Failed
+              // attempts are audited in the allocator's bounded decision history.
+              if (!prior || allocation?.reservation)
+                yield* sql`INSERT INTO model_selection_decisions (assignment_id, created_at, decision_json) VALUES (${input.request.assignmentId}, ${input.at}, ${json(retained)})
+                  ON CONFLICT(assignment_id) DO UPDATE SET decision_json = excluded.decision_json`;
               return retained;
             }
             return decision;

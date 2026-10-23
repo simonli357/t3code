@@ -9,6 +9,7 @@ import {
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type AllocationOperation,
   type ModelRoutingSnapshot,
 } from "@t3tools/contracts";
@@ -166,6 +167,98 @@ async function assess() {
   await change("Difficulty reason", "Scoped reasoning");
   await change("Stakes reason", "Reversible failure");
 }
+it.each(["codex", "claudeAgent"])(
+  "edits only the %s override effort and exposes retained exact options",
+  async (driver) => {
+    const effortId = driver === "codex" ? "reasoningEffort" : "effort";
+    const options = [
+      { id: "serviceTier", value: "priority" },
+      { id: effortId, value: "high" },
+      { id: "speed", value: "fast" },
+    ];
+    snapshot = {
+      ...snapshot,
+      history: [
+        {
+          at: "2026-10-23T12:00:00.000Z",
+          policyVersion: 3,
+          revision: 0,
+          selectedProfile: null,
+          rule: "Exact user override",
+          profiles: [],
+          reasons: [],
+          allocation: null,
+          request: {
+            selection: "automatic",
+            assignmentId: "prior",
+            environmentId: "host",
+            threadId: ThreadId.make("prior"),
+            allowedDrivers: [ProviderDriverKind.make(driver)],
+            assessment: {
+              difficulty: 7,
+              stakes: 7,
+              difficultyReason: "Interactions",
+              stakesReason: "Consequential",
+            },
+            override: {
+              driver: ProviderDriverKind.make(driver),
+              model: driver === "codex" ? "gpt-6-astra" : "claude-opus-5-5",
+              options,
+              reason: "Preserve priority and speed",
+            },
+          },
+        },
+      ],
+    };
+    await click("Refresh saved version; keep draft");
+    await click("Reassess as a new assignment");
+    expect(control("Override effort").value).toBe("high");
+    expect(container.textContent).toContain("serviceTier: priority");
+    expect(container.textContent).toContain("speed: fast");
+    await change("Override effort", "max");
+    await change("Reassessment reason", "Substantive scope change requires more reasoning");
+    await click("Preview exact selection");
+    const call = state.execute.mock.calls.findLast(
+      ([arg]) => arg.input._tag === "modelPreview",
+    )![0];
+    expect(call.input.request.override.options).toEqual(
+      options.map((o) => (o.id === effortId ? { ...o, value: "max" } : o)),
+    );
+    expect(call.input.request.override.reason).toBe("Preserve priority and speed");
+  },
+);
+it("renders eligibility with clear punctuation and one copy of the same reason", async () => {
+  await assess();
+  state.execute.mockImplementationOnce(async ({ input }) => ({
+    _tag: "Success",
+    value: {
+      selection: {
+        at: "2026-10-23T12:00:00.000Z",
+        request: input.request,
+        policyVersion: 3,
+        selectedProfile: 1,
+        revision: 0,
+        rule: "Rule",
+        allocation: null,
+        reasons: ["codex: table profile 1."],
+        profiles: [
+          {
+            driver: "codex",
+            model: "gpt-6.1-sol",
+            options: [{ id: "reasoningEffort", value: "medium" }],
+            profile: 1,
+            eligible: true,
+            reason: "codex: table profile 1.",
+          },
+        ],
+      },
+    },
+  }));
+  await click("Preview exact selection");
+  const text = container.querySelector('[aria-label="Selection preview"]')!.textContent!;
+  expect(text).not.toContain("? eligible");
+  expect(text.match(/codex: table profile 1\./g)).toHaveLength(1);
+});
 it("edits vertical stakes entries and reusable profiles, invalidates previews, then saves exact values", async () => {
   await assess();
   await click("Preview exact selection");
