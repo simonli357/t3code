@@ -10,7 +10,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-const ENV_FILES = [".env", NodePath.join("infra", "relay", ".env")];
+const ENV_FILES = [".env", ".env.local", NodePath.join("infra", "relay", ".env")];
 
 const projectRoot = process.env.T3CODE_PROJECT_ROOT;
 if (!projectRoot) {

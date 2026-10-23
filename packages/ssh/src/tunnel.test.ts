@@ -182,6 +182,10 @@ describe("ssh tunnel scripts", () => {
       "1.2.3-preview.1 x",
       "1.2.3-preview.1\nrm -rf /",
       "v1.2.3",
+      "1.2.3+custom/other",
+      "1.2.3+custom..32",
+      "1.2.3+custom.$(id)",
+      "1.2.3+",
     ]) {
       assert.throws(
         () => buildRemoteT3RunnerScript({ archiveVersion }),
@@ -757,6 +761,31 @@ describe("archive runner script", () => {
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
+
+  it.effect.skipIf(windowsHost)("reuses an installed runtime with SemVer build metadata", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-custom-runner-" });
+      const version = "0.0.45+custom.32";
+      const runtime = `${root}/.t3/runtime/versions/${version}`;
+      yield* fs.makeDirectory(runtime, { recursive: true });
+      yield* fs.writeFileString(`${runtime}/.install-complete`, `${version}\n`);
+      yield* fs.writeFileString(`${runtime}/t3`, `#!/bin/sh\nprintf '%s\\n' '${version}'\n`);
+      yield* fs.chmod(`${runtime}/t3`, 0o700);
+      const runner = `${root}/runner.sh`;
+      yield* fs.writeFileString(
+        runner,
+        buildRemoteT3RunnerScript({
+          archiveVersion: version,
+          releaseBaseUrl: `file://${root}/missing-release`,
+        }),
+      );
+      const result = yield* runRunner(root, runner);
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(result.stdout.trim(), version);
+      assert.deepEqual(yield* fs.readDirectory(`${root}/.t3/runtime/versions`), [version]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect.skipIf(windowsHost)(
     "installs once when several launches race, and reclaims stale locks",
