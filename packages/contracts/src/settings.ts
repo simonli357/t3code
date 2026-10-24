@@ -1119,18 +1119,18 @@ export const WorkerRenewalSettings = Schema.Struct({
 });
 export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
 
-const PersonalInstructionText = Schema.String.check(Schema.isMaxLength(8000));
-const PersonalInstructions = Schema.Struct({
+const GlobalInstructionText = Schema.String.check(Schema.isMaxLength(8000));
+const GlobalInstructions = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  text: PersonalInstructionText.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  text: GlobalInstructionText.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
 });
 
 export const ServerSettings = Schema.Struct({
-  personalInstructions: PersonalInstructions.pipe(
-    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(PersonalInstructions)({}))),
+  globalInstructions: GlobalInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(GlobalInstructions)({}))),
   ),
-  /** Environment-local fact; never synchronized with the personal text. */
-  personalInstructionsGuidePath: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** User-configured environment-local guide path; separate from instruction text. */
+  globalInstructionsGuidePath: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
   usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1499,13 +1499,13 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
-  personalInstructions: Schema.optionalKey(
+  globalInstructions: Schema.optionalKey(
     Schema.Struct({
       enabled: Schema.optionalKey(Schema.Boolean),
-      text: Schema.optionalKey(PersonalInstructionText),
+      text: Schema.optionalKey(GlobalInstructionText),
     }),
   ),
-  personalInstructionsGuidePath: Schema.optionalKey(Schema.String),
+  globalInstructionsGuidePath: Schema.optionalKey(Schema.String),
   usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(

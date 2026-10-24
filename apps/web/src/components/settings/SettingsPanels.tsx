@@ -1,4 +1,4 @@
-import { PersonalInstructionsSettings } from "./PersonalInstructionsSettings";
+import { GlobalInstructionsSettings } from "./GlobalInstructionsSettings";
 import { SettingsGroup } from "./SettingsGroup";
 import { Spinner } from "~/components/ui/spinner";
 import { NotificationSettings } from "./NotificationSettings";
@@ -2239,7 +2239,7 @@ export function GeneralSettingsPanel() {
   return (
     <SettingsPageContainer>
       <ProjectDefaultsSettings category="general" />
-      <PersonalInstructionsSettings key={scope.environmentIds.join(",")} />
+      <GlobalInstructionsSettings key={scope.environmentIds.join(",")} />
       <SettingsSection id="organization" title="Organization">
         <SettingsRow
           {...searchableSetting("project-grouping")}

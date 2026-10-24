@@ -2,22 +2,22 @@ import { describe, it, expect } from "vite-plus/test";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import * as NodeOS from "node:os";
 import {
-  buildPersonalInstructionContext,
-  appendPersonalInstructionContext,
-} from "./PersonalInstructions.ts";
+  buildGlobalInstructionContext,
+  appendGlobalInstructionContext,
+} from "./GlobalInstructions.ts";
 
-describe("personal instruction snapshots", () => {
+describe("global instruction snapshots", () => {
   it("leaves unconfigured sessions alone", () => {
-    expect(buildPersonalInstructionContext(DEFAULT_SERVER_SETTINGS, undefined)).toBeUndefined();
+    expect(buildGlobalInstructionContext(DEFAULT_SERVER_SETTINGS, undefined)).toBeUndefined();
   });
   it("keeps host facts separate and hashes only the effective text", () => {
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
-      personalInstructions: { enabled: true, text: "Use short test answers." },
+      globalInstructions: { enabled: true, text: "Use short test answers." },
     };
-    const a = buildPersonalInstructionContext(settings, "/job/a")!;
-    const b = buildPersonalInstructionContext(
-      { ...settings, personalInstructionsGuidePath: "/private/guide" },
+    const a = buildGlobalInstructionContext(settings, "/job/a")!;
+    const b = buildGlobalInstructionContext(
+      { ...settings, globalInstructionsGuidePath: "/private/guide" },
       "/job/b",
     )!;
     expect(a.revision).toEqual(b.revision);
@@ -25,23 +25,23 @@ describe("personal instruction snapshots", () => {
       host: NodeOS.hostname(),
       workspace: "/job/a",
     });
-    expect(JSON.parse(b.context.runtimeFacts).canonicalGuidePath).toBe("/private/guide");
+    expect(JSON.parse(b.context.runtimeFacts).guidePath).toBe("/private/guide");
     expect(a.context.instructions).toContain("user preferences");
-    expect(appendPersonalInstructionContext("Question", a.context)).toContain("Question");
+    expect(appendGlobalInstructionContext("Question", a.context)).toContain("Question");
   });
   it("replaces active, empty and disabled states without leaking inactive drafts", () => {
     const settings = {
       ...DEFAULT_SERVER_SETTINGS,
-      personalInstructions: { enabled: false, text: "Unreviewed draft" },
+      globalInstructions: { enabled: false, text: "Unreviewed draft" },
     };
-    expect(buildPersonalInstructionContext(settings, undefined)).toBeUndefined();
-    const disabled = buildPersonalInstructionContext(settings, undefined, true)!;
+    expect(buildGlobalInstructionContext(settings, undefined)).toBeUndefined();
+    const disabled = buildGlobalInstructionContext(settings, undefined, true)!;
     expect(disabled.context.instructions).not.toContain("Unreviewed draft");
     expect(disabled.context.instructions).toContain("Disregard earlier");
     expect(disabled.active).toBe(false);
     expect(
-      buildPersonalInstructionContext(
-        { ...settings, personalInstructions: { enabled: true, text: " " } },
+      buildGlobalInstructionContext(
+        { ...settings, globalInstructions: { enabled: true, text: " " } },
         undefined,
         true,
       )?.revision,

@@ -88,9 +88,9 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import {
-  buildPersonalInstructionContext,
-  appendPersonalInstructionContext,
-} from "../PersonalInstructions.ts";
+  buildGlobalInstructionContext,
+  appendGlobalInstructionContext,
+} from "../GlobalInstructions.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -392,7 +392,7 @@ function toRuntimePayloadFromSession(
   extra?: {
     readonly modelSelection?: unknown;
     readonly pendingContextHandoff?: string;
-    readonly personalInstructionsInheritedContext?: boolean;
+    readonly globalInstructionsInheritedContext?: boolean;
     readonly continueAfterServerUpdate?: TurnId;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
@@ -402,8 +402,8 @@ function toRuntimePayloadFromSession(
     ...(extra?.pendingContextHandoff !== undefined
       ? { pendingContextHandoff: extra.pendingContextHandoff }
       : {}),
-    ...(extra?.personalInstructionsInheritedContext
-      ? { personalInstructionsInheritedContext: true }
+    ...(extra?.globalInstructionsInheritedContext
+      ? { globalInstructionsInheritedContext: true }
       : {}),
     cwd: session.cwd ?? null,
     model: session.model ?? null,
@@ -1097,7 +1097,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     extra?: {
       readonly modelSelection?: unknown;
       readonly pendingContextHandoff?: string;
-      readonly personalInstructionsInheritedContext?: boolean;
+      readonly globalInstructionsInheritedContext?: boolean;
       readonly continueAfterServerUpdate?: TurnId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
@@ -1601,7 +1601,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
           ...(effectiveResumeCursor != null || input.contextHandoff
-            ? { personalInstructionsInheritedContext: true }
+            ? { globalInstructionsInheritedContext: true }
             : {}),
           ...(input.contextHandoff !== undefined
             ? { pendingContextHandoff: input.contextHandoff }
@@ -1755,7 +1755,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ? { input: inputTextWithAttachmentContext }
         : {}),
     };
-    delete input.personalInstructionContext;
+    delete input.globalInstructionContext;
     yield* Effect.annotateCurrentSpan({
       "provider.operation": "send-turn",
       "provider.thread_id": input.threadId,
@@ -1807,12 +1807,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         input.input = withHistory;
       }
-      const personalInstructions = buildPersonalInstructionContext(
+      const globalInstructions = buildGlobalInstructionContext(
         yield* serverSettings.getSettings.pipe(
           Effect.mapError((cause) =>
             toValidationError(
               "ProviderService.sendTurn",
-              "Could not load personal instructions",
+              "Could not load global instructions",
               cause,
             ),
           ),
@@ -1820,21 +1820,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         readPersistedCwd(payload),
         !!payload &&
           typeof payload === "object" &&
-          ("personalInstructionsSubmission" in payload ||
-            "personalInstructionsInheritedContext" in payload),
+          ("globalInstructionsSubmission" in payload ||
+            "globalInstructionsInheritedContext" in payload),
       );
-      if (personalInstructions) {
+      if (globalInstructions) {
         if (routed.adapter.provider === "codex") {
-          input.personalInstructionContext = personalInstructions.context;
+          input.globalInstructionContext = globalInstructions.context;
         } else {
-          const prompt = appendPersonalInstructionContext(
-            input.input,
-            personalInstructions.context,
-          );
+          const prompt = appendGlobalInstructionContext(input.input, globalInstructions.context);
           if (prompt.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
             return yield* toValidationError(
               "ProviderService.sendTurn",
-              "Input plus personal instructions exceeds the provider input limit. Shorten the request or personal instructions.",
+              "Input plus global instructions exceeds the provider input limit. Shorten the request or global instructions.",
             );
           }
           input.input = prompt;
@@ -1910,11 +1907,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           continueAfterServerUpdate: null,
           continueAfterServerUpdatePrepared: null,
           pendingContextHandoff: null,
-          ...(personalInstructions
+          ...(globalInstructions
             ? {
-                personalInstructionsSubmission: {
-                  revision: personalInstructions.revision,
-                  active: personalInstructions.active,
+                globalInstructionsSubmission: {
+                  revision: globalInstructions.revision,
+                  active: globalInstructions.active,
                   transport:
                     routed.adapter.provider === "codex" ? "additional-context" : "user-context",
                   turnId: turn.turnId,

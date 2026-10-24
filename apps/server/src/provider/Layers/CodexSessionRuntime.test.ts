@@ -1125,19 +1125,19 @@ describe("openCodexThread", () => {
   );
 });
 
-describe("personal instruction turn context", () => {
+describe("global instruction turn context", () => {
   it.effect("uses stable native keys for continuation turns without collaboration mode", () =>
     Effect.gen(function* () {
       for (const instructions of ["Test revision one", "Test revision two", "Disabled"]) {
         const params = yield* buildTurnStartParams({
           threadId: "native-unchanged",
           runtimeMode: "full-access",
-          personalInstructionContext: { instructions, runtimeFacts: '{"host":"test"}' },
+          globalInstructionContext: { instructions, runtimeFacts: '{"host":"test"}' },
         });
         NodeAssert.equal(params.threadId, "native-unchanged");
         NodeAssert.deepEqual(params.input, []);
         NodeAssert.deepEqual(params.additionalContext, {
-          t3_personal_instructions: { kind: "application", value: instructions },
+          t3_global_instructions: { kind: "application", value: instructions },
           t3_host_facts: { kind: "application", value: '{"host":"test"}' },
         });
       }

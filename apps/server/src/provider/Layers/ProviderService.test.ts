@@ -5541,9 +5541,9 @@ chatGptTelemetry.layer("ChatGPT connector turn analytics", (it) => {
   );
 });
 
-describe("current personal instructions across provider instances", () => {
+describe("current global instructions across provider instances", () => {
   for (const driver of ["codex", "claudeAgent", "cursor", "grok", "opencode", "antigravity"]) {
-    const instanceId = ProviderInstanceId.make(`personal-${driver}`);
+    const instanceId = ProviderInstanceId.make(`global-${driver}`);
     const fake = makeFakeCodexAdapter(ProviderDriverKind.make(driver));
     const harness = makeProviderServiceLayer({
       registry: makeStaticInstanceRegistry([[instanceId, fake.adapter]]),
@@ -5555,7 +5555,7 @@ describe("current personal instructions across provider instances", () => {
           const service = yield* ProviderService.ProviderService;
           const settings = yield* ServerSettings.ServerSettingsService;
           const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-          const threadId = asThreadId(`personal-${driver}`);
+          const threadId = asThreadId(`global-${driver}`);
           yield* service.startSession(threadId, {
             threadId,
             providerInstanceId: instanceId,
@@ -5565,23 +5565,23 @@ describe("current personal instructions across provider instances", () => {
           yield* service.sendTurn({
             threadId,
             input: "First",
-            personalInstructionContext: { instructions: "spoofed", runtimeFacts: "spoofed" },
+            globalInstructionContext: { instructions: "spoofed", runtimeFacts: "spoofed" },
           });
           assert.equal(fake.sendTurn.mock.calls.at(-1)?.[0].input, "First");
-          assert.isUndefined(fake.sendTurn.mock.calls.at(-1)?.[0].personalInstructionContext);
+          assert.isUndefined(fake.sendTurn.mock.calls.at(-1)?.[0].globalInstructionContext);
           yield* settings.updateSettings({
-            personalInstructions: { enabled: true, text: "Scoped test alpha" },
+            globalInstructions: { enabled: true, text: "Scoped test alpha" },
           });
           yield* service.sendTurn({ threadId, input: "Next" });
           const first = Option.getOrThrow(yield* directory.getBinding(threadId));
           const sent = fake.sendTurn.mock.calls.at(-1)![0];
           assert.include(
-            driver === "codex" ? sent.personalInstructionContext!.instructions : sent.input!,
+            driver === "codex" ? sent.globalInstructionContext!.instructions : sent.input!,
             "Scoped test alpha",
           );
           assert.equal(fake.startSession.mock.calls.length, 1);
           yield* settings.updateSettings({
-            personalInstructions: { enabled: true, text: "Scoped test beta" },
+            globalInstructions: { enabled: true, text: "Scoped test beta" },
           });
           fake.sendTurn.mockImplementationOnce(() =>
             Effect.fail(
@@ -5598,25 +5598,25 @@ describe("current personal instructions across provider instances", () => {
           yield* service.sendTurn({ threadId, input: "Retry" });
           const latest = fake.sendTurn.mock.calls.at(-1)![0];
           const text =
-            driver === "codex" ? latest.personalInstructionContext!.instructions : latest.input!;
+            driver === "codex" ? latest.globalInstructionContext!.instructions : latest.input!;
           assert.include(text, "Scoped test beta");
           assert.notInclude(text, "Scoped test alpha");
           yield* settings.updateSettings({
-            personalInstructions: { enabled: false, text: "Unreviewed draft" },
+            globalInstructions: { enabled: false, text: "Unreviewed draft" },
           });
           yield* service.sendTurn({ threadId, input: "Disabled" });
           const last = fake.sendTurn.mock.calls.at(-1)![0];
           const disabled =
-            driver === "codex" ? last.personalInstructionContext!.instructions : last.input!;
-          assert.include(disabled, "No personal instructions are active");
+            driver === "codex" ? last.globalInstructionContext!.instructions : last.input!;
+          assert.include(disabled, "No global instructions are active");
           assert.notInclude(disabled, "Unreviewed draft");
           assert.equal(fake.startSession.mock.calls.length, 1);
           assert.deepEqual(
             Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor,
             first.resumeCursor,
           );
-          yield* settings.updateSettings({ personalInstructions: { enabled: false, text: "" } });
-          const forkId = asThreadId(`personal-fork-${driver}`);
+          yield* settings.updateSettings({ globalInstructions: { enabled: false, text: "" } });
+          const forkId = asThreadId(`global-fork-${driver}`);
           yield* service.startSession(forkId, {
             threadId: forkId,
             providerInstanceId: instanceId,
@@ -5626,8 +5626,8 @@ describe("current personal instructions across provider instances", () => {
           yield* service.sendTurn({ threadId: forkId, input: "Fork after clearing" });
           const fork = fake.sendTurn.mock.calls.at(-1)![0];
           assert.include(
-            driver === "codex" ? fork.personalInstructionContext!.instructions : fork.input!,
-            "No personal instructions are active",
+            driver === "codex" ? fork.globalInstructionContext!.instructions : fork.input!,
+            "No global instructions are active",
           );
         }),
       );

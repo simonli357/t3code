@@ -10,34 +10,32 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
-export function PersonalInstructionsSettings() {
+export function GlobalInstructionsSettings() {
   const settings = useScopedSettings();
   const update = useUpdateScopedSettings();
   const { scope, connectedEnvironments } = useSettingsScope();
-  const mixed = useScopedSettingsMixed(["personalInstructions"]);
+  const mixed = useScopedSettingsMixed(["globalInstructions"]);
   const [draft, setDraft] = useState<string | null>(null);
   const [guide, setGuide] = useState<string | null>(null);
   if (scope.kind !== "all" && scope.kind !== "environment") return null;
-  const text = draft ?? settings.personalInstructions.text;
+  const text = draft ?? settings.globalInstructions.text;
   const disabled = connectedEnvironments.length === 0;
   return (
-    <SettingsSection id="personal-instructions" title="Personal instructions">
+    <SettingsSection id="global-instructions" title="Global instructions">
       <div className="space-y-3 p-4">
         <p className="text-sm text-muted-foreground">
-          User-owned preferences for every session on the selected environments, starting with their
-          next turn. Provider system and developer instructions still apply. Save the same reviewed
-          text to all intended hosts using the environment selector; offline hosts need a later
-          save. Editing alone does not activate a draft.
+          Instructions for all sessions on the selected environments, effective next turn. Editing
+          does not enable them. Offline environments need a later save.
         </p>
         <p className="text-sm">
           {mixed
             ? "Selected environments differ."
-            : settings.personalInstructions.enabled && settings.personalInstructions.text.trim()
+            : settings.globalInstructions.enabled && settings.globalInstructions.text.trim()
               ? "Enabled"
               : "Disabled"}
         </p>
         <Textarea
-          aria-label="Personal instruction text"
+          aria-label="Global instruction text"
           maxLength={8000}
           value={text}
           onChange={(event) => setDraft(event.target.value)}
@@ -46,20 +44,20 @@ export function PersonalInstructionsSettings() {
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={disabled}
-            onClick={() => update({ personalInstructions: { enabled: false, text } })}
+            onClick={() => update({ globalInstructions: { enabled: false, text } })}
           >
             Save inactive
           </Button>
           <Button
             disabled={disabled || !text.trim()}
-            onClick={() => update({ personalInstructions: { enabled: true, text } })}
+            onClick={() => update({ globalInstructions: { enabled: true, text } })}
           >
             Save and enable
           </Button>
           <Button
             variant="outline"
             disabled={disabled}
-            onClick={() => update({ personalInstructions: { enabled: false } })}
+            onClick={() => update({ globalInstructions: { enabled: false } })}
           >
             Disable
           </Button>
@@ -68,7 +66,7 @@ export function PersonalInstructionsSettings() {
             disabled={disabled}
             onClick={() => {
               setDraft("");
-              update({ personalInstructions: { enabled: false, text: "" } });
+              update({ globalInstructions: { enabled: false, text: "" } });
             }}
           >
             Clear
@@ -76,12 +74,12 @@ export function PersonalInstructionsSettings() {
         </div>
         {scope.kind === "environment" && (
           <>
-            <label htmlFor="personal-guide-path" className="text-sm">
-              This host's canonical guide path (optional)
+            <label htmlFor="global-guide-path" className="text-sm">
+              Guide path on this environment (optional)
             </label>
             <Input
-              id="personal-guide-path"
-              value={guide ?? settings.personalInstructionsGuidePath}
+              id="global-guide-path"
+              value={guide ?? settings.globalInstructionsGuidePath}
               onChange={(event) => setGuide(event.target.value)}
               disabled={disabled}
             />
@@ -90,19 +88,17 @@ export function PersonalInstructionsSettings() {
               disabled={disabled}
               onClick={() =>
                 update({
-                  personalInstructionsGuidePath: guide ?? settings.personalInstructionsGuidePath,
+                  globalInstructionsGuidePath: guide ?? settings.globalInstructionsGuidePath,
                 })
               }
             >
-              Save host path
+              Save guide path
             </Button>
           </>
         )}
         <p className="text-sm text-muted-foreground">
-          Codex receives keyed application context as developer messages containing user
-          preferences. Other providers receive user context on each turn; older snapshots remain in
-          their history but are explicitly superseded. Submission is not evidence that an agent read
-          or obeyed the instructions. Restore earlier text and save to roll back.
+          Provider system and developer instructions still apply. Submission does not prove
+          instructions were read or followed. Restore earlier text to roll back.
         </p>
       </div>
     </SettingsSection>

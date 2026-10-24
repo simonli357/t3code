@@ -621,9 +621,9 @@ describe("partial object patches at project scope", () => {
   });
 });
 
-describe("personal instruction deployment", () => {
+describe("global instruction deployment", () => {
   it("fans reviewed text to connected targets without copying host facts", () => {
-    const patch = { personalInstructions: { enabled: true, text: "Scoped test preference" } };
+    const patch = { globalInstructions: { enabled: true, text: "Scoped test preference" } };
     const plan = planScopedSettingsPatch(all, environments, patch);
     expect(plan.serverWrites.map((entry) => entry.environmentId)).toEqual([
       laptop.environmentId,
@@ -631,13 +631,13 @@ describe("personal instruction deployment", () => {
     ]);
     for (const entry of plan.serverWrites) {
       expect(entry.patch).toEqual(patch);
-      expect(entry.patch.personalInstructionsGuidePath).toBeUndefined();
+      expect(entry.patch.globalInstructionsGuidePath).toBeUndefined();
     }
     const disabled = applyServerSettingsPatch(
       { ...DEFAULT_SERVER_SETTINGS, ...patch },
-      { personalInstructions: { enabled: false } },
+      { globalInstructions: { enabled: false } },
     );
-    expect(disabled.personalInstructions).toEqual({
+    expect(disabled.globalInstructions).toEqual({
       enabled: false,
       text: "Scoped test preference",
     });

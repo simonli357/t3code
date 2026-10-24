@@ -70,7 +70,7 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
   /** Internal context, populated by ProviderService from current user settings. */
-  personalInstructionContext: Schema.optional(
+  globalInstructionContext: Schema.optional(
     Schema.Struct({
       instructions: Schema.String,
       runtimeFacts: Schema.String,

@@ -38,24 +38,20 @@ Settings that are environment-wide stay read-only while a project is selected. W
 targets disagree, a control shows **Mixed** until you choose one value. Appearance, keyboard,
 and other phone-only settings ignore the filter.
 
-## Personal instructions
+## Global instructions
 
-On web or desktop, open **Settings ? General ? Personal instructions** with **All projects**
-selected. Save a draft inactive, then enable it after review. These user preferences apply to
-all sessions on the selected environments, including workers and sessions opened from mobile.
-Changes take effect on the next turn without interrupting an agent. Disable preserves the draft;
-Clear removes it. Restore earlier text and save to roll back.
+On web or desktop, open **Settings > General > Global instructions** with **All projects**
+selected. Instructions start empty and disabled. Save an inactive draft or enable it for all
+sessions on the selected environments, including workers and mobile sessions. Changes apply
+next turn without interrupting agents. Disable retains the text; Clear removes it. Restore
+previous text to roll back. Saves reach connected environments only, not offline hosts.
 
-Use **All environments** to save the same text to connected hosts. Offline hosts need a later
-save; edits to one host's settings file do not synchronize automatically. Select one environment
-to set its canonical guide path separately. T3 supplies the actual hostname and known session
-workspace; it does not infer a guide path from a hostname.
-
-Provider system and developer instructions still apply. Codex receives keyed application context
-as developer messages identifying the text as user preferences. Other providers receive a current
-user-context snapshot each turn, explicitly superseding earlier snapshots retained in history.
-Each snapshot includes the effective text's SHA-256 revision. Submission does not prove an agent
-read or obeyed it. Personal text lives in the environment's settings, outside project repositories.
+T3 supplies the actual hostname and known workspace separately. A guide path is included only
+if you configure one for that environment. Provider system and developer instructions still
+apply: Codex receives keyed application context as developer messages identifying user
+preferences; other providers receive user context that supersedes earlier snapshots in history.
+The submitted revision hash identifies the text, not proof it was read or followed. Text is
+stored in environment settings outside project repositories.
 
 ## Defaults and inheritance
 

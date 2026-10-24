@@ -193,7 +193,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
-  readonly personalInstructionContext?:
+  readonly globalInstructionContext?:
     | { readonly instructions: string; readonly runtimeFacts: string }
     | undefined;
   readonly input?: string;
@@ -629,7 +629,7 @@ const SKILL_MENTION_PATTERN =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
 export function buildTurnStartParams(input: {
-  readonly personalInstructionContext?:
+  readonly globalInstructionContext?:
     | { readonly instructions: string; readonly runtimeFacts: string }
     | undefined;
   readonly threadId: string;
@@ -681,17 +681,17 @@ export function buildTurnStartParams(input: {
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     ...turnInstructions,
-    ...(input.personalInstructionContext
+    ...(input.globalInstructionContext
       ? {
           additionalContext: {
             ...turnInstructions.additionalContext,
-            t3_personal_instructions: {
+            t3_global_instructions: {
               kind: "application",
-              value: input.personalInstructionContext.instructions,
+              value: input.globalInstructionContext.instructions,
             },
             t3_host_facts: {
               kind: "application",
-              value: input.personalInstructionContext.runtimeFacts,
+              value: input.globalInstructionContext.runtimeFacts,
             },
           },
         }
@@ -2627,7 +2627,7 @@ export const makeCodexSessionRuntime = (
           const models = options.models ? yield* options.models : [];
           const modelName = models.find((model) => model.slug === normalizedModel)?.name;
           const params = yield* buildTurnStartParams({
-            personalInstructionContext: input.personalInstructionContext,
+            globalInstructionContext: input.globalInstructionContext,
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),
