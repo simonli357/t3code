@@ -620,3 +620,26 @@ describe("partial object patches at project scope", () => {
     });
   });
 });
+
+describe("personal instruction deployment", () => {
+  it("fans reviewed text to connected targets without copying host facts", () => {
+    const patch = { personalInstructions: { enabled: true, text: "Scoped test preference" } };
+    const plan = planScopedSettingsPatch(all, environments, patch);
+    expect(plan.serverWrites.map((entry) => entry.environmentId)).toEqual([
+      laptop.environmentId,
+      server.environmentId,
+    ]);
+    for (const entry of plan.serverWrites) {
+      expect(entry.patch).toEqual(patch);
+      expect(entry.patch.personalInstructionsGuidePath).toBeUndefined();
+    }
+    const disabled = applyServerSettingsPatch(
+      { ...DEFAULT_SERVER_SETTINGS, ...patch },
+      { personalInstructions: { enabled: false } },
+    );
+    expect(disabled.personalInstructions).toEqual({
+      enabled: false,
+      text: "Scoped test preference",
+    });
+  });
+});

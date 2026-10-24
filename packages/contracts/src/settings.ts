@@ -1119,7 +1119,18 @@ export const WorkerRenewalSettings = Schema.Struct({
 });
 export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
 
+const PersonalInstructionText = Schema.String.check(Schema.isMaxLength(8000));
+const PersonalInstructions = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  text: PersonalInstructionText.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+
 export const ServerSettings = Schema.Struct({
+  personalInstructions: PersonalInstructions.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(PersonalInstructions)({}))),
+  ),
+  /** Environment-local fact; never synchronized with the personal text. */
+  personalInstructionsGuidePath: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
   usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1488,6 +1499,13 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  personalInstructions: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      text: Schema.optionalKey(PersonalInstructionText),
+    }),
+  ),
+  personalInstructionsGuidePath: Schema.optionalKey(Schema.String),
   usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(

@@ -69,6 +69,13 @@ export const ProviderSessionStartInput = Schema.Struct({
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
+  /** Internal context, populated by ProviderService from current user settings. */
+  personalInstructionContext: Schema.optional(
+    Schema.Struct({
+      instructions: Schema.String,
+      runtimeFacts: Schema.String,
+    }),
+  ),
   threadId: ThreadId,
   /** Internal recovery signal. Allows an empty turn only for adapters that
       explicitly support promptless continuation. */

@@ -193,6 +193,9 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly personalInstructionContext?:
+    | { readonly instructions: string; readonly runtimeFacts: string }
+    | undefined;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "localImage";
@@ -626,6 +629,9 @@ const SKILL_MENTION_PATTERN =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
 export function buildTurnStartParams(input: {
+  readonly personalInstructionContext?:
+    | { readonly instructions: string; readonly runtimeFacts: string }
+    | undefined;
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
@@ -675,6 +681,21 @@ export function buildTurnStartParams(input: {
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     ...turnInstructions,
+    ...(input.personalInstructionContext
+      ? {
+          additionalContext: {
+            ...turnInstructions.additionalContext,
+            t3_personal_instructions: {
+              kind: "application",
+              value: input.personalInstructionContext.instructions,
+            },
+            t3_host_facts: {
+              kind: "application",
+              value: input.personalInstructionContext.runtimeFacts,
+            },
+          },
+        }
+      : {}),
   }).pipe(
     Effect.mapError((cause) =>
       CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
@@ -2606,6 +2627,7 @@ export const makeCodexSessionRuntime = (
           const models = options.models ? yield* options.models : [];
           const modelName = models.find((model) => model.slug === normalizedModel)?.name;
           const params = yield* buildTurnStartParams({
+            personalInstructionContext: input.personalInstructionContext,
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),

@@ -38,6 +38,25 @@ Settings that are environment-wide stay read-only while a project is selected. W
 targets disagree, a control shows **Mixed** until you choose one value. Appearance, keyboard,
 and other phone-only settings ignore the filter.
 
+## Personal instructions
+
+On web or desktop, open **Settings ? General ? Personal instructions** with **All projects**
+selected. Save a draft inactive, then enable it after review. These user preferences apply to
+all sessions on the selected environments, including workers and sessions opened from mobile.
+Changes take effect on the next turn without interrupting an agent. Disable preserves the draft;
+Clear removes it. Restore earlier text and save to roll back.
+
+Use **All environments** to save the same text to connected hosts. Offline hosts need a later
+save; edits to one host's settings file do not synchronize automatically. Select one environment
+to set its canonical guide path separately. T3 supplies the actual hostname and known session
+workspace; it does not infer a guide path from a hostname.
+
+Provider system and developer instructions still apply. Codex receives keyed application context
+as developer messages identifying the text as user preferences. Other providers receive a current
+user-context snapshot each turn, explicitly superseding earlier snapshots retained in history.
+Each snapshot includes the effective text's SHA-256 revision. Submission does not prove an agent
+read or obeyed it. Personal text lives in the environment's settings, outside project repositories.
+
 ## Defaults and inheritance
 
 General contains the model and workspace for new threads. Integrations controls agent browser

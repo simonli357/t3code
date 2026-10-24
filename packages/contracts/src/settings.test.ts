@@ -1009,3 +1009,15 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
   ).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, port: 0 }] })).toThrow();
 });
+
+describe("personal instruction settings", () => {
+  it("defaults inactive and preserves drafts when only disabled", () => {
+    expect(decodeServerSettings({}).personalInstructions).toEqual({ enabled: false, text: "" });
+    expect(
+      decodeServerSettingsPatch({ personalInstructions: { enabled: false } }).personalInstructions,
+    ).toEqual({ enabled: false });
+    expect(() =>
+      decodeServerSettingsPatch({ personalInstructions: { text: "x".repeat(8001) } }),
+    ).toThrow();
+  });
+});

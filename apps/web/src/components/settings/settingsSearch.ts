@@ -372,6 +372,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["composer rest resting scroll wheel conversation timeline shrink minimize"],
   },
   {
+    id: "personal-instructions",
+    title: "Personal instructions",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["global personal prompt user policy host guide"],
+  },
+  {
     id: "send-shortcut",
     title: "Send shortcut",
     to: "/settings/general",
