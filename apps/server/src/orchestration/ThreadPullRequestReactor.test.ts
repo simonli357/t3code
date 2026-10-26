@@ -559,102 +559,47 @@ describe("ThreadPullRequestReactor", () => {
   );
 
   it.effect.each(["settled", null] as const)(
-    "retries settled backfills and stops after success with settledOverride %s",
+    "skips settled threads at startup and on periodic polls with settledOverride %s",
     (settledOverride) =>
       Effect.scoped(
         Effect.gen(function* () {
-          const online = yield* Ref.make(false);
           const fixture = yield* makeHarness({
             threads: [
-              thread("backfill", { settledOverride, settledAt: NOW }),
-              thread("known", {
-                branch: "known",
-                settledOverride,
-                settledAt: NOW,
-                branchPullRequest: reference(1),
-              }),
+              thread("old", { settledOverride, settledAt: NOW }),
+              thread("open", { branch: "open" }),
+              thread("archived", { branch: "archived", archivedAt: NOW }),
             ],
-            branchPullRequest: ({ cwd }) =>
-              Ref.get(online).pipe(
-                Effect.flatMap((connected) =>
-                  connected
-                    ? Effect.succeed(branchPullRequest(42, "merged"))
-                    : Effect.fail(
-                        new GitManagerError({
-                          operation: "branchPullRequest",
-                          cwd,
-                          detail: "Offline",
-                        }),
-                      ),
-                ),
-              ),
           });
           yield* Effect.gen(function* () {
             const reactor = yield* fixture.start();
-            expect(yield* Ref.get(fixture.commands)).toHaveLength(0);
-            // A one-thread read cannot show that other pending threads are gone.
-            const gone = ThreadId.make("gone");
+            yield* TestClock.adjust("1 minute");
+            yield* Queue.take(fixture.reads);
+            yield* reactor.drain;
+            expect(
+              new Set((yield* Ref.get(fixture.branchCalls)).map((call) => call.branch)),
+            ).toEqual(new Set(["open"]));
+            const id = ThreadId.make("old");
             yield* fixture.publish({
               type: "thread.unarchived",
               sequence: 2,
-              eventId: EventId.make("gone-unarchived"),
+              eventId: EventId.make("old-unarchived"),
               aggregateKind: "thread",
-              aggregateId: gone,
+              aggregateId: id,
               occurredAt: NOW,
               commandId: null,
               causationEventId: null,
               correlationId: null,
               metadata: {},
-              payload: { threadId: gone, updatedAt: NOW },
+              payload: { threadId: id, updatedAt: NOW },
             });
-            expect(yield* Queue.take(fixture.reads)).toBe(gone);
+            expect(yield* Queue.take(fixture.reads)).toBe(id);
             yield* reactor.drain;
-            yield* Ref.set(online, true);
-            yield* TestClock.adjust("1 minute");
-            yield* Queue.take(fixture.reads);
-            yield* reactor.drain;
-            expect((yield* Ref.get(fixture.commands))[0]?.threadId).toBe("backfill");
-            yield* TestClock.adjust("1 minute");
-            yield* Queue.take(fixture.reads);
-            yield* reactor.drain;
-            expect((yield* Ref.get(fixture.branchCalls)).map((call) => call.branch)).toEqual([
-              "feature",
-              "feature",
-              "feature",
-            ]);
+            expect(
+              (yield* Ref.get(fixture.branchCalls)).some((call) => call.branch === "feature"),
+            ).toBe(true);
           }).pipe(Effect.provide(fixture.layer));
         }),
       ),
-  );
-
-  it.effect("stops retrying a settled backfill after repeated lookup failures", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fixture = yield* makeHarness({
-          threads: [thread("backfill", { settledOverride: "settled", settledAt: NOW })],
-          branchPullRequest: ({ cwd }) =>
-            Effect.fail(
-              new GitManagerError({ operation: "branchPullRequest", cwd, detail: "No gh" }),
-            ),
-        });
-        yield* Effect.gen(function* () {
-          const reactor = yield* fixture.start();
-          for (
-            let attempt = 1;
-            attempt < ThreadPullRequestReactor.BACKFILL_ATTEMPTS + 2;
-            attempt++
-          ) {
-            yield* TestClock.adjust("1 minute");
-            yield* Queue.take(fixture.reads);
-            yield* reactor.drain;
-          }
-          expect(yield* Ref.get(fixture.branchCalls)).toHaveLength(
-            ThreadPullRequestReactor.BACKFILL_ATTEMPTS,
-          );
-          expect(yield* Ref.get(fixture.commands)).toHaveLength(0);
-        }).pipe(Effect.provide(fixture.layer));
-      }),
-    ),
   );
 
   it.effect("discovers the same PRs from the unsettled read as from the full read", () =>
@@ -682,11 +627,9 @@ describe("ThreadPullRequestReactor", () => {
         ["archived", 6],
       ]);
 
-      // Startup, then two periodic passes. The startup backfill lookup fails,
-      // so the first periodic pass retries it from the full read.
+      // Startup and periodic passes both exclude settled threads.
       const discover = (read: ProjectionSnapshotQueryShape["getShellSnapshot"]) =>
         Effect.gen(function* () {
-          const online = yield* Ref.make(false);
           const reads: Array<ReadonlyArray<string>> = [];
           const fixture = yield* makeHarness({
             threads: [],
@@ -696,15 +639,8 @@ describe("ThreadPullRequestReactor", () => {
                   Effect.sync(() => reads.push(snapshot.threads.map(({ id }) => id).toSorted())),
                 ),
               ),
-            branchPullRequest: ({ cwd, branch }) =>
-              Effect.gen(function* () {
-                if (branch === "backfill" && !(yield* Ref.get(online))) {
-                  return yield* new GitManagerError({
-                    operation: "branchPullRequest",
-                    cwd,
-                    detail: "Offline",
-                  });
-                }
+            branchPullRequest: ({ branch }) =>
+              Effect.sync(() => {
                 const number = numbers.get(branch);
                 return number === undefined ? null : branchPullRequest(number);
               }),
@@ -713,7 +649,6 @@ describe("ThreadPullRequestReactor", () => {
             const reactor = yield* fixture.start();
             const startupCalls = (yield* Ref.get(fixture.branchCalls)).length;
             const startupCommands = (yield* Ref.get(fixture.commands)).length;
-            yield* Ref.set(online, true);
             for (let pass = 0; pass < 2; pass++) {
               yield* TestClock.adjust("1 minute");
               yield* Queue.take(fixture.reads);
@@ -738,14 +673,8 @@ describe("ThreadPullRequestReactor", () => {
       const { reads: unsettledReads, ...unsettled } = yield* discover(query.getShellSnapshot);
       const { reads: fullReads, ...full } = yield* discover(() => query.getShellSnapshot());
       expect(unsettled).toEqual(full);
-      expect(unsettled.commands).toEqual([
-        "backfill 5",
-        "open 1",
-        "open 1",
-        "resumed 2",
-        "resumed 2",
-      ]);
-      // The last pass has no backfill left, so it reads no settled thread.
+      expect(unsettled.commands).toEqual(["open 1", "open 1", "resumed 2", "resumed 2"]);
+      // Filtering at the query and the reactor produce the same open-thread work.
       expect(fullReads.at(-1)).toContain("imported");
       expect(unsettledReads.at(-1)).toEqual(["linked", "open", "resumed"]);
     }).pipe(

@@ -1080,6 +1080,15 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
       ).toBeNull();
 
+      expect(
+        (yield* manager.remoteStatus(
+          { cwd: repoDir },
+          { refreshUpstream: false, refreshMissingPullRequest: true },
+        ))?.pr,
+      ).toBeNull();
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+      yield* TestClock.adjust("60 seconds");
+
       const refreshed = yield* manager.remoteStatus(
         { cwd: repoDir },
         { refreshUpstream: false, refreshMissingPullRequest: true },
@@ -1505,6 +1514,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(status.pr?.state).toBe("merged");
       expect(pullRequest?.state).toBe("merged");
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+      yield* TestClock.adjust("60 seconds");
       const refreshed = yield* manager.branchPullRequest(
         { cwd: repoDir, branch: "feature/shared-pr-cache" },
         { refresh: true },
@@ -1570,6 +1580,29 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       yield* lookupAll;
       expect(prListCalls()).toHaveLength(7);
       expect(prListCalls().slice(-2).join("\n")).not.toContain("--head feature/open-pr");
+    }),
+  );
+
+  it.effect("repeated thread refreshes share a branch lookup for at least sixty seconds", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/poll-throttle"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/poll-throttle"]);
+      const { manager, ghCalls } = yield* makeManager();
+      const refresh = manager.branchPullRequest(
+        { cwd: repoDir, branch: "feature/poll-throttle" },
+        { refresh: true },
+      );
+      yield* refresh;
+      yield* TestClock.adjust("59 seconds");
+      yield* refresh;
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+      yield* TestClock.adjust("1 second");
+      yield* refresh;
+      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
     }),
   );
 
@@ -1716,10 +1749,10 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
   );
 
   it("backs off repeated PR lookup failures past the healthy refresh cadence", () => {
-    expect(Duration.toMillis(GitManager.prLookupFailureTtl(1))).toBe(20_000);
-    expect(Duration.toMillis(GitManager.prLookupFailureTtl(2))).toBe(40_000);
+    expect(Duration.toMillis(GitManager.prLookupFailureTtl(1))).toBe(60_000);
+    expect(Duration.toMillis(GitManager.prLookupFailureTtl(2))).toBe(120_000);
     // The point of the backoff: by the third retry a failing branch must not be
-    // asking more often than a healthy one, which refreshes every 2 minutes.
+    // asking more often than a healthy one, which refreshes every minute.
     expect(Duration.toMillis(GitManager.prLookupFailureTtl(4))).toBeGreaterThan(120_000);
     expect(Duration.toMillis(GitManager.prLookupFailureTtl(20))).toBe(900_000);
   });

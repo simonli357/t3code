@@ -51,13 +51,9 @@ function samePullRequest(
   );
 }
 
-/** Startup lookups per settled thread before discovery gives up on it. */
-export const BACKFILL_ATTEMPTS = 5;
-
 interface RefreshRequest {
   readonly threadId: ThreadId | null;
   readonly refresh: boolean;
-  readonly backfill?: boolean;
 }
 
 export function pullRequestMatchesProject(
@@ -76,7 +72,7 @@ export function pullRequestMatchesProject(
  * Read the shell state for a discovery or settlement sweep. A sweep for one
  * thread reads that thread and the projects it names, not every thread. A
  * sweep over all threads reads only unsettled threads, since both sweeps skip
- * settled ones. Discovery's backfill does its own full read.
+ * settled ones.
  */
 export const readSweepSnapshot = (
   snapshots: ProjectionSnapshotQuery.ProjectionSnapshotQueryShape,
@@ -112,57 +108,16 @@ export const make = Effect.gen(function* () {
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
-  // Settled threads get one link discovery at startup. Failed lookups retry on
-  // the periodic pass a few times, then stop until the thread changes or the
-  // server restarts, so a missing or logged-out CLI cannot loop forever.
-  const pendingBackfill = new Map<ThreadId, number>();
-  const finishBackfill = (threads: ReadonlyArray<{ readonly id: ThreadId }>) => {
-    for (const thread of threads) pendingBackfill.delete(thread.id);
-  };
-  const failBackfill = (threads: ReadonlyArray<{ readonly id: ThreadId }>) => {
-    for (const thread of threads) {
-      const remaining = pendingBackfill.get(thread.id);
-      if (remaining === undefined) continue;
-      if (remaining <= 1) pendingBackfill.delete(thread.id);
-      else pendingBackfill.set(thread.id, remaining - 1);
-    }
-  };
-
   const synchronize = Effect.fn("ThreadPullRequestReactor.synchronize")(function* (
     request: RefreshRequest,
   ) {
-    // Backfill looks up settled threads, so its passes read every thread.
-    const snapshot =
-      request.threadId === null && (request.backfill || pendingBackfill.size > 0)
-        ? yield* snapshots.getShellSnapshot()
-        : yield* readSweepSnapshot(snapshots, request.threadId);
+    const snapshot = yield* readSweepSnapshot(snapshots, request.threadId);
     const projects = new Map(snapshot.projects.map((project) => [project.id, project]));
-    if (request.backfill) {
-      for (const thread of snapshot.threads) {
-        if (
-          (thread.settledOverride === "settled" || thread.settledAt !== null) &&
-          thread.branchPullRequest == null
-        ) {
-          pendingBackfill.set(thread.id, BACKFILL_ATTEMPTS);
-        }
-      }
-    }
-    // A single-thread read only shows whether its own thread is gone. A thread
-    // with no branch has nothing to look up, and its entry would keep every
-    // periodic pass on the full read.
-    const branchThreadIds = new Set(
-      snapshot.threads.filter((thread) => thread.branch !== null).map((thread) => thread.id),
-    );
-    const checkedIds = request.threadId === null ? pendingBackfill.keys() : [request.threadId];
-    for (const threadId of checkedIds) {
-      if (!branchThreadIds.has(threadId)) pendingBackfill.delete(threadId);
-    }
     const threads = snapshot.threads.filter(
       (thread) =>
         thread.archivedAt === null &&
         ((thread.settledOverride !== "settled" && thread.settledAt === null) ||
-          request.threadId !== null ||
-          pendingBackfill.has(thread.id)) &&
+          request.threadId !== null) &&
         (thread.branch !== null || thread.branchPullRequest != null),
     );
     const groups = Map.groupBy(threads, (thread) =>
@@ -175,7 +130,7 @@ export const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const first = group[0]!;
           const snapshotProject = projects.get(first.projectId);
-          if (snapshotProject === undefined) return finishBackfill(group);
+          if (snapshotProject === undefined) return;
           // A finished turn may have added the remote this PR lives on. A failed
           // refresh resolves to null, so keep the snapshot's identity then.
           const project = request.refresh
@@ -188,7 +143,7 @@ export const make = Effect.gen(function* () {
               }
             : snapshotProject;
           const repository = sourceControlRepositorySelector(project.repositoryIdentity);
-          if (first.branch !== null && repository === null) return finishBackfill(group);
+          if (first.branch !== null && repository === null) return;
           const worktreeExists =
             first.worktreePath !== null && (yield* fileSystem.exists(first.worktreePath));
           const cwd =
@@ -205,7 +160,7 @@ export const make = Effect.gen(function* () {
           // A worktree can have different remotes, and the project identity
           // can lag a remote edit. Do not attach its PR to the wrong repository.
           if (detected !== null && !pullRequestMatchesProject(detected, project)) {
-            return finishBackfill(group);
+            return;
           }
           const detectedReference =
             detected !== null && repository !== null
@@ -256,7 +211,6 @@ export const make = Effect.gen(function* () {
                 samePullRequest(thread.branchPullRequest, branchPullRequest) &&
                 replacement === undefined
               ) {
-                pendingBackfill.delete(thread.id);
                 return null;
               }
               return { thread, branchPullRequest, replacement };
@@ -267,10 +221,7 @@ export const make = Effect.gen(function* () {
                   Effect.logWarning("thread pull request discovery failed", {
                     threadId: thread.id,
                     cause: Cause.pretty(cause),
-                  }).pipe(
-                    Effect.tap(() => Effect.sync(() => failBackfill([thread]))),
-                    Effect.as(null),
-                  ),
+                  }).pipe(Effect.as(null)),
               ),
             ),
           );
@@ -295,7 +246,7 @@ export const make = Effect.gen(function* () {
                 repositoryIdentity: currentIdentity,
               })
             ) {
-              return failBackfill(updates.map((update) => update.thread));
+              return;
             }
           }
 
@@ -320,12 +271,10 @@ export const make = Effect.gen(function* () {
                   branchPullRequest,
                   ...(replacement !== undefined ? { linkedPullRequest: replacement } : {}),
                 });
-                pendingBackfill.delete(thread.id);
               }).pipe(
                 // The thread changed since the lookup. Its own events requeue it.
                 Effect.catchTags({
-                  OrchestrationCommandInvariantError: () =>
-                    Effect.sync(() => finishBackfill([thread])),
+                  OrchestrationCommandInvariantError: () => Effect.void,
                 }),
                 Effect.catchCauseIf(
                   (cause) => !Cause.hasInterruptsOnly(cause),
@@ -333,7 +282,7 @@ export const make = Effect.gen(function* () {
                     Effect.logWarning("thread pull request update failed", {
                       threadId: thread.id,
                       cause: Cause.pretty(cause),
-                    }).pipe(Effect.tap(() => Effect.sync(() => failBackfill([thread])))),
+                    }),
                 ),
               ),
             { discard: true },
@@ -345,7 +294,7 @@ export const make = Effect.gen(function* () {
               Effect.logWarning("thread branch pull request lookup failed", {
                 threadIds: group.map((thread) => thread.id),
                 cause: Cause.pretty(cause),
-              }).pipe(Effect.tap(() => Effect.sync(() => failBackfill(group)))),
+              }),
           ),
         ),
       // Wide enough that a sweep's GitHub branch lookups reach GitHubCli together and share one
@@ -410,7 +359,7 @@ export const make = Effect.gen(function* () {
     // provider cache and retry backoff with status and automatic settlement.
     yield* forkParked(
       Effect.gen(function* () {
-        yield* worker.enqueue({ threadId: null, refresh: false, backfill: true });
+        yield* worker.enqueue({ threadId: null, refresh: false });
         yield* worker.drain;
         yield* Effect.gen(function* () {
           yield* worker.enqueue({ threadId: null, refresh: false });

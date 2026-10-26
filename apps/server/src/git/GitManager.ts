@@ -1,5 +1,6 @@
 import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as ByteSize from "effect/ByteSize";
@@ -82,7 +83,7 @@ export interface GitRunStackedActionOptions {
 }
 
 export interface GitRemoteStatusOptions extends GitVcsDriver.GitRemoteStatusOptions {
-  /** Retry a cached missing PR without clearing known PRs or failed lookup backoff. */
+  /** Retry a cached missing PR after one minute, preserving known PRs and failure backoff. */
   readonly refreshMissingPullRequest?: boolean;
 }
 
@@ -146,12 +147,12 @@ const STATUS_RESULT_CACHE_CAPACITY = 2_048;
 // under 429s instead of amplifying it.
 const PR_LOOKUP_CACHE_TTL = Duration.seconds(60);
 // Answers without an open PR ("no PR yet", merged, closed) only change when
-// someone opens a PR, and the paths that do that in-app (turn end, push,
-// create PR, user refresh) bypass this cache. Re-asking every minute for each
+// someone opens a PR. Turn-end refreshes can retry after one minute; git
+// actions and user refreshes invalidate immediately. Re-asking every minute for each
 // idle branch was the bulk of background GitHub quota use, so these wait out
 // a longer TTL and a PR opened outside the app shows up within minutes.
 const PR_LOOKUP_NO_OPEN_PR_CACHE_TTL = Duration.minutes(5);
-const PR_LOOKUP_FAILURE_BASE_TTL = Duration.seconds(20);
+const PR_LOOKUP_FAILURE_BASE_TTL = Duration.seconds(60);
 const PR_LOOKUP_FAILURE_MAX_TTL = Duration.minutes(15);
 const PR_LOOKUP_CACHE_CAPACITY = 2_048;
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
@@ -160,11 +161,9 @@ const isSourceControlProviderError = Schema.is(SourceControlProviderError);
  * How long a failed PR lookup is cached, given the number of consecutive
  * failures for that branch.
  *
- * A hosting provider rejects a throttled request immediately, so caching every
- * failure for a flat 20s made a rate-limited poller re-ask *faster* than a
- * healthy one does (which waits PR_LOOKUP_CACHE_TTL), turning a transient 429
- * into sustained pressure. Backing off per branch keeps the retry rate below
- * the healthy rate once a branch has failed more than a couple of times.
+ * Failed lookups wait at least as long as healthy ones, so fast rate-limit
+ * rejections cannot increase polling frequency. Repeated failures back off
+ * further, up to fifteen minutes.
  */
 export function prLookupFailureTtl(consecutiveFailures: number): Duration.Duration {
   const exponent = Math.max(0, consecutiveFailures - 1);
@@ -1110,9 +1109,10 @@ export const make = Effect.gen(function* () {
         ...(remoteName.length > 0 ? { remoteName } : {}),
       };
       return Effect.gen(function* () {
+        const checkedAt = yield* Clock.currentTimeMillis;
         const { headContext, lookup } = yield* resolveLookupHeadContext(cwd, details);
         if (!lookup) {
-          return { latest: null, headContext };
+          return { latest: null, headContext, checkedAt };
         }
         // Only skip when the branch is untracked as well: anything carrying an
         // upstream keeps the old behaviour.
@@ -1121,10 +1121,10 @@ export const make = Effect.gen(function* () {
           details.upstreamRef === null &&
           (yield* isUnpublishedBranch(cwd, headContext))
         ) {
-          return { latest: null, headContext };
+          return { latest: null, headContext, checkedAt };
         }
         const latest = yield* findLatestPrForHeadContext(cwd, headContext);
-        return { latest, headContext };
+        return { latest, headContext, checkedAt };
       });
     },
     {
@@ -1216,7 +1216,12 @@ export const make = Effect.gen(function* () {
       const cached = yield* Cache.getOption(prLookupCache, cacheKey).pipe(
         Effect.orElseSucceed(() => Option.none()),
       );
-      if (Option.isSome(cached) && cached.value.latest === null) {
+      if (
+        Option.isSome(cached) &&
+        cached.value.latest === null &&
+        (yield* Clock.currentTimeMillis) - cached.value.checkedAt >=
+          Duration.toMillis(PR_LOOKUP_CACHE_TTL)
+      ) {
         yield* Cache.invalidate(prLookupCache, cacheKey);
       }
     }
@@ -2223,12 +2228,17 @@ export const make = Effect.gen(function* () {
       ...(localBranchExists ? {} : { remoteName }),
     });
     if (options?.refresh) {
-      // A completed turn can create a PR or reuse a merged PR's branch.
-      // Refresh successful answers, but keep failed lookups' retry backoff.
+      // Completed turns can arrive seconds apart for threads sharing a branch.
+      // Preserve the one-minute floor and failed lookups' retry backoff.
       const cached = yield* Cache.getOption(prLookupCache, cacheKey).pipe(
         Effect.orElseSucceed(() => Option.none()),
       );
-      if (Option.isSome(cached)) yield* Cache.invalidate(prLookupCache, cacheKey);
+      if (
+        Option.isSome(cached) &&
+        (yield* Clock.currentTimeMillis) - cached.value.checkedAt >=
+          Duration.toMillis(PR_LOOKUP_CACHE_TTL)
+      )
+        yield* Cache.invalidate(prLookupCache, cacheKey);
     }
     let cached = yield* Cache.get(prLookupCache, cacheKey);
     // The cached head context may have resolved on a different remote than
