@@ -1,4 +1,6 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import type { ProjectId, ServerSettings, ThreadId } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
@@ -129,9 +131,68 @@ const failure = (threadId: string) => (cause: unknown) =>
         cause,
       });
 
+// Workenv owns these values; T3 accepts only paths inside the job root.
+const WORKENV_REDIRECTS = new Set([
+  "GOMODCACHE",
+  "GOCACHE",
+  "GRADLE_USER_HOME",
+  "MAVEN_OPTS",
+  "NUGET_PACKAGES",
+  "NUGET_HTTP_CACHE_PATH",
+  "CONDA_PKGS_DIRS",
+  "CONDA_ENVS_PATH",
+  "UV_CACHE_DIR",
+  "YARN_CACHE_FOLDER",
+  "ELECTRON_CACHE",
+  "ELECTRON_BUILDER_CACHE",
+  "npm_config_prefix",
+  "CARGO_INSTALL_ROOT",
+  "CARGO_HOME",
+  "PIPX_HOME",
+  "PIPX_BIN_DIR",
+  "PIPX_MAN_DIR",
+]);
+
+function workenvRedirects(root: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      NodeFS.readFileSync(NodePath.join(root, ".workenv-environment.json"), "utf8"),
+    );
+  } catch {
+    return {};
+  }
+  const values =
+    parsed &&
+    typeof parsed === "object" &&
+    "version" in parsed &&
+    parsed.version === 1 &&
+    "environment" in parsed
+      ? parsed.environment
+      : null;
+  if (!values || typeof values !== "object") return {};
+  const result: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (!WORKENV_REDIRECTS.has(name) || typeof value !== "string") continue;
+    const target = name === "MAVEN_OPTS" ? value.replace(/^-Dmaven\.repo\.local=/, "") : value;
+    if (name === "MAVEN_OPTS" && target === value) continue;
+    const relative = NodePath.relative(root, target);
+    if (
+      !NodePath.isAbsolute(target) ||
+      !relative ||
+      relative.startsWith("..") ||
+      NodePath.isAbsolute(relative)
+    )
+      continue;
+    result[name] = value;
+  }
+  return result;
+}
+
 /** Launch defaults only: tools can still choose paths and explicit provider values win. */
 export function workspaceEnvironment(job: SessionWorkspace): Record<string, string> {
   return {
+    ...workenvRedirects(job.root),
     T3_WORKSPACE_JOB_ID: job.jobId,
     T3_WORKSPACE_JOB_ROOT: job.root,
     T3_WORKSPACE_BUILD_DIR: job.buildDirectory,
