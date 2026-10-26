@@ -115,6 +115,7 @@ For authorized mobile verification, a missing or outdated native client is a bui
 
 ## Pull requests
 
+- Before deploying or reporting completion, integrate finished changes into this fork's `main`, push `origin/main`, and sync shared source checkouts on every host to that pushed commit without overwriting active work; deploy only from pushed commits.
 - Never make a PR unless the developer explicitly asks you to do so.
 - Conventional commit titles, plain language: `fix(web): new threads no longer spike CPU`.
 - Body: the problem in a sentence or two, then how you fixed it. End with the model and harness that did the work.
