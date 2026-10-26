@@ -16,7 +16,7 @@ import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
-import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 export class ThreadsCliServerNotRunningError extends Schema.TaggedError<ThreadsCliServerNotRunningError>()(
@@ -103,7 +103,7 @@ const purgeSettledCommand = Command.make("purge-settled", {
       const config = yield* resolveCliAuthConfig(flags, yield* GlobalFlag.LogLevel);
       yield* Effect.gen(function* () {
         const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
-        if (Option.isNone(runtimeState)) {
+        if (Option.isNone(runtimeState) || !isProcessAlive(runtimeState.value.pid)) {
           return yield* new ThreadsCliServerNotRunningError({ stateDir: config.stateDir });
         }
         const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;

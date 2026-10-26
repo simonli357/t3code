@@ -32,6 +32,7 @@ import { layerConfig as SqlitePersistenceLayerLive } from "../persistence/Layers
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import {
   clearPersistedServerRuntimeState,
+  isProcessAlive,
   readPersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -99,6 +100,15 @@ export class ProjectLiveServerRequestError extends Schema.TaggedError<ProjectLiv
 ) {
   override get message(): string {
     return "Failed to call the running server.";
+  }
+}
+
+export class ProjectLiveServerBusyError extends Schema.TaggedError<ProjectLiveServerBusyError>()(
+  "ProjectLiveServerBusyError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "The running server is busy or unreachable. Retry the command.";
   }
 }
 
@@ -207,7 +217,10 @@ const ProjectCliRuntimeLive = Layer.mergeAll(
 
 const PROJECT_CLI_LIVE_SERVER_TIMEOUT = Duration.seconds(1);
 const withProjectCliSessionToken = <A, E, R>(
-  environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+  environmentAuth: Pick<
+    EnvironmentAuth.EnvironmentAuth["Service"],
+    "issueSession" | "revokeSession"
+  >,
   run: (token: string) => Effect.Effect<A, E, R>,
 ) =>
   Effect.acquireUseRelease(
@@ -342,13 +355,20 @@ const getOfflineSnapshot = Effect.fn("getOfflineSnapshot")(function* () {
   return yield* projectionSnapshotQuery.getCommandReadModel();
 });
 
-const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
+export const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecutionMode")(
   function* (
-    environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
-    config: ServerConfig.ServerConfig["Service"],
+    environmentAuth: Pick<
+      EnvironmentAuth.EnvironmentAuth["Service"],
+      "issueSession" | "revokeSession"
+    >,
+    config: Pick<ServerConfig.ServerConfig["Service"], "serverRuntimeStatePath">,
   ) {
     const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
     if (Option.isNone(runtimeState)) {
+      return Option.none<{ readonly origin: string }>();
+    }
+    if (!isProcessAlive(runtimeState.value.pid)) {
+      yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
       return Option.none<{ readonly origin: string }>();
     }
 
@@ -369,8 +389,8 @@ const tryResolveLiveProjectExecutionMode = Effect.fn("tryResolveLiveProjectExecu
       origin: runtimeState.value.origin,
       cause: attempted.failure,
     });
-    yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
-    return Option.none<{ readonly origin: string }>();
+    // A failed probe does not give a second writer ownership of the live database.
+    return yield* new ProjectLiveServerBusyError({ cause: attempted.failure });
   },
 );
 
