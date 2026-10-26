@@ -50,9 +50,9 @@ const relayClientRpcError = (message: string) => (cause: unknown) =>
 
 function ensureRelayClientAvailable(
   environmentId: EnvironmentId,
-): Effect.Effect<void, CloudEnvironmentLinkError, EnvironmentRegistry.EnvironmentRegistry> {
+): Effect.Effect<void, CloudEnvironmentLinkError, EnvironmentRegistry> {
   return Effect.gen(function* () {
-    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const registry = yield* EnvironmentRegistry;
     const status = yield* registry
       .run(environmentId, request(WS_METHODS.cloudGetRelayClientStatus, {}))
       .pipe(Effect.mapError(relayClientRpcError("Could not check relay client availability.")));
@@ -260,7 +260,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
 }): Effect.Effect<
   void,
   CloudEnvironmentLinkError,
-  EnvironmentRegistry.EnvironmentRegistry | HttpClient.HttpClient | ManagedRelay.ManagedRelayClient
+  EnvironmentRegistry | HttpClient.HttpClient | ManagedRelay.ManagedRelayClient
 > {
   return Effect.gen(function* () {
     const configuredRelayUrl = relayUrl();

@@ -51,24 +51,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
-import * as Settings from "../../serverSettings.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
-import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
-import * as ProviderInstanceRegistryMutator from "../Services/ProviderInstanceRegistryMutator.ts";
+import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
+import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
-import {
-  type ProviderOrchestrationAdapterInfrastructure,
-  ProviderOrchestrationAdapterInfrastructureLive,
-} from "./ProviderOrchestrationAdapterInfrastructure.ts";
-import * as AcpRegistrySupport from "../acp/AcpRegistrySupport.ts";
-import { AcpRegistryCatalogLive } from "./AcpRegistryCatalog.ts";
-
-type ProviderInstanceRegistryHydrationEnv =
-  | Exclude<
-      BuiltInDriversEnv,
-      ProviderOrchestrationAdapterInfrastructure | AcpRegistrySupport.AcpRegistryCatalog
-    >
-  | Settings.ServerSettingsService;
 
 /**
  * Synthesize a `ProviderInstanceConfigMap` from a `ServerSettings` snapshot.
@@ -129,8 +116,8 @@ export const deriveProviderInstanceConfigMap = (
  */
 const SettingsWatcherLive = Layer.effectDiscard(
   Effect.gen(function* () {
-    const mutator = yield* ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator;
-    const serverSettings = yield* Settings.ServerSettingsService;
+    const mutator = yield* ProviderInstanceRegistryMutator;
+    const serverSettings = yield* ServerSettingsService;
     const settingsChanges = yield* serverSettings.subscribeChanges;
     yield* settingsChanges.pipe(
       Stream.runForEach((next) =>
@@ -164,12 +151,12 @@ const SettingsWatcherLive = Layer.effectDiscard(
  * it, so the visibility leak is harmless in practice.
  */
 export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  ProviderInstanceRegistry,
   never,
-  ProviderInstanceRegistryHydrationEnv
+  BuiltInDriversEnv | ServerSettingsService
 > = Layer.unwrap(
   Effect.gen(function* () {
-    const serverSettings = yield* Settings.ServerSettingsService;
+    const serverSettings = yield* ServerSettingsService;
     const initialSettings: ServerSettings | undefined = yield* serverSettings.getSettings.pipe(
       Effect.orElseSucceed(() => undefined),
     );
@@ -181,15 +168,8 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
     const mutableLayer = ProviderInstanceRegistryMutableLayer({
       drivers: BUILT_IN_DRIVERS,
       configMap: initialConfigMap,
-    }).pipe(
-      Layer.provide(ProviderOrchestrationAdapterInfrastructureLive),
-      Layer.provide(AcpRegistryCatalogLive),
-    );
+    });
 
     return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));
   }),
-) as Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
-  never,
-  ProviderInstanceRegistryHydrationEnv
->;
+) as Layer.Layer<ProviderInstanceRegistry, never, BuiltInDriversEnv | ServerSettingsService>;

@@ -3,13 +3,16 @@ import { CheckpointRef, ProjectId, type ThreadId } from "@t3tools/contracts";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/checkpoints";
 
-export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
-  return CheckpointRef.make(
-    `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/turn/${turnCount}`,
-  );
+/** Every checkpoint ref of a thread lives under this prefix. */
+export function checkpointRefPrefixForThread(threadId: ThreadId): string {
+  return `${CHECKPOINT_REFS_PREFIX}/${Encoding.encodeBase64Url(threadId)}/`;
 }
 
-function resolveThreadWorkspaceCwd(input: {
+export function checkpointRefForThreadTurn(threadId: ThreadId, turnCount: number): CheckpointRef {
+  return CheckpointRef.make(`${checkpointRefPrefixForThread(threadId)}turn/${turnCount}`);
+}
+
+export function resolveThreadWorkspaceCwd(input: {
   readonly thread: {
     readonly projectId: ProjectId;
     readonly worktreePath: string | null;

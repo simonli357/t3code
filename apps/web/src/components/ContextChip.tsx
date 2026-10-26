@@ -43,7 +43,6 @@ const contextChipVariants = cva(
         "pr-merged": "[--context-chip-accent:oklch(0.62_0.16_292)]",
         "pr-closed": "[--context-chip-accent:oklch(0.62_0.16_16)]",
         skill: "[--context-chip-accent:oklch(0.62_0.16_322)]",
-        thread: "[--context-chip-accent:oklch(0.62_0.12_190)]",
         citation: "[--context-chip-accent:oklch(0.62_0.16_259)]",
       },
       // Colors live in compoundVariants below so they come after the kind colors.
@@ -69,7 +68,6 @@ const contextChipVariants = cva(
           "pr-merged",
           "pr-closed",
           "skill",
-          "thread",
           "citation",
         ],
         className:

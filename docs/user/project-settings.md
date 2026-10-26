@@ -38,32 +38,29 @@ Settings that are environment-wide stay read-only while a project is selected. W
 targets disagree, a control shows **Mixed** until you choose one value. Appearance, keyboard,
 and other phone-only settings ignore the filter.
 
-## Worktree branch names
+## Global instructions
 
-In **Settings → Source Control → Worktree branch naming**, choose a static prefix,
-a model-selected semantic prefix such as `feat/` or `fix/`, or custom instructions
-for the complete name. The static prefix defaults to `t3code/`; a trailing slash is
-optional, and an empty prefix adds nothing. Invalid characters in a static prefix
-are replaced with hyphens. Custom instructions are appended to
-the naming prompt and can specify issue IDs, namespaces, and casing.
+On web or desktop, open **Settings > General > Global instructions** with **All projects**
+selected. Instructions start empty and disabled. Save an inactive draft or enable it for all
+sessions on the selected environments, including workers and mobile sessions. Changes apply
+next turn without interrupting agents. Disable retains the text; Clear removes it. Restore
+previous text to roll back. Saves reach connected environments only, not offline hosts.
 
-These settings apply to automatically named new worktree branches. Select a project
-to override its environment defaults. Worktree directories keep their original names.
-If generation fails, or a custom name is invalid or already taken, the temporary
-branch name remains.
-
-## Scheduled tasks on mobile
-
-Open **Settings → Scheduled tasks** to create recurring tasks or manage existing
-ones across your connected environments. Use the settings filter to narrow the
-list by environment or project. Each task runs on the environment you choose,
-using its project, model, and workspace settings. Fixed-time schedules use that
-environment's time zone, which may differ from your phone's.
-
-You can edit, pause, resume, run immediately, or delete a task from the list.
-Leaving an edited form asks before discarding unsaved changes.
+T3 supplies the actual hostname and known workspace separately. A guide path is included only
+if you configure one for that environment. Provider system and developer instructions still
+apply: Codex receives keyed application context as developer messages identifying user
+preferences; other providers receive user context that supersedes earlier snapshots in history.
+The submitted revision hash identifies the text, not proof it was read or followed. Text is
+stored in environment settings outside project repositories.
 
 ## Defaults and inheritance
+
+Corresponding workspaces on connected computers group by their Git repository. For a project
+without a Git remote, add the same unique `"projectKey"` (for example,
+`"my-team/survey-tool"`) to `t3.json` in each workspace root. This explicitly groups those
+folders without copying their files. Different projects must use different keys. Remove the
+key to return to automatic Git grouping, or separate folders when no Git identity is available.
+Changes appear after the identity cache refreshes (within 15 minutes).
 
 General contains the model and workspace for new threads. Integrations controls agent browser
 access. Source Control contains automatic pull, the default pull request merge method and text
@@ -87,6 +84,42 @@ itself, or **Skip** to leave them for a setup script. It resolves in the same or
 workspace default: a `"worktreeSubmodules"` value in the `t3.json` of the branch being checked out
 applies when the project and environment are both on **Inherit**.
 
+## Session workspaces
+
+In **Settings → Storage**, select one machine and set an absolute **Agent work root** to give
+each new session its own workspace and `tmp`, `build`, `cache`, `downloads`, `outputs` and
+`evidence` folders. Committed repositories use a worktree of their persistent Git primary.
+Ordinary folders and repositories without a first commit use an independent copy of their
+files; the latter gets an empty Git repository in the job. Source files and Git metadata stay
+unchanged. Copies exclude Git metadata and the configured agent-work root; later source edits
+are not synchronized. Internal directory links and junctions become independent copies;
+cycles and links into the agent-work root or Git metadata are omitted. Links to other external
+inputs must be removed or replaced with project-local files before snapshot creation.
+Keep persistent source inputs outside the agent-work root. Workers and
+linked-machine starts use the destination machine's setting. Existing sessions stay in place;
+clearing the setting affects future sessions only. Resume retains the original binding. Forks
+require committed source and receive their own worktree while preserving native conversation
+context where the provider supports it.
+
+Provider processes and terminals receive the job cwd and temporary/cache/build defaults.
+Explicit provider settings remain effective; tools can still choose other paths. Provider
+credentials and installed runtimes retain their existing locations. Antigravity uses a private
+per-process temporary subdirectory inside the job. An external OpenCode server cannot honor
+these launch settings; use a local OpenCode process for a job-backed session.
+
+T3 does not expire these jobs. Configure your external preservation and cleanup workflow, and
+preserve useful outputs before that workflow removes disposable files. Optionally configure an
+absolute lifecycle registration executable and an argument array. T3 invokes it without a shell
+before launch, with one JSON request on stdin: `action: "register"`, `version: 1`, `jobId`,
+`threadId`, `root`, `sourceDirectory`, `workspaceDirectory`, `tmpDirectory`, `buildDirectory`,
+`cacheDirectory`, `downloadsDirectory`, `outputsDirectory`, and `evidenceDirectory`.
+It must register or recognize that exact identity/path binding idempotently and return
+`{"version":1,"jobId":"<same jobId>","registered":true}` on stdout with exit code zero.
+Native provider hooks should recognize `T3_WORKSPACE_JOB_ID` and `T3_WORKSPACE_JOB_ROOT`
+against that durable registration, attaching activity to the same job. Registration failure
+prevents launch; retry retains the reserved job and paths. A missing established workspace
+requires recovery through its lifecycle owner.
+
 ## Storage cleanup
 
 Open **Settings → Storage** to enable automatic cleanup on one machine or all connected
@@ -98,7 +131,7 @@ Inherit follows each machine's rules; Off keeps that project's worktrees until y
 manually. Custom applies separate worktree rules to the selected project or checkout. Browser
 captures and log retention remain machine-wide.
 
-Worktrees can be removed after a chosen number of inactive days, after merging, or when they
+Session workspace jobs are excluded from T3's worktree cleanup. Other worktrees can be removed after a chosen number of inactive days, after merging, or when they
 have no commits beyond the default branch. Only T3-managed worktrees are eligible. Active
 sessions, shared worktrees, uncommitted changes, and ignored files other than `node_modules`
 prevent removal. Branches and thread history stay; starting another turn recreates the checkout.

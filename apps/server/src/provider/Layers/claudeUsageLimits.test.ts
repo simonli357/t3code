@@ -21,7 +21,6 @@ describe("claudeUsageResponseToLimits", () => {
             ...({
               model_scoped: [
                 { display_name: "Fable", utilization: 73, resets_at: "2026-07-24T08:59:00Z" },
-                { display_name: "Ghost", utilization: null, resets_at: null },
               ],
             } as object),
             extra_usage: {
@@ -56,18 +55,28 @@ describe("claudeUsageResponseToLimits", () => {
           },
           {
             id: "seven_day_fable",
+            modelScope: "Fable",
+            enforcement: { windowId: "seven_day_overage_included", checkedAt },
             kind: "weekly",
             label: "Weekly · Fable",
             usedPercent: 73,
             windowDurationMins: 10080,
             resetsAt: "2026-07-24T08:59:00.000Z",
           },
+          {
+            id: "seven_day_opus",
+            modelScope: "opus",
+            kind: "weekly",
+            label: "Weekly · opus",
+            usedPercent: 3,
+            windowDurationMins: 10080,
+          },
         ],
       },
     });
   });
 
-  it("names the overage-included bucket only from a scoped entry that drew a row", () => {
+  it("does not bind an enforcement ID when another reported model has missing readings", () => {
     expect(
       claudeUsageResponseToLimits({
         checkedAt,
@@ -83,7 +92,7 @@ describe("claudeUsageResponseToLimits", () => {
           },
         },
       }).names,
-    ).toEqual({ overageIncluded: "Fable" });
+    ).toEqual({ overageIncluded: undefined });
   });
 
   it("reports API key and Bedrock accounts as unsupported", () => {
@@ -157,6 +166,7 @@ describe("claudeRateLimitEventToUpdate", () => {
       windows: [
         {
           id: "seven_day_fable",
+          modelScope: "Fable",
           kind: "weekly",
           label: "Weekly · Fable",
           usedPercent: 40,
@@ -166,13 +176,13 @@ describe("claudeRateLimitEventToUpdate", () => {
     });
   });
 
-  it("ignores windows the page does not render and events without a utilization", () => {
+  it("retains model-scoped events and ignores events without a utilization", () => {
     expect(
       claudeRateLimitEventToUpdate(
         { status: "allowed", rateLimitType: "seven_day_opus", utilization: 0.1 },
         noNames,
       ),
-    ).toBeUndefined();
+    ).toMatchObject({ windows: [{ id: "seven_day_opus", modelScope: "opus", usedPercent: 10 }] });
     expect(
       claudeRateLimitEventToUpdate({ status: "rejected", rateLimitType: "five_hour" }, noNames),
     ).toBeUndefined();

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import type { ManagedEndpointCleanupMode } from "../Config.ts";
 import * as RelayConfiguration from "../Config.ts";
 import { managedEndpointTunnelNamePrefix } from "../deploymentConfig.ts";
 import * as ManagedEndpointAllocations from "./ManagedEndpointAllocations.ts";
@@ -18,7 +19,7 @@ export const MANAGED_ENDPOINT_SWEEP_ATTEMPT_LIMIT = 100;
 export const MANAGED_ENDPOINT_SWEEP_LIST_REQUEST_LIMIT = 10;
 
 export interface ManagedEndpointSweepResult {
-  readonly mode: RelayConfiguration.ManagedEndpointCleanupMode;
+  readonly mode: ManagedEndpointCleanupMode;
   readonly listRequests: number;
   readonly scanned: number;
   readonly attempted: number;
@@ -102,9 +103,7 @@ function rotatedPages(input: {
   return Array.from({ length: count }, (_, index) => 2 + ((start + index) % laterPageCount));
 }
 
-const emptyResult = (
-  mode: RelayConfiguration.ManagedEndpointCleanupMode,
-): ManagedEndpointSweepResult => ({
+const emptyResult = (mode: ManagedEndpointCleanupMode): ManagedEndpointSweepResult => ({
   mode,
   listRequests: 0,
   scanned: 0,

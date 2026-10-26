@@ -1,4 +1,3 @@
-import { Alert, AlertDescription } from "../ui/alert";
 import type { AuthSessionState } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import React, { startTransition, useEffect, useRef, useState, useCallback } from "react";
@@ -114,9 +113,9 @@ export function PairingRouteSurface({
         </div>
 
         {errorMessage ? (
-          <Alert variant="error">
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
+          <div className="rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
+            {errorMessage}
+          </div>
         ) : null}
 
         <div className="flex flex-wrap gap-2">
@@ -231,12 +230,10 @@ export function HostedPairingRouteSurface() {
       ) : null}
 
       {status === "error" ? (
-        <Alert variant="error" className="mt-5">
-          <AlertDescription>
-            Verify the backend is reachable from this browser, supports CORS for hosted clients, and
-            is served over HTTPS when opening this page from HTTPS.
-          </AlertDescription>
-        </Alert>
+        <div className="mt-5 rounded-lg border border-destructive/30 bg-destructive/6 px-3 py-2 text-sm text-destructive">
+          Verify the backend is reachable from this browser, supports CORS for hosted clients, and
+          is served over HTTPS when opening this page from HTTPS.
+        </div>
       ) : null}
 
       <div className="mt-6 flex flex-wrap gap-2">

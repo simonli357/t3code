@@ -82,12 +82,6 @@ export function bitbucketProviderFailure(
       ...(error.retryAt === undefined ? {} : { retryAt: error.retryAt }),
     };
   }
-  if (
-    (error._tag === "BitbucketResponseError" || error._tag === "BitbucketResponseBodyReadError") &&
-    error.status === 404
-  ) {
-    return { reason: "not-found" };
-  }
   return { reason: "failed" };
 }
 
@@ -183,12 +177,6 @@ export const make = Effect.gen(function* () {
             continues: true,
           })),
         ),
-
-    getChangeRequestChecks: (input) =>
-      Effect.all([api.getPullRequest(input), api.listChecks(input)], { concurrency: 2 }).pipe(
-        Effect.map(([pullRequest, checks]) => ({ state: pullRequest.state, checks })),
-        Effect.mapError(fail("getChangeRequestChecks")),
-      ),
 
     getChangeRequest: (input) => {
       const target = { repository: input.repository, number: input.number };

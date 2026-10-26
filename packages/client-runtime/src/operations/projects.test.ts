@@ -257,12 +257,13 @@ describe("add project shared logic", () => {
     );
   });
 
-  it("builds the V2 project.create mutation", () => {
+  it("builds the existing project.create command shape", () => {
     expect(
       buildProjectCreateCommand({
         commandId: CommandId.make("command"),
         projectId: ProjectId.make("project"),
         workspaceRoot: "/work/repo",
+        createdAt: "2026-01-01T00:00:00.000Z",
       }),
     ).toMatchObject({
       type: "project.create",

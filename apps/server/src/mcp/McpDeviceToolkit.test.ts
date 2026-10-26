@@ -19,13 +19,9 @@ const environmentId = EnvironmentId.make("environment-device-test");
 const threadId = ThreadId.make("thread-device-test");
 const invocation = (capabilities: ReadonlyArray<McpInvocationContext.McpCapability>) => ({
   environmentId,
-  requestNamespace: "provider-session-device-test",
-  thread: {
-    threadId,
-    providerSessionId: "provider-session-device-test",
-    providerInstanceId: ProviderInstanceId.make("codex"),
-  },
-  client: undefined,
+  threadId,
+  providerSessionId: "provider-session-device-test",
+  providerInstanceId: ProviderInstanceId.make("codex"),
   capabilities: new Set(capabilities),
   issuedAt: 1,
 });

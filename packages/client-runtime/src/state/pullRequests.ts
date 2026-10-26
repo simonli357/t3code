@@ -2,12 +2,9 @@ import {
   WS_METHODS,
   type EnvironmentId,
   type PullRequestActor,
-  type PullRequestActionInput,
   type PullRequestDetail,
   type PullRequestDiffInput,
   type PullRequestRef,
-  type PullRequestMergeMethod,
-  PullRequestOperationError,
   type PullRequestSummary,
   type VcsStatusResult,
 } from "@t3tools/contracts";
@@ -19,22 +16,22 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import {
   createAtomCommandScheduler,
-  createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
   createEnvironmentRpcSubscriptionAtomFamily,
   createEnvironmentQueryAtomFamily,
 } from "./runtime.ts";
 import { createPullRequestRouter } from "./pullRequestRouting.ts";
-import * as PullRequestDiffLoader from "./pullRequestDiffHttp.ts";
+import { PullRequestDiffLoader } from "./pullRequestDiffHttp.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
-import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 
 export {
   type PullRequestDiffLoadError,
   PullRequestDiffCredentialRejectedError,
+  PullRequestDiffLoader,
+  pullRequestDiffLoaderLayer,
 } from "./pullRequestDiffHttp.ts";
-export * as PullRequestDiffLoader from "./pullRequestDiffHttp.ts";
 
 /** @public Required to name the error in consumers' inferred pull request results. */
 export class EnvironmentHttpConnectionNotReadyError extends Data.TaggedError(
@@ -68,18 +65,12 @@ function writableQueryFamily<A, E>(
   );
   return ({
     environmentId,
-    input: { projectId, host, repository, number, allowStale },
+    input: { projectId, host, repository, number },
   }: Parameters<typeof family>[0]) =>
     writable(
       family({
         environmentId,
-        input: {
-          projectId,
-          ...(host === undefined ? {} : { host }),
-          repository,
-          number,
-          ...(allowStale === undefined ? {} : { allowStale }),
-        },
+        input: { projectId, ...(host === undefined ? {} : { host }), repository, number },
       }),
     );
 }
@@ -158,10 +149,7 @@ export function pullRequestDetailToVcsStatus(
  * pull request are order-sensitive. Confirmed label and reviewer edits update cached state.
  */
 export function createPullRequestEnvironmentAtoms<R, E>(
-  runtime: Atom.AtomRuntime<
-    EnvironmentRegistry | PullRequestDiffLoader.PullRequestDiffLoader | R,
-    E
-  >,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | PullRequestDiffLoader | R, E>,
 ) {
   const refreshes = createPullRequestRefreshAtomFamily(runtime);
   const commandScheduler = createAtomCommandScheduler();
@@ -243,13 +231,6 @@ export function createPullRequestEnvironmentAtoms<R, E>(
     }),
     detail,
     preview,
-    checks: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:pull-requests:checks",
-      tag: WS_METHODS.pullRequestsChecks,
-      execute: (input) => routedRequest(WS_METHODS.pullRequestsChecks, input),
-      staleTimeMs: 45_000,
-      refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
-    }),
     activity,
     threadComments: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:pull-requests:thread-comments",
@@ -267,8 +248,8 @@ export function createPullRequestEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       execute: (input: PullRequestDiffInput) =>
         Effect.gen(function* () {
-          const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-          const loader = yield* PullRequestDiffLoader.PullRequestDiffLoader;
+          const supervisor = yield* EnvironmentSupervisor;
+          const loader = yield* PullRequestDiffLoader;
           const prepared = yield* SubscriptionRef.get(supervisor.prepared);
           if (Option.isNone(prepared)) {
             return yield* new EnvironmentHttpConnectionNotReadyError({
@@ -320,58 +301,11 @@ export function createPullRequestEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.projectId, input.repository, input.number]),
       },
     }),
-    runAction: createEnvironmentCommand(runtime, {
+    runAction: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:pull-requests:run-action",
-      // Preparation belongs to the write's lane. Refreshable queries would restart it after
-      // every preceding action, and preparing outside the lane could reorder the clicks.
-      execute: (
-        input: PullRequestActionInput & {
-          readonly resolveMergeMethod?: (detail: PullRequestDetail) => PullRequestMergeMethod;
-        },
-        registry,
-        environmentId,
-      ) =>
-        Effect.gen(function* () {
-          const { resolveMergeMethod, ...actionInput } = input;
-          let preparedInput = actionInput;
-          if (actionInput.action === "merge" && resolveMergeMethod !== undefined) {
-            const { projectId, host, repository, number } = actionInput;
-            const reference = { projectId, host, repository, number, allowStale: false };
-            const detail = yield* routedRequest(WS_METHODS.pullRequestsDetail, reference);
-            if (
-              detail.state !== "open" ||
-              detail.isDraft ||
-              !detail.capabilities.actions.includes("merge") ||
-              !detail.viewerPermissions.actions.includes("merge")
-            ) {
-              return yield* new PullRequestOperationError({
-                operation: "runAction",
-                detail: "This pull request cannot be merged.",
-              });
-            }
-            if (detail.capabilities.stackActions) {
-              const stack = yield* routedRequest(WS_METHODS.pullRequestsStack, reference);
-              if (stack !== null) {
-                return yield* new PullRequestOperationError({
-                  operation: "runAction",
-                  detail: "Open this pull request to merge its stack.",
-                });
-              }
-            }
-            const mergeMethod = yield* Effect.try({
-              try: () => resolveMergeMethod(detail),
-              catch: (cause) =>
-                new PullRequestOperationError({
-                  operation: "runAction",
-                  detail:
-                    cause instanceof Error ? cause.message : "Could not choose a merge method.",
-                }),
-            });
-            preparedInput = { ...actionInput, mergeMethod };
-          }
-          yield* routedRequest(WS_METHODS.pullRequestsRunAction, preparedInput);
-          registry.refresh(preview({ environmentId, input: actionInput }));
-        }),
+      tag: WS_METHODS.pullRequestsRunAction,
+      execute: (input) => routedRequest(WS_METHODS.pullRequestsRunAction, input),
+      onSuccess: (target, registry) => Effect.sync(() => registry.refresh(preview(target))),
       scheduler: commandScheduler,
       concurrency: serialPerEnvironment,
     }),

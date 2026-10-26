@@ -4,13 +4,13 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
-import * as ServerSettings from "../serverSettings.ts";
-import * as DeviceHost from "./DeviceHost.ts";
-import * as DeviceService from "./DeviceService.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+import { DeviceHostError, DeviceHost } from "./DeviceHost.ts";
+import { makeWithHosts } from "./DeviceService.ts";
 
 it.effect("keeps hosts independent when serials collide and another host fails", () =>
   Effect.gen(function* () {
-    const host = (id: string, failed = false): DeviceHost.DeviceHost["Service"] => {
+    const host = (id: string, failed = false): DeviceHost["Service"] => {
       const ready = {
         nodePath: process.execPath,
         hub: { origin: `http://${id}` },
@@ -32,11 +32,7 @@ it.effect("keeps hosts independent when serials collide and another host fails",
         ensureReady: () =>
           failed
             ? Effect.fail(
-                new DeviceHost.DeviceHostError({
-                  hostId: id,
-                  step: "connect",
-                  cause: new Error("offline"),
-                }),
+                new DeviceHostError({ hostId: id, step: "connect", cause: new Error("offline") }),
               )
             : Effect.succeed(ready),
         ensureAgentReady: () => Effect.succeed(ready),
@@ -69,7 +65,7 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     const writeStarted = yield* Deferred.make<void>();
     const finishWrite = yield* Deferred.make<void>();
     const order: string[] = [];
-    const service = yield* DeviceService.makeWithHosts(hosts, undefined, () =>
+    const service = yield* makeWithHosts(hosts, undefined, () =>
       Effect.gen(function* () {
         order.push("write started");
         yield* Deferred.succeed(writeStarted, undefined);
@@ -124,10 +120,7 @@ it.effect("keeps hosts independent when serials collide and another host fails",
     expect((yield* service.state).hostStatuses).toEqual({});
   }).pipe(
     Effect.provide(
-      ServerSettings.layerTest({
-        enableDeviceSupport: true,
-        enableAgentDeviceAccess: true,
-      }),
+      ServerSettingsService.layerTest({ enableDeviceSupport: true, enableAgentDeviceAccess: true }),
     ),
   ),
 );

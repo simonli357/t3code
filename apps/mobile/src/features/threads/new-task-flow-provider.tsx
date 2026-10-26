@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert } from "react-native";
 
 import type {
   EnvironmentId,
@@ -45,7 +44,6 @@ import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
 import { useEnvironmentQuery } from "../../state/query";
-import { useAtomCommand } from "../../state/use-atom-command";
 import {
   appendComposerDraftAttachments,
   type ComposerDraftInsertion,
@@ -70,10 +68,6 @@ import {
   capturePendingTaskEditorWriteBaseline,
   flushPendingTaskEditorWrite,
 } from "../../state/pending-task-editor-writes";
-import {
-  rememberModelOptions,
-  withRememberedModelOptions,
-} from "../../state/use-model-option-memory";
 import { useDebouncedValue, usePaginatedBranches } from "../../state/queries";
 import { vcsEnvironment } from "../../state/vcs";
 import {
@@ -91,11 +85,7 @@ import {
   useRemoteConnectionStatus,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
-import { availableScratchWorkspaceRoot } from "@t3tools/client-runtime/operations/projects";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+import { canCreateProjectInEnvironment } from "@t3tools/client-runtime/operations/projects";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
@@ -207,13 +197,6 @@ type NewTaskFlowContextValue = {
    */
   readonly openDraft: (draftKey: string) => boolean;
   readonly selectEnvironment: (environmentId: EnvironmentId) => void;
-  /**
-   * Moves the draft to another machine. A draft without a project resolves to
-   * that machine's "No project" folder first, creating it when needed.
-   */
-  readonly switchEnvironment: (environmentId: EnvironmentId) => Promise<boolean>;
-  /** The machine a switch in progress is heading to. */
-  readonly switchingToEnvironmentId: EnvironmentId | null;
   readonly setSelectedModelKey: (
     key: string | null,
     options?: ReadonlyArray<ProviderOptionSelection>,
@@ -261,7 +244,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const groupingSettings = useMobileProjectGroupingSettings();
   const { enabled: legacyPlanModeEnabled, loaded: planModePreferenceLoaded } =
     useLegacyPlanModeState();
-
   const projectScopes = useMemo(
     () =>
       sortHomeProjectScopes({
@@ -380,10 +362,8 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     () =>
       connectedEnvironments.filter(
         (environment) =>
-          availableScratchWorkspaceRoot(
-            environment.connectionState,
-            serverConfigs.get(environment.environmentId),
-          ) !== null,
+          canCreateProjectInEnvironment(environment.connectionState) &&
+          serverConfigs.get(environment.environmentId)?.scratchWorkspaceRoot !== undefined,
       ),
     [connectedEnvironments, serverConfigs],
   );
@@ -611,9 +591,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!option) {
         return;
       }
-      const selection = withRememberedModelOptions(
-        options ? { ...option.selection, options } : option.selection,
-      );
+      const selection = options ? { ...option.selection, options } : option.selection;
       const provider = selectedEnvironmentServerConfig?.providers.find(
         (candidate) => candidate.instanceId === selection.instanceId,
       );
@@ -632,7 +610,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (!selectedModel || !selectedProjectDraftKey) {
         return;
       }
-      rememberModelOptions(selectedModel.instanceId, selectedModel.model, options ?? []);
       const nextSelection: ModelSelection = options
         ? { ...selectedModel, options }
         : {
@@ -809,53 +786,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setSelectedProjectKey(match ? scopedProjectKey(match.environmentId, match.id) : null);
     },
     [projects, selectedProject, carryDraftContentTo],
-  );
-
-  const openScratch = useAtomCommand(projectEnvironment.openScratch, { reportFailure: false });
-  const [switchingToEnvironmentId, setSwitchingToEnvironmentId] = useState<EnvironmentId | null>(
-    null,
-  );
-  // The latest switch wins: a slower, earlier one must not retarget the draft.
-  const latestSwitchRef = useRef<object | null>(null);
-  const switchEnvironment = useCallback(
-    async (environmentId: EnvironmentId): Promise<boolean> => {
-      if (environmentId === selectedEnvironmentId) {
-        latestSwitchRef.current = null;
-        setSwitchingToEnvironmentId(null);
-        return true;
-      }
-      if (!isScratchDraft) {
-        selectEnvironment(environmentId);
-        return true;
-      }
-      const request = {};
-      latestSwitchRef.current = request;
-      setSwitchingToEnvironmentId(environmentId);
-      try {
-        const result = await openScratch({ environmentId, input: {} });
-        if (latestSwitchRef.current !== request) return false;
-        if (result._tag === "Success") {
-          setProject(result.value);
-          return true;
-        }
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          Alert.alert(
-            "Could not switch machine",
-            error instanceof Error
-              ? error.message
-              : "The folder for threads without a project could not be created.",
-          );
-        }
-        return false;
-      } finally {
-        if (latestSwitchRef.current === request) {
-          latestSwitchRef.current = null;
-          setSwitchingToEnvironmentId(null);
-        }
-      }
-    },
-    [isScratchDraft, openScratch, selectEnvironment, selectedEnvironmentId, setProject],
   );
 
   const setWorkspaceMode = useCallback(
@@ -1304,8 +1234,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       setProject,
       openDraft,
       selectEnvironment,
-      switchEnvironment,
-      switchingToEnvironmentId,
       setSelectedModelKey,
       setWorkspaceMode,
       selectBranch,
@@ -1372,8 +1300,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       openDraft,
       selectBranch,
       selectEnvironment,
-      switchEnvironment,
-      switchingToEnvironmentId,
       setInteractionMode,
       setPrompt,
       setRuntimeMode,

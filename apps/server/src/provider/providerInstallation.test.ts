@@ -12,13 +12,13 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 
-import * as ServerSettings from "../serverSettings.ts";
-import * as CodexInstallation from "./CodexInstallation.ts";
-import * as AntigravityInstallation from "./AntigravityInstallation.ts";
+import { layerTest as settingsLayerTest } from "../serverSettings.ts";
+import { CodexInstallation } from "./CodexInstallation.ts";
+import { AntigravityInstallation } from "./AntigravityInstallation.ts";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { makeProviderInstallation } from "./providerInstallation.ts";
-import * as ProviderInstanceRegistry from "./Services/ProviderInstanceRegistry.ts";
-import * as ProviderRegistry from "./Services/ProviderRegistry.ts";
+import { ProviderInstanceRegistry } from "./Services/ProviderInstanceRegistry.ts";
+import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 
 const instanceId = ProviderInstanceId.make("antigravity");
 const driver = ProviderDriverKind.make("antigravity");
@@ -41,7 +41,7 @@ function instance(kind = driver, id = instanceId): ProviderInstance {
     enabled: false,
     displayName: undefined,
     continuationIdentity: { driverKind: kind, continuationKey: instanceId },
-    get orchestrationAdapter(): never {
+    get adapter(): never {
       throw new Error("Installation must not start a provider session.");
     },
     get snapshot(): never {
@@ -56,7 +56,7 @@ function instance(kind = driver, id = instanceId): ProviderInstance {
 const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function* (
   input: {
     instance?: ProviderInstance;
-    settings?: Parameters<typeof ServerSettings.layerTest>[0];
+    settings?: Parameters<typeof settingsLayerTest>[0];
   } = {},
 ) {
   const calls: string[] = [];
@@ -65,20 +65,20 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
   const router = yield* makeProviderInstallation().pipe(
     Effect.provide(
       Layer.mergeAll(
-        ServerSettings.layerTest(input.settings),
-        Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+        settingsLayerTest(input.settings),
+        Layer.mock(ProviderInstanceRegistry)({
           getInstance: (id) =>
             Effect.succeed(id === configured.instanceId ? configured : undefined),
           listInstances: Effect.succeed([configured]),
         }),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
+        Layer.mock(ProviderRegistry)({
           refreshInstance: () =>
             Effect.sync(() => {
               calls.push("refresh");
               return [];
             }),
         }),
-        Layer.mock(CodexInstallation.CodexInstallation)({
+        Layer.mock(CodexInstallation)({
           managedDirectory: "/unused-managed-codex",
           start: Effect.sync(() => {
             calls.push("codex-start");
@@ -97,7 +97,7 @@ const makeHarness = Effect.fn("providerInstallation.test.makeHarness")(function*
               calls.push("codex-remove");
             }),
         }),
-        Layer.mock(AntigravityInstallation.AntigravityInstallation)({
+        Layer.mock(AntigravityInstallation)({
           managedDirectory: "/unused-managed-runtime",
           start: Effect.sync(() => {
             calls.push("start");

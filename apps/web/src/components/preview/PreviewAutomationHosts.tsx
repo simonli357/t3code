@@ -90,7 +90,6 @@ import {
   resolvePreviewAutomationTarget,
 } from "./previewAutomationTarget";
 import { resolveHostWaitBudgetMs, waitForHostReadiness } from "./previewAutomationHostBudget";
-import { runPreviewClickKeepingHostFocus } from "./previewClickFocus";
 import { isPreviewViewportReady } from "./previewViewportReadiness";
 import { shouldRollbackPreviewViewport } from "./previewViewportRollback";
 
@@ -687,11 +686,9 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
           }
           case "click": {
             const ready = await requireReadyTab();
-            return await runPreviewClickKeepingHostFocus(ready.runtimeTabId, () =>
-              ready.bridge.automation.click(
-                ready.runtimeTabId,
-                request.input as Parameters<typeof ready.bridge.automation.click>[1],
-              ),
+            return await ready.bridge.automation.click(
+              ready.runtimeTabId,
+              request.input as Parameters<typeof ready.bridge.automation.click>[1],
             );
           }
           case "type": {

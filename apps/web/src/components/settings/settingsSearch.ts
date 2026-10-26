@@ -18,8 +18,9 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
+  | "/settings/allocation"
+  | "/settings/model-selection"
   | "/settings/integrations"
-  | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/storage"
   | "/settings/connections"
@@ -90,8 +91,9 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/allocation": "Provider allocation",
+  "/settings/model-selection": "Model selection",
   "/settings/integrations": "Integrations",
-  "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
   "/settings/connections": "Connections",
@@ -132,12 +134,35 @@ const KEYBINDING_SEARCH_ITEMS = STATIC_KEYBINDING_COMMANDS.toSorted((left, right
  */
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "model-selection",
+    title: "Model selection",
+    to: "/settings/model-selection",
+    scope: "environment",
+    searchTerms: ["difficulty", "stakes", "reasoning", "model", "table", "lookup", "automatic"],
+  },
+  {
+    id: "provider-allocation",
+    title: "Provider allocation",
+    to: "/settings/allocation",
+    scope: "environment",
+    searchTerms: ["accounts", "quota", "pacing", "allocation", "reserve", "policy"],
+  },
+  {
     id: "storage-worktrees",
     title: "Worktree cleanup",
     to: "/settings/storage",
     scope: "project-defaults",
     searchTerms: [
       "disk storage delete deleted archived threads old inactive merged unchanged worktrees retention days project inherit off custom",
+    ],
+  },
+  {
+    id: "session-workspaces",
+    title: "Session workspaces",
+    to: "/settings/storage",
+    scope: "environment",
+    searchTerms: [
+      "agent work root job cwd temporary build cache downloads outputs evidence lifecycle registration",
     ],
   },
   {
@@ -270,33 +295,10 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["long lines code blocks tables diffs file previews"],
   },
   {
-    id: "composer-context",
-    title: "Composer context",
-    to: "/settings/appearance",
-  },
-  {
     id: "project-grouping",
     title: "Project grouping",
     to: "/settings/general",
     searchTerms: ["combine matching repositories environments sidebar"],
-  },
-  {
-    id: "project-order",
-    title: "Project order",
-    to: "/settings/general",
-    searchTerms: ["sort projects sidebar manual created recent"],
-  },
-  {
-    id: "snooze-limited-threads",
-    title: "Snooze limited threads",
-    to: "/settings/general",
-    searchTerms: ["usage quota rate limit reset wake recover continue"],
-  },
-  {
-    id: "auto-resume-limited-threads",
-    title: "Auto-resume limited threads",
-    to: "/settings/general",
-    searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
     id: "working-shelf",
@@ -395,6 +397,27 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Collapse composer on scroll",
     to: "/settings/general",
     searchTerms: ["composer rest resting scroll wheel conversation timeline shrink minimize"],
+  },
+  {
+    id: "global-instructions",
+    title: "Global instructions",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["global instructions prompt preferences guide"],
+  },
+  {
+    id: "session-renewal",
+    title: "Session renewal",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["master worker soft hard warning renewal working hours time limit"],
+  },
+  {
+    id: "base-session-prompt",
+    title: "Base session prompt",
+    to: "/settings/projects",
+    scope: "project",
+    searchTerms: ["base initialization understand project reusable prompt"],
   },
   {
     id: "send-shortcut",
@@ -727,14 +750,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
-    id: "worktree-branch-naming",
-    title: "Worktree branch naming",
-    to: "/settings/source-control",
-    searchTerms: ["static semantic prefix custom prompt instructions feat fix refactor chore"],
-    environmentOnly: true,
-    scope: "project-defaults",
-  },
-  {
     id: "bitbucket-credentials",
     title: "Bitbucket credentials",
     to: "/settings/source-control",
@@ -879,6 +894,8 @@ export type SettingsSearchItemId = (typeof SETTINGS_SEARCH_ITEMS)[number]["id"];
 const SEARCH_ITEMS_BY_ID = new Map(SETTINGS_SEARCH_ITEMS.map((item) => [item.id, item] as const));
 
 const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScope | null>> = {
+  "/settings/allocation": "environment",
+  "/settings/model-selection": "environment",
   "/settings/projects": "project",
   "/settings/general": null,
   "/settings/appearance": null,
@@ -891,7 +908,6 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",
-  "/settings/scheduled-tasks": null,
   "/settings/archived": "project-defaults",
 };
 

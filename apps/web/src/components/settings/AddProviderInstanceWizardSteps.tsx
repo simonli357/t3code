@@ -9,38 +9,24 @@ interface AddProviderInstanceWizardStepsProps {
   readonly currentStep: number;
   readonly summaries: readonly (string | null)[];
   readonly instanceIdError: string | null;
-  readonly steps?: readonly string[];
-  readonly identityStep?: number;
-  readonly prerequisite?: {
-    readonly step: number;
-    readonly error: string | null;
-  };
   readonly onNavigation: (navigation: WizardNavigation) => void;
-  readonly disabled?: boolean;
 }
 
 export function AddProviderInstanceWizardSteps({
   currentStep,
   summaries,
   instanceIdError,
-  steps = ADD_PROVIDER_WIZARD_STEPS,
-  identityStep,
-  prerequisite,
   onNavigation,
-  disabled = false,
 }: AddProviderInstanceWizardStepsProps) {
   return (
     <WizardSteps
-      steps={steps}
+      steps={ADD_PROVIDER_WIZARD_STEPS}
       currentStep={currentStep}
       summaries={summaries}
-      isStepDisabled={() => disabled}
       onStepChange={(requestedStep) =>
         onNavigation(
-          resolveWizardNavigation(currentStep, requestedStep, steps.length, {
+          resolveWizardNavigation(currentStep, requestedStep, ADD_PROVIDER_WIZARD_STEPS.length, {
             instanceIdError,
-            ...(identityStep === undefined ? {} : { identityStep }),
-            ...(prerequisite === undefined ? {} : { prerequisite }),
           }),
         )
       }

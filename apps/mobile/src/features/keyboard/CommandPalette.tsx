@@ -26,7 +26,7 @@ import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { T3KeyboardCommands } from "../../native/T3KeyboardCommands";
 import { useProjects, useThreadShell, useThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
-import { useWorkspaceEnvironments } from "../../state/workspace";
+import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -145,7 +145,7 @@ export function CommandPalette(props: {
   const threads = useThreadShells();
   const activeThreadRef = useMemo(() => parseActiveThreadPath(props.pathname), [props.pathname]);
   const activeThread = useThreadShell(activeThreadRef);
-  const environments = useWorkspaceEnvironments();
+  const { environments } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<string | null>(null);
@@ -227,17 +227,6 @@ export function CommandPalette(props: {
           }),
       },
       {
-        key: "scheduledTasks",
-        kind: "action",
-        title: "Scheduled tasks",
-        searchTerms: ["schedule", "automations", "recurring"],
-        run: () =>
-          navigation.navigate("SettingsSheet", {
-            screen: "SettingsContent",
-            params: { screen: "SettingsScheduledTasks" },
-          }),
-      },
-      {
         key: "usage",
         kind: "action",
         title: "Usage",
@@ -246,6 +235,28 @@ export function CommandPalette(props: {
           navigation.navigate("SettingsSheet", {
             screen: "SettingsContent",
             params: { screen: "SettingsUsage" },
+          }),
+      },
+      {
+        key: "model-selection",
+        kind: "action",
+        title: "Model selection",
+        searchTerms: ["difficulty", "stakes", "reasoning", "model"],
+        run: () =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: { screen: "SettingsModelSelection" },
+          }),
+      },
+      {
+        key: "allocation",
+        kind: "action",
+        title: "Provider allocation",
+        searchTerms: ["quota", "pacing", "accounts"],
+        run: () =>
+          navigation.navigate("SettingsSheet", {
+            screen: "SettingsContent",
+            params: { screen: "SettingsAllocation" },
           }),
       },
       {

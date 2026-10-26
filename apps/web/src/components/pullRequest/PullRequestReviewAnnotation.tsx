@@ -9,15 +9,19 @@ import type {
   PullRequestThreadCommentsResult,
   PullRequestThreadComment,
 } from "@t3tools/contracts";
-import { HammerIcon, MessageSquareIcon, Trash2Icon } from "lucide-react";
-import { Circle, CircleCheck } from "lucide";
+import {
+  CheckCircle2Icon,
+  CircleIcon,
+  HammerIcon,
+  MessageSquareIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useRef, useState } from "react";
 
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { cn } from "~/lib/utils";
 
 import { Button } from "../ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
 import { PullRequestEditButton } from "./PullRequestEditButton";
 import { Textarea } from "../ui/textarea";
 import { isCommentSubmitShortcut } from "../diffs/commentSubmitShortcut";
@@ -215,10 +219,11 @@ export function ReviewThreadCard({
       onPointerDown={(event) => event.stopPropagation()}
     >
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <MorphIcon
-          className={cn("size-3.5", thread.isResolved && "text-success-foreground")}
-          icon={thread.isResolved ? CircleCheck : Circle}
-        />
+        {thread.isResolved ? (
+          <CheckCircle2Icon className="size-3.5 text-success-foreground" />
+        ) : (
+          <CircleIcon className="size-3.5" />
+        )}
         <button
           type="button"
           className="hover:text-foreground"

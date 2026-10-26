@@ -1,8 +1,4 @@
-import type {
-  EnvironmentId,
-  ServerInstallation,
-  ServerSelfUpdateCapability,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import type { ServerUpdateStage, ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import {
   isAtomCommandInterrupted,
@@ -14,7 +10,7 @@ import { type ComponentProps, useRef, useState } from "react";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
-import { serverEnvironment, updateOutdatedServer } from "~/state/server";
+import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { manualServerUpdateCommand } from "~/versionSkew";
 import { Button } from "./ui/button";
@@ -43,7 +39,6 @@ export interface ServerUpdateTarget {
   readonly environmentId: EnvironmentId;
   readonly serverLabel: string;
   readonly selfUpdate: ServerSelfUpdateCapability | null;
-  readonly installation?: ServerInstallation | undefined;
   readonly desktopAppUpdate?: boolean;
   readonly threadContinuation?: boolean;
   readonly targetVersion: string;
@@ -193,7 +188,6 @@ export function ServerUpdateAction({
   environmentId,
   serverLabel,
   selfUpdate,
-  installation,
   desktopAppUpdate = false,
   threadContinuation = false,
   targetVersion,
@@ -210,16 +204,12 @@ export function ServerUpdateAction({
   );
   const update = useServerUpdate();
   const { copyToClipboard } = useCopyToClipboard<{ command: string }>({
-    target: installation?.kind === "npm-global" ? "update command" : "relaunch command",
+    target: "update command",
     onCopy: ({ command }) => {
       toastManager.add({
         type: "success",
-        title:
-          installation?.kind === "npm-global" ? "Update command copied" : "Relaunch command copied",
-        description:
-          installation?.kind === "npm-global"
-            ? `Run \`${command}\` on ${serverLabel}, then restart t3 with your usual options.`
-            : `Stop t3 on ${serverLabel}, then relaunch with \`${command}\` using the same subcommand and options. This does not update an installed t3 command.`,
+        title: "Update command copied",
+        description: `Run \`${command}\` on ${serverLabel} to update it.`,
       });
     },
     onError: (error) => {
@@ -266,14 +256,8 @@ export function ServerUpdateAction({
     );
   }
 
-  const manualCommand =
-    selfUpdate === null ? manualServerUpdateCommand(targetVersion, installation) : null;
-  const actionLabel =
-    manualCommand !== null
-      ? installation?.kind === "npm-global"
-        ? "Copy update command"
-        : "Copy relaunch command"
-      : label;
+  const manualCommand = selfUpdate === null ? manualServerUpdateCommand(targetVersion) : null;
+  const actionLabel = manualCommand !== null ? "Copy update command" : label;
   const onClick =
     manualCommand !== null
       ? () => copyToClipboard(manualCommand, { command: manualCommand })
@@ -303,59 +287,6 @@ export function ServerUpdateAction({
   return (
     <Button size={size} variant={variant} className={className} onClick={onClick}>
       {actionLabel}
-    </Button>
-  );
-}
-
-/**
- * Updates a host too old for this client to connect to. Its version comes
- * from the host descriptor because the host never delivers a server config.
- */
-export function OutdatedServerUpdateAction({
-  environmentId,
-  serverLabel,
-  fromVersion,
-  targetVersion,
-  label = "Update",
-}: {
-  readonly environmentId: EnvironmentId;
-  readonly serverLabel: string;
-  readonly fromVersion: string | undefined;
-  readonly targetVersion: string;
-  readonly label?: string;
-}) {
-  const update = useAtomCommand(updateOutdatedServer, { reportFailure: false });
-  const handleUpdate = async () => {
-    if (pendingUpdateEnvironmentIds.has(environmentId)) return;
-    pendingUpdateEnvironmentIds.add(environmentId);
-    try {
-      const result = await update({
-        environmentId,
-        input: { targetVersion },
-        ...(fromVersion === undefined ? {} : { fromVersion }),
-      });
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) return;
-        throw squashAtomCommandFailure(result);
-      }
-      toastManager.add({
-        type: "success",
-        title: `${serverLabel} updated`,
-        description: `Reconnected on t3@${result.value.targetVersion}.`,
-      });
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: "Server update failed",
-        description: updateFailureMessage(error),
-      });
-    } finally {
-      pendingUpdateEnvironmentIds.delete(environmentId);
-    }
-  };
-  return (
-    <Button size="xs" variant="outline" onClick={() => void handleUpdate()}>
-      {label}
     </Button>
   );
 }

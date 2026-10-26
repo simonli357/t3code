@@ -2,9 +2,8 @@ import type { EnvironmentConnectionPhase } from "../connection/presentation.ts";
 import type {
   CommandId,
   EnvironmentId,
-  ProjectMutation,
+  OrchestrationCommand,
   ProjectId,
-  ServerConfig,
   SourceControlDiscoveryResult,
   SourceControlProviderKind,
   SourceControlRepositoryInfo,
@@ -35,19 +34,6 @@ export function canCreateProjectInEnvironment(
   connectionPhase: EnvironmentConnectionPhase | null | undefined,
 ): boolean {
   return connectionPhase === "connected";
-}
-
-/**
- * The Scratch folder an environment offers threads without a project right
- * now, or null while it is not connected or has none.
- */
-export function availableScratchWorkspaceRoot(
-  connectionPhase: EnvironmentConnectionPhase | null | undefined,
-  serverConfig: Pick<ServerConfig, "scratchWorkspaceRoot"> | null | undefined,
-): string | null {
-  return canCreateProjectInEnvironment(connectionPhase)
-    ? (serverConfig?.scratchWorkspaceRoot ?? null)
-    : null;
 }
 
 export type AddProjectRemoteSourceReadiness = Record<
@@ -354,7 +340,8 @@ export function buildProjectCreateCommand(input: {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly workspaceRoot: string;
-}): Extract<ProjectMutation, { type: "project.create" }> {
+  readonly createdAt: string;
+}): Extract<OrchestrationCommand, { type: "project.create" }> {
   return {
     type: "project.create",
     commandId: input.commandId,
@@ -363,5 +350,6 @@ export function buildProjectCreateCommand(input: {
     workspaceRoot: input.workspaceRoot,
     createWorkspaceRootIfMissing: true,
     defaultModelSelection: null,
+    createdAt: input.createdAt,
   };
 }

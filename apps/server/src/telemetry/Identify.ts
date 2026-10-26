@@ -10,17 +10,10 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 
-/**
- * Codex writes `tokens` only for ChatGPT logins and omits the key for API-key,
- * agent-identity, and personal-access-token logins, so its absence is a
- * supported install and not a malformed file.
- */
 const CodexAuthJsonSchema = Schema.Struct({
-  tokens: Schema.optionalKey(
-    Schema.Struct({
-      account_id: Schema.String,
-    }),
-  ),
+  tokens: Schema.Struct({
+    account_id: Schema.String,
+  }),
 });
 
 const ClaudeJsonSchema = Schema.Struct({
@@ -190,9 +183,7 @@ const getCodexAccountId = Effect.fn("TelemetryIdentity.getCodexAccountId")(funct
     ),
   );
 
-  return authJson.tokens === undefined
-    ? Option.none<string>()
-    : Option.some(authJson.tokens.account_id);
+  return Option.some(authJson.tokens.account_id);
 });
 
 const getClaudeUserId = Effect.fn("TelemetryIdentity.getClaudeUserId")(function* (
@@ -259,9 +250,6 @@ const upsertAnonymousId = Effect.gen(function* () {
  * 1. ~/.codex/auth.json tokens.account_id
  * 2. ~/.claude.json userID
  * 3. ~/.t3/telemetry/anonymous-id
- *
- * A missing file or an API-key-only Codex auth.json falls through quietly. Only
- * unreadable or malformed files warn.
  */
 export const getTelemetryIdentifierForHome = Effect.fn("getTelemetryIdentifierForHome")(
   function* (homeDirectory: string) {

@@ -6,6 +6,7 @@ import {
   Keyboard,
   Box,
   Maximize,
+  Moon,
   MoreHorizontal,
   PictureInPicture2,
   Power,
@@ -13,13 +14,12 @@ import {
   SlidersHorizontal,
   Smartphone,
   Square,
+  Sun,
   Type,
   X,
 } from "lucide-react";
-import { Moon, Sun } from "lucide";
 import type { ReactNode } from "react";
 import { Button } from "~/components/ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
 import {
   Menu,
   MenuItem,
@@ -132,7 +132,7 @@ export function DeviceControlsRail(props: {
           disabled={controls.disabled || !settings?.appearance}
           onClick={() => void controls.act({ type: "setAppearance", value: nextAppearance })}
         >
-          <MorphIcon icon={settings?.appearance === "dark" ? Sun : Moon} />
+          {settings?.appearance === "dark" ? <Sun /> : <Moon />}
         </RailButton>
         <Menu>
           <MenuTrigger

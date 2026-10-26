@@ -1,7 +1,8 @@
 import {
   type EnvironmentId,
-  type OrchestrationV2ShellSnapshot,
-  type OrchestrationV2ThreadDetailSnapshot,
+  OrchestrationProjectShell,
+  type OrchestrationShellSnapshot,
+  type OrchestrationThreadDetailSnapshot,
   type ServerConfig,
   type ThreadId,
   type VcsListRefsResult,
@@ -12,7 +13,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type { ConnectionRegistration } from "../connection/catalog.ts";
-import type { ConnectionTarget, PersistedConnectionTarget } from "../connection/model.ts";
+import type { ConnectionTarget } from "../connection/model.ts";
 
 export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPersistenceError>()(
   "ConnectionPersistenceError",
@@ -21,7 +22,6 @@ export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPer
       "list-targets",
       "list-disabled-targets",
       "register-connection",
-      "set-connection-routes",
       "remove-connection",
       "set-connection-enabled",
       "load-shell",
@@ -53,23 +53,10 @@ export class ConnectionTargetStore extends Context.Service<
 export class ConnectionRegistrationStore extends Context.Service<
   ConnectionRegistrationStore,
   {
-    /**
-     * Saves one route's records and sets the environment's full route list,
-     * preferred first. Records of routes missing from `routes` are dropped.
-     */
     readonly register: (
       registration: ConnectionRegistration,
-      routes: ReadonlyArray<PersistedConnectionTarget>,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
-    /** Reorders or drops routes without adding one. `routes` must not be empty. */
-    readonly setRoutes: (
-      environmentId: EnvironmentId,
-      routes: ReadonlyArray<PersistedConnectionTarget>,
-    ) => Effect.Effect<void, ConnectionPersistenceError>;
-    /** Forgets the environment and every route it had. */
-    readonly remove: (
-      environmentId: EnvironmentId,
-    ) => Effect.Effect<void, ConnectionPersistenceError>;
+    readonly remove: (target: ConnectionTarget) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly setEnabled: (
       environmentId: EnvironmentId,
       enabled: boolean,
@@ -82,21 +69,21 @@ export class EnvironmentCacheStore extends Context.Service<
   {
     readonly loadShell: (
       environmentId: EnvironmentId,
-    ) => Effect.Effect<Option.Option<OrchestrationV2ShellSnapshot>, ConnectionPersistenceError>;
+    ) => Effect.Effect<Option.Option<OrchestrationShellSnapshot>, ConnectionPersistenceError>;
     readonly saveShell: (
       environmentId: EnvironmentId,
-      snapshot: OrchestrationV2ShellSnapshot,
+      snapshot: OrchestrationShellSnapshot,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly loadThread: (
       environmentId: EnvironmentId,
       threadId: ThreadId,
     ) => Effect.Effect<
-      Option.Option<OrchestrationV2ThreadDetailSnapshot>,
+      Option.Option<OrchestrationThreadDetailSnapshot>,
       ConnectionPersistenceError
     >;
     readonly saveThread: (
       environmentId: EnvironmentId,
-      snapshot: OrchestrationV2ThreadDetailSnapshot,
+      snapshot: OrchestrationThreadDetailSnapshot,
     ) => Effect.Effect<void, ConnectionPersistenceError>;
     readonly removeThread: (
       environmentId: EnvironmentId,
@@ -143,6 +130,21 @@ export class EnvironmentCacheStore extends Context.Service<
     ) => Effect.Effect<void, ConnectionPersistenceError>;
   }
 >()("@t3tools/client-runtime/platform/persistence/EnvironmentCacheStore") {}
+
+const encodeProjectShells = Schema.encodeEffect(Schema.Array(OrchestrationProjectShell));
+
+/**
+ * Encodes a shell snapshot for `EnvironmentCacheStore.saveShell`. The result
+ * equals `Schema.encode(OrchestrationShellSnapshot)`, so the cache format does
+ * not change. Walking thousands of threads through Schema blocks the UI
+ * thread, and a decoded thread shell is already in its encoded form, so only
+ * the projects go through Schema: their icon has a real encode transform.
+ */
+export const encodeShellSnapshotForCache = (snapshot: OrchestrationShellSnapshot) =>
+  Effect.map(
+    encodeProjectShells(snapshot.projects),
+    (projects) => ({ ...snapshot, projects }) satisfies typeof OrchestrationShellSnapshot.Encoded,
+  );
 
 export class EnvironmentOwnedDataCleanup extends Context.Reference<{
   readonly clear: (environmentId: EnvironmentId) => Effect.Effect<void>;

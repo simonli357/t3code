@@ -9,12 +9,10 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import * as ThreadUndo from "./threadUndo";
 
 type UndoOptions = {
-  action: "Settled" | "Snoozed" | "Unpinned" | "Archived" | "Discarded";
+  action: "Settled" | "Snoozed" | "Unpinned" | "Archived";
   undo: () => Promise<AtomCommandResult<unknown, unknown>>;
   failureTitle: string;
   claim: ReturnType<typeof ThreadUndo.begin>;
-  /** Runs once the action can no longer be undone. */
-  commit?: () => void;
 };
 
 type UndoNotice = {
@@ -31,9 +29,7 @@ let liveUndos: UndoOptions[] = [];
 let expiry: ReturnType<typeof setTimeout> | undefined;
 
 function refreshNotice() {
-  const stale = liveUndos.filter(({ claim }) => !claim.isCurrent());
-  liveUndos = liveUndos.filter((entry) => !stale.includes(entry));
-  for (const entry of stale) entry.commit?.();
+  liveUndos = liveUndos.filter(({ claim }) => claim.isCurrent());
   const latest = liveUndos.at(-1);
   if (!latest) {
     clearTimeout(expiry);
@@ -104,10 +100,7 @@ export function showThreadUndoNotice(options: UndoOptions) {
   expiry = setTimeout(() => {
     const expired = liveUndos;
     liveUndos = [];
-    for (const { claim, commit } of expired) {
-      claim.finish();
-      commit?.();
-    }
+    for (const { claim } of expired) claim.finish();
     refreshNotice();
   }, 5_000);
 }

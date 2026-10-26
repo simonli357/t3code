@@ -327,7 +327,6 @@ describe("cloud onboarding discovery", () => {
             {
               environmentId: newMachineId,
               connection: { phase: "connected", error: null, traceId: null },
-              relayManaged: true,
             },
           ]}
           showSavedEnvironments

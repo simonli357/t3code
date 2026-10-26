@@ -64,6 +64,16 @@ function scopedWindowId(displayName: string): string {
   return `seven_day_${displayName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
 }
 
+/** The SDK's stable enforcement key can have a differently named numeric bucket. */
+export function claudeEnforcementUsageWindowId(
+  type: string | undefined,
+  names: ClaudeScopedLimitNames,
+): string | undefined {
+  return type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded
+    ? scopedWindowId(names.overageIncluded)
+    : undefined;
+}
+
 function scopedWindow(
   displayName: string,
   usedPercent: number,
@@ -71,6 +81,7 @@ function scopedWindow(
 ): ServerProviderUsageWindow {
   return {
     id: scopedWindowId(displayName),
+    modelScope: displayName,
     kind: "weekly",
     label: `Weekly · ${displayName}`,
     windowDurationMins: WEEK_MINS,
@@ -147,6 +158,8 @@ export function claudeRateLimitEventToUpdate(
   if (type === OVERAGE_INCLUDED_EVENT_TYPE && names.overageIncluded) {
     return { windows: [scopedWindow(names.overageIncluded, usedPercent, resetsAt)] };
   }
+  if (type.startsWith("seven_day_") && type !== OVERAGE_INCLUDED_EVENT_TYPE)
+    return { windows: [scopedWindow(type.slice("seven_day_".length), usedPercent, resetsAt)] };
   return undefined;
 }
 
@@ -169,19 +182,69 @@ export function claudeUsageResponseToLimits(input: {
   for (const id of Object.keys(WINDOWS)) {
     const window = response.rate_limits[id as "five_hour" | "seven_day"];
     if (!window || typeof window.utilization !== "number") continue;
-    windows.push(makeWindow(id, window.utilization, isoFromString(window.resets_at)));
+    windows.push({
+      ...makeWindow(id, window.utilization, isoFromString(window.resets_at)),
+      // Claude reports null (not an omitted field) when no five-hour window is active.
+      ...(id === "five_hour" && window.utilization === 0 && window.resets_at === null
+        ? { inactive: true as const }
+        : {}),
+    });
   }
-  // The CLI filters `model_scoped` to the overage-included allowlist, which
-  // today holds one model; the first entry is the one the event refers to.
-  let overageIncluded: string | undefined;
-  for (const entry of readModelScoped(response.rate_limits)) {
-    if (typeof entry.utilization !== "number") continue;
+  for (const [id, value] of Object.entries(response.rate_limits)) {
+    if (
+      !id.startsWith("seven_day_") ||
+      id === OVERAGE_INCLUDED_EVENT_TYPE ||
+      !value ||
+      typeof value !== "object" ||
+      !("utilization" in value) ||
+      typeof value.utilization !== "number"
+    )
+      continue;
+    windows.push(
+      scopedWindow(
+        id.slice("seven_day_".length),
+        value.utilization,
+        "resets_at" in value && typeof value.resets_at === "string"
+          ? isoFromString(value.resets_at)
+          : undefined,
+      ),
+    );
+  }
+  // The CLI filters model_scoped to its overage-included allowlist. Only a
+  // unique, usable entry proves which bucket that enforcement identity names.
+  const scoped = readModelScoped(response.rate_limits);
+  for (const entry of scoped) {
+    if (
+      !entry.display_name.trim() ||
+      typeof entry.utilization !== "number" ||
+      !Number.isFinite(entry.utilization)
+    )
+      continue;
     windows.push(
       scopedWindow(entry.display_name, entry.utilization, isoFromString(entry.resets_at)),
     );
-    // Only a bucket that drew a row may receive events; naming one that was
-    // skipped would let a mid-turn event open a row the probe never showed.
-    overageIncluded ??= entry.display_name;
+  }
+  const rawScoped = (response.rate_limits as { readonly model_scoped?: unknown }).model_scoped;
+  const candidate =
+    Array.isArray(rawScoped) && rawScoped.length === 1 && scoped.length === 1
+      ? scoped[0]
+      : undefined;
+  const matches = candidate
+    ? windows.filter((w) => w.id === scopedWindowId(candidate.display_name))
+    : [];
+  const overageIncluded =
+    matches.length === 1 &&
+    candidate?.display_name.trim() &&
+    typeof candidate.utilization === "number" &&
+    Number.isFinite(candidate.utilization)
+      ? candidate.display_name
+      : undefined;
+  if (overageIncluded) {
+    const index = windows.indexOf(matches[0]!);
+    windows[index] = {
+      ...matches[0]!,
+      enforcement: { windowId: OVERAGE_INCLUDED_EVENT_TYPE, checkedAt },
+    };
   }
   return {
     limits: makeUsageLimits({ checkedAt, windows }),

@@ -14,8 +14,8 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
-import { ProviderUsageLimitsUpdate } from "./providerUsageLimits.ts";
-import { ProviderApprovalOption } from "./providerPolicy.ts";
+import { ProviderUsageLimitsUpdate, ProviderQuotaState } from "./providerUsageLimits.ts";
+import { ProviderApprovalOption } from "./orchestration.ts";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -277,12 +277,6 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactThreshold: Schema.optional(PositiveInt),
-  cost: Schema.optional(
-    Schema.Struct({
-      amount: Schema.Number.check(Schema.isFinite()),
-      currency: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(32)),
-    }),
-  ),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 
@@ -353,6 +347,8 @@ export type TurnTokenUsage = typeof TurnTokenUsage.Type;
 
 const TurnCompletedPayload = Schema.Struct({
   state: RuntimeTurnState,
+  /** Provider-reported API time; not inferred from turn or tool wall time. */
+  apiDurationMs: Schema.optional(NonNegativeInt),
   stopReason: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),
@@ -541,6 +537,43 @@ export const TaskRunHandles = Schema.Struct({
 export type TaskRunHandles = typeof TaskRunHandles.Type;
 
 /**
+ * Watch-loop task types: Monitor-tool tasks plus background shells (a shell
+ * that outlives its turn is in practice a watch loop). Canonical single copy —
+ * the server liveness registry, ingestion's agentKind stamp, and the client
+ * fold's legacy fallback all classify with these sets.
+ */
+export const MONITOR_TASK_TYPES: ReadonlySet<string> = new Set([
+  "monitor",
+  "monitor_mcp",
+  "local_bash",
+  "shell",
+]);
+/** Task types that are neither agents nor watch loops (plan-mode bookkeeping). */
+export const INERT_TASK_TYPES: ReadonlySet<string> = new Set(["plan", "dream"]);
+
+/**
+ * Agent-vs-background classification, stamped by ingestion as `agentKind` so
+ * persisted rows are self-describing. A deliberate denylist: the SDK's
+ * agent-flavored type names drift (subagent, local_agent, local_workflow, …)
+ * and an allowlist silently dropped real subagents when "local_agent"
+ * appeared. A task launched from inside a subagent (agentId set) is
+ * agent-internal background work UNLESS it is itself agent-flavored — a
+ * nested agent can outlive its parent and stays in the roster.
+ */
+export function classifyTaskAgentKind(input: {
+  readonly taskType?: string | undefined;
+  readonly agentId?: string | undefined;
+}): "agent" | "background" {
+  const { taskType, agentId } = input;
+  const nonAgentType =
+    taskType !== undefined && (MONITOR_TASK_TYPES.has(taskType) || INERT_TASK_TYPES.has(taskType));
+  if (agentId !== undefined && agentId.trim().length > 0) {
+    return taskType === undefined || nonAgentType ? "background" : "agent";
+  }
+  return nonAgentType ? "background" : "agent";
+}
+
+/**
  * Optional agent-identity linkage carried on every task lifecycle payload.
  * Repeated on progress and terminal rows (not just start) so client folds can
  * reconstruct an agent even when its start row aged out of activity retention.
@@ -551,7 +584,7 @@ const taskAgentLinkageFields = {
    * every row so folds can classify without the start row. */
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
   /**
-   * Server-stamped classification, set at ingestion.
+   * Server-stamped classification (classifyTaskAgentKind at ingestion).
    * Clients trust this stamp outright; rows without it (legacy, pre-stamp)
    * fall back to client-side heuristics.
    */
@@ -777,6 +810,7 @@ const RuntimeWarningPayload = Schema.Struct({
 export type RuntimeWarningPayload = typeof RuntimeWarningPayload.Type;
 
 const RuntimeErrorPayload = Schema.Struct({
+  quotaStates: Schema.optional(Schema.Array(ProviderQuotaState)),
   message: TrimmedNonEmptyStringSchema,
   code: Schema.optional(TrimmedNonEmptyStringSchema),
   class: Schema.optional(RuntimeErrorClass),

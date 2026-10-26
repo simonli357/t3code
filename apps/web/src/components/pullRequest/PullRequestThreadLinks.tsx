@@ -50,8 +50,8 @@ function EnabledPullRequestThreadLinks({
   onPickerOpenChange,
 }: PullRequestThreadLinksProps) {
   const parsed = parseChangeRequestUrl(url);
-  const thread = useThreadShell(threadRef?.environmentId === environmentId ? threadRef : null);
-  const currentThreadRef = thread === null ? null : threadRef;
+  const currentThreadRef = threadRef?.environmentId === environmentId ? threadRef : null;
+  const thread = useThreadShell(currentThreadRef);
   const linking = usePullRequestLinking(environmentId);
   const linkedHere = linking.isLinked(thread, url);
   const relations = useEnvironmentQuery(

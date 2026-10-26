@@ -7,10 +7,8 @@ import {
   type ReactNode,
   type KeyboardEvent,
 } from "react";
-import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import { Image as ImageGlyph, Text as TextGlyph } from "lucide";
+import { ChevronLeftIcon, ChevronRightIcon, ImageIcon, TextIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import type { ExpandedImageItem, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { resolveExternalWebLinkHost } from "./externalLinkContextMenu";
@@ -167,6 +165,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     : accessibilityDetails?.format === "json"
       ? "Show accessibility JSON"
       : "Show extracted text";
+  const ContentsIcon = showingAccessibilityDetails ? ImageIcon : TextIcon;
 
   return (
     <Dialog
@@ -261,11 +260,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
                       />
                     }
                   >
-                    <MorphIcon
-                      className="size-3"
-                      aria-hidden="true"
-                      icon={showingAccessibilityDetails ? ImageGlyph : TextGlyph}
-                    />
+                    <ContentsIcon className="size-3" aria-hidden="true" />
                   </TooltipTrigger>
                   <TooltipPopup side="top">{contentsLabel}</TooltipPopup>
                 </Tooltip>

@@ -44,10 +44,6 @@ const DEFINITIONS = [
     kind: "skill",
     capabilities: { details: "tooltip", expanded: "none", defaultDraftView: "compact" },
   },
-  {
-    kind: "thread",
-    capabilities: { details: "tooltip", expanded: "none", defaultDraftView: "compact" },
-  },
 ] as const satisfies ReadonlyArray<ContextPresentationDefinition>;
 
 function buildDefinitionRegistry(

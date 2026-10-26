@@ -70,77 +70,58 @@ function connectionIdOf(target: ConnectionTarget): string | null {
   }
 }
 
-function routeKey(target: ConnectionTarget): string {
-  return connectionIdOf(target) ?? target._tag;
-}
-
-function removeRouteMetadata(
+function removeConnectionMetadata(
   document: ConnectionCatalogDocument,
-  removed: ReadonlyArray<ConnectionTarget>,
+  target: ConnectionTarget,
+  removeRemoteToken: boolean,
 ): ConnectionCatalogDocument {
-  const connectionIds = new Set(removed.flatMap((target) => connectionIdOf(target) ?? []));
-  const relayRemoved = removed.some((target) => target._tag === "RelayConnectionTarget");
-  const environmentIds = new Set(removed.map((target) => target.environmentId));
+  const connectionId = connectionIdOf(target);
   return {
     ...document,
-    profiles: document.profiles.filter((value) => !connectionIds.has(value.connectionId)),
-    credentials: document.credentials.filter((value) => !connectionIds.has(value.connectionId)),
-    // The DPoP token belongs to the T3 Connect route.
-    remoteDpopTokens: relayRemoved
-      ? document.remoteDpopTokens.filter((value) => !environmentIds.has(value.environmentId))
+    targets: removeCatalogValue(
+      document.targets,
+      (value) => value.environmentId,
+      target.environmentId,
+    ),
+    profiles:
+      connectionId === null
+        ? document.profiles
+        : removeCatalogValue(document.profiles, (value) => value.connectionId, connectionId),
+    credentials:
+      connectionId === null
+        ? document.credentials
+        : removeCatalogValue(document.credentials, (value) => value.connectionId, connectionId),
+    remoteDpopTokens: removeRemoteToken
+      ? removeCatalogValue(
+          document.remoteDpopTokens,
+          (value) => value.environmentId,
+          target.environmentId,
+        )
       : document.remoteDpopTokens,
+    // Re-registration passes `removeRemoteToken: false` and must keep the
+    // switched-off flag; only a real removal clears it.
+    disabledEnvironmentIds: removeRemoteToken
+      ? removeCatalogValue(document.disabledEnvironmentIds, (value) => value, target.environmentId)
+      : document.disabledEnvironmentIds,
   };
 }
 
-/**
- * An environment's saved routes in preference order. Targets of one
- * environment keep their relative order in `targets`, so a document written
- * before routes existed is one environment with one route.
- */
-export function catalogRoutes(
-  document: ConnectionCatalogDocument,
-  environmentId: EnvironmentId,
-): ReadonlyArray<PersistedConnectionTarget> {
-  return document.targets.filter((target) => target.environmentId === environmentId);
-}
-
-/**
- * Replaces an environment's routes with `routes`, preferred first. Records
- * owned by a dropped route go with it; the environment keeps its position in
- * the catalog. An empty list leaves the environment's other records in place;
- * use `removeConnectionFromCatalog` to forget the environment.
- */
-export function setRoutesInCatalog(
-  document: ConnectionCatalogDocument,
-  environmentId: EnvironmentId,
-  routes: ReadonlyArray<PersistedConnectionTarget>,
-): ConnectionCatalogDocument {
-  const kept = new Set(routes.map(routeKey));
-  const dropped = catalogRoutes(document, environmentId).filter(
-    (target) => !kept.has(routeKey(target)),
-  );
-  const firstIndex = document.targets.findIndex((target) => target.environmentId === environmentId);
-  const others = document.targets.filter((target) => target.environmentId !== environmentId);
-  const insertAt =
-    firstIndex === -1
-      ? others.length
-      : document.targets.slice(0, firstIndex).filter((t) => t.environmentId !== environmentId)
-          .length;
-  return {
-    ...removeRouteMetadata(document, dropped),
-    targets: [...others.slice(0, insertAt), ...routes, ...others.slice(insertAt)],
-  };
-}
-
-/** Saves one route of an environment, keeping its other routes. */
 export function registerConnectionInCatalog(
   document: ConnectionCatalogDocument,
   registration: ConnectionRegistration,
-  routes: ReadonlyArray<PersistedConnectionTarget> = [registration.target],
 ): ConnectionCatalogDocument {
+  const target = registration.target;
+  const previous = document.targets.find(
+    (candidate) => candidate.environmentId === target.environmentId,
+  );
+  const cleaned =
+    previous === undefined ? document : removeConnectionMetadata(document, previous, false);
   // Re-registering (for example editing a label or URL) keeps the disabled
   // flag; only `setConnectionEnabledInCatalog` or removal changes it.
-  const next = setRoutesInCatalog(document, registration.target.environmentId, routes);
+  const next: ConnectionCatalogDocument = {
+    ...cleaned,
+    targets: replaceCatalogValue(cleaned.targets, (value) => value.environmentId, target),
+  };
 
   switch (registration._tag) {
     case "RelayConnectionRegistration":
@@ -170,32 +151,19 @@ export function registerConnectionInCatalog(
   }
 }
 
-/** Forgets an environment and every route it had. */
 export function removeConnectionFromCatalog(
   document: ConnectionCatalogDocument,
-  environmentId: EnvironmentId,
+  target: ConnectionTarget,
 ): ConnectionCatalogDocument {
-  const next = setRoutesInCatalog(document, environmentId, []);
-  return {
-    ...next,
-    remoteDpopTokens: removeCatalogValue(
-      next.remoteDpopTokens,
-      (value) => value.environmentId,
-      environmentId,
-    ),
-    disabledEnvironmentIds: removeCatalogValue(
-      next.disabledEnvironmentIds,
-      (value) => value,
-      environmentId,
-    ),
-    ...(next.githubRoutingPermissions === undefined
-      ? {}
-      : {
-          githubRoutingPermissions: next.githubRoutingPermissions.filter(
-            (permission) => permission.environmentId !== environmentId,
-          ),
-        }),
-  };
+  const next = removeConnectionMetadata(document, target, true);
+  return document.githubRoutingPermissions === undefined
+    ? next
+    : {
+        ...next,
+        githubRoutingPermissions: document.githubRoutingPermissions.filter(
+          (permission) => permission.environmentId !== target.environmentId,
+        ),
+      };
 }
 
 /** Flips the disabled flag for a saved environment; unknown ids are ignored. */

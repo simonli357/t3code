@@ -1,5 +1,3 @@
-import { presentThreadShell } from "@t3tools/client-runtime/state/models";
-import * as DateTime from "effect/DateTime";
 import { planPinnedMove } from "@t3tools/client-runtime/state/thread-sort";
 import {
   createPendingThreadOrder,
@@ -19,13 +17,12 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
-  RunId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
-import { makeRawThreadShell, makeThreadShellFixture } from "../../test-fixtures";
 import { threadJumpTarget } from "../keyboard/threadKeyboardShortcuts";
 import {
   buildThreadListV2Items,
@@ -38,7 +35,6 @@ import {
   resolveThreadListV2SwipeActions,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
-  threadHasUnseenCompletion,
   type ThreadListV2ListItem,
 } from "./threadListV2";
 
@@ -47,14 +43,31 @@ const environmentId = EnvironmentId.make("environment-1");
 function makeThread(
   input: Partial<EnvironmentThreadShell> & Pick<EnvironmentThreadShell, "id" | "title">,
 ): EnvironmentThreadShell {
-  return makeThreadShellFixture({
+  return {
     environmentId,
+    projectId: ProjectId.make("project-1"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    pullRequests: [],
+    latestTurn: null,
+    createdAt: "2026-06-01T00:00:00.000Z",
+    updatedAt: "2026-06-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
     ...input,
-  });
+  };
 }
 
 const NOW = "2026-06-02T00:00:00.000Z";
-
 const linkedPullRequest = {
   projectId: ProjectId.make("project-1"),
   repository: "pingdotgg/t3code",
@@ -111,93 +124,24 @@ describe("resolveThreadListV2SnoozeMenuSelection", () => {
 });
 
 describe("resolveThreadListV2Status", () => {
-  it("distinguishes usage limits from ordinary failures and clears the label after recovery", () => {
-    const thread = makeThread({
-      id: ThreadId.make("limited"),
-      title: "Limited",
-      runtime: {
-        status: "failed",
-        activeRunId: null,
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        providerName: "Codex",
-        lastError: "Plan limit reached",
-        lastErrorClass: "usage_limit",
-        updatedAt: NOW,
-      },
-    });
-    expect(resolveThreadListV2Status(thread)).toBe("limited");
-    expect(
-      resolveThreadListV2Status({
-        ...thread,
-        runtime: { ...thread.runtime!, lastErrorClass: null },
-      }),
-    ).toBe("failed");
-    expect(
-      resolveThreadListV2Status({
-        ...thread,
-        runtime: { ...thread.runtime!, status: "completed" },
-      }),
-    ).toBe("ready");
-  });
-
-  it("prioritizes approval over a running runtime", () => {
+  it("prioritizes approval over a running session", () => {
     const thread = makeThread({
       id: ThreadId.make("t"),
       title: "t",
       hasPendingApprovals: true,
-      runtime: {
+      session: {
+        threadId: ThreadId.make("t"),
         status: "running",
-        activeRunId: RunId.make("run-t"),
         providerName: "Codex",
         providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "full-access",
+        activeTurnId: null,
         lastError: null,
         updatedAt: NOW,
       },
     });
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
-
-  it("reports waiting when presentation parks runtime idle for background tasks", () => {
-    expect(
-      resolveThreadListV2Status(
-        makeThread({
-          id: ThreadId.make("t"),
-          title: "t",
-          pendingBackgroundTasks: [{ taskId: "bg-1", description: "Watch build", kind: "monitor" }],
-          runtime: {
-            status: "idle",
-            activeRunId: null,
-            providerInstanceId: ProviderInstanceId.make("codex"),
-            providerName: "Codex",
-            lastError: null,
-            updatedAt: NOW,
-          },
-        }),
-      ),
-    ).toBe("waiting");
-  });
-
-  it.each([
-    { kind: "command", status: "ready" },
-    { kind: "monitor", status: "waiting" },
-  ] as const)(
-    "presents an unseen completion with a $kind roster as $status",
-    ({ kind, status }) => {
-      const thread = presentThreadShell(
-        environmentId,
-        makeRawThreadShell({
-          latestRunId: RunId.make("run-background-completion"),
-          status: "completed",
-          latestRunCompletedAt: DateTime.makeUnsafe(NOW),
-          lastVisitedAt: DateTime.makeUnsafe("2026-06-01T23:59:00.000Z"),
-          pendingBackgroundTasks: [{ taskId: "background-work", kind }],
-        }),
-      );
-
-      expect(resolveThreadListV2Status(thread)).toBe(status);
-      expect(threadHasUnseenCompletion(thread)).toBe(true);
-    },
-  );
 
   it("resolves ready for quiescent threads", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
@@ -365,6 +309,19 @@ describe("sortThreadsForListV2", () => {
     ]);
     expect(sorted.map((thread) => thread.id)).toEqual(["newest", "middle", "oldest"]);
   });
+
+  it("surfaces an un-settled thread at the top via its re-entry stamp", () => {
+    const sorted = sortThreadsForListV2([
+      {
+        id: "old-unsettled",
+        createdAt: "2026-06-01T08:00:00.000Z",
+        unsettledAt: "2026-06-01T13:00:00.000Z",
+      },
+      { id: "newest", createdAt: "2026-06-01T12:00:00.000Z" },
+      { id: "middle", createdAt: "2026-06-01T10:00:00.000Z" },
+    ]);
+    expect(sorted.map((thread) => thread.id)).toEqual(["old-unsettled", "newest", "middle"]);
+  });
 });
 
 describe("getThreadListV2OrderedSection", () => {
@@ -506,60 +463,6 @@ describe("buildThreadListV2Items", () => {
       pinned: true,
     });
     expect(layout.settledCount).toBe(0);
-  });
-
-  it("hides snoozed threads and counts them — visibility parity with web", () => {
-    const layout = buildThreadListV2Items({
-      threads: [
-        makeThread({ id: ThreadId.make("active"), title: "Active" }),
-        makeThread({
-          id: ThreadId.make("snoozed"),
-          title: "Snoozed",
-          snoozedUntil: "2026-06-03T09:00:00.000Z",
-          snoozedAt: "2026-06-01T12:00:00.000Z",
-        }),
-        makeThread({
-          id: ThreadId.make("woken"),
-          title: "Woken",
-          // Wake time already passed: back in the active list.
-          snoozedUntil: "2026-06-01T18:00:00.000Z",
-          snoozedAt: "2026-06-01T12:00:00.000Z",
-        }),
-      ],
-      environmentId: null,
-      searchQuery: "",
-      now: NOW,
-    });
-
-    // Same createdAt → static sort tiebreaks by id; the point is the woken
-    // thread is BACK in the card block and the snoozed one is gone.
-    expect(layout.items.map((item) => item.thread.id)).toEqual(["active", "woken"]);
-    expect(layout.snoozedCount).toBe(1);
-  });
-
-  it("moves a settled pinned thread into the settled shelf — parity with web (#7969)", () => {
-    const layout = buildThreadListV2Items({
-      threads: [
-        makeThread({ id: ThreadId.make("active"), title: "Active" }),
-        makeThread({
-          id: ThreadId.make("pinned-settled"),
-          title: "Pinned while settled",
-          pinnedAt: "2026-06-01T12:00:00.000Z",
-          // Stale settled state (the decider clears it on pin): the pin wins.
-          settledOverride: "settled",
-          settledAt: "2026-06-01T12:00:00.000Z",
-        }),
-      ],
-      environmentId: null,
-      searchQuery: "",
-      now: NOW,
-    });
-
-    // Since #7969 a settled thread leaves the active block even while pinned;
-    // the pin re-applies when the thread is un-settled.
-    expect(layout.items.map((item) => item.thread.id)).toEqual(["active", "pinned-settled"]);
-    expect(layout.items.map((item) => item.pinned)).toEqual([false, false]);
-    expect(layout.settledCount).toBe(1);
   });
 
   it("snooze hides a pinned thread and wake restores it to the pinned block", () => {
@@ -901,11 +804,10 @@ describe("buildThreadListV2Items", () => {
   });
 
   it("scopes the flat list to one project", () => {
-    const projectId = ProjectId.make("project-1");
     const otherProjectId = ProjectId.make("project-2");
     const { items } = buildThreadListV2Items({
       threads: [
-        makeThread({ id: ThreadId.make("included"), projectId, title: "Included" }),
+        makeThread({ id: ThreadId.make("included"), title: "Included" }),
         makeThread({
           id: ThreadId.make("excluded"),
           projectId: otherProjectId,
@@ -913,7 +815,7 @@ describe("buildThreadListV2Items", () => {
         }),
       ],
       environmentId: null,
-      projectRefs: [{ environmentId, projectId }],
+      projectRefs: [{ environmentId, projectId: ProjectId.make("project-1") }],
       searchQuery: "",
       now: NOW,
     });
@@ -923,21 +825,19 @@ describe("buildThreadListV2Items", () => {
 
   it("scopes the flat list to every environment member of a logical project", () => {
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
-    const projectId = ProjectId.make("project-1");
     const { items } = buildThreadListV2Items({
       threads: [
-        makeThread({ id: ThreadId.make("local"), projectId, title: "Local" }),
+        makeThread({ id: ThreadId.make("local"), title: "Local" }),
         makeThread({
           environmentId: remoteEnvironmentId,
           id: ThreadId.make("remote"),
-          projectId,
           title: "Remote",
         }),
       ],
       environmentId: null,
       projectRefs: [
-        { environmentId, projectId },
-        { environmentId: remoteEnvironmentId, projectId },
+        { environmentId, projectId: ProjectId.make("project-1") },
+        { environmentId: remoteEnvironmentId, projectId: ProjectId.make("project-1") },
       ],
       searchQuery: "",
       now: NOW,
@@ -960,9 +860,9 @@ describe("buildThreadListV2Items settled paging", () => {
           latestUserMessageAt: `2026-06-01T0${index}:00:00.000Z`,
           // A turn adopted the message (same requestedAt): without it the
           // thread reads as a queued turn start, which never settles.
-          latestRun: {
-            runId: RunId.make(`run-${index}`),
-            status: "completed",
+          latestTurn: {
+            turnId: TurnId.make(`turn-${index}`),
+            state: "completed",
             requestedAt: `2026-06-01T0${index}:00:00.000Z`,
             startedAt: `2026-06-01T0${index}:00:00.000Z`,
             completedAt: `2026-06-01T0${index}:10:00.000Z`,
@@ -1563,47 +1463,20 @@ describe("cross-section thread drops", () => {
   });
 });
 
-it("excludes subagents from navigation, search and ordering while retaining user forks", () => {
-  const root = makeThread({ id: ThreadId.make("root"), title: "Root" });
-  const child = makeThread({
-    id: ThreadId.make("child"),
-    title: "Child",
-    lineage: { parentThreadId: root.id, rootThreadId: root.id, relationshipToParent: "subagent" },
-  });
-  const fork = makeThread({
-    id: ThreadId.make("fork"),
-    title: "Fork",
-    lineage: { parentThreadId: root.id, rootThreadId: root.id, relationshipToParent: "fork" },
-  });
-  const threads = [root, child, fork];
-  expect(
-    buildThreadListV2Items({ threads, environmentId: null, searchQuery: "", now: NOW }).items.map(
-      (item) => item.thread.id,
-    ),
-  ).toEqual([fork.id, root.id]);
-  expect(
-    buildThreadListV2Items({ threads, environmentId: null, searchQuery: "Child", now: NOW }).items,
-  ).toEqual([]);
-  expect(
-    getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
-      (thread) => thread.id,
-    ),
-  ).toEqual([fork.id, root.id]);
-});
-
-/* ─── Recycled-list equality + per-row clock scoping ─────────────────── */
+/* â”€â”€â”€ Recycled-list equality + per-row clock scoping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
 const BASE_MS = Date.parse(NOW);
 const isoAt = (ms: number) => new Date(ms).toISOString();
 const MINUTE_MS = 60_000;
 
-function runningRuntime() {
+function runningSession(threadId: string) {
   return {
+    threadId: ThreadId.make(threadId),
     status: "running" as const,
     providerName: "Codex",
     providerInstanceId: ProviderInstanceId.make("codex"),
     runtimeMode: "full-access" as const,
-    activeRunId: null,
+    activeTurnId: null,
     lastError: null,
     updatedAt: NOW,
   };
@@ -1886,7 +1759,7 @@ describe("buildThreadListV2ListItems clock scoping", () => {
         id: ThreadId.make("tick-working"),
         title: "tick working",
         latestUserMessageAt: isoAt(BASE_MS - 5 * MINUTE_MS),
-        runtime: runningRuntime(),
+        session: runningSession("tick-working"),
       });
       const threads = buildTickThreads();
       const items = buildTickList(
@@ -1948,27 +1821,6 @@ describe("thread list v2 minute tick invalidation", () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("keeps unread completion labels stable across a minute tick", () => {
-    const unread = makeThread({
-      id: ThreadId.make("tick-unread"),
-      title: "Unread completion",
-      lastVisitedAt: isoAt(BASE_MS - 10 * MINUTE_MS),
-      latestRun: {
-        runId: RunId.make("tick-unread-run"),
-        status: "completed",
-        requestedAt: isoAt(BASE_MS - 6 * MINUTE_MS),
-        startedAt: isoAt(BASE_MS - 6 * MINUTE_MS),
-        completedAt: isoAt(BASE_MS - 5 * MINUTE_MS),
-        assistantMessageId: null,
-      },
-    });
-    const options = { snoozeEnvironmentIds: new Set<EnvironmentId>() };
-    const first = buildTickList([unread], BASE_MS, [], options)[0]!;
-    const next = buildTickList([unread], BASE_MS + MINUTE_MS, [], options)[0]!;
-    expect(first.type === "v2-thread" && first.timeLabel).toBe("");
-    expect(threadListV2ListItemsAreEqual(first, next)).toBe(true);
   });
 
   it("keeps hour-granularity rows stable across a minute tick when they carry no snooze menu", () => {
@@ -2159,146 +2011,438 @@ describe("buildThreadListV2ListItems row-state stamps", () => {
   });
 });
 
-describe("Working section beta", () => {
-  const running = {
-    status: "running" as const,
-    activeRunId: null,
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    providerName: "Codex",
-    lastError: null,
-    updatedAt: NOW,
-  };
-  const finishedAt = (id: string, completedAt: string) =>
+describe("managed worker groups on native lists", () => {
+  const otherEnvironmentId = EnvironmentId.make("environment-2");
+  const computerLabels = new Map<EnvironmentId, string>([
+    [environmentId, "myalien"],
+    [otherEnvironmentId, "myacer"],
+  ]);
+  const organization = (
+    overrides: Partial<NonNullable<EnvironmentThreadShell["organization"]>> = {},
+  ) => ({
+    owner: null,
+    workers: [],
+    revision: 0,
+    assignmentState: null,
+    reportOutcome: null,
+    directInputAt: null,
+    ...overrides,
+  });
+  const master = (
+    id: string,
+    workerIds: string[],
+    overrides: Partial<EnvironmentThreadShell> = {},
+  ) =>
     makeThread({
       id: ThreadId.make(id),
       title: id,
-      createdAt: "2026-06-01T00:00:00.000Z",
-      latestRun: {
-        runId: RunId.make(`run-${id}`),
-        status: "completed",
-        requestedAt: "2026-06-01T00:00:00.000Z",
-        startedAt: "2026-06-01T00:00:00.000Z",
-        completedAt,
-        assistantMessageId: null,
-      },
+      organization: organization({
+        workers: workerIds.map((threadId) => ({
+          environmentId: null,
+          threadId: ThreadId.make(threadId),
+        })),
+      }),
+      ...overrides,
     });
-  const threads = [
-    finishedAt("finished-early", "2026-06-01T01:00:00.000Z"),
-    finishedAt("finished-late", "2026-06-01T03:00:00.000Z"),
-    makeThread({ id: ThreadId.make("working"), title: "working", runtime: running }),
+  const worker = (id: string, owner: string, overrides: Partial<EnvironmentThreadShell> = {}) =>
     makeThread({
-      id: ThreadId.make("asks-approval"),
-      title: "asks-approval",
-      createdAt: "2026-06-01T02:00:00.000Z",
-      runtime: running,
-      hasPendingApprovals: true,
-    }),
-    makeThread({
-      id: ThreadId.make("pinned-working"),
-      title: "pinned-working",
-      runtime: running,
-      pinnedAt: "2026-06-01T00:00:00.000Z",
-    }),
-  ];
-  const build = (input: Partial<Parameters<typeof buildThreadListV2Items>[0]> = {}) =>
+      id: ThreadId.make(id),
+      title: id,
+      organization: organization({
+        owner: { environmentId: null, threadId: ThreadId.make(owner) },
+      }),
+      ...overrides,
+    });
+  const groupKey = (id: string) => `${environmentId}:${id}`;
+  const list = (
+    threads: EnvironmentThreadShell[],
+    options: {
+      expanded?: ReadonlySet<string>;
+      connected?: ReadonlySet<string>;
+      searchQuery?: string;
+      selectedThreadKey?: string;
+      settlementEnvironmentIds?: ReadonlySet<EnvironmentId>;
+      settledShelfExpanded?: boolean;
+      settledLimit?: number;
+    } = {},
+  ) =>
     buildThreadListV2Items({
       threads,
       environmentId: null,
-      searchQuery: "",
+      searchQuery: options.searchQuery ?? "",
       now: NOW,
-      workingShelfEnabled: true,
-      ...input,
+      selectedThreadKey: options.selectedThreadKey ?? null,
+      ...(options.settlementEnvironmentIds
+        ? { settlementEnvironmentIds: options.settlementEnvironmentIds }
+        : {}),
+      ...(options.settledShelfExpanded === undefined
+        ? {}
+        : { settledShelfExpanded: options.settledShelfExpanded }),
+      ...(options.settledLimit === undefined ? {} : { settledLimit: options.settledLimit }),
+      organization: {
+        expanded: options.expanded ?? new Set<string>(),
+        finishedExpanded: new Set<string>(),
+        connected: options.connected ?? new Set([environmentId]),
+        computerLabels,
+      },
     });
-  const ids = (layout: ReturnType<typeof buildThreadListV2Items>) =>
-    layout.items.map((item) => item.thread.id);
+  const ids = (layout: ReturnType<typeof list>) => layout.items.map((row) => row.thread.id);
 
-  it("folds unpinned working threads into a collapsed shelf", () => {
-    const layout = build();
-    expect(ids(layout)).toEqual([
-      "pinned-working",
-      "finished-late",
-      "asks-approval",
-      "finished-early",
+  it("starts every group collapsed and opens only the groups the user opened", () => {
+    const threads = [
+      master("first", ["a", "b"]),
+      worker("a", "first"),
+      worker("b", "first"),
+      master("second", ["c"]),
+      worker("c", "second"),
+    ];
+    const closed = list(threads);
+    expect(ids(closed)).toEqual(["first", "second"]);
+    expect(closed.items[0]?.organization).toMatchObject({
+      expanded: false,
+      groupDepth: 0,
+      workers: { total: 2 },
+    });
+
+    const open = list(threads, { expanded: new Set([groupKey("first")]) });
+    expect(ids(open)).toEqual(["first", "a", "b", "second"]);
+    expect(open.items[0]?.organization?.expanded).toBe(true);
+    // A worker under its header names no master of its own: the header does.
+    expect(open.items[1]?.organization).toMatchObject({
+      groupDepth: 1,
+      ownerText: "Master: first · myalien",
+      workers: null,
+    });
+    expect(open.items[3]?.organization?.expanded).toBe(false);
+  });
+
+  it("does not open a group because workers arrived or changed status", () => {
+    const base = [master("first", ["a"]), worker("a", "first")];
+    expect(ids(list(base))).toEqual(["first"]);
+    const busier = [
+      master("first", ["a", "b", "c"]),
+      worker("a", "first", { hasPendingApprovals: true }),
+      worker("b", "first", { hasPendingUserInput: true }),
+      worker("c", "first"),
+    ];
+    const layout = list(busier);
+    expect(ids(layout)).toEqual(["first"]);
+    expect(layout.items[0]?.organization).toMatchObject({
+      expanded: false,
+      workers: { total: 3, attention: 2 },
+    });
+  });
+
+  it("keeps the selected worker reachable without opening its group", () => {
+    const threads = [
+      master("first", ["a", "b"]),
+      // Reported done but not settled: it waits in the group's Finished fold.
+      worker("a", "first", {
+        projectId: ProjectId.make("other-project"),
+        organization: organization({
+          owner: { environmentId: null, threadId: ThreadId.make("first") },
+          reportOutcome: "done",
+        }),
+      }),
+      worker("b", "first"),
+    ];
+    const layout = list(threads, { selectedThreadKey: groupKey("a") });
+    expect(ids(layout)).toEqual(["first", "a"]);
+    expect(layout.items[1]?.thread.projectId).toBe("other-project");
+    expect(layout.items[1]?.organization?.groupDepth).toBe(1);
+    // The header still shows the user's own choice, not what the selection forced.
+    expect(layout.items[0]?.organization?.expanded).toBe(false);
+  });
+
+  it("moves a settled worker to Settled and out of its master's counts until it is un-settled", () => {
+    // Settled long after a blocked report: the old report must not keep a ghost row or count.
+    const blocked = organization({
+      owner: { environmentId: null, threadId: ThreadId.make("first") },
+      reportOutcome: "blocked",
+    });
+    const threads = (b: Partial<EnvironmentThreadShell> = {}) => [
+      master("first", ["a", "b", "c"]),
+      worker("a", "first"),
+      worker("b", "first", { organization: blocked, ...b }),
+      worker("c", "first"),
+    ];
+    const open = new Set([groupKey("first")]);
+
+    const parked = list(threads({ settledOverride: "settled" }), { expanded: open });
+    // The group first, then the Settled tail: b is listed once, as an ordinary settled row.
+    expect(ids(parked)).toEqual(["first", "a", "c", "b"]);
+    expect(parked.settledCount).toBe(1);
+    expect(parked.settledShelfHeaderIndex).toBe(3);
+    expect(parked.items[3]).toMatchObject({ variant: "slim", snoozed: false });
+    expect(parked.items[3]?.organization).toMatchObject({
+      groupDepth: 0,
+      workers: null,
+      ownerText: "Master: first · myalien",
+    });
+    expect(parked.items[0]?.organization?.workers).toMatchObject({ total: 2, attention: 0 });
+
+    // Un-settled, it is an active worker again: back in its group, counted with its real state.
+    const resumed = list(threads({ settledOverride: "active" }), { expanded: open });
+    expect(ids(resumed)).toEqual(["first", "a", "b", "c"]);
+    expect(resumed.settledCount).toBe(0);
+    expect(resumed.items[2]?.organization).toMatchObject({ groupDepth: 1 });
+    expect(resumed.items[0]?.organization?.workers).toMatchObject({ total: 3, attention: 1 });
+  });
+
+  it("does not hold a settled master out of Settled for its settled workers' old state", () => {
+    const blocked = organization({
+      owner: { environmentId: null, threadId: ThreadId.make("first") },
+      reportOutcome: "blocked",
+    });
+    const layout = list([
+      master("first", ["a"], { settledOverride: "settled" }),
+      worker("a", "first", { settledOverride: "settled", organization: blocked }),
     ]);
-    expect(layout.workingCount).toBe(1);
-    expect(layout.workingShelfHeaderIndex).toBe(4);
-
-    const off = build({ workingShelfEnabled: false });
-    expect(ids(off)).toContain("working");
-    expect(off.workingCount).toBe(0);
+    // Nothing is active, so nothing needs attention: no group, no header, both in Settled.
+    expect(layout.settledShelfHeaderIndex).toBe(0);
+    expect(layout.settledCount).toBe(2);
+    expect(layout.items.map((row) => row.organization?.workers ?? null)).toEqual([null, null]);
   });
 
-  it("shows working rows as cards when expanded, or only the selected one when collapsed", () => {
-    expect(build({ workingShelfExpanded: true }).items.at(-1)).toMatchObject({
-      thread: { id: "working" },
-      variant: "card",
+  it("keeps a selected settled worker reachable through Settled, not under its master", () => {
+    const threads = [
+      master("first", ["a", "b"]),
+      worker("a", "first"),
+      worker("b", "first", { settledOverride: "settled" }),
+      master("other", [], { settledOverride: "settled" }),
+    ];
+    const selectedThreadKey = groupKey("b");
+    // A collapsed Settled shelf still lists the open conversation, and the closed group
+    // reveals nothing for it.
+    const collapsed = list(threads, { selectedThreadKey, settledShelfExpanded: false });
+    expect(ids(collapsed)).toEqual(["first", "b"]);
+    expect(collapsed.items[0]?.organization).toMatchObject({
+      expanded: false,
+      workers: { total: 1 },
     });
-    expect(ids(build({ selectedThreadKey: `${environmentId}:working` })).at(-1)).toBe("working");
+    expect(collapsed.items[1]?.organization?.groupDepth).toBe(0);
+    expect(collapsed.settledCount).toBe(2);
+    // Past the page limit it is pulled into the tail once, never also listed under the group.
+    const limited = list(threads, { selectedThreadKey, settledLimit: 1 });
+    expect(ids(limited).filter((id) => id === "b")).toHaveLength(1);
+    expect(limited.items.find((row) => row.thread.id === "b")?.organization?.groupDepth).toBe(0);
   });
 
-  it("orders the inbox by the latest return this device observed", () => {
-    const layout = build({
-      inboxReturnAt: (thread) =>
-        thread.id === "finished-early" ? Date.parse("2026-06-01T04:00:00.000Z") : undefined,
+  it("keeps an active worker under its master through a settled intermediate worker", () => {
+    const threads = [
+      master("first", ["mid"]),
+      worker("mid", "first", {
+        settledOverride: "settled",
+        organization: organization({
+          owner: { environmentId: null, threadId: ThreadId.make("first") },
+          workers: [{ environmentId: null, threadId: ThreadId.make("leaf") }],
+        }),
+      }),
+      // Needs the user, which would hold a master out of Settled if the master were its group.
+      worker("leaf", "mid", { hasPendingApprovals: true }),
+    ];
+    const layout = list(threads, { expanded: new Set([groupKey("first")]) });
+    // The group lists the active leaf; the settled worker is its own Settled row.
+    expect(ids(layout)).toEqual(["first", "leaf", "mid"]);
+    expect(layout.items[0]?.organization?.workers).toMatchObject({ total: 1, attention: 1 });
+    // The leaf keeps its real owner: it names the settled worker instead of hiding or replacing it.
+    expect(layout.items[1]?.organization).toMatchObject({
+      groupDepth: 2,
+      ownerText: "Master: mid · myalien",
     });
-    expect(ids(layout).slice(1)).toEqual(["finished-early", "finished-late", "asks-approval"]);
+    // The settled worker heads no group of its own, so its descendant's state cannot hold it out
+    // of Settled and the leaf is not listed twice.
+    expect(layout.settledCount).toBe(1);
+    expect(layout.items[2]).toMatchObject({ variant: "slim" });
+    expect(layout.items[2]?.organization).toMatchObject({ groupDepth: 0, workers: null });
   });
 
-  it("places the shelf after queued tasks and before snoozed and settled threads", () => {
-    const layout = buildThreadListV2Items({
-      threads: [
-        makeThread({ id: ThreadId.make("active"), title: "active" }),
-        makeThread({ id: ThreadId.make("working"), title: "working", runtime: running }),
-        makeThread({
-          id: ThreadId.make("snoozed"),
-          title: "snoozed",
-          runtime: running,
-          snoozedUntil: "2026-06-03T09:00:00.000Z",
-          snoozedAt: "2026-06-01T12:00:00.000Z",
-        }),
-        makeThread({
-          id: ThreadId.make("settled"),
-          title: "settled",
-          settledOverride: "settled",
-          settledAt: NOW,
-        }),
-      ],
+  it("settles a remote worker only where its own computer can un-settle it", () => {
+    const first = makeThread({
+      id: ThreadId.make("first"),
+      title: "first",
+      organization: organization({
+        workers: [{ environmentId: otherEnvironmentId, threadId: ThreadId.make("a") }],
+      }),
+    });
+    const remote = makeThread({
+      id: ThreadId.make("a"),
+      title: "a",
+      environmentId: otherEnvironmentId,
+      settledOverride: "settled",
+      organization: organization({ owner: { environmentId, threadId: first.id } }),
+    });
+    const both = new Set([environmentId, otherEnvironmentId]);
+    const supported = list([first, remote], {
+      settlementEnvironmentIds: both,
+      connected: both,
+    });
+    expect(ids(supported)).toEqual(["first", "a"]);
+    expect(supported.settledCount).toBe(1);
+    expect(supported.items[0]?.organization?.workers).toBeNull();
+
+    // Without the capability there (old server, or its descriptor has not loaded) the cached
+    // snapshot is not "settled": the worker stays in its group as one this client cannot see.
+    const unsupported = list([first, remote], {
+      settlementEnvironmentIds: new Set([environmentId]),
+    });
+    expect(ids(unsupported)).toEqual(["first"]);
+    expect(unsupported.items[0]?.organization?.workers).toMatchObject({ total: 1, unknown: 1 });
+  });
+
+  it("names an owner by title and computer, and says so when the master is unavailable", () => {
+    const missingId = "b100c296-4625-440b-a19e-cf296b1f4a77";
+    const orphan = makeThread({
+      id: ThreadId.make("orphan"),
+      title: "orphan",
+      environmentId: otherEnvironmentId,
+      organization: organization({
+        owner: { environmentId: otherEnvironmentId, threadId: ThreadId.make(missingId) },
+      }),
+    });
+    const layout = list([orphan]);
+    // Nothing is invented or hidden: the worker stays a visible top-level row.
+    expect(ids(layout)).toEqual(["orphan"]);
+    const row = layout.items[0]?.organization;
+    expect(row).toMatchObject({ groupDepth: 0, ownerText: "Master unavailable · myacer" });
+    expect(row?.ownerText).not.toContain(missingId);
+    expect(row?.ownerDetail).toContain(missingId);
+    expect(row?.ownerDetail).toContain("myacer");
+    // A computer with no known name is left out rather than replaced by an identifier.
+    const unnamed = buildThreadListV2Items({
+      threads: [orphan],
       environmentId: null,
       searchQuery: "",
       now: NOW,
-      workingShelfEnabled: true,
-      workingShelfExpanded: true,
-      snoozedShelfExpanded: true,
+      organization: {
+        expanded: new Set<string>(),
+        finishedExpanded: new Set<string>(),
+        connected: new Set([otherEnvironmentId]),
+        computerLabels: new Map(),
+      },
     });
-    const items = buildThreadListV2ListItems({
-      items: layout.items,
-      pendingTasks: [makePendingTask("queued")],
-      workingCount: layout.workingCount,
-      workingShelfExpanded: true,
-      workingShelfHeaderIndex: layout.workingShelfHeaderIndex,
-      snoozedCount: layout.snoozedCount,
-      snoozedShelfExpanded: true,
-      snoozedShelfHeaderIndex: layout.snoozedShelfHeaderIndex,
-      settledCount: layout.settledCount,
-      settledShelfHeaderIndex: layout.settledShelfHeaderIndex,
+    expect(unnamed.items[0]?.organization?.ownerText).toBe("Master unavailable");
+  });
+
+  it("lists search results flat, each naming its master", () => {
+    const threads = [master("first", ["a"]), worker("a", "first")];
+    const layout = list(threads, { searchQuery: "a" });
+    expect(ids(layout)).toEqual(["a"]);
+    expect(layout.items[0]?.organization).toMatchObject({
+      groupDepth: 0,
+      ownerText: "Master: first · myalien",
+      workers: null,
     });
-    expect(
-      items.map((item) =>
-        item.type === "v2-thread"
-          ? item.item.thread.id
-          : item.type === "v2-pending"
-            ? item.pendingTask.title
-            : item.type,
-      ),
-    ).toEqual([
-      "active",
-      "queued",
-      "v2-working-shelf",
-      "working",
-      "v2-snoozed-shelf",
-      "snoozed",
-      "v2-settled-shelf",
-      "settled",
-    ]);
+    const both = list(threads, { searchQuery: "first" });
+    expect(ids(both)).toEqual(["first"]);
+    expect(both.items[0]?.organization?.workers).toBeNull();
+  });
+
+  it("reports workers it cannot see as unknown, never as running or zero", () => {
+    // Worker "a" runs on a computer this client is not connected to.
+    const first = makeThread({
+      id: ThreadId.make("first"),
+      title: "first",
+      organization: organization({
+        workers: [
+          { environmentId: otherEnvironmentId, threadId: ThreadId.make("a") },
+          { environmentId: null, threadId: ThreadId.make("b") },
+        ],
+      }),
+    });
+    const remote = makeThread({
+      id: ThreadId.make("a"),
+      title: "a",
+      environmentId: otherEnvironmentId,
+      organization: organization({ owner: { environmentId, threadId: first.id } }),
+    });
+    const layout = list([first, remote, worker("b", "first", { session: runningSession("b") })]);
+    expect(layout.items[0]?.organization?.workers).toMatchObject({
+      total: 2,
+      unknown: 1,
+      running: 1,
+      attention: 0,
+    });
+    // A group with workers this client cannot see stays among the active rows.
+    expect(ids(layout)).toEqual(["first"]);
+  });
+
+  it("lets a recycled cell see every change a group row draws", () => {
+    const threads = [master("first", ["a"]), worker("a", "first")];
+    const rowFor = (layout: ReturnType<typeof list>, id: string) =>
+      buildThreadListV2ListItems({ items: layout.items, pendingTasks: [] }).find(
+        (item) => item.type === "v2-thread" && item.item.thread.id === id,
+      )!;
+    const closed = rowFor(list(threads), "first");
+    expect(threadListV2ListItemsAreEqual(closed, rowFor(list(threads), "first"))).toBe(true);
+    const opened = rowFor(list(threads, { expanded: new Set([groupKey("first")]) }), "first");
+    expect(threadListV2ListItemsAreEqual(closed, opened)).toBe(false);
+    const needsAttention = rowFor(
+      list([threads[0]!, worker("a", "first", { hasPendingApprovals: true })]),
+      "first",
+    );
+    expect(threadListV2ListItemsAreEqual(closed, needsAttention)).toBe(false);
+    // The owner line is part of what a worker row draws, so a rename must reach the cell.
+    const named = rowFor(list(threads, { searchQuery: "a" }), "a");
+    const renamed = rowFor(
+      list([{ ...threads[0]!, title: "renamed" }, threads[1]!], { searchQuery: "a" }),
+      "a",
+    );
+    expect(threadListV2ListItemsAreEqual(named, renamed)).toBe(false);
+  });
+});
+
+describe("Base session shelves", () => {
+  const base = makeThread({ id: ThreadId.make("base-template"), title: "Template", isBase: true });
+  const remote = makeThread({
+    ...base,
+    environmentId: EnvironmentId.make("remote"),
+    projectId: ProjectId.make("remote-project"),
+  });
+  const input = {
+    threads: [base, remote],
+    environmentId: null,
+    searchQuery: "",
+    now: NOW,
+    organization: {
+      expanded: new Set<string>(),
+      finishedExpanded: new Set<string>(),
+      connected: new Set<string>(),
+      computerLabels: new Map<EnvironmentId, string>(),
+    },
+  };
+  it("defaults closed across grouped projects and remembers intentional expansion", () => {
+    const closed = buildThreadListV2Items(input);
+    expect(closed.baseCount).toBe(2);
+    expect(closed.items).toHaveLength(0);
+    expect(closed.baseShelfExpanded).toBe(false);
+    const open = buildThreadListV2Items({
+      ...input,
+      organization: { ...input.organization, expanded: new Set(["base-sessions"]) },
+    });
+    expect(open.items.map((row) => row.thread.environmentId).sort()).toEqual(
+      [environmentId, "remote"].sort(),
+    );
+    const rows = buildThreadListV2ListItems({
+      ...open,
+      pendingTasks: [],
+      snoozedShelfExpanded: false,
+      settledShelfExpanded: true,
+    });
+    expect(rows[0]?.type).toBe("v2-base-shelf");
+  });
+  it("uses the same Settled rule, keeps selected bases reachable and searches collapsed bases", () => {
+    const settled = buildThreadListV2Items({
+      ...input,
+      threads: [{ ...base, settledOverride: "settled", hasPendingApprovals: true }],
+    });
+    expect(settled.baseCount).toBe(0);
+    expect(settled.settledCount).toBe(1);
+    const selected = buildThreadListV2Items({
+      ...input,
+      selectedThreadKey: `${environmentId}:${base.id}`,
+    });
+    expect(selected.items.map((row) => row.thread.environmentId)).toEqual([environmentId]);
+    expect(buildThreadListV2Items({ ...input, searchQuery: "Template" }).items).toHaveLength(2);
   });
 });

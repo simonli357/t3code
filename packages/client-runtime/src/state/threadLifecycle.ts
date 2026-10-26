@@ -1,7 +1,7 @@
 import type {
   EnvironmentId,
-  OrchestrationV2ShellSnapshot,
-  OrchestrationV2ThreadShell,
+  OrchestrationShellSnapshot,
+  OrchestrationThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -11,14 +11,14 @@ import type { AtomCommand } from "./runtime.ts";
 
 interface PendingThreadUpdate {
   readonly threadId: ThreadId;
-  readonly apply: (thread: OrchestrationV2ThreadShell) => OrchestrationV2ThreadShell;
+  readonly apply: (thread: OrchestrationThreadShell) => OrchestrationThreadShell;
   sequence?: number;
 }
 
 export function createOptimisticThreadLifecycle(
   sourceSnapshotAtom: (
     environmentId: EnvironmentId,
-  ) => Atom.Atom<OrchestrationV2ShellSnapshot | null>,
+  ) => Atom.Atom<OrchestrationShellSnapshot | null>,
 ) {
   const pendingAtom = Atom.family((_environmentId: EnvironmentId) =>
     Atom.make<ReadonlyArray<PendingThreadUpdate>>([]).pipe(Atom.keepAlive),
@@ -55,16 +55,16 @@ export function createOptimisticThreadLifecycle(
       E
     >,
     apply: (
-      thread: OrchestrationV2ThreadShell,
+      thread: OrchestrationThreadShell,
       input: Input,
-      now: DateTime.Utc,
+      now: string,
       accepted: boolean,
-    ) => OrchestrationV2ThreadShell,
+    ) => OrchestrationThreadShell,
   ): typeof command {
     return {
       label: command.label,
       run: async (registry, target) => {
-        const now = DateTime.nowUnsafe();
+        const now = DateTime.formatIso(DateTime.nowUnsafe());
         const pending = pendingAtom(target.environmentId);
         const source = sourceSnapshotAtom(target.environmentId);
         const update: PendingThreadUpdate = {
@@ -80,7 +80,7 @@ export function createOptimisticThreadLifecycle(
           if (result._tag === "Success") {
             update.sequence = result.value.sequence;
             registry.update(pending, (current) => [...current]);
-            const reconcile = (snapshot: OrchestrationV2ShellSnapshot | null) => {
+            const reconcile = (snapshot: OrchestrationShellSnapshot | null) => {
               if (snapshot === null || snapshot.snapshotSequence >= result.value.sequence) {
                 remove();
                 unsubscribe();

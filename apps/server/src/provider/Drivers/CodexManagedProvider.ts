@@ -8,7 +8,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { chatGptModels } from "../CodexChatGptModels.ts";
 import { makeCodexManagedRuntime } from "../CodexManagedRuntime.ts";
 import { ProviderDriverError } from "../Errors.ts";
-import { createCodexAdapterV2 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import {
   checkCodexProviderStatus,
   makePendingCodexProvider,
@@ -209,28 +209,15 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
   yield* runtime.auth.controller.subscribe("managed-codex-snapshot").pipe(
     // Disconnect also publishes idle when a saved account has no active sign-in flow.
     Stream.filter((state) => ["idle", "succeeded", "failed", "cancelled"].includes(state.phase)),
-    // Sign-out closes the scope of an in-flight probe, which fails that refresh
-    // with an interrupt. Keep listening so the sign-out's own idle still refreshes.
-    Stream.runForEach(() => snapshot.refresh.pipe(Effect.ignoreCause({ log: true }))),
+    Stream.runForEach(() => snapshot.refresh.pipe(Effect.asVoid)),
     Effect.forkScoped,
   );
   const resolveRuntime = runtime.auth.controller.withAccess!(runtime.resolve);
-  // Launch settings resolve per session from the signed-in token. The registry
-  // already wraps openSession in withAccess, so resolve without re-entering it.
-  const orchestrationAdapter = yield* createCodexAdapterV2(input, {
-    onUsageLimits: (update) => snapshot.applyUsageLimits(update),
-    resolveRuntime: runtime.resolve,
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new ProviderDriverError({
-          driver: DRIVER,
-          instanceId,
-          detail: "Failed to build Codex orchestration adapter.",
-          cause,
-        }),
-    ),
-  );
+  const adapter = yield* makeCodexAdapter(config, {
+    instanceId,
+    resolveRuntime,
+    onManagedConnectionRevoked: runtime.auth.revoke.pipe(Effect.ignore),
+  });
   const nativeGeneration = yield* makeCodexTextGeneration(
     config,
     undefined,
@@ -266,7 +253,7 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
     accentColor,
     enabled,
     snapshot,
-    orchestrationAdapter,
+    adapter,
     textGeneration,
     auth: runtime.auth.controller,
     snapshotForCwd: (cwd: string) =>

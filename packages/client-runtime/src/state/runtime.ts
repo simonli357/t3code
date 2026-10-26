@@ -8,7 +8,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
 
 import type { ConnectionAttemptError } from "../connection/model.ts";
-import * as EnvironmentRegistry from "../connection/registry.ts";
+import { EnvironmentNotRegisteredError, EnvironmentRegistry } from "../connection/registry.ts";
 import {
   type EnvironmentRpcInput,
   type EnvironmentRpcSuccess,
@@ -21,7 +21,7 @@ import {
   request,
   subscribe,
 } from "../rpc/client.ts";
-import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 
 interface EnvironmentAtomOptions<Input, A, E, R> {
   readonly label: string;
@@ -451,10 +451,10 @@ function runInEnvironment<A, E, R>(
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<
   A,
-  E | EnvironmentRegistry.EnvironmentNotRegisteredError,
-  EnvironmentRegistry.EnvironmentRegistry | Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>
+  E | EnvironmentNotRegisteredError,
+  EnvironmentRegistry | Exclude<R, EnvironmentSupervisor>
 > {
-  return EnvironmentRegistry.EnvironmentRegistry.pipe(
+  return EnvironmentRegistry.pipe(
     Effect.flatMap((registry) => registry.run(environmentId, effect)),
   );
 }
@@ -464,41 +464,32 @@ export function runStreamInEnvironment<A, E, R>(
   stream: Stream.Stream<A, E, R>,
 ): Stream.Stream<
   A,
-  E | EnvironmentRegistry.EnvironmentNotRegisteredError,
-  EnvironmentRegistry.EnvironmentRegistry | Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>
+  E | EnvironmentNotRegisteredError,
+  EnvironmentRegistry | Exclude<R, EnvironmentSupervisor>
 > {
   return Stream.unwrap(
-    EnvironmentRegistry.EnvironmentRegistry.pipe(
-      Effect.map((registry) => registry.runStream(environmentId, stream)),
-    ),
+    EnvironmentRegistry.pipe(Effect.map((registry) => registry.runStream(environmentId, stream))),
   );
 }
 
 export function followStreamInEnvironment<A, E, R>(
   environmentId: EnvironmentIdType,
   stream: Stream.Stream<A, E, R>,
-): Stream.Stream<
-  A,
-  E,
-  EnvironmentRegistry.EnvironmentRegistry | Exclude<R, EnvironmentSupervisor.EnvironmentSupervisor>
-> {
+): Stream.Stream<A, E, EnvironmentRegistry | Exclude<R, EnvironmentSupervisor>> {
   return Stream.unwrap(
-    EnvironmentRegistry.EnvironmentRegistry.pipe(
+    EnvironmentRegistry.pipe(
       Effect.map((registry) => registry.followStream(environmentId, stream)),
     ),
   );
 }
 
 export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: EnvironmentQueryAtomOptions<
     Input,
     A,
     E,
-    | EnvironmentSupervisor.EnvironmentSupervisor
-    | EnvironmentRegistry.EnvironmentRegistry
-    | AtomRegistry.AtomRegistry
-    | R
+    EnvironmentSupervisor | EnvironmentRegistry | AtomRegistry.AtomRegistry | R
   >,
 ): (target: {
   readonly environmentId: EnvironmentIdType;
@@ -509,7 +500,7 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
       followStreamInEnvironment(
         environmentId,
         Stream.unwrap(
-          EnvironmentSupervisor.EnvironmentSupervisor.pipe(
+          EnvironmentSupervisor.pipe(
             Effect.map((supervisor) =>
               SubscriptionRef.changes(supervisor.state).pipe(
                 Stream.zipLatest(SubscriptionRef.changes(supervisor.session)),
@@ -527,10 +518,7 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
     const queryAtom = runtime
       .atom<
         A,
-        | E
-        | ConnectionAttemptError
-        | EnvironmentRegistry.EnvironmentNotRegisteredError
-        | EnvironmentRpcUnavailableError
+        E | ConnectionAttemptError | EnvironmentNotRegisteredError | EnvironmentRpcUnavailableError
       >((get) => {
         const connection = Option.getOrNull(
           AsyncResult.value(get(connectionAtom(target.environmentId))),
@@ -585,13 +573,8 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
 }
 
 export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
-  options: EnvironmentSubscriptionAtomOptions<
-    Input,
-    A,
-    E,
-    EnvironmentSupervisor.EnvironmentSupervisor | R
-  >,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
+  options: EnvironmentSubscriptionAtomOptions<Input, A, E, EnvironmentSupervisor | R>,
 ) {
   const family = Atom.family((key: string) => {
     const target = parseEnvironmentRpcKey<Input>(key);
@@ -611,12 +594,12 @@ export function createEnvironmentSubscriptionAtomFamily<R, ER, Input, A, E>(
 }
 
 export function createEnvironmentCommand<R, ER, Input, A, E>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: EnvironmentCommandAtomOptions<
     Input,
     A,
     E,
-    EnvironmentSupervisor.EnvironmentSupervisor | EnvironmentRegistry.EnvironmentRegistry | R
+    EnvironmentSupervisor | EnvironmentRegistry | R
   >,
 ) {
   return createRuntimeCommand(runtime, {
@@ -632,7 +615,7 @@ export function createEnvironmentCommand<R, ER, Input, A, E>(
 }
 
 export function createEnvironmentRpcQueryAtomFamily<R, ER, TTag extends EnvironmentUnaryRpcTag>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: {
     readonly label: string;
     readonly tag: TTag;
@@ -641,7 +624,7 @@ export function createEnvironmentRpcQueryAtomFamily<R, ER, TTag extends Environm
     ) => Effect.Effect<
       EnvironmentRpcSuccess<TTag>,
       EnvironmentRpcFailure<TTag> | EnvironmentRpcUnavailableError,
-      EnvironmentSupervisor.EnvironmentSupervisor | EnvironmentRegistry.EnvironmentRegistry
+      EnvironmentSupervisor | EnvironmentRegistry
     >;
     readonly staleTimeMs?: number;
     readonly idleTtlMs?: number;
@@ -671,7 +654,7 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
   TTag extends EnvironmentSubscriptionRpcTag,
   B = EnvironmentRpcStreamValue<TTag>,
 >(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: {
     readonly label: string;
     readonly tag: TTag;
@@ -680,13 +663,9 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
       stream: Stream.Stream<
         EnvironmentRpcStreamValue<TTag>,
         EnvironmentRpcStreamFailure<TTag>,
-        EnvironmentSupervisor.EnvironmentSupervisor | R
+        EnvironmentSupervisor | R
       >,
-    ) => Stream.Stream<
-      B,
-      EnvironmentRpcStreamFailure<TTag>,
-      EnvironmentSupervisor.EnvironmentSupervisor | R
-    >;
+    ) => Stream.Stream<B, EnvironmentRpcStreamFailure<TTag>, EnvironmentSupervisor | R>;
   },
 ) {
   return createEnvironmentSubscriptionAtomFamily(runtime, {
@@ -695,18 +674,14 @@ export function createEnvironmentRpcSubscriptionAtomFamily<
     subscribe: (input: EnvironmentRpcInput<TTag>) => {
       const stream = subscribe(options.tag, input);
       return options.transform === undefined
-        ? (stream as Stream.Stream<
-            B,
-            EnvironmentRpcStreamFailure<TTag>,
-            EnvironmentSupervisor.EnvironmentSupervisor | R
-          >)
+        ? (stream as Stream.Stream<B, EnvironmentRpcStreamFailure<TTag>, EnvironmentSupervisor | R>)
         : options.transform(stream);
     },
   });
 }
 
 export function createEnvironmentRpcCommand<R, ER, TTag extends EnvironmentUnaryRpcTag>(
-  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: {
     readonly label: string;
     readonly tag: TTag;
@@ -715,7 +690,7 @@ export function createEnvironmentRpcCommand<R, ER, TTag extends EnvironmentUnary
     ) => Effect.Effect<
       EnvironmentRpcSuccess<TTag>,
       EnvironmentRpcFailure<TTag> | EnvironmentRpcUnavailableError,
-      EnvironmentSupervisor.EnvironmentSupervisor | EnvironmentRegistry.EnvironmentRegistry
+      EnvironmentSupervisor | EnvironmentRegistry
     >;
     readonly scheduler?: AtomCommandScheduler;
     readonly concurrency?: AtomCommandConcurrency<{

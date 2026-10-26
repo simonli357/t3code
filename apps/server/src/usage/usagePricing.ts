@@ -7,46 +7,35 @@
  *
  * @module usagePricing
  */
-import type {
-  UsageCategoryCost,
-  UsageCostSource,
-  UsageModelPriceOverride,
-  UsageTokenTotals,
-} from "@t3tools/contracts";
+import type { UsageCostSource, UsageModelPriceOverride } from "@t3tools/contracts";
 
-import type { UsageRecord, UsageSpeed } from "./usageTranscripts.ts";
+import type { UsageRecord } from "./usageTranscripts.ts";
 
-/** Token rates for one billing speed. All values are USD per token. */
-export interface TokenRates {
+/**
+ * The subset of a LiteLLM entry we price against. All values are USD per token.
+ *
+ * LiteLLM also publishes tiered variants (`*_above_272k_tokens`, `*_flex`,
+ * `*_priority`, `*_batches`). We deliberately price at the base tier: the
+ * transcripts don't record which tier served a request, so anything else would
+ * be a guess dressed up as precision.
+ */
+export interface ModelRate {
   readonly inputCostPerToken: number;
   readonly outputCostPerToken: number;
   readonly cacheReadCostPerToken: number;
   readonly cacheCreationCostPerToken: number;
-}
-
-/**
- * The subset of a LiteLLM entry we price against: standard rates, plus rates
- * for each faster speed the model publishes. A request at a speed with no
- * published rates bills at the standard rates.
- *
- * LiteLLM also publishes `*_above_272k_tokens`, `*_flex`, and `*_batches`
- * variants. Transcripts don't record those, so we don't price them.
- */
-export interface ModelRate extends TokenRates {
   /**
-   * From LiteLLM's `provider_specific_entry.fast` multiple (Claude fast mode),
-   * or else its `*_priority` rates (Codex `priority`).
+   * Multiple of the rates above billed for a fast-mode request, from LiteLLM's
+   * `provider_specific_entry.fast`. `1` when the model publishes no fast tier.
    */
-  readonly fast: TokenRates | null;
-  /** From LiteLLM's `*_ultrafast` rates (Codex `ultrafast`). */
-  readonly ultrafast: TokenRates | null;
+  readonly fastMultiplier: number;
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
 
 /**
  * Custom IDs keep their case, provider prefix, and variant suffix. Custom rates
- * apply as entered, at every speed.
+ * apply as entered, fast-mode requests included.
  */
 export function createOverrideRateTable(
   overrides: Readonly<Record<string, UsageModelPriceOverride>>,
@@ -61,68 +50,31 @@ export function createOverrideRateTable(
           (prices.cacheReadCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
         cacheCreationCostPerToken:
           (prices.cacheWriteCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
-        fast: null,
-        ultrafast: null,
+        fastMultiplier: 1,
       },
     ]),
   );
 }
 
-/** One raw LiteLLM entry. Field names carry a tier suffix, e.g. `_priority`. */
-type LiteLlmEntry = Readonly<Record<string, unknown>>;
+/** Raw shape of one LiteLLM entry, narrowed to the fields we read. */
+interface LiteLlmEntry {
+  readonly input_cost_per_token?: unknown;
+  readonly output_cost_per_token?: unknown;
+  readonly cache_read_input_token_cost?: unknown;
+  readonly cache_creation_input_token_cost?: unknown;
+  readonly provider_specific_entry?: unknown;
+}
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/**
- * Reads one rate set, `suffix` selecting a tier such as `_priority`. Returns
- * `null` without both an input and an output rate.
- *
- * Anthropic bills cache reads at a discount and cache writes at a premium.
- * When the standard tier omits them, cached input is priced as plain input
- * rather than as free. A faster tier that omits them keeps the standard tier's
- * cache-to-input ratio.
- */
-function readTokenRates(
-  entry: LiteLlmEntry,
-  suffix: string,
-  standard?: TokenRates,
-): TokenRates | null {
-  const input = finiteNumber(entry[`input_cost_per_token${suffix}`]);
-  const output = finiteNumber(entry[`output_cost_per_token${suffix}`]);
-  if (input === null || output === null) return null;
-  const cacheRate = (name: string, field: "cacheReadCostPerToken" | "cacheCreationCostPerToken") =>
-    finiteNumber(entry[`${name}${suffix}`]) ??
-    (standard !== undefined && standard.inputCostPerToken > 0
-      ? (standard[field] / standard.inputCostPerToken) * input
-      : input);
-  return {
-    inputCostPerToken: input,
-    outputCostPerToken: output,
-    cacheReadCostPerToken: cacheRate("cache_read_input_token_cost", "cacheReadCostPerToken"),
-    cacheCreationCostPerToken: cacheRate(
-      "cache_creation_input_token_cost",
-      "cacheCreationCostPerToken",
-    ),
-  };
-}
-
-function scaleTokenRates(rates: TokenRates, multiple: number): TokenRates {
-  return {
-    inputCostPerToken: rates.inputCostPerToken * multiple,
-    outputCostPerToken: rates.outputCostPerToken * multiple,
-    cacheReadCostPerToken: rates.cacheReadCostPerToken * multiple,
-    cacheCreationCostPerToken: rates.cacheCreationCostPerToken * multiple,
-  };
-}
-
 /** Reads `provider_specific_entry.fast`, e.g. `2` for Claude Opus 5.5. */
-function fastMultiplier(entry: LiteLlmEntry): number | null {
-  const specific = entry["provider_specific_entry"];
-  if (typeof specific !== "object" || specific === null) return null;
+function fastMultiplier(entry: LiteLlmEntry): number {
+  const specific = entry.provider_specific_entry;
+  if (typeof specific !== "object" || specific === null) return 1;
   const fast = finiteNumber((specific as Record<string, unknown>)["fast"]);
-  return fast !== null && fast > 0 ? fast : null;
+  return fast !== null && fast > 0 ? fast : 1;
 }
 
 /**
@@ -142,19 +94,21 @@ export function parseRateTable(document: unknown): RateTable {
   for (const [name, raw] of Object.entries(document as Record<string, unknown>)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as LiteLlmEntry;
-    const standard = readTokenRates(entry, "");
-    if (standard === null) continue;
+    const input = finiteNumber(entry.input_cost_per_token);
+    const output = finiteNumber(entry.output_cost_per_token);
+    if (input === null || output === null) continue;
 
     const key = normalizeRateKey(name);
     if (key.length === 0) continue;
-    const multiple = fastMultiplier(entry);
     table.set(key, {
-      ...standard,
-      fast:
-        multiple === null
-          ? readTokenRates(entry, "_priority", standard)
-          : scaleTokenRates(standard, multiple),
-      ultrafast: readTokenRates(entry, "_ultrafast", standard),
+      inputCostPerToken: input,
+      outputCostPerToken: output,
+      // Anthropic bills cache reads at a discount and cache writes at a
+      // premium. When a model omits them, cached input is priced as plain
+      // input rather than as free.
+      cacheReadCostPerToken: finiteNumber(entry.cache_read_input_token_cost) ?? input,
+      cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost) ?? input,
+      fastMultiplier: fastMultiplier(entry),
     });
   }
 
@@ -177,27 +131,14 @@ export function parseRateTable(document: unknown): RateTable {
   return table;
 }
 
-function sameTokenRates(a: TokenRates | null, b: TokenRates | null): boolean {
-  if (a === null || b === null) return a === b;
+function sameRate(a: ModelRate, b: ModelRate): boolean {
   return (
     a.inputCostPerToken === b.inputCostPerToken &&
     a.outputCostPerToken === b.outputCostPerToken &&
     a.cacheReadCostPerToken === b.cacheReadCostPerToken &&
-    a.cacheCreationCostPerToken === b.cacheCreationCostPerToken
+    a.cacheCreationCostPerToken === b.cacheCreationCostPerToken &&
+    a.fastMultiplier === b.fastMultiplier
   );
-}
-
-function sameRate(a: ModelRate, b: ModelRate): boolean {
-  return (
-    sameTokenRates(a, b) &&
-    sameTokenRates(a.fast, b.fast) &&
-    sameTokenRates(a.ultrafast, b.ultrafast)
-  );
-}
-
-/** The rates a request at `speed` bills at. */
-function ratesAt(rate: ModelRate, speed: UsageSpeed): TokenRates {
-  return (speed === "standard" ? null : rate[speed]) ?? rate;
 }
 
 function normalizeRateKey(model: string): string {
@@ -235,27 +176,7 @@ const UNPRICEABLE_MODELS = new Set([
   "fable",
 ]);
 
-/**
- * Lookups per table, by raw model name. A scan prices every record twice
- * against a few dozen models, and tables are never mutated once built.
- */
-const resolvedRates = new WeakMap<RateTable, Map<string, ModelRate | null>>();
-
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
-  let resolved = resolvedRates.get(table);
-  if (resolved === undefined) {
-    resolved = new Map();
-    resolvedRates.set(table, resolved);
-  }
-  let rate = resolved.get(model);
-  if (rate === undefined) {
-    rate = resolveRate(table, model);
-    resolved.set(model, rate);
-  }
-  return rate;
-}
-
-function resolveRate(table: RateTable, model: string): ModelRate | null {
   const key = stripVariantSuffix(normalizeRateKey(model));
   const bareName = bareModelName(key);
   if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
@@ -265,36 +186,16 @@ function resolveRate(table: RateTable, model: string): ModelRate | null {
 /** The parts of a transcript record that decide its price. */
 export type PricedRecord = Pick<
   UsageRecord,
-  "model" | "rateModel" | "totals" | "speed" | "reportedCostUsd"
+  "model" | "rateModel" | "totals" | "fast" | "reportedCostUsd"
 >;
 
 export interface PricedUsage {
   readonly costUsd: number;
   readonly costSource: UsageCostSource;
-  /** `costUsd` by token category, or `null` when no rates are known to split it. */
-  readonly categoryCostUsd: UsageCategoryCost | null;
-  /** What `costUsd` exceeds the same tokens at standard rates. `0` without rates. */
-  readonly speedPremiumUsd: number;
-}
-
-function costByCategory(totals: UsageTokenTotals, rates: TokenRates): UsageCategoryCost {
-  return {
-    input: totals.uncachedInputTokens * rates.inputCostPerToken,
-    cacheRead: totals.cachedInputTokens * rates.cacheReadCostPerToken,
-    cacheWrite: totals.cacheCreationTokens * rates.cacheCreationCostPerToken,
-    output: totals.outputTokens * rates.outputCostPerToken,
-  };
-}
-
-function sumCategories(cost: UsageCategoryCost): number {
-  return cost.input + cost.cacheRead + cost.cacheWrite + cost.output;
 }
 
 /**
  * Prices one record's tokens.
- *
- * A provider-reported cost is kept as is, and split by category and speed in
- * proportion to the model's list rates when those are known.
  *
  * `reasoningTokens` is intentionally not charged separately: it is already
  * counted inside `outputTokens`.
@@ -306,37 +207,22 @@ export function priceUsage(
 ): PricedUsage {
   const { model, totals, reportedCostUsd } = record;
   const override = overrides?.get(model.trim());
-  const reported =
-    override === undefined && reportedCostUsd !== null && Number.isFinite(reportedCostUsd)
-      ? reportedCostUsd
-      : null;
-  const unsplit = (costUsd: number, costSource: UsageCostSource): PricedUsage => ({
-    costUsd,
-    costSource,
-    categoryCostUsd: null,
-    speedPremiumUsd: 0,
-  });
-  const rate = override ?? lookupRate(table, record.rateModel ?? model);
-  if (rate === null) {
-    return reported === null ? unsplit(0, "unpriced") : unsplit(reported, "providerReported");
+  if (override === undefined && reportedCostUsd !== null && Number.isFinite(reportedCostUsd)) {
+    return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
-  const listCost = costByCategory(totals, ratesAt(rate, record.speed));
-  const listCostUsd = sumCategories(listCost);
-  if (reported !== null && listCostUsd <= 0) return unsplit(reported, "providerReported");
-  const premiumUsd =
-    record.speed === "standard" ? 0 : listCostUsd - sumCategories(costByCategory(totals, rate));
-  const scale = reported === null ? 1 : reported / listCostUsd;
+  const rate = override ?? lookupRate(table, record.rateModel ?? model);
+  if (rate === null) return { costUsd: 0, costSource: "unpriced" };
+
+  const standardCostUsd =
+    totals.uncachedInputTokens * rate.inputCostPerToken +
+    totals.cachedInputTokens * rate.cacheReadCostPerToken +
+    totals.cacheCreationTokens * rate.cacheCreationCostPerToken +
+    totals.outputTokens * rate.outputCostPerToken;
+
   return {
-    costUsd: reported ?? listCostUsd,
-    costSource: reported === null ? "modelPriced" : "providerReported",
-    categoryCostUsd: {
-      input: listCost.input * scale,
-      cacheRead: listCost.cacheRead * scale,
-      cacheWrite: listCost.cacheWrite * scale,
-      output: listCost.output * scale,
-    },
-    speedPremiumUsd: premiumUsd * scale,
+    costUsd: standardCostUsd * (record.fast ? rate.fastMultiplier : 1),
+    costSource: "modelPriced",
   };
 }
 
@@ -352,6 +238,9 @@ export function cacheSavingsUsd(
   const rate =
     overrides?.get(record.model.trim()) ?? lookupRate(table, record.rateModel ?? record.model);
   if (rate === null) return 0;
-  const rates = ratesAt(rate, record.speed);
-  return record.totals.cachedInputTokens * (rates.inputCostPerToken - rates.cacheReadCostPerToken);
+  return (
+    record.totals.cachedInputTokens *
+    (rate.inputCostPerToken - rate.cacheReadCostPerToken) *
+    (record.fast ? rate.fastMultiplier : 1)
+  );
 }

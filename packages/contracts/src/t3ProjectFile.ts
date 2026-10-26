@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
-import { ProjectScriptIcon } from "./project.ts";
+import { ProjectScriptIcon } from "./orchestration.ts";
 import type { ProjectScopedServerSettingKey, ServerSettings } from "./settings.ts";
 
 /** File name of the checked-in T3 project file, resolved at the workspace root. */
@@ -67,6 +67,15 @@ export const T3ProjectFileScript = Schema.Struct({
 export type T3ProjectFileScript = typeof T3ProjectFileScript.Type;
 
 export const T3ProjectFile = Schema.Struct({
+  projectKey: Schema.optionalKey(
+    trimmedNonEmpty(
+      {
+        description:
+          "Explicit shared project identity. Use the same unique key in corresponding workspaces on different computers, including folders without Git. Overrides Git-based grouping; unrelated projects must use different keys.",
+      },
+      256,
+    ),
+  ),
   $schema: Schema.optionalKey(
     Schema.String.annotate({
       description: `URL of the JSON Schema for this file, typically "${T3_PROJECT_FILE_SCHEMA_URL}".`,

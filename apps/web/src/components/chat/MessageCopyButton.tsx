@@ -1,8 +1,6 @@
 import { memo, useRef } from "react";
-import { Check, Copy } from "lucide";
+import { CopyIcon, CheckIcon } from "lucide-react";
 import { Button } from "../ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
-import { cn } from "~/lib/utils";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import {
   ANCHORED_COPY_TOAST_TIMEOUT_MS,
@@ -49,10 +47,7 @@ export const MessageCopyButton = memo(function MessageCopyButton({
           />
         }
       >
-        <MorphIcon
-          className={cn("size-3", isCopied && "text-primary")}
-          icon={isCopied ? Check : Copy}
-        />
+        {isCopied ? <CheckIcon className="size-3 text-primary" /> : <CopyIcon className="size-3" />}
       </TooltipTrigger>
       <TooltipPopup>
         <p>Copy message</p>

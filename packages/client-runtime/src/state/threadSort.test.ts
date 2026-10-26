@@ -1,8 +1,7 @@
-import { ProjectId, RunId } from "@t3tools/contracts";
+import { ProjectId, TurnId, type OrchestrationLatestTurn } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  activeThreadAnchorTimestampMs,
   generateSpreadPinOrderKeys,
   getLatestThreadForProject,
   pinOrderKeyBetween,
@@ -16,17 +15,6 @@ import {
   type SettledThreadTimestampInput,
   type ThreadSortInput,
 } from "./threadSort.ts";
-
-describe("activeThreadAnchorTimestampMs", () => {
-  it("uses the later unsettle time when an old thread re-enters the active list", () => {
-    expect(
-      activeThreadAnchorTimestampMs({
-        createdAt: "2026-01-01T00:00:00.000Z",
-        unsettledAt: "2026-08-01T00:00:00.000Z",
-      }),
-    ).toBe(Date.parse("2026-08-01T00:00:00.000Z"));
-  });
-});
 
 type TestThread = { readonly id: string } & ThreadSortInput;
 
@@ -47,7 +35,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: "2026-03-09T10:00:00.000Z",
         latestUserMessageAt: "2026-03-09T11:00:00.000Z",
-        latestRun: null,
+        latestTurn: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T10:00:00.000Z");
@@ -58,7 +46,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: "invalid",
         latestUserMessageAt: "2026-03-09T11:00:00.000Z",
-        latestRun: null,
+        latestTurn: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T11:00:00.000Z");
@@ -66,7 +54,7 @@ describe("resolveSettledThreadTimestamp", () => {
       resolveSettledThreadTimestamp({
         settledAt: null,
         latestUserMessageAt: null,
-        latestRun: null,
+        latestTurn: null,
         updatedAt: "2026-03-09T12:00:00.000Z",
       }),
     ).toBe("2026-03-09T12:00:00.000Z");
@@ -78,13 +66,13 @@ describe("sortSettledThreads", () => {
     id: string;
     settledAt?: string | null;
     latestUserMessageAt?: string | null;
-    latestRun?: SettledThreadTimestampInput["latestRun"];
+    latestTurn?: OrchestrationLatestTurn | null;
     updatedAt?: string;
   }) => ({
     id: input.id,
     settledAt: input.settledAt ?? null,
     latestUserMessageAt: input.latestUserMessageAt ?? null,
-    latestRun: input.latestRun ?? null,
+    latestTurn: input.latestTurn ?? null,
     updatedAt: input.updatedAt ?? "2026-03-09T09:00:00.000Z",
   });
 
@@ -124,9 +112,9 @@ describe("sortSettledThreads", () => {
       settled({
         id: "completed-later",
         latestUserMessageAt: "2026-03-09T10:00:00.000Z",
-        latestRun: {
-          runId: RunId.make("run-1"),
-          status: "completed",
+        latestTurn: {
+          turnId: TurnId.make("turn-1"),
+          state: "completed",
           assistantMessageId: null,
           requestedAt: "2026-03-09T10:00:00.000Z",
           startedAt: "2026-03-09T10:00:00.000Z",

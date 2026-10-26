@@ -1189,14 +1189,18 @@ export function applyPullRequestOverrides<Entry extends PullRequestListEntry>(
   keyOf: (entry: Entry) => string,
   state: PullRequestListState,
 ): ReadonlyArray<Entry> {
-  if (overrides.size === 0 && state === "all") return entries;
+  if (overrides.size === 0) return entries;
   const out: Entry[] = [];
   for (const entry of entries) {
     const override = overrides.get(keyOf(entry));
-    if (state !== "all" && (override?.state ?? entry.state) !== state) continue;
-    out.push(override === undefined ? entry : { ...entry, ...override });
+    if (override === undefined) {
+      out.push(entry);
+      continue;
+    }
+    if (state !== "all" && override.state !== state) continue;
+    out.push({ ...entry, ...override });
   }
-  return overrides.size === 0 && out.length === entries.length ? entries : out;
+  return out;
 }
 
 /**

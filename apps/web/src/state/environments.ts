@@ -1,7 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
-  hasRelayRoute,
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
 import { Discovery } from "@t3tools/client-runtime/relay";
@@ -10,11 +9,7 @@ import * as Option from "effect/Option";
 import { useMemo } from "react";
 
 import { environmentCatalog } from "../connection/catalog";
-import {
-  environmentPresentations,
-  environmentSummaries,
-  useEnvironmentPresentation,
-} from "./presentation";
+import { environmentPresentations, useEnvironmentPresentation } from "./presentation";
 import { primaryEnvironmentIdAtom } from "./primaryEnvironment";
 import { relayEnvironmentDiscovery } from "./relay";
 import { usePreparedConnection } from "./session";
@@ -35,7 +30,7 @@ function projectEnvironmentPresentation(
     environmentId,
     label: presentation.entry.target.label,
     displayUrl: connectionCatalogDisplayUrl(presentation.entry),
-    relayManaged: hasRelayRoute(presentation.entry),
+    relayManaged: presentation.entry.target._tag === "RelayConnectionTarget",
   };
 }
 
@@ -88,24 +83,4 @@ export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): 
 
 export function useRelayEnvironmentDiscovery(): Discovery.RelayEnvironmentDiscoveryState {
   return useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
-}
-
-export function useEnvironmentIds() {
-  return useAtomValue(environmentSummaries.environmentIdsAtom);
-}
-
-export function useEnvironmentIdentities() {
-  return useAtomValue(environmentSummaries.identitiesAtom);
-}
-
-export function usePullRequestsSupported() {
-  return useAtomValue(environmentSummaries.pullRequestsSupportedAtom);
-}
-
-export function useEnvironmentMachines() {
-  return useAtomValue(environmentSummaries.machineByIdAtom);
-}
-
-export function useConnectedEnvironmentIds() {
-  return useAtomValue(environmentSummaries.connectedEnvironmentIdsAtom);
 }

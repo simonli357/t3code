@@ -498,15 +498,13 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   end(endTime: bigint, exit: Exit.Exit<unknown, unknown>): void {
-    // Cached lookup fibers retain parent spans. Traces need success status, not result payloads.
-    const traceExit = ExitRuntime.isSuccess(exit) ? ExitRuntime.void : exit;
     this.status = {
       _tag: "Ended",
       startTime: this.status.startTime,
       endTime,
-      exit: traceExit,
+      exit,
     };
-    this.delegate.end(endTime, traceExit);
+    this.delegate.end(endTime, exit);
 
     if (this.sampled) {
       this.push(spanToTraceRecord(this));

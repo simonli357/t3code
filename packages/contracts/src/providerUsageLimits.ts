@@ -18,6 +18,16 @@ import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
  * `kind` only orders and labels the bar.
  */
 export const ServerProviderUsageWindow = Schema.Struct({
+  /** Complete provider probe explicitly reports an empty, inactive rolling window. */
+  inactive: Schema.optional(Schema.Literal(true)),
+  /** Proven enforcement-to-numeric bucket association from a complete provider probe. */
+  enforcement: Schema.optional(
+    Schema.Struct({ windowId: TrimmedNonEmptyString, checkedAt: IsoDateTime }),
+  ),
+  /** Provider-reported bucket name; unresolved scope is conservatively account-wide. */
+  modelScope: Schema.optional(TrimmedNonEmptyString),
+  checkedAt: Schema.optional(IsoDateTime),
+  applicableModels: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   id: TrimmedNonEmptyString,
   kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
   label: TrimmedNonEmptyString,
@@ -48,6 +58,9 @@ export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
  * last good bars for the latter and clear them for the former.
  */
 export const ServerProviderUsageLimits = Schema.Struct({
+  /** No short window in a complete provider read; sparse updates cannot renew this evidence. */
+  shortWindowAbsent: Schema.optional(Schema.Boolean),
+  shortWindowAbsentCheckedAt: Schema.optional(IsoDateTime),
   checkedAt: IsoDateTime,
   windows: ForwardCompatibleArray(ServerProviderUsageWindow),
   /** Opaque credential identity when the provider does not report an account. */
@@ -75,8 +88,18 @@ export type ServerProviderUsageLimits = typeof ServerProviderUsageLimits.Type;
  * a time and Codex documents its notification as a partial. Windows merge by
  * `id` onto the instance's published snapshot; omitted windows are unchanged.
  */
+export const ProviderQuotaState = Schema.Struct({
+  windowId: TrimmedNonEmptyString,
+  /** Exact numeric bucket identity already established when this event arrived. */
+  usageWindowId: Schema.optional(TrimmedNonEmptyString),
+  status: Schema.Literals(["rejected", "allowed"]),
+  resetsAt: Schema.optional(IsoDateTime),
+});
+export type ProviderQuotaState = typeof ProviderQuotaState.Type;
+
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
+  states: Schema.optional(Schema.Array(ProviderQuotaState)),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

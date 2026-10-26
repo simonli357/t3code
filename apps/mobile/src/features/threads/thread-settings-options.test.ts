@@ -1,7 +1,7 @@
 import type { ProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { runtimeModeChoicesForSupportedModes, selectableChoices } from "./thread-settings-options";
+import { selectableChoices } from "./thread-settings-options";
 
 const effortDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> = {
   id: "effort",
@@ -25,11 +25,5 @@ describe("selectableChoices", () => {
       "medium",
       "high",
     ]);
-  });
-});
-
-describe("runtimeModeChoicesForSupportedModes", () => {
-  it("keeps controls usable when forward-compatible decoding removes every advertised mode", () => {
-    expect(runtimeModeChoicesForSupportedModes([])).toHaveLength(4);
   });
 });

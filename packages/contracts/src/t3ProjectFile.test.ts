@@ -1,13 +1,17 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { T3ProjectFile, type T3ProjectFile as T3ProjectFileType } from "./t3ProjectFile.ts";
+import { T3ProjectFile } from "./t3ProjectFile.ts";
 
-const decode = Schema.decodeUnknownSync(T3ProjectFile as never) as (
-  input: unknown,
-) => T3ProjectFileType;
+const decode = Schema.decodeUnknownSync(T3ProjectFile);
 
 describe("T3ProjectFile", () => {
+  it("accepts explicit project keys and rejects empty or oversized keys", () => {
+    expect(decode({ projectKey: " simon/surveyforge " }).projectKey).toBe("simon/surveyforge");
+    for (const projectKey of ["", "   ", "x".repeat(257), 42]) {
+      expect(() => decode({ projectKey })).toThrow();
+    }
+  });
   it("decodes a full project file", () => {
     const decoded = decode({
       $schema: "https://t3.codes/schema/t3.json",

@@ -1,4 +1,4 @@
-import type { OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
+import type { OrchestrationShellSnapshot } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -6,14 +6,11 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { HttpClient } from "effect/unstable/http";
 
-import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
+import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
-import * as ManagedRelay from "../relay/managedRelay.ts";
-import {
-  executeAuthenticatedEnvironmentHttpRequest,
-  withOrchestrationProtocolHeader,
-} from "./environmentHttpAuth.ts";
+import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
+import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
 
 // Long enough for a slow but alive server to finish. On timeout the socket asks
 // the same server for the same full snapshot, so a short deadline only throws
@@ -33,10 +30,8 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
   "clientRuntime.state.fetchEnvironmentShellSnapshot",
 )(function* (input: {
   readonly prepared: PreparedConnection;
-  readonly signer: Option.Option<ManagedRelay.ManagedRelayDpopSigner["Service"]>;
-  readonly remoteAuthorization?: Option.Option<
-    RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]
-  >;
+  readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
+  readonly remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
   readonly timeoutMs?: number;
 }) {
   return yield* executeAuthenticatedEnvironmentHttpRequest({
@@ -46,7 +41,7 @@ export const fetchEnvironmentShellSnapshot = Effect.fn(
     url: (httpBaseUrl) => environmentEndpointUrl(httpBaseUrl, "/api/orchestration/shell"),
     timeoutMs: input.timeoutMs ?? DEFAULT_SHELL_SNAPSHOT_TIMEOUT_MS,
     request: ({ client, headers }) =>
-      client.shellSnapshot({ headers: withOrchestrationProtocolHeader(headers) }),
+      client.shellSnapshot({ headers, payload: { projectConfigIdentity: "true" } }),
   });
 });
 
@@ -61,31 +56,33 @@ export class ShellSnapshotLoader extends Context.Service<
   {
     readonly load: (
       prepared: PreparedConnection,
-    ) => Effect.Effect<Option.Option<OrchestrationV2ShellSnapshot>>;
+    ) => Effect.Effect<Option.Option<OrchestrationShellSnapshot>>;
   }
 >()("@t3tools/client-runtime/state/shellSnapshotHttp/ShellSnapshotLoader") {}
 
-export const layer: Layer.Layer<ShellSnapshotLoader, never, HttpClient.HttpClient> = Layer.effect(
+export const shellSnapshotLoaderLayer: Layer.Layer<
+  ShellSnapshotLoader,
+  never,
+  HttpClient.HttpClient
+> = Layer.effect(
   ShellSnapshotLoader,
   Effect.gen(function* () {
     const httpClient = yield* HttpClient.HttpClient;
     // Resolve the DPoP signer optionally: it is only needed for relay/DPoP
     // connections, so the loader must not hard-require it.
-    const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
-    const remoteAuthorization = yield* Effect.serviceOption(
-      RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
-    );
+    const signer = yield* Effect.serviceOption(ManagedRelayDpopSigner);
+    const remoteAuthorization = yield* Effect.serviceOption(RemoteEnvironmentAuthorization);
     return ShellSnapshotLoader.of({
       load: (prepared: PreparedConnection) =>
         fetchEnvironmentShellSnapshot({ prepared, signer, remoteAuthorization }).pipe(
-          Effect.map(Option.some<OrchestrationV2ShellSnapshot>),
+          Effect.map(Option.some<OrchestrationShellSnapshot>),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.catchCause((cause) =>
             Effect.logWarning(
               "Could not load the environment shell snapshot over HTTP; using the socket snapshot instead.",
             ).pipe(
               Effect.annotateLogs({ cause: Cause.pretty(cause) }),
-              Effect.as(Option.none<OrchestrationV2ShellSnapshot>()),
+              Effect.as(Option.none<OrchestrationShellSnapshot>()),
             ),
           ),
         ),

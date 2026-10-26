@@ -12,7 +12,11 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { HostProcessArchitecture, HostProcessPlatform } from "./hostProcess.ts";
 
-import * as RelayClient from "./relayClient.ts";
+import {
+  RelayClientInstallError,
+  CLOUDFLARED_VERSION,
+  makeCloudflaredRelayClient,
+} from "./relayClient.ts";
 
 // The suite runs the linux code path against the real filesystem, checking
 // POSIX exec bits that NTFS never reports; the win32 branch skips that check.
@@ -77,7 +81,7 @@ describe("RelayClient", () => {
         const overridePath = `${baseDir}/override-cloudflared`;
         yield* fileSystem.writeFileString(overridePath, "override");
         yield* fileSystem.chmod(overridePath, 0o755);
-        const manager = yield* RelayClient.makeCloudflaredRelayClient({
+        const manager = yield* makeCloudflaredRelayClient({
           baseDir,
         });
 
@@ -94,7 +98,7 @@ describe("RelayClient", () => {
           status: "available",
           executablePath: overridePath,
           source: "override",
-          version: RelayClient.CLOUDFLARED_VERSION,
+          version: CLOUDFLARED_VERSION,
         });
       }).pipe(
         Effect.scoped,
@@ -118,7 +122,7 @@ describe("RelayClient", () => {
           prefix: "t3-cloudflared-test-",
         });
         const bytes = new TextEncoder().encode("test-cloudflared-binary");
-        const manager = yield* RelayClient.makeCloudflaredRelayClient({
+        const manager = yield* makeCloudflaredRelayClient({
           baseDir,
           releaseAsset: {
             url: "https://example.test/cloudflared",
@@ -135,12 +139,12 @@ describe("RelayClient", () => {
             }
           }),
         );
-        const managedPath = `${baseDir}/tools/cloudflared/${RelayClient.CLOUDFLARED_VERSION}/linux-x64/cloudflared`;
+        const managedPath = `${baseDir}/tools/cloudflared/${CLOUDFLARED_VERSION}/linux-x64/cloudflared`;
         expect(installed).toEqual({
           status: "available",
           executablePath: managedPath,
           source: "managed",
-          version: RelayClient.CLOUDFLARED_VERSION,
+          version: CLOUDFLARED_VERSION,
         });
         expect(new TextDecoder().decode(yield* fileSystem.readFile(managedPath))).toBe(
           "test-cloudflared-binary",
@@ -174,7 +178,7 @@ describe("RelayClient", () => {
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-cloudflared-test-",
       });
-      const manager = yield* RelayClient.makeCloudflaredRelayClient({
+      const manager = yield* makeCloudflaredRelayClient({
         baseDir,
         releaseAsset: {
           url: "https://example.test/cloudflared",
@@ -184,7 +188,7 @@ describe("RelayClient", () => {
       });
 
       const error = yield* manager.install.pipe(Effect.flip);
-      expect(error).toBeInstanceOf(RelayClient.RelayClientInstallError);
+      expect(error).toBeInstanceOf(RelayClientInstallError);
       expect(error.reason).toBe("invalid_checksum");
     }).pipe(
       Effect.scoped,
@@ -207,7 +211,7 @@ describe("RelayClient", () => {
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-cloudflared-test-",
       });
-      const manager = yield* RelayClient.makeCloudflaredRelayClient({
+      const manager = yield* makeCloudflaredRelayClient({
         baseDir,
         releaseAsset: {
           url: "https://example.test/cloudflared",
@@ -245,13 +249,13 @@ describe("RelayClient", () => {
         });
         const binDir = `${baseDir}/bin`;
         const executablePath = `${binDir}/cloudflared`;
-        const manager = yield* RelayClient.makeCloudflaredRelayClient({
+        const manager = yield* makeCloudflaredRelayClient({
           baseDir,
         });
 
         expect(yield* manager.resolve).toEqual({
           status: "missing",
-          version: RelayClient.CLOUDFLARED_VERSION,
+          version: CLOUDFLARED_VERSION,
         });
 
         yield* fileSystem.makeDirectory(binDir);
@@ -263,7 +267,7 @@ describe("RelayClient", () => {
           status: "available",
           executablePath,
           source: "path",
-          version: RelayClient.CLOUDFLARED_VERSION,
+          version: CLOUDFLARED_VERSION,
         });
       }).pipe(
         Effect.scoped,

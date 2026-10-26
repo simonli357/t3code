@@ -8,10 +8,7 @@ desktop when the terminal is not focused. Customize `usage.open` in
 
 **Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, and Cursor history from your connected
 environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
-cost, split by token type and by speed. These estimates are not your subscription bill.
-**Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
-split, such as a provider-reported cost for a model without public rates, shows as **Other**.
-Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
+cost. These estimates are not your subscription bill.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
 record are missing from the totals.
@@ -44,14 +41,58 @@ results appear as each one responds.
 If recent work is missing or a new model shows no cost, refresh to rescan session history and
 update model pricing.
 
+## Allocate accounts for new work
+
+Open **Settings > Provider allocation** for account recommendations using your chosen model,
+reasoning options and computer. Quota, pacing, reserve and load forecasts are advisory.
+You or your master decide whether to start; warnings never veto a compatible explicit choice.
+A recommendation does not promise that the provider will accept or complete the work.
+
+Preview starts nothing. **Start** submits the selected profile, including when an older saved
+policy says Observation. Actual unsupported profiles, ownership conflicts, unavailable execution
+connections and provider authentication/quota failures remain errors. Choose one shared coordinator
+for durable assignment accounting and keep it reachable; missing readings from other hosts are
+warnings. Existing threads, forks and retries retain their selections. Agents that were not told
+which computer to use can compare them first; see
+[Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
+
+The page opens with numeric budgets, showing the default beside your current value. Codex defaults
+to 30% initially plus 10 allowance percentage points per 24 hours since reset; Claude defaults to
+0% initially plus 17 points per 24 hours. The target is capped below the reserve. Claude's 17-point
+rate can use a weekly allowance before seven days. Existing saved policies keep their values,
+including cycle-based pacing, until you edit or reset them.
+
+Use **Save settings** to apply changes; no assignment preview is required. **Reset to defaults**
+changes the draft, then Save applies it. Neither restores enforcement. Reconnecting keeps unsaved
+edits. If someone saved a newer version, **Reload saved settings** discards your old draft explicitly.
+
+Account weights default equally to 50. A higher weight favors that account among compatible choices
+with comparable warnings; zero does not block an explicit choice. Family shares show relative
+preference, not guaranteed usage. Known shared identities count once across computers; unidentified
+accounts stay separate. Usage analytics show account allowance points/hour when measured. Model and
+effort token samples are separate evidence, not subscription percentages; missing rates say
+**Not enough data**. Collection remains limited to accounts already opted into measurements.
+
+Advanced sections contain forecast estimates, connection setup, the assignment simulator, temporary
+targets and diagnostics. Reset plans do not replenish quota; allocation never redeems credits or
+enables overage.
+
+An earlier denied or observation-only proposal can start with the same assignment and thread IDs.
+The master may choose an account before startup. After startup is attempted, retry the entire input
+unchanged if a response is lost; this reconciles its durable receipt without duplicating the work.
+A confirmed failed start remains recorded as an error. Stop or cancel running work before releasing
+its accounting; unused reservations expire.
+
+History charts remain limited to accounts opted into usage retention. Native mobile supports
+saved numeric budgets, weights, usage inspection and assignment preview; use the web page for editing settings and human-session startup.
+
 ## Set custom model prices
 
 On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
 edit, or reset a model's estimated price. **Apply to** starts with your current Usage filter;
 choose all environments or select individual destinations. Enter the exact model ID and USD
 rates per million input and output tokens. You can enter any model ID, including models
-without public pricing. When a model on **Usage** has no known price, select it under
-**Breakdown** and choose **Set price** to open this table with that model added.
+without public pricing.
 
 Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
 tokens that are free. Saved prices replace automatic pricing for all of that environment's
@@ -60,11 +101,6 @@ cells show **Mixed**. Edit rates directly in the table, then choose **Save chang
 edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
 prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
 it before saving.
-
-To count one model as another, such as a preview model under its released name, enter the target
-model ID under **Map to**. The mapped model no longer appears on **Usage**: its tokens and cost
-move to the target model and use the target's price. Clear **Map to** or reset the row to show
-the model on its own again.
 
 Each destination reports whether the change saved. Offline or unavailable environments are
 marked **Not saved**. Reconnect them and choose **Retry failed saves** to finish the same change
@@ -114,6 +150,58 @@ or endpoint configurations do not report subscription limits.
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 
+## Model selection
+
+Open **Settings → Model selection** beside Provider allocation, or find it through
+Settings search or the command palette. Choose the shared coordinator in Provider
+allocation first. Automatic selection is opt-in through this page or an agent automatic
+request; ordinary model pickers keep their explicit choices.
+
+The page is one lookup table per provider, on separate Codex and Claude tabs. Columns are
+an assignment's difficulty and rows are its stakes, each scored 0–10. Each cell is the model
+and reasoning that assignment gets, for example difficulty 7 with stakes 8. Select a cell,
+then change its model or reasoning, or set an alternative that is used only when that choice
+is unavailable. Only that cell changes. Choices come from what your connected accounts
+advertise, and a cell they cannot currently offer is flagged and keeps its saved value.
+Changing a model keeps the cell's reasoning when the new model offers it; otherwise you
+choose the reasoning yourself. Automatic selection never uses Luna, Haiku or Fable.
+
+Edited cells are marked until you press **Save table**, which creates a new policy version.
+**Discard changes** returns to the saved table, and **Reset to defaults** restores the built-in
+table for the provider you are viewing as an unsaved edit. Tables saved before cells were
+editable one by one keep the same choice for every score pair until you save again. If another
+editor saves while you are editing, keep your edits on top of the newer version or discard
+them; a save never overwrites changes you have not seen. Existing sessions and assignment
+retries retain their selections.
+
+Assess the scoped assignment on two integer axes, each from 0 to 10, with a short reason.
+Difficulty measures reasoning, uncertainty and interactions. Stakes measures failure impact,
+reversibility and detectability. Use 0–3 for routine/low, 4–6 for moderate, 7 for
+demanding/high, 8 for very demanding/very high, 9 for extreme, and 10 only for exceptional
+assignments. Missing assessments cannot start automatic work.
+
+The collapsed sections below the table hold the rest. **Test an assignment** previews the
+exact model, effort, rule, account recommendation and warnings using your unsaved table, and
+starts a new assignment from a saved one. The master chooses the account and starts it; quota
+forecasts do not block that choice. Exact user overrides remain authoritative; conflicts are
+shown for you to resolve. A missing capability uses only an explicitly configured
+alternative; low quota never chooses a weaker choice or another computer. **Policy settings,
+versions and raw JSON** holds the reassessment limit, reverts and the raw policy.
+**Recent decisions** can start an explicit reassessment as a new session after substantive
+failure or a justified scope change, within the configured bound. A provider-family change
+requires explicit consent. Transport or installation failures alone are not reasons to
+escalate. **Connection** shows coordinator status and refreshes the saved version.
+
+Agents use the same preview and managed startup services through `t3_allocate_account` and
+`t3_start_allocated_assignment`, supplying an automatic assessment or retaining their existing
+exact request. They read the same saved table. Retry the identical IDs and intent after a lost
+response; use new IDs for new work. Native mobile edits the same table in **Settings → Model
+selection**, including relay connections, with the same version and catalog checks. Use the web
+editor for human-session startup, exact-override and reassessment controls, previous-policy
+reverts, raw JSON and full history. A direct connection offers an editor link; relay and SSH
+connections require opening this custom build's web client and selecting the same environment.
+Pair the browser if prompted.
+
 ## Connect a CLIProxyAPI hub
 
 To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
@@ -132,6 +220,26 @@ Add **Subscription usage** from your iOS or Android widget gallery to see remain
 Claude quotas. Tap it to open **Usage → Limits**; on Android this works while T3 is running in
 the background, otherwise open the app from the launcher. On iOS, use **Edit Widget** to choose
 Session, Weekly, or both for each provider. Reopen T3 to refresh expired readings.
+
+## Measure worker capacity
+
+The custom build provides the read-only `t3_usage_measurements` agent tool and
+`GET /api/orchestration/usage-measurements`. Both report context size, session age,
+turn and tool duration, provider API time when available, token/cache totals, and
+recent account quota consumption. Optional filters are `instanceId`, `threadId`,
+`lookbackHours` (1–336), and `turnLimit` (1–100).
+
+Collection is off by default. Set the server's `usageMeasurementInstanceIds` to
+the provider instance IDs you own; leave shared accounts out. Removing an instance
+also removes its retained measurements. History starts at installation, is bounded
+to 14 days/5,000 turns/30,000 quota changes, and survives server restarts. No prompts,
+responses, tool arguments, or credentials are stored by this collector.
+
+Quota rates include all traffic on an account, including other machines. Per-model
+token baselines are grouped by effort and context size; they are not subscription
+percentages. Session age includes idle time, and non-tool wall time is not model
+compute time. Missing or stale observations do not produce quota forecasts. The
+tool supplies evidence; it never assigns work, changes accounts or redeems resets.
 
 ## Keyboard shortcuts
 

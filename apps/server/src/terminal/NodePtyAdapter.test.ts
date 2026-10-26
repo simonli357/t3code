@@ -110,9 +110,8 @@ it.effect("waits for the Windows PID without requiring output", () =>
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(["exit", "close", "error", "invalid-pid"] as const)(
-  "fails Windows startup on %s and cleans up",
-  (failure) =>
+for (const failure of ["exit", "close", "error", "invalid-pid"] as const) {
+  it.effect(`fails Windows startup on ${failure} and cleans up`, () =>
     Effect.gen(function* () {
       const { nativeProcess, subscribed } = preparePendingProcess();
       const adapter = yield* PtyAdapter.PtyAdapter;
@@ -130,7 +129,8 @@ it.effect.each(["exit", "close", "error", "invalid-pid"] as const)(
       assert.equal(nativeProcess.events.listenerCount("exit"), 0);
       assert.equal(nativeProcess._agent.kill.mock.calls.length, 1);
     }).pipe(Effect.provide(testLayer)),
-);
+  );
+}
 
 it.effect("cancels the Windows connection without waiting for output", () =>
   Effect.gen(function* () {
@@ -160,9 +160,8 @@ it.effect("reports an incompatible Windows readiness API instead of hanging", ()
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(["win32", "linux", "darwin"] as const)(
-  "terminates through node-pty using %s semantics",
-  (platform) =>
+for (const platform of ["win32", "linux", "darwin"] as const) {
+  it.effect(`terminates through node-pty using ${platform} semantics`, () =>
     Effect.gen(function* () {
       const adapter = yield* PtyAdapter.PtyAdapter;
       const process = yield* adapter.spawn({
@@ -190,7 +189,8 @@ it.effect.each(["win32", "linux", "darwin"] as const)(
           : [["SIGTERM"], ["SIGKILL"], [undefined]],
       );
     }).pipe(Effect.provide(makeTestLayer(platform))),
-);
+  );
+}
 
 it.effect("spawns through the public adapter with the provided host references", () =>
   Effect.gen(function* () {
@@ -279,9 +279,8 @@ it.effect("reports native module load failures as structured startup defects", (
   ),
 );
 
-it.effect.each([2048, 8])(
-  "preserves an exit during readiness handoff with scheduler budget %s",
-  (budget) =>
+for (const budget of [2048, 8]) {
+  it.effect(`preserves an exit during readiness handoff with scheduler budget ${budget}`, () =>
     Effect.gen(function* () {
       const { nativeProcess, subscribed } = preparePendingProcess();
       const adapter = yield* PtyAdapter.PtyAdapter;
@@ -301,7 +300,8 @@ it.effect.each([2048, 8])(
       yield* Fiber.join(fiber);
       assert.equal(exits.length, 1);
     }).pipe(Effect.provide(testLayer)),
-);
+  );
+}
 
 it.effect("replays an exit to late subscribers and respects unsubscription", () =>
   Effect.gen(function* () {
@@ -320,9 +320,8 @@ it.effect("replays an exit to late subscribers and respects unsubscription", () 
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect.each(["spawn", "interrupt"] as const)(
-  "logs cleanup failures without replacing %s",
-  (failure) =>
+for (const failure of ["spawn", "interrupt"] as const) {
+  it.effect(`logs cleanup failures without replacing ${failure}`, () =>
     Effect.gen(function* () {
       const { nativeProcess, subscribed } = preparePendingProcess();
       const killError = new Error("native kill failed");
@@ -362,4 +361,5 @@ it.effect.each(["spawn", "interrupt"] as const)(
       assert.equal(nativeProcess.events.listenerCount("exit"), 0);
       assert.equal(nativeProcess._socket.listenerCount("ready_datapipe"), 0);
     }).pipe(Effect.provide(testLayer)),
-);
+  );
+}

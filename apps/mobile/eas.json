@@ -63,7 +63,7 @@
     "v2-preview": {
       "extends": "production",
       "android": {
-        "track": "v2",
+        "track": "alpha",
         "releaseStatus": "completed"
       }
     },

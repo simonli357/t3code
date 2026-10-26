@@ -13,6 +13,45 @@ import {
 const checkedAt = "2026-07-18T10:00:00.000Z";
 
 describe("codexRateLimitsToLimits", () => {
+  it("records absence only from explicit complete reads, never partial or ambiguous snapshots", () => {
+    const weekly = { usedPercent: 5, windowDurationMins: 10080, resetsAt: 1_793_382_503 };
+    const snapshot = { primary: weekly, secondary: null };
+    expect(codexRateLimitsToLimits({ checkedAt, completeRead: true, snapshot })).toMatchObject({
+      shortWindowAbsent: true,
+      shortWindowAbsentCheckedAt: checkedAt,
+    });
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        completeRead: true,
+        snapshot: {
+          primary: null,
+          secondary: weekly,
+        },
+      }).shortWindowAbsent,
+    ).toBe(true);
+    for (const snapshot of [
+      { primary: weekly },
+      { primary: null, secondary: null },
+      { primary: { usedPercent: 5 }, secondary: null },
+      { primary: { ...weekly, windowDurationMins: NaN }, secondary: null },
+      { primary: { ...weekly, windowDurationMins: 300 }, secondary: weekly },
+    ]) {
+      expect(
+        codexRateLimitsToLimits({ checkedAt, completeRead: true, snapshot }).shortWindowAbsent,
+      ).toBeUndefined();
+    }
+    expect(codexRateLimitsToLimits({ checkedAt, snapshot }).shortWindowAbsent).toBeUndefined();
+    expect(codexRateLimitsToUpdate(snapshot)).not.toHaveProperty("shortWindowAbsent");
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        completeRead: true,
+        snapshot,
+        rateLimitsByLimitId: { codex: snapshot, spark: { primary: weekly } },
+      }).shortWindowAbsent,
+    ).toBeUndefined();
+  });
   it("maps primary and secondary onto the session and weekly windows", () => {
     expect(
       codexRateLimitsToLimits({
@@ -63,7 +102,7 @@ describe("codexRateLimitsToLimits", () => {
     ]);
   });
 
-  it("selects the main Codex allowance and leaves Spark out", () => {
+  it("keeps model-specific buckets separate from the main Codex allowance", () => {
     const spark = {
       limitId: "codex_bengalfox",
       primary: { usedPercent: 0, windowDurationMins: 300 },
@@ -79,6 +118,22 @@ describe("codexRateLimitsToLimits", () => {
         },
       }).windows,
     ).toEqual([
+      {
+        id: "codex_bengalfox:primary",
+        modelScope: "codex_bengalfox",
+        kind: "session",
+        label: "Session · codex_bengalfox",
+        usedPercent: 0,
+        windowDurationMins: 300,
+      },
+      {
+        id: "codex_bengalfox:secondary",
+        modelScope: "codex_bengalfox",
+        kind: "weekly",
+        label: "Weekly · codex_bengalfox",
+        usedPercent: 90,
+        windowDurationMins: 10080,
+      },
       {
         id: "secondary",
         kind: "weekly",
@@ -108,7 +163,9 @@ describe("codexRateLimitsToLimits", () => {
           secondary: { usedPercent: 90 },
         },
       }).windows,
-    ).toEqual([]);
+    ).toMatchObject([
+      { id: "codex_bengalfox:secondary", usedPercent: 90, modelScope: "codex_bengalfox" },
+    ]);
   });
 });
 
@@ -132,14 +189,19 @@ describe("codexRateLimitsToUpdate", () => {
     expect(codexRateLimitsToUpdate({ planType: "plus" })).toBeUndefined();
   });
 
-  it("ignores Spark notifications so they cannot overwrite the main allowance", () => {
+  it("isolates Spark notifications so they cannot overwrite the main allowance", () => {
     expect(
       codexRateLimitsToUpdate({
         limitId: "codex_bengalfox",
         primary: { usedPercent: 0, windowDurationMins: 300 },
         secondary: { usedPercent: 90, windowDurationMins: 10080 },
       }),
-    ).toBeUndefined();
+    ).toMatchObject({
+      windows: [
+        { id: "codex_bengalfox:primary", usedPercent: 0 },
+        { id: "codex_bengalfox:secondary", usedPercent: 90 },
+      ],
+    });
     expect(
       codexRateLimitsToUpdate({
         limitId: "codex",
@@ -295,22 +357,5 @@ describe("mergeCodexRateLimits", () => {
         primary: { usedPercent: 3, resetsAt: 1_800_000_000, windowDurationMins: 300 },
       }),
     ).toBe(main);
-  });
-});
-
-import { codexUsageLimitResetAt } from "./codexUsageLimits.ts";
-
-describe("codexUsageLimitResetAt", () => {
-  it("waits for every exhausted window and never invents an unknown reset", () => {
-    expect(
-      codexUsageLimitResetAt({
-        primary: { usedPercent: 100, resetsAt: 2000000000 },
-        secondary: { usedPercent: 100, resetsAt: 2000100000 },
-      }),
-    ).toBe("2033-05-19T07:20:00.000Z");
-    expect(codexUsageLimitResetAt({ primary: { usedPercent: 100 } })).toBeNull();
-    expect(
-      codexUsageLimitResetAt({ primary: { usedPercent: 50, resetsAt: 2000000000 } }),
-    ).toBeNull();
   });
 });

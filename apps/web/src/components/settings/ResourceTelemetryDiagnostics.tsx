@@ -4,13 +4,14 @@ import {
   ActivityIcon,
   AlertTriangleIcon,
   BatteryIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
   CpuIcon,
   DatabaseIcon,
   GaugeIcon,
   HardDriveIcon,
   MemoryStickIcon,
 } from "lucide-react";
-import { ChevronDown, ChevronRight } from "lucide";
 import type {
   BackgroundBooleanState,
   EnvironmentId,
@@ -43,7 +44,6 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatRelativeTime } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { MorphIcon } from "~/components/MorphIcon";
 import { ScrollArea } from "../ui/scroll-area";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -480,6 +480,7 @@ function ProcessTreeName({
 }) {
   const name = formatProcessName(process);
   const hasChildren = process.childPids.length > 0;
+  const ChevronIcon = collapsed ? ChevronRightIcon : ChevronDownIcon;
   return (
     <div
       className="grid min-w-0 grid-cols-[1.25rem_0.375rem_minmax(0,1fr)] items-center gap-2"
@@ -492,7 +493,7 @@ function ProcessTreeName({
           onClick={() => onToggle(process)}
           aria-label={collapsed ? `Expand ${name}` : `Collapse ${name}`}
         >
-          <MorphIcon className="size-3.5" icon={collapsed ? ChevronRight : ChevronDown} />
+          <ChevronIcon className="size-3.5" />
         </Button>
       ) : (
         <span className="size-5" aria-hidden />

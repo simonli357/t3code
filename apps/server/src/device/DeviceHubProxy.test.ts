@@ -9,8 +9,14 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpClient, HttpClientResponse, HttpRouter } from "effect/unstable/http";
-import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
-import * as DeviceService from "./DeviceService.ts";
+import {
+  EnvironmentAuth,
+  ServerAuthMissingCredentialError,
+  ServerAuthSessionCredentialValidationError,
+  type ServerAuthCredentialError,
+  type ServerAuthInternalError,
+} from "../auth/EnvironmentAuth.ts";
+import { DeviceService } from "./DeviceService.ts";
 import { deviceHubProxyRouteLayer } from "./DeviceHubProxy.ts";
 
 const disposers: Array<() => Promise<void>> = [];
@@ -21,7 +27,7 @@ afterEach(async () => {
 const fixture = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   fail = false,
-  authError?: EnvironmentAuth.ServerAuthCredentialError | EnvironmentAuth.ServerAuthInternalError,
+  authError?: ServerAuthCredentialError | ServerAuthInternalError,
 ) => {
   let finalized = 0;
   const requests: string[] = [];
@@ -38,7 +44,7 @@ const fixture = (
   const { handler, dispose } = HttpRouter.toWebHandler(
     deviceHubProxyRouteLayer.pipe(
       Layer.provideMerge(
-        Layer.succeed(EnvironmentAuth.EnvironmentAuth, {
+        Layer.succeed(EnvironmentAuth, {
           authenticateWebSocketUpgrade: () =>
             authError
               ? Effect.fail(authError)
@@ -48,13 +54,13 @@ const fixture = (
                   method: "bearer-access-token",
                   scopes,
                 }),
-        } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]),
+        } as unknown as EnvironmentAuth["Service"]),
       ),
       Layer.provideMerge(
-        Layer.succeed(DeviceService.DeviceService, {
+        Layer.succeed(DeviceService, {
           currentReadiness: () =>
             Effect.succeed({ hostId: LOCAL_DEVICE_HOST_ID, hub: { origin: "http://hub.test" } }),
-        } as DeviceService.DeviceService["Service"]),
+        } as DeviceService["Service"]),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
     ),
@@ -145,9 +151,9 @@ describe("device hub proxy", () => {
 });
 
 it.each([
-  [new EnvironmentAuth.ServerAuthMissingCredentialError({}), 401],
+  [new ServerAuthMissingCredentialError({}), 401],
   [
-    new EnvironmentAuth.ServerAuthSessionCredentialValidationError({
+    new ServerAuthSessionCredentialValidationError({
       cause: new Error("private credential diagnostic"),
     }),
     500,

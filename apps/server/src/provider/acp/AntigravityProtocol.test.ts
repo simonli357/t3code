@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import type * as EffectAcpSchema from "effect-acp/compat";
-import * as AcpWireSchema from "effect-acp/schema-v1";
+import * as EffectAcpSchema from "effect-acp/schema";
 
 import {
   extractAntigravityUserInputQuestion,
@@ -19,7 +18,7 @@ import {
 } from "./AntigravityProtocol.ts";
 import { mergeToolCallState, parseSessionUpdateEvent } from "./AcpRuntimeModel.ts";
 
-const isSessionNotification = Schema.is(AcpWireSchema.SessionNotification);
+const isSessionNotification = Schema.is(EffectAcpSchema.SessionNotification);
 
 describe("native Antigravity subagent tools", () => {
   it("recognizes only native invocation titles and excludes MCP tools", () => {

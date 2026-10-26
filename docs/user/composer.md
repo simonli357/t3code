@@ -34,26 +34,77 @@ See [images and videos](#images-and-videos-in-messages) for previewing and savin
 
 ## Send while the agent is working
 
-On web and desktop, choose **Settings → General → Follow-up behavior** to queue
-new messages for a later turn or steer the running turn immediately. The setting
-applies to this client; already queued messages keep their place. Queued messages
-are saved on the server and can be edited, reordered, or removed above the composer.
-`Cmd+Enter` on macOS or `Ctrl+Enter` on Windows and Linux uses the opposite action:
-it steers when your default is Queue and queues when your default is Steer.
+On web and desktop, a message sent during a running turn waits at the end of the conversation as a
+dashed bubble. It goes out on its own when the agent finishes its next tool
+call, or when the turn ends, even while you have another thread open. Use the arrow under the bubble to send it right
+away, or the X to move it back into the composer. Stop returns every queued
+message to the composer.
+
+In **Settings → General → Follow-up behavior**, choose **Queue** to keep this
+behavior or **Steer** to send new messages immediately. This setting applies to
+the current client. Messages already queued keep their place.
 
 Use `Cmd+Shift+Enter` on macOS or `Ctrl+Shift+Enter` on Windows and Linux to send
-the oldest queued message as a steer. This leaves the current draft intact and
-requires an active turn that supports steering. Change
-`thread.steerQueuedMessage` in **Settings → Keybindings** to use another shortcut.
+the oldest queued message now. Change `thread.steerQueuedMessage` in
+**Settings → Keybindings** to use another shortcut. It leaves the current draft
+in the composer and waits if the agent needs an approval or an answer.
 
-Press `Option+Up` on macOS or `Alt+Up` on Windows and Linux with the cursor at the
-start of the composer to edit the most recently queued message. Change
-`thread.editQueuedMessage` to use another shortcut.
+## Switch accounts or providers in a chat
 
-Mobile has the same choice under **Settings → Follow-ups**. While a turn is
-running the send button shows which action it will take. Long-press it to use the
-other action for a single message, or hold `Cmd` while sending from a hardware
-keyboard. The button only offers Steer when the running agent supports it.
+On web and desktop, choose another account, provider or model in the composer's
+model picker, then send your next message. An account or provider change waits
+for the current turn to finish, including when you use **Send now**.
+
+Compatible accounts continue the native conversation. A different provider or an
+account with separate session storage starts a fresh native session with bounded
+chat history: the initial request and recent messages are favored. Earlier tool
+state, reasoning and attachments are not transferred. The visible chat stays
+intact, and the agent can read omitted messages with `t3_thread_read`.
+
+Some providers require a new chat to change models within their native session.
+Managed workers retain the account/model specified by their spawning plan;
+changing one manually does not rewrite that plan or reroute queued assignments.
+
+## Masters and workers
+
+New conversations are independent. Assigning a worker makes its owner a master.
+A worker can own other workers while remaining a worker of its own master; task
+names such as reviewer or researcher do not change these roles.
+
+Open **Session organization** from a conversation's menu (long-press on mobile),
+or select its role in the web/desktop chat header. Choose an eligible master on
+any linked computer, or **Independent** to release a worker. The dialog
+shows the current relationship and confirms the change. Assignment preserves
+the conversation, workspace, provider/account/model and running or queued work;
+future reports follow the new owner. Each choice shows its computer. Changing
+ownership leaves the worker on its current computer; moving its execution uses
+the separate native session move flow. All participating computers must be
+reachable to verify ancestry and prepare the change. If a connection is lost,
+use **Retry change**: T3 resumes the same durable request instead of creating a
+second transfer. A stale relationship refreshes in the open editor for review.
+
+The sidebar groups workers under their master while keeping each worker's actual
+project and computer. Collapsed groups show running work, attention requests and
+offline/unknown workers. **Finished** retains completed workers and their history.
+Search and direct conversation links reveal the selected worker and its owner
+path. Pins, snoozes and settlement still apply within the group. Collapsing a
+group or closing a tab does not stop its workers.
+
+You can message a worker directly; its master sees a compact direct-input marker.
+Renewing a master transfers its workers to the successor. A nested master keeps
+its parent, including a parent on another computer. Retry an interrupted renewal
+with the same successor; its durable intent preserves the parent and children
+without starting another conversation.
+
+Configure separate master and worker renewal limits in **Settings → General →
+Session renewal** (mobile: **Settings → Agent behavior**). A soft limit warns on
+the next session, tool, or settings activity;
+an optional hard limit prepares a checkpoint and starts a successor at a turn
+boundary, keeping the selected account, model and worker relationships. Long
+tool waits do not count as working time. Automatic renewal is off by default,
+and stopped, settled, independent and Base sessions are not automatically resumed.
+If a checkpoint or successor fails, the original conversation remains available
+and shows a renewal error.
 
 ## Queue messages offline on mobile
 
@@ -114,8 +165,7 @@ On web and desktop, choose **Edit from here** beneath a sent message to rewind
 the conversation to before that message. Choose **Revert and keep changes** to
 leave workspace files as they are, or **Revert files too** to restore them as well.
 File restore is only offered for threads running in a worktree, and it is
-refused when another thread or agent session also uses that directory, a folder
-inside it, or a folder that contains it, since
+refused when another thread or agent session also uses that directory, since
 restoring would erase their changes. A thread that works in the project directory
 rewinds the conversation only. The selected prompt and its attachments return to the composer for editing and
 resending. Any unsent draft stays above the restored prompt.
@@ -149,30 +199,6 @@ awake; it can sleep normally once recording stops.
 
 Transcription runs on your device. T3 Code deletes the temporary audio after
 transcription or cancellation; only the message text is sent when you submit.
-
-## Queued messages
-
-On web and desktop, the composer shows **Interrupt** while the agent is working and the draft is
-empty. Adding text or attachments replaces it with a steer arrow. Click it to send a message into
-the active turn, or press `Enter` on desktop. Hold `Cmd` on macOS or `Ctrl` on Windows and Linux to
-switch the button to a queue icon. Click while holding that key, or press `Cmd+Enter` or
-`Ctrl+Enter` on desktop, to queue the message for after the active turn.
-
-Queued messages appear above the composer. Rows show a thumbnail of any attached image alongside
-the text. Drag a row by its handle to reorder it, use the handle's arrow keys, promote the message
-to a steer, or remove it.
-
-If the server restarts, saved queued messages keep their order and are held. Press
-**Resume** in an empty composer on web or desktop, or **Resume queue** in the queue
-sheet on mobile, to continue. You can edit, reorder, or remove held messages without starting them.
-
-The pencil on a queued row opens that message in the composer for editing. The original message
-stays in the queue until you save, and its row is highlighted while you edit. The message's
-attachments appear above the text with a remove control, and new images can be added the usual way.
-The checkmark saves the queued message in place; **Cancel** on its row leaves it unchanged. Whatever
-you had typed in the composer before starting the edit is restored afterwards. If the queued
-message starts or is removed while you are editing, the edit ends: changed content moves into the
-composer when it is empty, and is discarded otherwise.
 
 ## Commands and skills
 
@@ -209,13 +235,6 @@ pull requests in the current project's repository. Continue typing digits to fil
 by any part of its pull request numbers. A complete number is also resolved directly, even when that
 pull request is older than the recent list. Type a single word after `#` to search pull requests in
 the repository by text. Choose a result to insert it as a chip.
-
-Another thread can be context too. Type `@` followed by part of its title to pick one from
-the same server, or on web and desktop drag a thread out of the sidebar and drop it on the
-composer; a multi-selection drops together. The chip shows the thread's current title and
-opens it when selected. Your prompt only carries a reference: the agent reads the thread's
-history on demand, so attaching a long thread costs nothing until the agent looks. Attaching a
-thread does not change it, and the agent cannot send messages to it unless you ask.
 
 Images keep their thumbnail shelf above the text and also get a chip at your cursor, so you can
 say exactly which image you mean. Deleting an image chip leaves the image on the shelf; removing
@@ -273,9 +292,6 @@ styles, or images from neighboring files.
 On web and desktop, HTML and PDF files open as rendered pages. Switch an HTML
 file to source view to read its markup; a link to a specific line opens source
 automatically. HTML previews cannot access your T3 Code session.
-
-The file viewer recognizes images, HTML, and PDF files by their filename extension,
-including filenames or folders containing `#` or `?`.
 
 On mobile, select a PDF attachment or link to open it. iOS uses the native viewer;
 Android opens a compatible installed file viewer.

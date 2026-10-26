@@ -11,6 +11,7 @@ import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
+import { ProjectBasePromptSettings } from "./components/ProjectBasePromptSettings";
 import {
   AndroidSettingsEnvironmentFilter,
   SettingsEnvironmentFilterHeader,
@@ -93,6 +94,7 @@ function ProjectOverviewContent(props: {
 
   return (
     <>
+      <ProjectBasePromptSettings members={props.members} />
       <View className="flex-row items-center gap-4 px-2">
         <ProjectFavicon
           environmentId={representative.environmentId}

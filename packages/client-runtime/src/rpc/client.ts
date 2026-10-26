@@ -1,11 +1,7 @@
-import {
-  EnvironmentAuthorizationError,
-  ORCHESTRATION_V2_WS_METHODS,
-  WS_METHODS,
-} from "@t3tools/contracts";
+import { ORCHESTRATION_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
-import * as Duration from "effect/Duration";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -14,7 +10,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { RpcClientError } from "effect/unstable/rpc";
 
-import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 
@@ -48,12 +44,11 @@ export type EnvironmentSubscriptionRpcTag =
   | typeof WS_METHODS.codexAuthCallbackSubscribe
   | typeof WS_METHODS.providerAuthSubscribe
   | typeof WS_METHODS.providerInstallSubscribe
-  | typeof ORCHESTRATION_V2_WS_METHODS.subscribeShell
-  | typeof ORCHESTRATION_V2_WS_METHODS.subscribeThread
+  | typeof ORCHESTRATION_WS_METHODS.subscribeShell
+  | typeof ORCHESTRATION_WS_METHODS.subscribeThread
   | typeof WS_METHODS.subscribeAuthAccess
   | typeof WS_METHODS.subscribeServerConfig
   | typeof WS_METHODS.subscribeServerLifecycle
-  | typeof WS_METHODS.scheduledTasksSubscribe
   | typeof WS_METHODS.subscribeTerminalEvents
   | typeof WS_METHODS.subscribeTerminalMetadata
   | typeof WS_METHODS.subscribePreviewEvents
@@ -96,10 +91,6 @@ export class EnvironmentRpcSubscriptionObserver extends Context.Reference<{
 }) {}
 
 export const isRpcClientError = Schema.is(RpcClientError.RpcClientError);
-const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
-
-/** Ceiling for the doubling delay between same-session expected-failure retries. */
-const MAX_EXPECTED_FAILURE_RETRY_DELAY_MS = 30_000;
 
 export type EnvironmentRpcInput<TTag extends EnvironmentRpcTag> = Parameters<RpcMethod<TTag>>[0];
 
@@ -124,7 +115,7 @@ export type EnvironmentRpcStreamFailure<TTag extends EnvironmentStreamRpcTag> =
     : never;
 
 const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
-  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  const supervisor = yield* EnvironmentSupervisor;
   return yield* SubscriptionRef.get(supervisor.session).pipe(
     Effect.flatMap(
       Option.match({
@@ -141,17 +132,10 @@ const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
   );
 });
 
-export const getInitialServerConfig = Effect.fn("EnvironmentRpc.getInitialServerConfig")(
-  function* () {
-    const session = yield* currentSession();
-    return yield* session.initialConfig;
-  },
-);
-
 export const request = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
 >(tag: TTag, input: EnvironmentRpcInput<TTag>) {
-  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  const supervisor = yield* EnvironmentSupervisor;
   yield* Effect.annotateCurrentSpan({
     "environment.id": supervisor.target.environmentId,
     "rpc.method": tag,
@@ -174,7 +158,7 @@ export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(
 ): Stream.Stream<
   EnvironmentRpcStreamValue<TTag>,
   EnvironmentRpcStreamFailure<TTag> | EnvironmentRpcUnavailableError,
-  EnvironmentSupervisor.EnvironmentSupervisor
+  EnvironmentSupervisor
 > {
   return Stream.unwrap(
     currentSession().pipe(
@@ -200,12 +184,6 @@ interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
   readonly onExpectedFailure?: (
     cause: Cause.Cause<EnvironmentRpcStreamFailure<TTag>>,
   ) => Effect.Effect<void, never, never>;
-  /**
-   * First delay before resubscribing on the same session after an expected
-   * failure. Each consecutive failure doubles it up to 30 seconds, and the
-   * first value from a healthy stream resets it. Authorization failures are
-   * not retried; they wait for the next session or `resubscribe` signal.
-   */
   readonly retryExpectedFailureAfter?: Duration.Input;
   readonly resubscribe?: Stream.Stream<unknown, never, never>;
 }
@@ -218,14 +196,10 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
     stream: Stream.Stream<EnvironmentRpcStreamValue<TTag>, EnvironmentRpcStreamFailure<TTag>>,
   ) => Stream.Stream<A, EnvironmentRpcStreamFailure<TTag>>,
   options?: SubscriptionOptions<TTag>,
-): Stream.Stream<
-  A,
-  EnvironmentRpcStreamFailure<TTag>,
-  EnvironmentSupervisor.EnvironmentSupervisor
-> {
+): Stream.Stream<A, EnvironmentRpcStreamFailure<TTag>, EnvironmentSupervisor> {
   return Stream.unwrap(
     Effect.gen(function* () {
-      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const supervisor = yield* EnvironmentSupervisor;
       const observer = yield* EnvironmentRpcSubscriptionObserver;
       const sessionChanges = SubscriptionRef.changes(supervisor.session);
       const sessions =
@@ -252,9 +226,6 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                 EnvironmentRpcStreamValue<TTag>,
                 EnvironmentRpcStreamFailure<TTag>
               >;
-              // Consecutive expected-failure retries on this session. Reset by
-              // the first value a resubscribed stream delivers.
-              let expectedFailureRetries = 0;
               const subscribeToSession = (): Stream.Stream<A, EnvironmentRpcStreamFailure<TTag>> =>
                 Stream.suspend(() =>
                   Stream.unwrap(
@@ -265,13 +236,7 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         method: tag,
                         input,
                       });
-                      const stream = mapStream(session, method(input)).pipe(
-                        Stream.onFirst(() =>
-                          Effect.sync(() => {
-                            expectedFailureRetries = 0;
-                          }),
-                        ),
-                      );
+                      const stream = mapStream(session, method(input));
                       // An evicted preview host completes its registration stream.
                       // Re-register only after completion; failures still follow the
                       // session recovery policy and browser actions are never replayed.
@@ -319,27 +284,14 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         const handled = Stream.fromEffect(options.onExpectedFailure(cause)).pipe(
                           Stream.drain,
                         );
-                        const isAuthorizationFailure = cause.reasons.some(
-                          (reason) =>
-                            reason._tag === "Fail" && isEnvironmentAuthorizationError(reason.error),
-                        );
-                        if (
-                          options.retryExpectedFailureAfter === undefined ||
-                          isAuthorizationFailure
-                        ) {
+                        if (options.retryExpectedFailureAfter === undefined) {
                           return handled;
                         }
-                        const retryDelay = Duration.millis(
-                          Math.min(
-                            Duration.toMillis(options.retryExpectedFailureAfter) *
-                              2 ** expectedFailureRetries,
-                            MAX_EXPECTED_FAILURE_RETRY_DELAY_MS,
-                          ),
-                        );
-                        expectedFailureRetries += 1;
                         return handled.pipe(
                           Stream.concat(
-                            Stream.fromEffect(Effect.sleep(retryDelay)).pipe(Stream.drain),
+                            Stream.fromEffect(Effect.sleep(options.retryExpectedFailureAfter)).pipe(
+                              Stream.drain,
+                            ),
                           ),
                           Stream.concat(subscribeToSession()),
                         );
@@ -368,7 +320,7 @@ export function subscribeDynamic<TTag extends EnvironmentSubscriptionRpcTag>(
 ): Stream.Stream<
   EnvironmentRpcStreamValue<TTag>,
   EnvironmentRpcStreamFailure<TTag>,
-  EnvironmentSupervisor.EnvironmentSupervisor
+  EnvironmentSupervisor
 > {
   return subscribeDynamicMapped(tag, makeInput, (_session, stream) => stream, options);
 }
@@ -381,7 +333,7 @@ export function subscribeDynamicWithSession<TTag extends EnvironmentSubscription
 ): Stream.Stream<
   readonly [session: RpcSession, value: EnvironmentRpcStreamValue<TTag>],
   EnvironmentRpcStreamFailure<TTag>,
-  EnvironmentSupervisor.EnvironmentSupervisor
+  EnvironmentSupervisor
 > {
   return subscribeDynamicMapped(
     tag,
@@ -398,7 +350,7 @@ export function subscribe<TTag extends EnvironmentSubscriptionRpcTag>(
 ): Stream.Stream<
   EnvironmentRpcStreamValue<TTag>,
   EnvironmentRpcStreamFailure<TTag>,
-  EnvironmentSupervisor.EnvironmentSupervisor
+  EnvironmentSupervisor
 > {
   return subscribeDynamic(tag, () => Effect.succeed(input), options);
 }

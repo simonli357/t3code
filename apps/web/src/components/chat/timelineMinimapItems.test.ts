@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { MessageId } from "@t3tools/contracts";
+import { WORKER_REVIEW_BLOCKED } from "@t3tools/shared/workerMessages";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 import { deriveTimelineMinimapItems, resolveTimelineMinimapPreview } from "./timelineMinimapItems";
 import type { ChatMessage } from "../../types";
@@ -12,7 +13,7 @@ function rows(
     role,
     text,
     streaming: false,
-    runId: null,
+    turnId: null,
     createdAt: new Date(index * 1000).toISOString(),
     updatedAt: new Date(index * 1000).toISOString(),
   }));
@@ -47,6 +48,23 @@ describe("timeline minimap previews", () => {
     expect(source[items[0]!.rowIndex]!.id).toBe(items[0]!.id);
     expect(resolveTimelineMinimapPreview(items[1]!)?.assistantText).toBe("Second answer");
     expect(items[0]?.assistantText).toBe(" Done\t now ");
+  });
+
+  it("previews a delivered report by its summary but leaves a user's own text alone", () => {
+    const text = `[T3 worker report — deploy_worker — 20:07]\nWorker: w\nOutcome: blocked, needs the user\nApprove the signing key.\n\n${WORKER_REVIEW_BLOCKED}`;
+    const [delivered, typed] = rows([
+      ["user", text],
+      ["user", text],
+    ]);
+    const withId = (row: MessagesTimelineRow, id: string): MessagesTimelineRow =>
+      row.kind === "message"
+        ? { ...row, message: { ...row.message, id: MessageId.make(id) } }
+        : row;
+    const items = deriveTimelineMinimapItems([withId(delivered!, "worker-job:report:r:1"), typed!]);
+    expect(resolveTimelineMinimapPreview(items[0]!)?.userText).toBe(
+      "Worker report · deploy_worker · 20:07: Blocked — needs you. Approve the signing key.",
+    );
+    expect(items[1]?.userText).toBe(text);
   });
 
   it("handles an unanswered prompt, empty responses, and a closed preview", () => {

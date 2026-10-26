@@ -55,22 +55,22 @@ vi.mock("./use-thread-selection", () => ({
   }),
 }));
 vi.mock("./use-thread-detail", () => ({
-  useSelectedThreadPendingRequests: () => ({
-    approvals: [],
-    userInputs: [
+  useSelectedThreadDetail: () => ({
+    activities: [
       {
-        requestId: "request-1",
+        id: "request-activity",
+        kind: "user-input.requested",
         createdAt: "2026-09-08T00:00:00Z",
-        responseCapability: "live",
-        dismissible: false,
-        questions: ["first", "second"].map((id) => ({
-          id,
-          header: id,
-          question: `Attach ${id} file`,
-          options: [],
-          allowCustomAnswer: true,
-          multiSelect: false,
-        })),
+        payload: {
+          requestId: "request-1",
+          questions: ["first", "second"].map((id) => ({
+            id,
+            header: id,
+            question: `Attach ${id} file`,
+            options: [],
+            allowCustomAnswer: true,
+          })),
+        },
       },
     ],
   }),

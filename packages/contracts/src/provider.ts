@@ -9,12 +9,10 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import {
+  ChatAttachment,
+  ModelSelection,
   getProviderAttachmentLimitError,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
-  ChatAttachment,
-} from "./chatAttachment.ts";
-import { ModelSelection } from "./modelSelection.ts";
-import {
   ProviderApprovalDecision,
   ProviderApprovalPolicy,
   ProviderInteractionMode,
@@ -23,7 +21,7 @@ import {
   ProviderUserInputAnswers,
   UserInputAttachments,
   RuntimeMode,
-} from "./providerPolicy.ts";
+} from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -54,6 +52,8 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
+  /** Internal launch defaults resolved from the durable session workspace. */
+  workspaceEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
   // See ProviderSession for the migration story.
@@ -62,6 +62,8 @@ export const ProviderSessionStartInput = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   resumeCursor: Schema.optional(Schema.Unknown),
+  /** Internal portable history for a fresh native session; never a resume cursor. */
+  contextHandoff: Schema.optional(Schema.String),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   runtimeMode: RuntimeMode,
@@ -69,6 +71,13 @@ export const ProviderSessionStartInput = Schema.Struct({
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
+  /** Internal context, populated by ProviderService from current user settings. */
+  globalInstructionContext: Schema.optional(
+    Schema.Struct({
+      instructions: Schema.String,
+      runtimeFacts: Schema.String,
+    }),
+  ),
   threadId: ThreadId,
   /** Internal recovery signal. Allows an empty turn only for adapters that
       explicitly support promptless continuation. */

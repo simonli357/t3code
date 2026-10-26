@@ -128,7 +128,13 @@ export function gitHubPullRequestBrowserUrl(
   repository: string,
   number: number,
 ): string | null {
-  if (identity?.provider !== "github" || !Number.isSafeInteger(number) || number < 1) return null;
+  if (
+    identity?.locator.source !== "git-remote" ||
+    identity.provider !== "github" ||
+    !Number.isSafeInteger(number) ||
+    number < 1
+  )
+    return null;
   const repositoryPath = repository.split("/");
   if (
     repositoryPath.length !== 2 ||

@@ -10,9 +10,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 
-import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
+import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
-import * as ManagedRelay from "../relay/managedRelay.ts";
+import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import {
   makeEnvironmentHttpApiUrlBuilder,
   type RemoteEnvironmentRequestError,
@@ -44,10 +44,8 @@ export const fetchEnvironmentPullRequestDiff = Effect.fn(
 )(function* (input: {
   readonly prepared: PreparedConnection;
   readonly diff: PullRequestDiffInput;
-  readonly signer: Option.Option<ManagedRelay.ManagedRelayDpopSigner["Service"]>;
-  readonly remoteAuthorization?: Option.Option<
-    RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]
-  >;
+  readonly signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
+  readonly remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
   readonly timeoutMs?: number;
 }) {
   return yield* executeAuthenticatedEnvironmentHttpRequest({
@@ -81,14 +79,16 @@ export class PullRequestDiffLoader extends Context.Service<
   }
 >()("@t3tools/client-runtime/state/pullRequestDiffHttp/PullRequestDiffLoader") {}
 
-export const layer: Layer.Layer<PullRequestDiffLoader, never, HttpClient.HttpClient> = Layer.effect(
+export const pullRequestDiffLoaderLayer: Layer.Layer<
+  PullRequestDiffLoader,
+  never,
+  HttpClient.HttpClient
+> = Layer.effect(
   PullRequestDiffLoader,
   Effect.gen(function* () {
     const httpClient = yield* HttpClient.HttpClient;
-    const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
-    const remoteAuthorization = yield* Effect.serviceOption(
-      RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
-    );
+    const signer = yield* Effect.serviceOption(ManagedRelayDpopSigner);
+    const remoteAuthorization = yield* Effect.serviceOption(RemoteEnvironmentAuthorization);
     return PullRequestDiffLoader.of({
       load: (prepared, input) =>
         fetchEnvironmentPullRequestDiff({

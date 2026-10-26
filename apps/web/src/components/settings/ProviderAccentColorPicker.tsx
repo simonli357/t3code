@@ -1,6 +1,6 @@
 "use client";
 
-import { PlusIcon, XIcon } from "lucide-react";
+import { PipetteIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { hexToHsv, hsvToHex, type HsvColor } from "../../lib/color";
@@ -9,6 +9,7 @@ import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { Popover, PopoverClose, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { normalizeProviderAccentColor } from "../../providerInstances";
+import { cn } from "../../lib/utils";
 
 const FALLBACK_ACCENT_COLOR = "#2563eb";
 
@@ -70,50 +71,44 @@ function ProviderCustomColorPicker(props: {
   readonly onCommit: (value: string) => void;
   readonly onClear: () => void;
 }) {
-  const normalized = normalizeProviderAccentColor(props.value);
+  const normalized = normalizeProviderAccentColor(props.value) ?? FALLBACK_ACCENT_COLOR;
 
   return (
     <Popover>
       <PopoverTrigger
         render={
-          <Button
+          <button
             type="button"
-            size="icon-sm"
-            variant="ghost-muted"
-            style={normalized ? { backgroundColor: normalized } : undefined}
-            aria-label={`${normalized ? "Change" : "Add"} accent color for ${props.displayName}`}
-          >
-            {normalized ? (
-              <span className="sr-only">Change accent color</span>
-            ) : (
-              <PlusIcon aria-hidden />
+            className={cn(
+              "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-input text-white shadow-xs transition-transform duration-200 active:scale-95",
+              "hover:scale-105 hover:border-ring/60",
             )}
-          </Button>
+            style={{ backgroundColor: normalized }}
+            aria-label={`Choose accent color for ${props.displayName}`}
+          >
+            <PipetteIcon className="size-3 text-white/70 drop-shadow-sm" aria-hidden />
+          </button>
         }
       />
       <PopoverPopup side="bottom" align="start" sideOffset={6} padding="none">
-        <ProviderCustomColorPanel
-          value={normalized ?? FALLBACK_ACCENT_COLOR}
-          onCommit={props.onCommit}
-        />
-        {normalized ? (
-          <div className="border-t border-border/60 p-1">
-            <PopoverClose
-              render={
-                <Button
-                  type="button"
-                  size="compact"
-                  variant="ghost-muted"
-                  className="w-full justify-start"
-                  onClick={props.onClear}
-                >
-                  <XIcon className="size-3.5" aria-hidden />
-                  Clear color
-                </Button>
-              }
-            />
-          </div>
-        ) : null}
+        <ProviderCustomColorPanel value={normalized} onCommit={props.onCommit} />
+        <div className="border-t border-border/60 p-1">
+          <PopoverClose
+            render={
+              <Button
+                type="button"
+                size="compact"
+                variant="ghost-muted"
+                className="w-full justify-start"
+                onClick={props.onClear}
+                disabled={!props.value}
+              >
+                <XIcon aria-hidden />
+                Clear color
+              </Button>
+            }
+          />
+        </div>
       </PopoverPopup>
     </Popover>
   );

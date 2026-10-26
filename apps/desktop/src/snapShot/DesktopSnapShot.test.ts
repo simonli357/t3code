@@ -3873,9 +3873,8 @@ it.effect("waits to apply settings while permissions are pending", () => {
   ).pipe(Effect.provide(layer));
 });
 
-it.effect.each([false, true])(
-  "tests macOS capture without publishing it and cleans up, failure=%s",
-  (fails) => {
+for (const fails of [false, true]) {
+  it.effect(`tests macOS capture without publishing it and cleans up, failure=${fails}`, () => {
     const active = {
       platform: "macos",
       id: 42,
@@ -3916,8 +3915,8 @@ it.effect.each([false, true])(
         }),
       ),
     );
-  },
-);
+  });
+}
 
 it.effect("rejects macOS test capture on other platforms", () =>
   Effect.scoped(

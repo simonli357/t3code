@@ -1,7 +1,6 @@
 import { ComposerContextId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useNavigation } from "@react-navigation/native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert } from "react-native";
 import type { EnvironmentId } from "@t3tools/contracts";
@@ -153,7 +152,6 @@ export function ComposerEditor({
         : "",
     [environmentId, draft.context, draft.attachments],
   );
-  const navigation = useNavigation();
   const selectedReference = selected
     ? collectComposerContextReferences(selected.source)[0]
     : undefined;
@@ -231,13 +229,6 @@ export function ComposerEditor({
                 },
               }
             : {})}
-          onOpenThread={(thread) => {
-            setSelected(null);
-            navigation.navigate("Thread", {
-              environmentId: String(thread.environmentId),
-              threadId: String(thread.threadId),
-            });
-          }}
           environmentId={environmentId}
           records={draft.context?.records}
           attachments={draft.attachments}

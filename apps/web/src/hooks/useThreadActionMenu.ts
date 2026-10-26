@@ -1,5 +1,8 @@
-import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { openSessionOrganization } from "../components/SessionOrganizationDialog";
+import { openMoveSession } from "../components/MoveSessionDialog";
+import { useForkConversation } from "./useForkConversation";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
+import { scopeProjectRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
@@ -21,6 +24,8 @@ import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   readEnvironmentSupportsAutoSettleOptOut,
+  readThreadSupportsForking,
+  readThreadSupportsMoving,
   readEnvironmentSupportsPinning,
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
@@ -36,7 +41,7 @@ import {
   selectProjectGroupingSettings,
 } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
-import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
+import { useUiStateStore } from "../uiStateStore";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
@@ -70,6 +75,7 @@ export function useThreadActionMenu(input: {
 }) {
   const { threadRef, projectCwd, onStartRename } = input;
   const router = useRouter();
+  const forkConversation = useForkConversation();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -92,12 +98,12 @@ export function useThreadActionMenu(input: {
     setThreadAutoSettle,
     archiveThread,
     deleteThread,
-    markThreadUnread,
   } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -133,6 +139,9 @@ export function useThreadActionMenu(input: {
         if (!thread) return;
         const now = new Date();
         const supports = {
+          forking: readThreadSupportsForking(threadRef),
+          moving: readThreadSupportsMoving(threadRef),
+          organization: thread.organization !== undefined,
           settlement: readEnvironmentSupportsSettlement(threadRef.environmentId),
           autoSettleOptOut: readEnvironmentSupportsAutoSettleOptOut(threadRef.environmentId),
           snooze: readEnvironmentSupportsSnooze(threadRef.environmentId),
@@ -143,6 +152,8 @@ export function useThreadActionMenu(input: {
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
         const items = buildThreadActionMenuItems({
           branch: thread.branch ?? null,
+          // The chat header has no project-scoped thread list behind the
+          // menu, so the "Filter by project" affordance is sidebar-only.
           projectFilter: null,
           isPinned: thread.pinnedAt != null,
           isSettled: supports.settlement && thread.settledOverride === "settled",
@@ -150,7 +161,7 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
-          isRunning: !threadRuntimeCanArchive(thread.runtime),
+          isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
           supports,
           snoozePresets,
         });
@@ -179,6 +190,15 @@ export function useThreadActionMenu(input: {
           }
         };
         switch (action) {
+          case "session-organization":
+            openSessionOrganization(threadRef);
+            return;
+          case "move-session":
+            openMoveSession(threadRef);
+            return;
+          case "fork-conversation":
+            await forkConversation(threadRef);
+            return;
           case "project-settings": {
             const project = projects.find(
               (candidate) =>
@@ -246,7 +266,7 @@ export function useThreadActionMenu(input: {
             );
             return;
           case "mark-unread":
-            markThreadUnread(threadRef);
+            markThreadUnread(scopedThreadKey(threadRef), thread.latestTurn?.completedAt);
             return;
           case "copy-path": {
             const workspacePath = thread.worktreePath ?? projectCwd;
@@ -333,6 +353,7 @@ export function useThreadActionMenu(input: {
       copyThreadIdToClipboard,
       deleteThread,
       handleNewThread,
+      forkConversation,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,

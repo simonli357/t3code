@@ -134,7 +134,8 @@ function LinkPullRequestDialog({
   const ownProject = useMemo(() => {
     const project = environmentProjects.find((candidate) => candidate.id === projectId);
     const identity = project?.repositoryIdentity;
-    if (!project || !identity) return null;
+    if (!project || identity?.locator.source !== "git-remote") return null;
+    const remoteUrl = identity.locator.remoteUrl;
     const repository =
       identity.displayName ??
       (identity.owner && identity.name ? `${identity.owner}/${identity.name}` : null);
@@ -147,7 +148,7 @@ function LinkPullRequestDialog({
       webUrl: (number: number) =>
         kind === "forgejo" && identity.webUrl
           ? `${identity.webUrl.replace(/\/+$/, "")}/pulls/${number}`
-          : changeRequestWebUrl(kind, host, repository, number, identity.locator.remoteUrl),
+          : changeRequestWebUrl(kind, host, repository, number, remoteUrl),
     };
   }, [environmentProjects, projectId]);
   const linking = usePullRequestLinking(threadRef.environmentId);

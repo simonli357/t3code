@@ -11,7 +11,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
-import * as ServerConfig from "../config.ts";
+import { ServerConfig } from "../config.ts";
 
 export class ResourceMonitorBinaryUnsupported extends Schema.TaggedError<ResourceMonitorBinaryUnsupported>()(
   "ResourceMonitorBinaryUnsupported",
@@ -136,7 +136,7 @@ function resourceMonitorRustTarget(
 }
 
 export const make = Effect.fn("resourceTelemetry.resourceMonitorBinary.make")(function* () {
-  const config = yield* ServerConfig.ServerConfig;
+  const config = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcessPlatform;

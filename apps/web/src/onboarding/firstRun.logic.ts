@@ -27,9 +27,9 @@ interface FirstRunWorkspaceInput {
     readonly id: string;
     readonly projectId: string;
     readonly environmentId: string;
-    readonly latestRun: unknown;
+    readonly latestTurn: unknown;
     readonly latestUserMessageAt: string | null;
-    readonly runtime: unknown;
+    readonly session: unknown;
   }>;
 }
 
@@ -116,9 +116,9 @@ export function isFreshFirstRunWorkspace(input: FirstRunWorkspaceInput): boolean
     input.bootstrapThreadId === bootstrapThread.id &&
     bootstrapThread.environmentId === input.primaryEnvironmentId &&
     bootstrapThread.projectId === bootstrapProject.id &&
-    bootstrapThread.latestRun === null &&
+    bootstrapThread.latestTurn === null &&
     bootstrapThread.latestUserMessageAt === null &&
-    bootstrapThread.runtime === null
+    bootstrapThread.session === null
   );
 }
 

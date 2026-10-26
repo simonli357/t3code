@@ -1,4 +1,16 @@
-import type { ThreadRowProviderInstance } from "./thread-provider-instance";
+import {
+  describeSessionRole,
+  sessionKey,
+} from "@t3tools/client-runtime/state/session-organization";
+import { toggleSessionGroup } from "../../state/session-organization";
+import {
+  SessionFinishedToggle,
+  SessionGroupHeader,
+  sessionNestingClassName,
+} from "./session-group-header";
+import { SessionOrganizationSheet } from "./SessionOrganizationSheet";
+import type { ThreadListV2Organization } from "./threadListV2";
+import { useNativeSessionMove } from "./useNativeSessionMove";
 import {
   THREAD_LIST_V2_MONO_FONT as MONO_FONT,
   THREAD_LIST_V2_ROW_CONTENT_CLASS_NAME,
@@ -24,13 +36,13 @@ import { memo, useCallback, useEffect, useMemo, useState, type ComponentProps } 
 import { Alert, Pressable, useWindowDimensions, View } from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 
-import type { ThreadListProvider } from "../../state/thread-list-environments";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ControlPillMenu } from "../../components/ControlPill";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { ProjectFavicon } from "../../components/ProjectFavicon";
-import { ProviderIcon, ProviderInstanceIcon } from "../../components/ProviderIcon";
+import { ProviderInstanceIcon } from "../../components/ProviderIcon";
+import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import { cn } from "../../lib/cn";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
@@ -41,11 +53,9 @@ import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import {
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
-  resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2SnoozeMenuSelection,
-  threadHasUnseenCompletion,
+  resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
-  resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
   type ThreadListV2Status,
 } from "./threadListV2";
@@ -69,7 +79,6 @@ const STATUS_LABEL_BY_STATUS: Partial<
   input: { label: "Input", className: "text-adaptive-indigo-600-300" },
   working: { label: "Working", className: "text-adaptive-sky-600-400" },
   failed: { label: "Failed", className: "text-danger-foreground" },
-  limited: { label: "Limited", className: "text-warning-foreground" },
 };
 
 // Menus keep lifecycle and title regeneration together. Archive keeps its
@@ -191,12 +200,11 @@ type ThreadListV2ShelfHeaderProps = {
   readonly pane?: "screen" | "sidebar";
 };
 
-const SHELF_LABEL = { working: "Working", snoozed: "Snoozed", settled: "Settled" } as const;
-
 function ThreadListV2ShelfHeader(
-  props: ThreadListV2ShelfHeaderProps & { readonly kind: keyof typeof SHELF_LABEL },
+  props: ThreadListV2ShelfHeaderProps & { readonly kind: "base" | "snoozed" | "settled" },
 ) {
-  const label = SHELF_LABEL[props.kind];
+  const label =
+    props.kind === "base" ? "Base sessions" : props.kind === "snoozed" ? "Snoozed" : "Settled";
   return (
     <ThreadListV2Section
       label={props.expanded ? label : `${label} (${props.count})`}
@@ -212,12 +220,6 @@ function ThreadListV2ShelfHeader(
     />
   );
 }
-
-export const ThreadListV2WorkingShelfHeader = memo(function ThreadListV2WorkingShelfHeader(
-  props: ThreadListV2ShelfHeaderProps,
-) {
-  return <ThreadListV2ShelfHeader {...props} kind="working" />;
-});
 
 export const ThreadListV2SnoozedShelfHeader = memo(function ThreadListV2SnoozedShelfHeader(
   props: ThreadListV2ShelfHeaderProps,
@@ -450,6 +452,7 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
 });
 
 export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
+  readonly organization?: ThreadListV2Organization | undefined;
   readonly thread: EnvironmentThreadShell;
   readonly variant: "card" | "slim";
   /** A message for this thread is waiting in the outbox. */
@@ -473,8 +476,6 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly snoozePresetMinute: string;
   readonly project: EnvironmentProject | null;
   readonly projectTitle?: string;
-  /** Keep the environment's provider array stable across unrelated list updates. */
-  readonly providers: ReadonlyArray<ThreadListProvider> | undefined;
   readonly providerInstance: ThreadRowProviderInstance | null;
   /** Which machine hosts the thread. Null when only one environment is
       connected — repeating the same label on every row is noise. Mirrors
@@ -562,19 +563,6 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const pinnedRow = props.pinned === true;
   const dormant = useSwipeRowDormant(props.activationKey);
 
-  const { providerDrivers, providerIconUrl } = useMemo(() => {
-    const provider = props.providers?.find(
-      (candidate) =>
-        candidate.instanceId ===
-        (thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId),
-    );
-    return {
-      providerDrivers: resolveThreadListV2ProviderDrivers(thread, props.providers),
-      providerIconUrl: provider?.iconUrl,
-    };
-  }, [thread, props.providers]);
-
-  const providerInstance = props.providerInstance;
   const pr = useThreadPr(thread);
 
   const theme = useUniwindTheme();
@@ -583,13 +571,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const rowAppearance = getThreadListV2RowAppearance(theme, sidebarPane, selected);
 
   const status = resolveThreadListV2Status(thread);
-  // "Done" marks a completion the user has not opened yet — same emerald
-  // label as the web sidebar, sourced from the server-side visited watermark
-  // so checking a thread on any device clears it everywhere.
-  const isUnread = status === "ready" && threadHasUnseenCompletion(thread);
-  const statusLabel =
-    STATUS_LABEL_BY_STATUS[status] ??
-    (isUnread ? { label: "Done", className: "text-adaptive-emerald-700-300" } : undefined);
+  const statusLabel = STATUS_LABEL_BY_STATUS[status];
   // The timestamp is precomputed on the list item (same stamps the settled
   // tail sorts by) so a minute tick only re-renders rows that draw it.
   const timeLabel = props.timeLabel;
@@ -732,15 +714,26 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : [],
     [props.autoSettleOptOutSupported, thread.autoSettleDisabledAt],
   );
+  const [organizationOpen, setOrganizationOpen] = useState(false);
+  const nativeMove = useNativeSessionMove(thread);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      ...(thread.organization
+        ? [{ id: "session-organization", title: "Session organization…", image: "person.2" }]
+        : []),
+      ...nativeMove.menuItems,
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
         isRegenerating: thread.titleRegeneration != null,
       }),
     ],
-    [props.titleRegenerationSupported, thread.titleRegeneration],
+    [
+      props.titleRegenerationSupported,
+      thread.titleRegeneration,
+      thread.organization,
+      nativeMove.menuItems,
+    ],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -802,6 +795,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event === "session-organization") setOrganizationOpen(true);
+      if (nativeEvent.event.startsWith("native-move")) nativeMove.onAction(nativeEvent.event);
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "settle") handleSettle();
       if (nativeEvent.event === "unsettle") handleUnsettle();
@@ -839,6 +834,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       onNewThreadOnBranch,
       thread,
       handleArchive,
+      nativeMove,
       handleDelete,
       handleRegenerateTitle,
       handleRename,
@@ -851,8 +847,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       handleUnpin,
       handleUnsettle,
       handleUnsnooze,
-      setCustomSnoozeOpen,
       snoozePresets,
+      setCustomSnoozeOpen,
+      setOrganizationOpen,
     ],
   );
   const primaryAction = useMemo(() => {
@@ -986,19 +983,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         </View>
       ) : null}
       <View className="mt-1 flex-row items-center gap-2">
-        {(status === "failed" || status === "limited") && thread.runtime?.lastError ? (
+        {status === "failed" && thread.session?.lastError ? (
           <Text
             className={cn(
               "flex-1 text-xs",
               selected
                 ? selectedThreadRowColors.mutedForegroundClassName
-                : status === "limited"
-                  ? "text-warning-foreground"
-                  : "text-danger-foreground",
+                : "text-danger-foreground",
             )}
             numberOfLines={1}
           >
-            {thread.runtime.lastError}
+            {thread.session.lastError}
           </Text>
         ) : thread.branch || props.environmentLabel ? (
           /* "branch · machine" share one truncating line. The machine sits
@@ -1083,26 +1078,15 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </Text>
           </View>
         ) : null}
-        {providerInstance ? (
-          // Earlier owners peek out behind the current provider so a
-          // handed-off thread shows where it has been. The current owner
-          // keeps its account badge so same-driver instances stay distinct.
-          <View className="flex-row items-center">
-            {providerDrivers.slice(0, -1).map((driver, index) => (
-              <View key={`${driver}:${index}`} className="-mr-1 opacity-30">
-                <ProviderIcon provider={driver} size={12} />
-              </View>
-            ))}
-            <ProviderInstanceIcon
-              iconUrl={providerIconUrl}
-              provider={providerInstance.driverKind}
-              size={14}
-              displayName={providerInstance.displayName}
-              accentColor={providerInstance.accentColor}
-              showBadge={providerInstance.showBadge}
-              surfaceColor={rowAppearance.providerIconSurfaceColor}
-            />
-          </View>
+        {props.providerInstance ? (
+          <ProviderInstanceIcon
+            provider={props.providerInstance.driverKind}
+            size={14}
+            displayName={props.providerInstance.displayName}
+            accentColor={props.providerInstance.accentColor}
+            showBadge={props.providerInstance.showBadge}
+            surfaceColor={rowAppearance.providerIconSurfaceColor}
+          />
         ) : null}
       </View>
     </>
@@ -1220,8 +1204,56 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       </RowPressable>
     );
 
+  const organization = props.organization;
+  const groupDepth = organization?.groupDepth ?? 0;
+  const role = describeSessionRole(thread, { nested: groupDepth > 0 });
+  // The header above a depth-1 worker already names its master. The master of a
+  // worker of a worker, or one this client cannot load, is named on the row.
+  const ownerCaption = groupDepth === 1 ? null : (organization?.ownerText ?? null);
+  // A card draws its computer on its last line; a slim row has no such line.
+  const captionRest = [
+    variant === "slim" && thread.organization ? props.environmentLabel : null,
+    ownerCaption,
+  ]
+    .filter((part) => part !== null)
+    .join(" · ");
+
   return (
-    <View collapsable={false}>
+    <View collapsable={false} className={sessionNestingClassName(groupDepth, props.pane)}>
+      {organizationOpen && (
+        <SessionOrganizationSheet thread={thread} onClose={() => setOrganizationOpen(false)} />
+      )}
+      {(variant !== "slim" || snoozedRow) && (role !== null || captionRest.length > 0) ? (
+        <View className={cn("pt-1", sidebarPane ? "px-3" : "px-5")}>
+          <Text
+            numberOfLines={1}
+            accessibilityHint={
+              ownerCaption !== null ? (organization?.ownerDetail ?? undefined) : undefined
+            }
+            className={cn(
+              "text-xs",
+              sidebarPane ? "text-drawer-foreground-muted" : "text-foreground-secondary",
+            )}
+          >
+            {role !== null ? (
+              <Text
+                className={cn(
+                  "text-xs",
+                  role.master &&
+                    cn(
+                      "font-t3-semibold",
+                      sidebarPane ? "text-drawer-foreground" : "text-foreground",
+                    ),
+                )}
+              >
+                {role.text}
+              </Text>
+            ) : null}
+            {role !== null && captionRest.length > 0 ? " · " : null}
+            {captionRest}
+          </Text>
+        </View>
+      ) : null}
       {customSnoozeOpen && (
         <CustomSnoozeSheet onClose={() => setCustomSnoozeOpen(false)} onSnooze={handleSnooze} />
       )}
@@ -1275,6 +1307,31 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </ControlPillMenu>
         )}
       </ThreadSwipeable>
+      {organization?.workers ? (
+        <>
+          <SessionGroupHeader
+            pane={props.pane}
+            title={thread.title}
+            summary={organization.workers}
+            expanded={organization.expanded}
+            onToggle={() => toggleSessionGroup(sessionKey(thread))}
+          />
+          {organization.expanded && organization.finishedCount > 0 ? (
+            <SessionFinishedToggle
+              pane={props.pane}
+              count={organization.finishedCount}
+              expanded={organization.finishedExpanded}
+              onToggle={() => toggleSessionGroup(sessionKey(thread), true)}
+            />
+          ) : null}
+        </>
+      ) : null}
     </View>
   );
+});
+
+export const ThreadListV2BaseShelfHeader = memo(function ThreadListV2BaseShelfHeader(
+  props: ThreadListV2ShelfHeaderProps,
+) {
+  return <ThreadListV2ShelfHeader {...props} kind="base" />;
 });

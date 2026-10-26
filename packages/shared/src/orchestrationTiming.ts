@@ -1,36 +1,14 @@
-import { isOrchestrationV2WorkActive, type OrchestrationV2Subagent } from "@t3tools/contracts";
-
-/** Unknown settled timing must not turn a task's age into its work duration. */
-export function deriveSubagentElapsedMs(
-  agent: {
-    readonly status: OrchestrationV2Subagent["status"];
-    readonly startedAt: string | null;
-    readonly completedAt: string | null;
-  },
-  nowMs: number,
-): number | null {
-  if (agent.startedAt === null) return null;
-  const end = isOrchestrationV2WorkActive(agent.status)
-    ? nowMs
-    : agent.completedAt === null
-      ? null
-      : Date.parse(agent.completedAt);
-  if (end === null) return null;
-  const start = Date.parse(agent.startedAt);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-}
-
-type LatestRunTiming = {
-  readonly runId: string | null;
+type LatestTurnTiming = {
+  readonly turnId: string | null;
   /** Set when the turn is created; `startedAt` waits for the provider. */
   readonly requestedAt?: string | null;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
 };
 
-type RuntimeActivityState = {
+type SessionActivityState = {
   readonly orchestrationStatus: string;
-  readonly activeRunId?: string | null;
+  readonly activeTurnId?: string | null;
 };
 
 export function formatDuration(durationMs: number): string {
@@ -52,14 +30,14 @@ export function formatDuration(durationMs: number): string {
   return parts.join(" ");
 }
 
-function isLatestRunSettled(
-  latestRun: LatestRunTiming | null,
-  runtime: RuntimeActivityState | null,
+function isLatestTurnSettled(
+  latestTurn: LatestTurnTiming | null,
+  session: SessionActivityState | null,
 ): boolean {
-  if (!latestRun) return false;
-  if (!latestRun.completedAt) return false;
-  if (!runtime) return true;
-  if (runtime.orchestrationStatus === "running") return false;
+  if (!latestTurn) return false;
+  if (!latestTurn.completedAt) return false;
+  if (!session) return true;
+  if (session.orchestrationStatus === "running") return false;
   return true;
 }
 
@@ -74,15 +52,15 @@ function isLatestRunSettled(
  * this cannot leave the indicator counting after the work is done.
  */
 export function deriveActiveWorkStartedAt(
-  latestRun: LatestRunTiming | null,
-  runtime: RuntimeActivityState | null,
+  latestTurn: LatestTurnTiming | null,
+  session: SessionActivityState | null,
   sendStartedAt: string | null,
 ): string | null {
-  if (runtime?.activeRunId && runtime.activeRunId !== latestRun?.runId) {
+  if (session?.activeTurnId && session.activeTurnId !== latestTurn?.turnId) {
     return sendStartedAt;
   }
-  if (!isLatestRunSettled(latestRun, runtime)) {
-    return latestRun?.startedAt ?? latestRun?.requestedAt ?? sendStartedAt;
+  if (!isLatestTurnSettled(latestTurn, session)) {
+    return latestTurn?.startedAt ?? latestTurn?.requestedAt ?? sendStartedAt;
   }
   return sendStartedAt;
 }

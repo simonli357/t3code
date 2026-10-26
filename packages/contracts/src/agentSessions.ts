@@ -1,5 +1,11 @@
 import * as Schema from "effect/Schema";
-import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 /** Coding agent home directories the scanner knows how to read. */
@@ -19,6 +25,11 @@ export const AgentSessionImportSource = Schema.Struct({
   birthtimeMs: Schema.NullOr(Schema.Number),
 });
 export type AgentSessionImportSource = typeof AgentSessionImportSource.Type;
+
+/** Imported message ids retain their origin after event metadata is projected into SQLite. */
+export function isImportedAgentSessionMessageId(messageId: string): boolean {
+  return messageId.startsWith("import:");
+}
 
 /**
  * Empty for now. Kept as a struct so future scan options (source filters,
@@ -107,5 +118,33 @@ export class AgentSessionScanError extends Schema.TaggedError<AgentSessionScanEr
 ) {
   override get message(): string {
     return `Failed to scan agent sessions during ${this.operation}.`;
+  }
+}
+
+/** The client supplies a stable destination id so retries cannot create duplicates. */
+export const AgentSessionForkInput = Schema.Struct({
+  sourceThreadId: ThreadId,
+  threadId: ThreadId,
+});
+export type AgentSessionForkInput = typeof AgentSessionForkInput.Type;
+export const AgentSessionForkResult = Schema.Struct({ threadId: ThreadId });
+export class AgentSessionForkError extends Schema.TaggedError<AgentSessionForkError>()(
+  "AgentSessionForkError",
+  { message: Schema.String },
+) {}
+
+export const AgentTaskStopInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: TrimmedNonEmptyString,
+});
+export type AgentTaskStopInput = typeof AgentTaskStopInput.Type;
+export class AgentTaskStopError extends Schema.TaggedError<AgentTaskStopError>()(
+  "AgentTaskStopError",
+  {
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
   }
 }

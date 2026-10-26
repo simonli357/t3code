@@ -16,8 +16,7 @@ export {
 
 export interface EnvironmentOption {
   environmentId: EnvironmentId;
-  /** Null when the machine's "No project" folder is not created yet. */
-  projectId: ProjectId | null;
+  projectId: ProjectId;
   label: string;
   isPrimary: boolean;
   machine: EnvironmentMachineKind;
@@ -65,8 +64,6 @@ export function shouldShowEnvironmentIndicator(input: {
 }
 
 export function shouldShowComposerContextStrip(input: {
-  isDraftHeroState: boolean;
-  persistInActiveThreads: boolean;
   hasActiveProject: boolean;
   isGitRepo: boolean;
   showEnvironmentIndicator: boolean;
@@ -75,7 +72,6 @@ export function shouldShowComposerContextStrip(input: {
 }): boolean {
   return (
     input.hasActiveProject &&
-    (input.isDraftHeroState || input.persistInActiveThreads) &&
     (input.isGitRepo || input.showEnvironmentIndicator || input.hostsRestingComposerControls)
   );
 }
@@ -116,13 +112,6 @@ export function resolveLockedWorkspaceLabel(
 ): string {
   if (activeWorktreePath) return "Worktree";
   return effectiveEnvMode === "worktree" ? resolveEnvModeLabel("worktree") : "Local checkout";
-}
-
-export function resolveWorkspaceDisplayName(path: string | null): string | null {
-  if (!path) return null;
-  const normalizedPath = path.replace(/[\\/]+$/, "");
-  if (normalizedPath.length === 0) return path;
-  return normalizedPath.split(/[\\/]/).at(-1) ?? normalizedPath;
 }
 
 export interface PreviousWorktreeSeed {

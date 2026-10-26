@@ -1,79 +1,235 @@
-import { useFocusEffect } from "@react-navigation/native";
-import { useCallback, useEffect, useRef } from "react";
 import {
-  voiceInputBlocksSubmission,
-  type VoiceInputState,
-} from "@t3tools/client-runtime/voice-input";
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  setIsAudioActiveAsync,
+  useAudioRecorder,
+  type RecordingStatus,
+} from "expo-audio";
+import { File } from "expo-file-system";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { useFocusEffect } from "@react-navigation/native";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { AppState } from "react-native";
+import { useSharedValue } from "react-native-reanimated";
 
 import type { ComposerEditorSelection } from "../../components/ComposerEditor";
-import { useGlobalVoiceInput } from "./VoiceInputProvider";
-import { createVoiceInputTarget } from "./voiceInputSession";
+import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
+import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
+import {
+  VoiceInputController,
+  VOICE_RECORDING_LIMIT_SECONDS,
+  voiceInputBlocksSubmission,
+  voiceInputFreezesEditor,
+  type VoiceDraftSnapshot,
+  type VoiceInputState,
+} from "@t3tools/client-runtime/voice-input";
+import { normalizeVoiceInputDecibels, VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 
-const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
+const INITIAL_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
+const VOICE_METERING_INTERVAL_MS = 80;
+const VOICE_RECORDING_OPTIONS = {
+  ...RecordingPresets.HIGH_QUALITY,
+  isMeteringEnabled: true,
+};
+
+async function releaseVoiceRecordingAudio(): Promise<void> {
+  try {
+    await setAudioModeAsync({ allowsRecording: false });
+  } finally {
+    // Expo does not deactivate AVAudioSession when recording stops or its
+    // category changes. Explicit deactivation resumes interrupted app audio.
+    await setIsAudioActiveAsync(false);
+  }
+}
+
+async function configureVoiceRecordingAudio(): Promise<void> {
+  try {
+    await setAudioModeAsync({
+      allowsRecording: true,
+      interruptionMode: "doNotMix",
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+    });
+    await setIsAudioActiveAsync(true);
+  } catch (error) {
+    try {
+      await releaseVoiceRecordingAudio();
+    } catch {
+      // Keep the setup error. The controller has not started a recorder yet.
+    }
+    throw error;
+  }
+}
 
 export function useVoiceInputController(input: {
   readonly ownerKey: string | null;
-  /** Shown by the global dictation pill when this composer is off screen. */
-  readonly label: string;
-  readonly readDraftMessage: () => string | null;
-  readonly subscribeToDraftChanges: (onChange: () => void) => () => void;
+  readonly draftMessage: string;
   readonly selection: ComposerEditorSelection;
   readonly disabled?: boolean;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onChangeSelection: (selection: ComposerEditorSelection) => void;
 }) {
-  const global = useGlobalVoiceInput();
-  const { setOwnerFocused, session } = global;
-  const latestInput = useRef(input);
-  latestInput.current = input;
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
+  const [state, setState] = useState<VoiceInputState>(INITIAL_STATE);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const keepAwakeId = useId();
+  const keepAwakeSessionRef = useRef(0);
+  const elapsedSecondsRef = useRef(0);
+  const audioLevelsRef = useRef(Array<number>(VOICE_WAVEFORM_SAMPLE_COUNT).fill(0));
+  const audioLevels = useSharedValue(audioLevelsRef.current);
+  const controllerRef = useRef<VoiceInputController | null>(null);
+  const previousDraftRef = useRef({ ownerKey: input.ownerKey, text: input.draftMessage });
+  const revisionRef = useRef(0);
+  if (
+    previousDraftRef.current.ownerKey !== input.ownerKey ||
+    previousDraftRef.current.text !== input.draftMessage
+  ) {
+    previousDraftRef.current = { ownerKey: input.ownerKey, text: input.draftMessage };
+    revisionRef.current += 1;
+  }
+  const latestInputRef = useRef(input);
+  latestInputRef.current = input;
+
+  const handleRecorderStatus = useCallback((status: RecordingStatus) => {
+    controllerRef.current?.handleRecorderStatus({
+      isFinished: status.isFinished,
+      hasError: status.hasError || status.mediaServicesDidReset === true,
+      error: status.error,
+      url: status.url,
+    });
   }, []);
+  const recorder = useAudioRecorder(VOICE_RECORDING_OPTIONS, handleRecorderStatus);
+
+  if (!controllerRef.current) {
+    controllerRef.current = new VoiceInputController({
+      recorder,
+      getTranscriber: getLocalVoiceTranscriber,
+      requestPermission: async () => {
+        const permission = await requestRecordingPermissionsAsync();
+        return { granted: permission.granted, canAskAgain: permission.canAskAgain };
+      },
+      configureRecording: configureVoiceRecordingAudio,
+      releaseRecording: releaseVoiceRecordingAudio,
+      deleteRecording: (uri) => new File(uri).delete(),
+      readDraft: (): VoiceDraftSnapshot | null => {
+        const current = latestInputRef.current;
+        if (!current.ownerKey) return null;
+        return {
+          ownerKey: current.ownerKey,
+          text: current.draftMessage,
+          selection: current.selection,
+          revision: revisionRef.current,
+        };
+      },
+      commitDraft: (text, selection) => {
+        const current = latestInputRef.current;
+        current.onChangeSelection(selection);
+        current.onChangeDraftMessage(text);
+      },
+      onStateChange: setState,
+    });
+  }
+
+  const controller = controllerRef.current;
+  const previousOwnerRef = useRef(input.ownerKey);
+  useEffect(() => {
+    if (previousOwnerRef.current === input.ownerKey) return;
+    previousOwnerRef.current = input.ownerKey;
+    controller.ownerChanged();
+  }, [controller, input.ownerKey]);
 
   useFocusEffect(
-    useCallback(() => {
-      const ownerKey = input.ownerKey;
-      if (!ownerKey) return;
-      setOwnerFocused(ownerKey, true);
-      return () => setOwnerFocused(ownerKey, false);
-    }, [input.ownerKey, setOwnerFocused]),
+    useCallback(
+      () => () => {
+        controller.dispose();
+      },
+      [controller],
+    ),
   );
 
-  const start = useCallback(() => {
-    const captured = latestInput.current;
-    if (!captured.ownerKey || captured.disabled) return;
-    void session.start({
-      ...createVoiceInputTarget(
-        captured.ownerKey,
-        captured.readDraftMessage,
-        (text, selection) => {
-          captured.onChangeDraftMessage(text);
-          if (mounted.current && latestInput.current.ownerKey === captured.ownerKey) {
-            latestInput.current.onChangeSelection(selection);
-          }
-        },
-        captured.selection,
-        captured.subscribeToDraftChanges,
-      ),
-      label: captured.label,
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      // iOS reports `inactive` while its permission dialog is open. Only the
+      // real background state cancels preparation; recorder status handles
+      // calls and route interruptions during capture.
+      if (nextState === "background") controller.appMovedToBackground();
     });
-  }, [session]);
-  const state = global.ownerKey === input.ownerKey ? global.state : IDLE_STATE;
-  const isBusy = voiceInputBlocksSubmission(state);
+    return () => subscription.remove();
+  }, [controller]);
+
+  useEffect(() => () => controller.dispose(), [controller]);
+
+  useEffect(() => {
+    if (state.phase !== "recording") return;
+
+    const tag = `voice-input:${keepAwakeId}:${++keepAwakeSessionRef.current}`;
+    const activation = activateKeepAwakeAsync(tag);
+    void activation.catch(() => {});
+    return () => {
+      // Release after activation settles, even if the recording ends immediately.
+      void activation.then(() => deactivateKeepAwake(tag)).catch(() => {});
+    };
+  }, [keepAwakeId, state.phase]);
+
+  useEffect(() => {
+    if (state.phase !== "preparing" && state.phase !== "recording") return;
+
+    if (audioLevelsRef.current.some((level) => level !== 0)) {
+      audioLevelsRef.current = Array<number>(VOICE_WAVEFORM_SAMPLE_COUNT).fill(0);
+      audioLevels.value = audioLevelsRef.current;
+    }
+    if (elapsedSecondsRef.current !== 0) {
+      elapsedSecondsRef.current = 0;
+      setElapsedSeconds(0);
+    }
+    if (state.phase !== "recording") return;
+
+    const sampleRecording = () => {
+      if (controller.currentState.phase !== "recording") return;
+      const status = recorder.getStatus();
+      if (!status.isRecording) return;
+
+      const level = normalizeVoiceInputDecibels(status.metering);
+      const history = audioLevelsRef.current;
+      if (level !== 0 || history.some((sample) => sample !== 0)) {
+        const nextLevels = [...history.slice(1), level];
+        audioLevelsRef.current = nextLevels;
+        audioLevels.value = nextLevels;
+      }
+
+      const nextElapsedSeconds = Math.min(
+        VOICE_RECORDING_LIMIT_SECONDS,
+        Math.max(0, Math.floor(status.durationMillis / 1_000)),
+      );
+      if (nextElapsedSeconds !== elapsedSecondsRef.current) {
+        elapsedSecondsRef.current = nextElapsedSeconds;
+        setElapsedSeconds(nextElapsedSeconds);
+      }
+    };
+
+    sampleRecording();
+    const intervalId = setInterval(sampleRecording, VOICE_METERING_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [audioLevels, controller, recorder, state.phase]);
+
+  const start = useCallback(() => {
+    if (!latestInputRef.current.disabled) void controller.start();
+  }, [controller]);
+  const stop = useCallback(() => controller.stop(), [controller]);
+  const cancel = useCallback(() => controller.cancel(), [controller]);
+
   return {
-    isAvailable: global.isAvailable && (!global.isBusy || global.ownerKey === input.ownerKey),
+    // Store screenshots show the dictation button even on simulators, whose
+    // on-device transcription is unavailable.
+    isAvailable: getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null,
     state,
-    audioLevels: global.audioLevels,
-    elapsedSeconds: global.elapsedSeconds,
-    isBusy,
-    freezesEditor: isBusy,
-    blocksSubmission: isBusy,
+    audioLevels,
+    elapsedSeconds,
+    isBusy: voiceInputBlocksSubmission(state),
+    freezesEditor: voiceInputFreezesEditor(state),
+    blocksSubmission: voiceInputBlocksSubmission(state),
     start,
-    stop: global.stop,
-    cancel: global.cancel,
+    stop,
+    cancel,
   };
 }

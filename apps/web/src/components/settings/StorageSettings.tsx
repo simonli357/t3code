@@ -15,6 +15,7 @@ import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsL
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import type { ScopedSettingsTarget } from "./scopedSettings";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { SessionWorkspaceSettings } from "./SessionWorkspaceSettings";
 import {
   useClearScopedSettings,
   useScopedSettings,
@@ -151,6 +152,7 @@ export function StorageSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SessionWorkspaceSettings />
       <SettingsSection id="storage-worktrees" title="Worktrees">
         {isProjectScope && (
           <SettingsRow

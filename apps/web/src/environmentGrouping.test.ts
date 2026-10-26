@@ -52,6 +52,34 @@ function makeProject(overrides: Partial<Project> = {}): Project {
 }
 
 describe("environment grouping", () => {
+  it("groups explicitly identified folders across all computers without merging matching titles", () => {
+    const projects = ["linux-a", "windows", "linux-b"].map((host, index) =>
+      makeProject({
+        id: ProjectId.make(`survey-${host}`),
+        environmentId: EnvironmentId.make(host),
+        title: "SurveyForge",
+        workspaceRoot: index === 1 ? "D:\\Projects\\surveyforge" : `/home/${host}/surveyforge`,
+        repositoryIdentity: {
+          canonicalKey: "project:simon/surveyforge",
+          locator: { source: "project-config", projectKey: "simon/surveyforge" },
+        },
+      }),
+    );
+    const unrelated = makeProject({ title: "SurveyForge", workspaceRoot: "/other/surveyforge" });
+    const groups = buildSidebarProjectSnapshots({
+      projects: [...projects, unrelated],
+      settings: defaultGroupingSettings,
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: () => null,
+    });
+    expect(groups).toHaveLength(2);
+    expect(new Set(projects.map((project) => deriveLogicalProjectKey(project)))).toEqual(
+      new Set(["project:simon/surveyforge"]),
+    );
+    expect(deriveLogicalProjectKey(unrelated)).not.toBe("project:simon/surveyforge");
+    expect(projectGroupsSpanEnvironments(groups)).toBe(true);
+  });
+
   it("groups matching repository identities across environments", () => {
     const primary = makeProject({ repositoryIdentity });
     const remote = makeProject({

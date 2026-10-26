@@ -7,15 +7,12 @@ import {
   ComposerContextRecord,
   OrchestrationMessageContext,
 } from "./composerContext.ts";
-import {
-  OrchestrationV2Command,
-  OrchestrationV2ConversationMessageJson,
-} from "./orchestrationV2.ts";
+import { OrchestrationMessage, ThreadTurnStartCommand } from "./orchestration.ts";
 
 const decodeRecord = Schema.decodeUnknownOption(ComposerContextRecord);
 const decodeContext = Schema.decodeUnknownSync(OrchestrationMessageContext);
-const decodeMessage = Schema.decodeUnknownSync(OrchestrationV2ConversationMessageJson);
-const decodeCommand = Schema.decodeUnknownSync(OrchestrationV2Command);
+const decodeMessage = Schema.decodeUnknownSync(OrchestrationMessage);
+const decodeTurnStart = Schema.decodeUnknownSync(ThreadTurnStartCommand);
 
 const base = { version: 1, contextId: "ctx_1" } as const;
 
@@ -110,14 +107,6 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
   },
   mention: { ...base, kind: "mention", label: "@src/index.ts", path: "src/index.ts" },
   skill: { ...base, kind: "skill", label: "$pinchtab", name: "pinchtab" },
-  thread: {
-    ...base,
-    kind: "thread",
-    label: "Fix login flow",
-    environmentId: "environment-1",
-    threadId: "thread-1",
-    title: "Fix login flow",
-  },
 };
 
 describe("ComposerContextRecord", () => {
@@ -232,17 +221,12 @@ describe("OrchestrationMessageContext", () => {
     ).toThrow();
   });
 
-  it("is optional on messages and message dispatch commands", () => {
+  it("is optional on messages and turn-start commands", () => {
     const message = {
-      createdBy: "user",
-      creationSource: "web",
       id: "m1",
-      threadId: "t1",
-      runId: null,
-      nodeId: null,
       role: "user",
       text: "hi",
-      attachments: [],
+      turnId: null,
       streaming: false,
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -254,18 +238,19 @@ describe("OrchestrationMessageContext", () => {
     });
     expect(withContext.context?.records).toHaveLength(1);
 
-    const command = decodeCommand({
-      type: "message.dispatch",
-      createdBy: "user",
-      creationSource: "web",
+    const command = decodeTurnStart({
+      type: "thread.turn.start",
       commandId: "c1",
       threadId: "t1",
-      messageId: "m1",
-      text: "hi",
-      attachments: [],
-      context: { version: 1, records: [knownRecords.image] },
-      dispatchMode: { type: "start_immediately" },
+      message: {
+        messageId: "m1",
+        role: "user",
+        text: "hi",
+        attachments: [],
+        context: { version: 1, records: [knownRecords.image] },
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
     });
-    expect(command.type === "message.dispatch" && command.context?.records[0]?.kind).toBe("image");
+    expect(command.message.context?.records[0]?.kind).toBe("image");
   });
 });

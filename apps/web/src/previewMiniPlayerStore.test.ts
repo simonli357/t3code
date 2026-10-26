@@ -50,7 +50,6 @@ describe("previewMiniPlayerStore", () => {
       source: tabB,
       position: { x: 24, y: 48 },
       width: null,
-      lastInteraction: "drag",
     });
   });
 
@@ -65,7 +64,6 @@ describe("previewMiniPlayerStore", () => {
       source: tabB,
       position: null,
       width: null,
-      lastInteraction: "drag",
     });
   });
 
@@ -77,19 +75,6 @@ describe("previewMiniPlayerStore", () => {
     expect(
       selectThreadPreviewMiniPlayer(usePreviewMiniPlayerStore.getState().byThreadKey, refA),
     ).toMatchObject({ source: tabB, width: 480 });
-  });
-
-  it("keeps a resize placement after release and clears it when dragging", () => {
-    const store = usePreviewMiniPlayerStore.getState();
-    store.open(refA, tabA);
-    store.resize(refA, "browser:tab-a", 460, { x: 1112, y: 275 });
-    expect(
-      selectThreadPreviewMiniPlayer(usePreviewMiniPlayerStore.getState().byThreadKey, refA),
-    ).toMatchObject({ width: 460, position: { x: 1112, y: 275 }, lastInteraction: "resize" });
-    store.move(refA, "browser:tab-a", { x: 1112, y: 275 });
-    expect(
-      selectThreadPreviewMiniPlayer(usePreviewMiniPlayerStore.getState().byThreadKey, refA),
-    ).toMatchObject({ width: 460, position: { x: 1112, y: 275 }, lastInteraction: "drag" });
   });
 
   it("floats one source per thread, so a device replaces the browser tab", () => {

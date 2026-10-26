@@ -39,12 +39,9 @@ import {
   CodexSettings,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
-import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { mergePathEntries } from "@t3tools/shared/shell";
-
-import { acpRegistryManagedBinaryDirectories } from "../provider/acp/AcpRegistrySupport.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
@@ -59,6 +56,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
@@ -66,6 +64,7 @@ import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEn
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   increment,
@@ -1107,6 +1106,10 @@ function findEscapeSequenceEndIndex(input: string, start: number): number | null
   return isEscapeFinalByte(input.charCodeAt(cursor)) ? cursor + 1 : start + 1;
 }
 
+// eslint-disable-next-line no-control-regex -- Terminal sequence introducers must reach the parser.
+const HISTORY_SEQUENCE_START = /[\u001b\u0090\u009b\u009d\u009e\u009f]/;
+const NEXT_HISTORY_SEQUENCE_START = new RegExp(HISTORY_SEQUENCE_START.source, "g");
+
 function sanitizeTerminalHistoryChunk(
   pendingControlSequence: string,
   data: string,
@@ -1216,8 +1219,11 @@ function sanitizeTerminalHistoryChunk(
       continue;
     }
 
-    append(input[index] ?? "");
-    index += 1;
+    // One slice per printable run: every chunk of coloured output reaches this loop.
+    NEXT_HISTORY_SEQUENCE_START.lastIndex = index + 1;
+    const nextSequenceStart = NEXT_HISTORY_SEQUENCE_START.exec(input)?.index ?? input.length;
+    append(input.slice(index, nextSequenceStart));
+    index = nextSequenceStart;
   }
 
   return { visibleText, pendingControlSequence: "" };
@@ -1308,8 +1314,7 @@ function stripAppImageRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function createTerminalSpawnEnv(
   baseEnv: NodeJS.ProcessEnv,
-  runtimeEnv: Record<string, string> | null | undefined,
-  platform: NodeJS.Platform,
+  runtimeEnv?: Record<string, string> | null,
 ): NodeJS.ProcessEnv {
   const spawnEnv: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(baseEnv)) {
@@ -1319,17 +1324,12 @@ function createTerminalSpawnEnv(
   }
   if (runtimeEnv) {
     for (const [key, value] of Object.entries(runtimeEnv)) {
-      const existingKey =
-        platform === "win32"
-          ? Object.keys(spawnEnv).find((candidate) => candidate.toLowerCase() === key.toLowerCase())
-          : undefined;
-      spawnEnv[existingKey ?? key] =
+      spawnEnv[key] =
         key === "CODEX_HOME" || key === "CLAUDE_CONFIG_DIR" ? expandHomePath(value) : value;
     }
   }
-  // An explicit empty override opts out for terminals started without a client.
-  // Otherwise both PTY backends feed truecolor-capable terminal clients.
-  if (!spawnEnv.COLORTERM && runtimeEnv?.COLORTERM === undefined) {
+  // Both PTY backends feed truecolor-capable terminal clients.
+  if (spawnEnv.COLORTERM === undefined || spawnEnv.COLORTERM === "") {
     spawnEnv.COLORTERM = "truecolor";
   }
   return stripAppImageRuntimeEnv(spawnEnv);
@@ -1351,13 +1351,6 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapter.PtyAdapter["Service"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
-  /**
-   * Catalog cache and tool directories for managed ACP Registry installs. Their
-   * install directories are appended to the terminal PATH so users can run
-   * managed agents by name (e.g. `kimi login`).
-   */
-  managedBinaryCacheDir?: string;
-  managedBinaryToolsDir?: string;
   subprocessInspector?: TerminalSubprocessInspector;
   processTable?: Effect.Effect<
     ReadonlyArray<ResourceMonitorProcessTableEntry>,
@@ -1427,7 +1420,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("TerminalManager.make")(function* () {
-  const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
@@ -1451,8 +1444,6 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
         (cause) => new TerminalSubprocessCheckError({ cause, command: "resource-monitor" }),
       ),
     ),
-    managedBinaryCacheDir: providerStatusCacheDir,
-    managedBinaryToolsDir: path.join(baseDir, "tools"),
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
@@ -1471,7 +1462,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
   const historyByteLimit = options.historyByteLimit ?? DEFAULT_HISTORY_BYTE_LIMIT;
   const platform = yield* HostProcessPlatform;
-  const architecture = yield* HostProcessArchitecture;
+  const agentScope = yield* AgentScope;
   // Terminals must inherit the user's full environment (minus the blocklist
   // applied in createTerminalSpawnEnv) — an allowlist here silently strips
   // things like PSModulePath, DISPLAY, proxies, and toolchain variables.
@@ -1479,6 +1470,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
   const resolveLaunchInputEnvironment = Effect.fn("terminal.resolveLaunchInputEnvironment")(
     function* <Input extends TerminalOpenInput | TerminalAttachInput | TerminalRestartInput>(
       input: Input,
@@ -1486,6 +1478,33 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Input,
       TerminalProviderInstanceNotFoundError | TerminalProviderEnvironmentError
     > {
+      let workspaceIdentity: Record<string, string> = {};
+      if (Option.isSome(workspaces)) {
+        const job = yield* workspaces.value.verify(input.threadId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TerminalProviderEnvironmentError({
+                providerInstanceId: ProviderInstanceId.make(
+                  input.providerInstanceId ?? "workspace",
+                ),
+                cause,
+              }),
+          ),
+        );
+        if (job) {
+          workspaceIdentity = { T3_WORKSPACE_JOB_ID: job.jobId, T3_WORKSPACE_JOB_ROOT: job.root };
+          input = {
+            ...input,
+            cwd: input.cwd === job.sourceDirectory ? job.workspaceDirectory : input.cwd,
+            env: {
+              ...SessionWorkspaces.workspaceEnvironment(job),
+              ...input.env,
+              T3_WORKSPACE_JOB_ID: job.jobId,
+              T3_WORKSPACE_JOB_ROOT: job.root,
+            },
+          };
+        }
+      }
       if (input.providerInstanceId === undefined) return input;
       const resolver = options.resolveProviderInstanceEnvironment;
       if (resolver === undefined) {
@@ -1494,7 +1513,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         });
       }
       const env = yield* resolver(input.providerInstanceId, input.env);
-      return { ...input, env };
+      return { ...input, env: { ...env, ...workspaceIdentity } };
     },
   );
   // One process-table snapshot per poll tick, shared across every terminal.
@@ -1569,7 +1588,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     sessions: new Map(),
     killFibers: new Map(),
   });
-  const threadLocks = yield* KeyedLock.make<string>();
+  const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
   const terminalEventListeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const workerScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(workerScope, Exit.void));
@@ -1598,10 +1617,29 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     f: (state: TerminalManagerState) => readonly [A, TerminalManagerState],
   ) => SynchronizedRef.modify(managerStateRef, f);
 
+  const getThreadSemaphore = (threadId: string) =>
+    SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
+      const existing: Option.Option<Semaphore.Semaphore> = Option.fromNullishOr(
+        current.get(threadId),
+      );
+      return Option.match(existing, {
+        onNone: () =>
+          Semaphore.make(1).pipe(
+            Effect.map((semaphore) => {
+              const next = new Map(current);
+              next.set(threadId, semaphore);
+              return [semaphore, next] as const;
+            }),
+          ),
+        onSome: (semaphore) => Effect.succeed([semaphore, current] as const),
+      });
+    });
+
   const withThreadLock = <A, E, R>(
     threadId: string,
     effect: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, R> => threadLocks.withLock(threadId, effect);
+  ): Effect.Effect<A, E, R> =>
+    Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
 
   const clearKillFiber = Effect.fn("terminal.clearKillFiber")(function* (
     process: PtyAdapter.PtyProcess | null,
@@ -2172,10 +2210,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
     }
 
+    const launch = yield* agentScope.wrap({
+      command: candidate.shell,
+      args: candidate.args ?? [],
+      name: "terminal",
+      env: spawnEnv,
+    });
     const attempt = yield* Effect.result(
       options.ptyAdapter.spawn({
-        shell: candidate.shell,
-        ...(candidate.args ? { args: candidate.args } : {}),
+        shell: launch.command,
+        ...(launch.args.length > 0 ? { args: [...launch.args] } : {}),
         cwd: session.cwd,
         cols: session.cols,
         rows: session.rows,
@@ -2237,40 +2281,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.andThen(
           Effect.gen(function* () {
             const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, platform);
-            // Append (never prepend) managed ACP agent install directories so
-            // `kimi login` and friends resolve by name without shadowing any
-            // system or user tool of the same name.
-            if (
-              options.managedBinaryCacheDir !== undefined &&
-              options.managedBinaryToolsDir !== undefined
-            ) {
-              const managedDirectories = yield* acpRegistryManagedBinaryDirectories({
-                fileSystem,
-                path,
-                cacheDir: options.managedBinaryCacheDir,
-                toolsDir: options.managedBinaryToolsDir,
-                platform,
-                architecture,
-              });
-              if (managedDirectories.length > 0) {
-                const delimiter = platform === "win32" ? ";" : ":";
-                const pathKey =
-                  platform === "win32"
-                    ? (Object.keys(terminalEnv).find(
-                        (candidate) => candidate.toLowerCase() === "path",
-                      ) ?? "PATH")
-                    : "PATH";
-                const merged = mergePathEntries(
-                  terminalEnv[pathKey],
-                  managedDirectories.join(delimiter),
-                  platform,
-                );
-                if (merged !== undefined) {
-                  terminalEnv[pathKey] = merged;
-                }
-              }
-            }
+            const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
             const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;

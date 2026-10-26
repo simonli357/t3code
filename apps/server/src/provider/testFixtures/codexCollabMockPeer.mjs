@@ -1,6 +1,6 @@
-// Minimal codex app-server stand-in, spawned as the Codex binary by the
-// provider readiness probe tests. Answers the handshake and, for session
-// requests, returns REAL captured responses (codexMultiAgentWire.json), then
+// Minimal codex app-server stand-in for runtime-level collab tests.
+// Speaks just enough of the protocol for CodexSessionRuntime to start a
+// session, using REAL captured responses (codexMultiAgentWire.json), then
 // replays a scripted multi-agent notification sequence read from the
 // T3_CODEX_COLLAB_SCRIPT env var (a JSON file path) when the first turn
 // starts. Runs as a plain Node process — stdlib only.
@@ -14,6 +14,17 @@ const fixture = JSON.parse(
   NodeFS.readFileSync(NodePath.join(here, "codexMultiAgentWire.json"), "utf8"),
 );
 const script = JSON.parse(NodeFS.readFileSync(process.env.T3_CODEX_COLLAB_SCRIPT, "utf8"));
+if (script.recordLaunch) {
+  NodeFS.appendFileSync(
+    `${process.env.T3_CODEX_COLLAB_SCRIPT}.launches`,
+    `${JSON.stringify({
+      cwd: process.cwd(),
+      tmp: process.env.TMP,
+      job: process.env.T3_WORKSPACE_JOB_ID,
+      authHome: process.env.CODEX_HOME,
+    })}\n`,
+  );
+}
 
 const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 let turnStartCount = 0;
@@ -100,6 +111,14 @@ rl.on("line", (line) => {
   }
   if (method === "skills/list" || method === "model/list") {
     write({ id, result: { data: [] } });
+    return;
+  }
+  if (method === "thread/fork") {
+    NodeFS.appendFileSync(
+      `${process.env.T3_CODEX_COLLAB_SCRIPT}.requests`,
+      `${JSON.stringify({ method, params: message.params })}\n`,
+    );
+    write({ id, result: { thread: { id: `fork-${process.pid}`, turns: [] } } });
     return;
   }
   if (method === "thread/start") {

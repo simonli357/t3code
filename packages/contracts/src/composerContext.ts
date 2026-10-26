@@ -1,11 +1,9 @@
 import * as Schema from "effect/Schema";
 
 import {
-  EnvironmentId,
   ForwardCompatibleArray,
   NonNegativeInt,
   PositiveInt,
-  ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
@@ -27,7 +25,6 @@ export const COMPOSER_CONTEXT_KINDS = [
   "review-comment",
   "mention",
   "skill",
-  "thread",
 ] as const;
 export type KnownComposerContextKind = (typeof COMPOSER_CONTEXT_KINDS)[number];
 
@@ -219,19 +216,6 @@ export const SkillContextRecord = Schema.Struct({
 export type SkillContextRecord = typeof SkillContextRecord.Type;
 
 /**
- * Another thread on the same server, attached so the agent can read its history through
- * `t3_thread_read`. Only identity travels; the title is a display snapshot.
- */
-export const ThreadContextRecord = Schema.Struct({
-  ...recordBase,
-  kind: Schema.Literal("thread"),
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-  title: ContextLabel,
-});
-export type ThreadContextRecord = typeof ThreadContextRecord.Type;
-
-/**
  * Catch-all for kinds this build does not know. Known discriminators are excluded so a
  * malformed known record fails its own schema instead of sliding through unchecked.
  * Mirrors `ChatUnknownAttachment`.
@@ -261,7 +245,6 @@ export const KnownComposerContextRecord = Schema.Union([
   ReviewCommentContextRecord,
   MentionContextRecord,
   SkillContextRecord,
-  ThreadContextRecord,
 ]);
 export type KnownComposerContextRecord = typeof KnownComposerContextRecord.Type;
 

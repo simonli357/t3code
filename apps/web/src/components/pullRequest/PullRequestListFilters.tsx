@@ -3,6 +3,7 @@ import type {
   EnvironmentId,
   ProjectId,
   PullRequestInvolvement,
+  ProjectIconOverride,
   PullRequestListFilters,
   PullRequestListState,
   SourceControlProviderKind,

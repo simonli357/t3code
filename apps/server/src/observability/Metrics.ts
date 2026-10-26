@@ -19,38 +19,42 @@ export const rpcRequestDuration = Metric.timer("t3_rpc_request_duration", {
   description: "RPC request handling duration.",
 });
 
-const orchestrationEventsProcessedTotal = Metric.counter(
+export const orchestrationCommandsTotal = Metric.counter("t3_orchestration_commands_total", {
+  description: "Total orchestration commands dispatched.",
+});
+
+export const orchestrationCommandDuration = Metric.timer("t3_orchestration_command_duration", {
+  description: "Orchestration command dispatch duration.",
+});
+
+export const orchestrationCommandAckDuration = Metric.timer(
+  "t3_orchestration_command_ack_duration",
+  {
+    description:
+      "Time from orchestration command dispatch to the first committed domain event emitted for that command.",
+  },
+);
+
+export const orchestrationEventsProcessedTotal = Metric.counter(
   "t3_orchestration_events_processed_total",
   {
     description: "Total orchestration intent events processed by runtime reactors.",
   },
 );
 
-export const orchestrationEffectClaimsTotal = Metric.counter(
-  "t3_orchestration_effect_claims_total",
-  {
-    description: "Total completed orchestration effect outbox claim attempts by result.",
-  },
-);
-
-export const orchestrationEffectQueueWait = Metric.timer("t3_orchestration_effect_queue_wait", {
-  description:
-    "Time from an orchestration effect's temporal availability until claim, including same-thread blocking.",
-});
-
-const providerSessionsTotal = Metric.counter("t3_provider_sessions_total", {
+export const providerSessionsTotal = Metric.counter("t3_provider_sessions_total", {
   description: "Total provider session lifecycle operations.",
 });
 
-const providerTurnsTotal = Metric.counter("t3_provider_turns_total", {
+export const providerTurnsTotal = Metric.counter("t3_provider_turns_total", {
   description: "Total provider turn lifecycle operations.",
 });
 
-const providerTurnDuration = Metric.timer("t3_provider_turn_duration", {
+export const providerTurnDuration = Metric.timer("t3_provider_turn_duration", {
   description: "Provider turn request duration.",
 });
 
-const providerRuntimeEventsTotal = Metric.counter("t3_provider_runtime_events_total", {
+export const providerRuntimeEventsTotal = Metric.counter("t3_provider_runtime_events_total", {
   description: "Total canonical provider runtime events processed.",
 });
 
@@ -139,13 +143,16 @@ export const withMetrics: {
   <A, E, R>(effect: Effect.Effect<A, E, R>, options: WithMetricsOptions): Effect.Effect<A, E, R>;
 } = dual(2, withMetricsImpl);
 
-const providerMetricAttributes = (provider: string, extra?: Readonly<Record<string, unknown>>) =>
+export const providerMetricAttributes = (
+  provider: string,
+  extra?: Readonly<Record<string, unknown>>,
+) =>
   compactMetricAttributes({
     provider,
     ...extra,
   });
 
-const providerTurnMetricAttributes = (input: {
+export const providerTurnMetricAttributes = (input: {
   readonly provider: string;
   readonly model: string | null | undefined;
   readonly extra?: Readonly<Record<string, unknown>>;

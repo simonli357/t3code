@@ -14,11 +14,11 @@ import * as TestClock from "effect/testing/TestClock";
 import { subscribeChatGptHandoff } from "./CodexChatGptHandoff.ts";
 import { FetchHttpClient } from "effect/unstable/http";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
-import * as ServerSettings from "../serverSettings.ts";
-import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import { layerTest as settingsLayerTest } from "../serverSettings.ts";
+import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
 import { makeCodexChatGptAuth } from "./CodexChatGptAuth.ts";
 
 const assertSameCallback = (actual: string | null, expected: string | null) => {
@@ -37,13 +37,13 @@ const makeHarnessFor = Effect.fnUntraced(function* (
 ) {
   const environmentId = environmentIds.get(bytes) ?? EnvironmentId.make(NodeCrypto.randomUUID());
   environmentIds.set(bytes, environmentId);
-  const environment = ServerEnvironment.ServerEnvironmentIdentity.of({
+  const environment = ServerEnvironmentIdentity.of({
     getEnvironmentId: Effect.succeed(environmentId),
   });
   const keys = yield* Effect.promise(() => generateKeyPair("RS256"));
   const jwk = yield* Effect.promise(() => exportJWK(keys.publicKey));
   const untrustedKeys = yield* Effect.promise(() => generateKeyPair("RS256"));
-  const secrets = ServerSecretStore.ServerSecretStore.of({
+  const secrets = ServerSecretStore.of({
     get: (name) => Effect.sync(() => Option.fromUndefinedOr(bytes.get(name))),
     set: (name, value) =>
       Effect.sync(() => {
@@ -212,7 +212,7 @@ const makeHarnessFor = Effect.fnUntraced(function* (
     event: string;
     properties: Readonly<Record<string, unknown>> | undefined;
   }[] = [];
-  const analytics = AnalyticsService.AnalyticsService.of({
+  const analytics = AnalyticsService.of({
     record: (event, properties) =>
       failAnalytics
         ? Effect.die("analytics unavailable")
@@ -226,9 +226,9 @@ const makeHarnessFor = Effect.fnUntraced(function* (
     discoveryUrl: `${origin}/discovery`,
     resource: `${origin}/v1`,
   }).pipe(
-    Effect.provideService(AnalyticsService.AnalyticsService, analytics),
-    Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
-    Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
+    Effect.provideService(AnalyticsService, analytics),
+    Effect.provideService(ServerSecretStore, secrets),
+    Effect.provideService(ServerEnvironmentIdentity, environment),
   );
   const phase = (phase: string) =>
     auth.controller.subscribe("owner").pipe(
@@ -272,7 +272,7 @@ const makeHarnessFor = Effect.fnUntraced(function* (
     const stored = yield* auth.read;
     const record = Option.getOrThrow(stored);
     const store = yield* ProviderCredentialStore.make("codex-chatgpt", instanceId).pipe(
-      Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
+      Effect.provideService(ServerSecretStore, secrets),
     );
     yield* store.set(new TextEncoder().encode(JSON.stringify({ ...record, expiresAt: 0 })));
   });
@@ -293,12 +293,12 @@ const makeHarnessFor = Effect.fnUntraced(function* (
         },
         "owner",
         { discoveryUrl: `${origin}/discovery`, resource: `${origin}/v1` },
-      ).pipe(Stream.provideService(AnalyticsService.AnalyticsService, analytics)),
+      ).pipe(Stream.provideService(AnalyticsService, analytics)),
     finishCallback: (state: { authorizationUrl: string | null }) =>
       Effect.promise(() => fetch(prepareCallback(state))),
     destination: Effect.gen(function* () {
       const destinationBytes = new Map<string, Uint8Array>();
-      const destinationStore = ServerSecretStore.ServerSecretStore.of({
+      const destinationStore = ServerSecretStore.of({
         ...secrets,
         get: (name) => Effect.sync(() => Option.fromUndefinedOr(destinationBytes.get(name))),
         set: (name, value) =>
@@ -315,9 +315,9 @@ const makeHarnessFor = Effect.fnUntraced(function* (
         discoveryUrl: `${origin}/discovery`,
         resource: `${origin}/v1`,
       }).pipe(
-        Effect.provideService(AnalyticsService.AnalyticsService, analytics),
-        Effect.provideService(ServerSecretStore.ServerSecretStore, destinationStore),
-        Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
+        Effect.provideService(AnalyticsService, analytics),
+        Effect.provideService(ServerSecretStore, destinationStore),
+        Effect.provideService(ServerEnvironmentIdentity, environment),
       );
       return { auth: destination, bytes: destinationBytes };
     }),
@@ -326,8 +326,8 @@ const makeHarnessFor = Effect.fnUntraced(function* (
       discoveryUrl: `${origin}/discovery`,
       resource: `${origin}/v1`,
     }).pipe(
-      Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
-      Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
+      Effect.provideService(ServerSecretStore, secrets),
+      Effect.provideService(ServerEnvironmentIdentity, environment),
     ),
     startRemote,
     signIn: signInWithMethod(),
@@ -426,34 +426,36 @@ it.effect(
       }),
     ),
 );
-it.effect.each(["identity", "sharing"] as const)(
-  "failed account change preserves the original credentials and registration: %s",
-  (failure) =>
-    provision(
-      Effect.gen(function* () {
-        const h = yield* makeHarness;
-        yield* h.signIn;
-        yield* h.phase("succeeded");
-        const before = h.storedRecords();
-        h.setCallbackClientId("oaiapp_other_account");
-        if (failure === "identity") h.setInvalidNonce();
-        else h.declineSharing();
-        yield* h.changeAccount;
-        yield* h.phase("failed");
-        assert.strictEqual(
-          h.authorizationRequests[1]!.searchParams.get("client_id"),
-          "dynamic_agent_client",
-        );
-        if (failure === "sharing") {
-          assert.deepEqual(
-            Option.getOrThrow(yield* h.auth.read),
-            before.find((record) => record.accessToken),
+for (const failure of ["identity", "sharing"] as const) {
+  it.effect(
+    `failed account change preserves the original credentials and registration: ${failure}`,
+    () =>
+      provision(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          yield* h.signIn;
+          yield* h.phase("succeeded");
+          const before = h.storedRecords();
+          h.setCallbackClientId("oaiapp_other_account");
+          if (failure === "identity") h.setInvalidNonce();
+          else h.declineSharing();
+          yield* h.changeAccount;
+          yield* h.phase("failed");
+          assert.strictEqual(
+            h.authorizationRequests[1]!.searchParams.get("client_id"),
+            "dynamic_agent_client",
           );
-          assert.lengthOf(h.storedRecords().find((record) => record.profiles).profiles, 2);
-        } else assert.deepEqual(h.storedRecords(), before);
-      }),
-    ),
-);
+          if (failure === "sharing") {
+            assert.deepEqual(
+              Option.getOrThrow(yield* h.auth.read),
+              before.find((record) => record.accessToken),
+            );
+            assert.lengthOf(h.storedRecords().find((record) => record.profiles).profiles, 2);
+          } else assert.deepEqual(h.storedRecords(), before);
+        }),
+      ),
+  );
+}
 it.effect("retains the callback host and path after controller recreation and token removal", () =>
   provision(
     Effect.gen(function* () {
@@ -959,42 +961,48 @@ it.effect("rejects mismatched callback state before any token exchange or creden
     }),
   ),
 );
-it.effect.each(["issuer", "audience", "signature"] as const)(
-  "rejects ID token %s verification before saving tokens or registration",
-  (invalidClaim) =>
-    provision(
-      Effect.gen(function* () {
-        const h = yield* makeHarness;
-        h.setIdentityFailure(invalidClaim);
-        yield* h.signIn;
-        assert.include((yield* h.phase("failed")).message!, "could not be verified");
-        assert.strictEqual(h.exchanges.length, 1);
-        assert.deepEqual(h.storedRecords(), []);
-        assert.isTrue(Option.isNone(yield* h.auth.read));
-      }),
-    ),
-);
-it.effect.each([
-  { revoked: false, label: "without changing the current account" },
-  { revoked: true, label: "after token removal" },
-])("rejects conflicting callback client ID on reauthorization $label", ({ revoked }) =>
-  provision(
-    Effect.gen(function* () {
-      const h = yield* makeHarness;
-      yield* h.signIn;
-      yield* h.phase("succeeded");
-      if (revoked) yield* h.auth.revoke;
-      const before = h.storedRecords();
-      h.setCallbackClientId("oaiapp_untrusted_callback");
-      yield* h.signIn;
-      assert.include((yield* h.phase("failed")).message!, "registration is incomplete");
-      assert.strictEqual(h.authorizationRequests[1]?.searchParams.get("client_id"), "oaiapp_test");
-      assert.strictEqual(h.exchanges.length, 1);
-      assert.deepEqual(h.storedRecords(), before);
-      assert.strictEqual(Option.isNone(yield* h.auth.read), revoked);
-    }),
-  ),
-);
+for (const invalidClaim of ["issuer", "audience", "signature"] as const) {
+  it.effect(
+    `rejects ID token ${invalidClaim} verification before saving tokens or registration`,
+    () =>
+      provision(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          h.setIdentityFailure(invalidClaim);
+          yield* h.signIn;
+          assert.include((yield* h.phase("failed")).message!, "could not be verified");
+          assert.strictEqual(h.exchanges.length, 1);
+          assert.deepEqual(h.storedRecords(), []);
+          assert.isTrue(Option.isNone(yield* h.auth.read));
+        }),
+      ),
+  );
+}
+for (const revoked of [false, true]) {
+  it.effect(
+    `rejects conflicting callback client ID on reauthorization ${revoked ? "after token removal" : "without changing the current account"}`,
+    () =>
+      provision(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          yield* h.signIn;
+          yield* h.phase("succeeded");
+          if (revoked) yield* h.auth.revoke;
+          const before = h.storedRecords();
+          h.setCallbackClientId("oaiapp_untrusted_callback");
+          yield* h.signIn;
+          assert.include((yield* h.phase("failed")).message!, "registration is incomplete");
+          assert.strictEqual(
+            h.authorizationRequests[1]?.searchParams.get("client_id"),
+            "oaiapp_test",
+          );
+          assert.strictEqual(h.exchanges.length, 1);
+          assert.deepEqual(h.storedRecords(), before);
+          assert.strictEqual(Option.isNone(yield* h.auth.read), revoked);
+        }),
+      ),
+  );
+}
 
 it.effect("returns successful desktop sign-in to the original Welcome step", () =>
   provision(
@@ -1149,25 +1157,26 @@ it.effect(
     ),
 );
 
-it.effect.each([
-  { disconnected: false, label: "while connected" },
-  { disconnected: true, label: "after Disconnect" },
-])("rejects a different verified identity during saved-profile reauth $label", ({ disconnected }) =>
-  provision(
-    Effect.gen(function* () {
-      const h = yield* makeHarness;
-      yield* h.signIn;
-      yield* h.phase("succeeded");
-      if (disconnected) yield* h.auth.controller.logout(Effect.void);
-      const before = h.storedRecords();
-      h.setIdentity("another-user", "another@example.test");
-      yield* h.signIn;
-      assert.include((yield* h.phase("failed")).message!, "different ChatGPT account");
-      assert.deepEqual(h.storedRecords(), before);
-      assert.strictEqual(Option.isNone(yield* h.auth.read), disconnected);
-    }),
-  ),
-);
+for (const disconnected of [false, true]) {
+  it.effect(
+    `rejects a different verified identity during saved-profile reauth ${disconnected ? "after Disconnect" : "while connected"}`,
+    () =>
+      provision(
+        Effect.gen(function* () {
+          const h = yield* makeHarness;
+          yield* h.signIn;
+          yield* h.phase("succeeded");
+          if (disconnected) yield* h.auth.controller.logout(Effect.void);
+          const before = h.storedRecords();
+          h.setIdentity("another-user", "another@example.test");
+          yield* h.signIn;
+          assert.include((yield* h.phase("failed")).message!, "different ChatGPT account");
+          assert.deepEqual(h.storedRecords(), before);
+          assert.strictEqual(Option.isNone(yield* h.auth.read), disconnected);
+        }),
+      ),
+  );
+}
 
 it.effect(
   "retains both profiles and reuses the original account's client and callback when returning from another account",
@@ -1418,7 +1427,7 @@ it.effect(
     ),
 );
 
-it.effect.each([
+for (const code of [
   "invalid_grant",
   "invalid_refresh_token",
   "token_expired",
@@ -1427,31 +1436,33 @@ it.effect.each([
   "refresh_token_reused",
   "invalid_client",
   "invalid_token",
-])("refresh recovery follows the machine-readable code: %s", (code) =>
-  provision(
-    Effect.gen(function* () {
-      const h = yield* makeHarness;
-      yield* h.signIn;
-      yield* h.phase("succeeded");
-      yield* h.seedExpired;
-      h.setRefreshError(code);
-      yield* Effect.flip(h.auth.access);
-      assert.strictEqual(
-        Option.isNone(yield* h.auth.read),
-        !["invalid_client", "invalid_token"].includes(code),
-      );
-      assert.isTrue(
-        h
-          .storedRecords()
-          .some((record) =>
-            record.profiles?.some(
-              (profile: { clientId: string }) => profile.clientId === "oaiapp_test",
+]) {
+  it.effect(`refresh recovery follows the machine-readable code: ${code}`, () =>
+    provision(
+      Effect.gen(function* () {
+        const h = yield* makeHarness;
+        yield* h.signIn;
+        yield* h.phase("succeeded");
+        yield* h.seedExpired;
+        h.setRefreshError(code);
+        yield* Effect.flip(h.auth.access);
+        assert.strictEqual(
+          Option.isNone(yield* h.auth.read),
+          !["invalid_client", "invalid_token"].includes(code),
+        );
+        assert.isTrue(
+          h
+            .storedRecords()
+            .some((record) =>
+              record.profiles?.some(
+                (profile: { clientId: string }) => profile.clientId === "oaiapp_test",
+              ),
             ),
-          ),
-      );
-    }),
-  ),
-);
+        );
+      }),
+    ),
+  );
+}
 
 it.effect(
   "logout revokes the latest refresh token with the selected client and clears its ID hint",
@@ -1726,8 +1737,8 @@ it.effect("primary completes OAuth and destination imports and owns the refresh 
       assert.isFalse("refreshToken" in reconnect!);
       const store = yield* ProviderCredentialStore.make("codex-chatgpt", instanceId).pipe(
         Effect.provideService(
-          ServerSecretStore.ServerSecretStore,
-          ServerSecretStore.ServerSecretStore.of({
+          ServerSecretStore,
+          ServerSecretStore.of({
             get: (name) => Effect.sync(() => Option.fromUndefinedOr(destination.bytes.get(name))),
             set: (name, value) =>
               Effect.sync(() => {
@@ -1976,7 +1987,7 @@ it.effect("includes accounts from other Codex instances in the environment", () 
       assert.strictEqual(completed?.properties?.savedConnectionCount, 2);
     }).pipe(
       Effect.provide(
-        ServerSettings.layerTest({
+        settingsLayerTest({
           providerInstances: {
             [instanceId]: { driver: "codex", enabled: true },
             [ProviderInstanceId.make("managed-work")]: { driver: "codex", enabled: true },
@@ -1992,7 +2003,7 @@ it.effect("an unreadable unrelated profile omits counts without failing sign-in"
     Effect.gen(function* () {
       const h = yield* makeHarness;
       const unrelated = yield* ProviderCredentialStore.make("codex-chatgpt", "codex").pipe(
-        Effect.provideService(ServerSecretStore.ServerSecretStore, h.secrets),
+        Effect.provideService(ServerSecretStore, h.secrets),
       );
       // The harness owns its store; seed the corresponding binding in that store.
       h.bytes.set(unrelated.binding.key, new TextEncoder().encode("invalid"));
@@ -2001,7 +2012,7 @@ it.effect("an unreadable unrelated profile omits counts without failing sign-in"
       const completed = h.analyticsEvents.find(({ event }) => event === "chatgpt.auth.completed");
       assert.strictEqual(completed?.properties?.outcome, "succeeded");
       assert.notProperty(completed?.properties ?? {}, "connectedAccountCount");
-    }).pipe(Effect.provide(ServerSettings.layerTest())),
+    }).pipe(Effect.provide(settingsLayerTest())),
   ),
 );
 
@@ -2012,7 +2023,7 @@ it.effect("reports connections without an email separately from identifiable acc
       yield* h.signIn;
       yield* h.phase("succeeded");
       const store = yield* ProviderCredentialStore.make("codex-chatgpt", instanceId).pipe(
-        Effect.provideService(ServerSecretStore.ServerSecretStore, h.secrets),
+        Effect.provideService(ServerSecretStore, h.secrets),
       );
       yield* store.set(
         new TextEncoder().encode(

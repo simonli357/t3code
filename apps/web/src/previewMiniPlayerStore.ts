@@ -28,7 +28,6 @@ export interface PreviewMiniPlayerState {
   readonly position: PreviewMiniPlayerPosition | null;
   /** Height always follows the mirrored source's aspect ratio. */
   readonly width: number | null;
-  readonly lastInteraction: "drag" | "resize";
 }
 
 interface PreviewMiniPlayerStoreState {
@@ -41,12 +40,7 @@ interface PreviewMiniPlayerStoreState {
     sourceKey: string,
     position: PreviewMiniPlayerPosition,
   ) => void;
-  readonly resize: (
-    ref: ScopedThreadRef,
-    sourceKey: string,
-    width: number,
-    position?: PreviewMiniPlayerPosition,
-  ) => void;
+  readonly resize: (ref: ScopedThreadRef, sourceKey: string, width: number) => void;
   readonly removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -80,7 +74,6 @@ export const usePreviewMiniPlayerStore = create<PreviewMiniPlayerStoreState>()((
             source,
             position: current?.position ?? null,
             width: current?.width ?? null,
-            lastInteraction: current?.lastInteraction ?? "drag",
           },
         },
       };
@@ -97,41 +90,29 @@ export const usePreviewMiniPlayerStore = create<PreviewMiniPlayerStoreState>()((
       const threadKey = scopedThreadKey(ref);
       const current = state.byThreadKey[threadKey];
       if (!current || previewMiniPlayerSourceKey(current.source) !== sourceKey) return state;
-      if (
-        current.position?.x === position.x &&
-        current.position.y === position.y &&
-        current.lastInteraction === "drag"
-      )
-        return state;
+      if (current.position?.x === position.x && current.position.y === position.y) return state;
       return {
         byThreadKey: {
           ...state.byThreadKey,
-          [threadKey]: { ...current, position, lastInteraction: "drag" },
+          [threadKey]: { ...current, position },
         },
       };
     }),
-  resize: (ref, sourceKey, width, position) =>
+  resize: (ref, sourceKey, width) =>
     set((state) => {
       const threadKey = scopedThreadKey(ref);
       const current = state.byThreadKey[threadKey];
       if (
         !current ||
         previewMiniPlayerSourceKey(current.source) !== sourceKey ||
-        (current.width === width &&
-          current.lastInteraction === "resize" &&
-          (!position || (current.position?.x === position.x && current.position.y === position.y)))
+        current.width === width
       ) {
         return state;
       }
       return {
         byThreadKey: {
           ...state.byThreadKey,
-          [threadKey]: {
-            ...current,
-            width,
-            position: position ?? current.position,
-            lastInteraction: "resize",
-          },
+          [threadKey]: { ...current, width },
         },
       };
     }),

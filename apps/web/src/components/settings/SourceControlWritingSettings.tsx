@@ -38,7 +38,6 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
-import { BranchNamingSettings } from "./BranchNamingSettings";
 import { searchableSetting } from "./settingsSearch";
 
 const MODE_OPTIONS: Record<SourceControlWritingStyleMode, { label: string; description: string }> =
@@ -127,7 +126,6 @@ export function SourceControlWritingSettingsSection() {
 
   return (
     <SettingsSection id="source-control-text-generation" title="Text generation">
-      <BranchNamingSettings />
       <SettingsRow
         serverScoped
         settingKeys={["sourceControlWritingStyle"]}

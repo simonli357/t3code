@@ -1,13 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
-import * as Scope from "effect/Scope";
 import { createModelSelection } from "@t3tools/shared/model";
 import { expect } from "vite-plus/test";
 
@@ -40,6 +38,8 @@ interface FakeCodexInput {
   forbidArg?: string;
   stdinMustContain?: string;
   stdinMustNotContain?: string;
+  /** What `codex mcp list --json` answers; a number exits with that code instead. */
+  mcpServers?: ReadonlyArray<{ name: string; enabled: boolean }> | number;
 }
 
 // The stub walks argv the way the shell script it replaced did: `--image`,
@@ -56,6 +56,7 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
     forbidArg: input.forbidArg ?? null,
     stdinMustContain: input.stdinMustContain ?? null,
     stdinMustNotContain: input.stdinMustNotContain ?? null,
+    mcpServers: input.mcpServers ?? [],
     stderr: input.stderr ?? null,
     output: input.output,
     exitCode: input.exitCode ?? 0,
@@ -69,6 +70,11 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         'import * as NodeFS from "node:fs";',
         `const check = ${check};`,
         "const args = process.argv.slice(2);",
+        'if (args.includes("mcp") && args.includes("list")) {',
+        '  if (typeof check.mcpServers === "number") process.exit(check.mcpServers);',
+        "  process.stdout.write(JSON.stringify(check.mcpServers));",
+        "  process.exit(0);",
+        "}",
         'const originalArgs = ` ${args.join(" ")} `;',
         "let outputPath = null;",
         "let seenImage = false;",
@@ -148,7 +154,7 @@ function withFakeCodexEnv<A, E, R>(
     const config = decodeCodexSettings({ binaryPath: codexPath, launchArgs: input.launchArgs });
     const textGeneration = yield* makeCodexTextGeneration(
       config,
-      input.environment === undefined ? undefined : { ...process.env, ...input.environment },
+      input.environment,
       Effect.succeed(
         (input.models ?? []).map((slug) => ({
           slug,
@@ -170,9 +176,8 @@ function withFakeCodexEnv<A, E, R>(
 }
 
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
-  it.effect.each(["gpt-5.6-luna", "openai.gpt-5.6-luna"])(
-    "dispatches the qualified live model for %s",
-    (selectedModel) =>
+  for (const selectedModel of ["gpt-5.6-luna", "openai.gpt-5.6-luna"]) {
+    it.effect(`dispatches the qualified live model for ${selectedModel}`, () =>
       withFakeCodexEnv(
         {
           output: JSON.stringify({ title: "Bedrock title" }),
@@ -190,7 +195,8 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             expect(result.title).toBe("Bedrock title");
           }),
       ),
-  );
+    );
+  }
   it.effect("generates and sanitizes commit messages without branch by default", () =>
     withFakeCodexEnv(
       {
@@ -262,6 +268,70 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
             { id: "serviceTier", value: "priority" },
           ]),
+        }),
+    ),
+  );
+
+  it.effect("generates titles with the user's MCP servers and plugins off", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Remove default shapes" }),
+        mcpServers: [
+          { name: "augmenter", enabled: true },
+          { name: "my.server", enabled: true },
+          { name: "already-off", enabled: false },
+        ],
+        requireArg:
+          '--config features.plugins=false --config features.apps=false --config mcp_servers={"augmenter"={enabled=false},"my.server"={enabled=false}}',
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Augmenter task 1. Use the Augmenter MCP: link_thread when you start.",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.title).toBe("Remove default shapes");
+        }),
+    ),
+  );
+
+  it.effect("still generates when Codex cannot list its MCP servers", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ branch: "remove-default-shapes" }),
+        mcpServers: 2,
+        requireArg: "--config features.plugins=false --config features.apps=false --ephemeral",
+        forbidArg: "mcp_servers=",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateBranchName({
+            cwd: process.cwd(),
+            message: "Remove default shapes from characters",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.branch).toBe("remove-default-shapes");
+        }),
+    ),
+  );
+
+  it.effect("keeps plugins and apps off over launch args that turn them on", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Remove default shapes" }),
+        launchArgs: "--config features.plugins=true --config features.apps=true",
+        requireArg:
+          "--config features.plugins=true --config features.apps=true --config features.plugins=false --config features.apps=false --ephemeral",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const result = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Remove default shapes from characters",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(result.title).toBe("Remove default shapes");
         }),
     ),
   );
@@ -402,76 +472,6 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           });
 
           expect(generated.branch).toBe("feat/session");
-        }),
-    ),
-  );
-
-  it.effect.each([
-    {
-      mode: "static",
-      output: "Add Search",
-      expected: "team/add-search",
-      instruction: "without a prefix or namespace",
-    },
-    {
-      mode: "semantic",
-      output: "feat/add-search",
-      expected: "feat/add-search",
-      instruction: "semantic prefix",
-    },
-    {
-      mode: "custom",
-      output: "Julius/ABC-123.v2",
-      expected: "Julius/ABC-123.v2",
-      instruction: "Preserve the issue ID and capitalization.",
-    },
-  ] as const)("generates a branch using $mode naming", (example) =>
-    withFakeCodexEnv(
-      {
-        output: JSON.stringify({ branch: example.output }),
-        stdinMustContain: example.instruction,
-      },
-      (textGeneration) =>
-        Effect.gen(function* () {
-          const generated = yield* textGeneration.generateBranchName({
-            cwd: process.cwd(),
-            message: "Add search",
-            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
-            naming: {
-              mode: example.mode,
-              prefix: "team/",
-              instructions: "Preserve the issue ID and capitalization.",
-            },
-          });
-          expect(generated.branch).toBe(example.expected);
-        }),
-    ),
-  );
-
-  it.effect("generates branch names even when the ambient scope is already closed", () =>
-    withFakeCodexEnv(
-      {
-        output: JSON.stringify({
-          branch: "feat/background-generation",
-        }),
-      },
-      (textGeneration) =>
-        Effect.gen(function* () {
-          // Background fibers (e.g. the worktree branch rename fork) can run
-          // after their launching request's scope has closed; temp files must
-          // not be tied to that ambient scope or they are reaped on creation.
-          const closedScope = yield* Scope.make();
-          yield* Scope.close(closedScope, Exit.void);
-
-          const generated = yield* textGeneration
-            .generateBranchName({
-              cwd: process.cwd(),
-              message: "Please update session handling.",
-              modelSelection: DEFAULT_TEST_MODEL_SELECTION,
-            })
-            .pipe(Effect.provideService(Scope.Scope, closedScope));
-
-          expect(generated.branch).toBe("feat/background-generation");
         }),
     ),
   );

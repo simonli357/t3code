@@ -1,3 +1,4 @@
+import { presentWorkerMessage, workerMessagePreview } from "@t3tools/shared/workerMessages";
 import type { MessagesTimelineRow } from "./MessagesTimeline.logic";
 
 export interface TimelineMinimapItem {
@@ -18,10 +19,12 @@ export function deriveTimelineMinimapItems(
       continue;
     }
 
+    // A delivered report or peer message previews as its summary, like the row itself.
+    const delivered = presentWorkerMessage(row.message);
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: row.message.text,
+      userText: delivered ? workerMessagePreview(delivered) : row.message.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
     });
   }

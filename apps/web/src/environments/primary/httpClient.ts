@@ -5,18 +5,10 @@ import * as Layer from "effect/Layer";
 
 import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 
-type PrimaryEnvironmentHttpApiClient = Effect.Success<
-  ReturnType<typeof makeEnvironmentHttpApiClient>
->;
-
-export interface PrimaryEnvironmentHttpClient {
-  readonly PrimaryEnvironmentHttpClient: unique symbol;
-}
-
-export const PrimaryEnvironmentHttpClient: Context.Service<
+export class PrimaryEnvironmentHttpClient extends Context.Service<
   PrimaryEnvironmentHttpClient,
-  PrimaryEnvironmentHttpApiClient
-> = Context.Service("@t3tools/web/environments/primary/httpClient/PrimaryEnvironmentHttpClient");
+  Effect.Success<ReturnType<typeof makeEnvironmentHttpApiClient>>
+>()("@t3tools/web/environments/primary/httpClient/PrimaryEnvironmentHttpClient") {}
 
 const make = Effect.suspend(() =>
   makeEnvironmentHttpApiClient(resolvePrimaryEnvironmentHttpUrl("/")),

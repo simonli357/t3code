@@ -1,47 +1,39 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
-  ORCHESTRATION_PROTOCOL_HEADER,
-  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   ProjectId,
+  ProviderInstanceId,
+  ThreadId,
   type AuthSessionState,
-  type OrchestrationV2ShellSnapshot,
-  OrchestrationV2ThreadDetailSnapshot,
-  OrchestrationV2ThreadBoundedSnapshot,
-  type OrchestrationV2ThreadHistoryPage,
+  type OrchestrationShellSnapshot,
+  type OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import type { HttpClient } from "effect/unstable/http";
 
-import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
+import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
 import {
   ConnectionTransientError,
   RelayConnectionTarget,
   type PreparedConnection,
   type PreparedHttpAuthorization,
 } from "../connection/model.ts";
-import * as ManagedRelay from "../relay/managedRelay.ts";
+import { ManagedRelayDpopSigner, type ManagedRelayDpopProofInput } from "../relay/managedRelay.ts";
 import { remoteHttpClientLayer, type RemoteEnvironmentRequestError } from "../rpc/http.ts";
-import * as PullRequestDiffLoader from "./pullRequestDiffHttp.ts";
-import { withOrchestrationProtocolHeader } from "./environmentHttpAuth.ts";
+import {
+  fetchEnvironmentPullRequestDiff,
+  type PullRequestDiffCredentialRejectedError,
+  PullRequestDiffLoader,
+  pullRequestDiffLoaderLayer,
+} from "./pullRequestDiffHttp.ts";
 import { fetchEnvironmentSessionState } from "./session.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
-import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
-import {
-  boundedThreadSnapshotLoaderLayer,
-  fetchEnvironmentBoundedThreadSnapshot,
-} from "./boundedThreadSnapshotHttp.ts";
-import { fetchEnvironmentThreadHistoryPage } from "./threadHistoryHttp.ts";
-import { v2Projection } from "./orchestrationV2TestFixtures.ts";
-
-const encodeThreadSnapshot = Schema.encodeSync(OrchestrationV2ThreadDetailSnapshot);
-const encodeBoundedSnapshot = Schema.encodeSync(OrchestrationV2ThreadBoundedSnapshot);
+import { fetchEnvironmentThreadSnapshot } from "./threadSnapshotHttp.ts";
 
 const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -77,28 +69,38 @@ const SESSION = {
 } satisfies AuthSessionState;
 const UNAUTHENTICATED_SESSION = { authenticated: false, auth: AUTH } satisfies AuthSessionState;
 const SHELL = {
-  schemaVersion: 1,
   snapshotSequence: 1,
   projects: [],
   threads: [],
-  archivedThreads: [],
-} satisfies OrchestrationV2ShellSnapshot;
+  updatedAt: "2026-09-04T00:00:00.000Z",
+} satisfies OrchestrationShellSnapshot;
 const THREAD = {
   snapshotSequence: 2,
-  projection: v2Projection,
-} satisfies OrchestrationV2ThreadDetailSnapshot;
-const BOUNDED_THREAD = {
-  ...THREAD,
-  historyCursor: "older-page",
-  hasMoreHistory: true,
-  latestLocalTurnOrdinal: 3,
-} satisfies OrchestrationV2ThreadBoundedSnapshot;
-const THREAD_HISTORY = {
-  snapshotSequence: 2,
-  items: [],
-  nextCursor: null,
-  hasMoreHistory: false,
-} satisfies OrchestrationV2ThreadHistoryPage;
+  thread: {
+    id: ThreadId.make("thread-1"),
+    projectId: ProjectId.make("project-1"),
+    title: "Thread",
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    pullRequests: [],
+    worktreePath: null,
+    latestTurn: null,
+    createdAt: "2026-09-04T00:00:00.000Z",
+    updatedAt: "2026-09-04T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+    messages: [],
+    proposedPlans: [],
+    activities: [],
+    checkpoints: [],
+    session: null,
+  },
+  page: { beforeCursor: null, hasMore: false, snapshotSequence: 2 },
+} satisfies OrchestrationThreadDetailSnapshot;
 
 function credentialRejectedResponse(reason = "invalid_credential") {
   return Response.json(
@@ -115,12 +117,10 @@ function credentialRejectedResponse(reason = "invalid_credential") {
 function makeHarness(reply: (requestNumber: number) => Response | Promise<Response>) {
   const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
   const authorizations: Array<
-    Parameters<
-      RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]["authorizeDpopHttp"]
-    >[0]
+    Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpopHttp"]>[0]
   > = [];
-  const proofs: Array<ManagedRelay.ManagedRelayDpopProofInput> = [];
-  const remoteAuthorization = RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
+  const proofs: Array<ManagedRelayDpopProofInput> = [];
+  const remoteAuthorization = RemoteEnvironmentAuthorization.of({
     authorizeBearer: () => Effect.die("Unexpected bearer connection preparation."),
     authorizeDpop: () => Effect.die("HTTP requests must not prepare a WebSocket connection."),
     authorizeDpopHttp: (input) =>
@@ -139,7 +139,7 @@ function makeHarness(reply: (requestNumber: number) => Response | Promise<Respon
         };
       }),
   });
-  const signer = ManagedRelay.ManagedRelayDpopSigner.of({
+  const signer = ManagedRelayDpopSigner.of({
     thumbprint: Effect.succeed("test-thumbprint"),
     createProof: (input) =>
       Effect.sync(() => {
@@ -171,12 +171,11 @@ const LOADERS: ReadonlyArray<{
   readonly method: string;
   readonly path: string;
   readonly response: unknown;
-  readonly expected: unknown;
   readonly load: (
     input: HttpInput,
   ) => Effect.Effect<
     unknown,
-    RemoteEnvironmentRequestError | PullRequestDiffLoader.PullRequestDiffCredentialRejectedError,
+    RemoteEnvironmentRequestError | PullRequestDiffCredentialRejectedError,
     HttpClient.HttpClient
   >;
 }> = [
@@ -185,16 +184,13 @@ const LOADERS: ReadonlyArray<{
     method: "POST",
     path: "/api/pull-requests/diff",
     response: DIFF_RESULT,
-    expected: DIFF_RESULT,
-    load: (input: HttpInput) =>
-      PullRequestDiffLoader.fetchEnvironmentPullRequestDiff({ ...input, diff: DIFF }),
+    load: (input: HttpInput) => fetchEnvironmentPullRequestDiff({ ...input, diff: DIFF }),
   },
   {
     name: "session permissions",
     method: "GET",
     path: "/api/auth/session",
     response: SESSION,
-    expected: SESSION,
     load: fetchEnvironmentSessionState,
   },
   {
@@ -202,41 +198,19 @@ const LOADERS: ReadonlyArray<{
     method: "GET",
     path: "/api/orchestration/shell",
     response: SHELL,
-    expected: SHELL,
     load: fetchEnvironmentShellSnapshot,
-  },
-  {
-    name: "thread snapshot",
-    method: "GET",
-    path: `/api/orchestration/threads/${THREAD.projection.thread.id}`,
-    response: encodeThreadSnapshot(THREAD),
-    expected: THREAD,
-    load: (input: HttpInput) =>
-      ThreadSnapshotLoader.fetchEnvironmentThreadSnapshot({
-        ...input,
-        threadId: THREAD.projection.thread.id,
-      }),
-  },
-  {
-    name: "bounded thread snapshot",
-    method: "GET",
-    path: `/api/orchestration/threads/${THREAD.projection.thread.id}/bounded`,
-    response: encodeBoundedSnapshot(BOUNDED_THREAD),
-    expected: BOUNDED_THREAD,
-    load: (input: HttpInput) =>
-      fetchEnvironmentBoundedThreadSnapshot({ ...input, threadId: THREAD.projection.thread.id }),
   },
   {
     name: "older thread history",
     method: "GET",
-    path: `/api/orchestration/threads/${THREAD.projection.thread.id}/history`,
-    response: THREAD_HISTORY,
-    expected: THREAD_HISTORY,
+    path: "/api/orchestration/threads/thread-1",
+    response: THREAD,
     load: (input: HttpInput) =>
-      fetchEnvironmentThreadHistoryPage({
+      fetchEnvironmentThreadSnapshot({
         ...input,
-        threadId: THREAD.projection.thread.id,
-        cursor: "older-page",
+        threadId: THREAD.thread.id,
+        window: { turnLimit: 20, beforeCursor: "older-page" },
+        reasoningMessages: true,
       }),
   },
 ];
@@ -258,7 +232,7 @@ describe("authenticated environment HTTP requests", () => {
       const harness = makeHarness(() => Response.json(loader.response));
       const result = yield* loader.load(harness.input).pipe(Effect.provide(harness.httpLayer));
 
-      expect(result).toEqual(loader.expected);
+      expect(result).toEqual(loader.response);
       expect(harness.calls).toHaveLength(1);
       const call = harness.calls[0]!;
       const url = new URL(call.url);
@@ -268,11 +242,6 @@ describe("authenticated environment HTTP requests", () => {
       expect(new Headers(call.init.headers).get("authorization")).toBe("DPoP current-token");
       expect(new Headers(call.init.headers).get("dpop")).toBe("proof-1");
       expect(call.init.credentials).toBeUndefined();
-      if (loader.path.startsWith("/api/orchestration/")) {
-        expect(new Headers(call.init.headers).get(ORCHESTRATION_PROTOCOL_HEADER)).toBe(
-          ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-        );
-      }
       expect(harness.authorizations).toEqual([{ expectedEnvironmentId: TARGET.environmentId }]);
       expect(harness.proofs).toEqual([
         {
@@ -281,8 +250,13 @@ describe("authenticated environment HTTP requests", () => {
           accessToken: "current-token",
         },
       ]);
+      if (loader.name === "shell snapshot") {
+        expect(url.searchParams.get("projectConfigIdentity")).toBe("true");
+      }
       if (loader.name === "older thread history") {
-        expect(url.searchParams.get("cursor")).toBe("older-page");
+        expect(url.searchParams.get("turnLimit")).toBe("20");
+        expect(url.searchParams.get("beforeCursor")).toBe("older-page");
+        expect(url.searchParams.get("reasoningMessages")).toBe("true");
       }
       expect(PREPARED.httpAuthorization).toMatchObject({ accessToken: "expired-token" });
     }),
@@ -293,10 +267,9 @@ describe("authenticated environment HTTP requests", () => {
       const harness = makeHarness((requestNumber) =>
         requestNumber === 1 ? credentialRejectedResponse() : Response.json(DIFF_RESULT),
       );
-      const result = yield* PullRequestDiffLoader.fetchEnvironmentPullRequestDiff({
-        ...harness.input,
-        diff: DIFF,
-      }).pipe(Effect.provide(harness.httpLayer));
+      const result = yield* fetchEnvironmentPullRequestDiff({ ...harness.input, diff: DIFF }).pipe(
+        Effect.provide(harness.httpLayer),
+      );
 
       expect(result).toEqual(DIFF_RESULT);
       expect(harness.authorizations).toEqual([
@@ -323,99 +296,19 @@ describe("authenticated environment HTTP requests", () => {
     }),
   );
 
-  it.effect.each(LOADERS.filter((loader) => loader.path.startsWith("/api/orchestration/")))(
-    "renews a rejected credential without losing the v2 protocol or query for $name",
-    (loader) =>
-      Effect.gen(function* () {
-        const harness = makeHarness((requestNumber) =>
-          requestNumber === 1 ? credentialRejectedResponse() : Response.json(loader.response),
-        );
-        const result = yield* loader.load(harness.input).pipe(Effect.provide(harness.httpLayer));
-        expect(result).toEqual(loader.expected);
-        expect(harness.calls).toHaveLength(2);
-        const retried = harness.calls[1]!;
-        const url = new URL(retried.url);
-        expect(url.origin).toBe(RENEWED_ORIGIN);
-        expect(url.pathname).toBe(loader.path);
-        expect(new Headers(retried.init.headers).get("authorization")).toBe("DPoP renewed-token");
-        expect(new Headers(retried.init.headers).get("dpop")).toBe("proof-2");
-        expect(new Headers(retried.init.headers).get(ORCHESTRATION_PROTOCOL_HEADER)).toBe(
-          ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-        );
-        expect(harness.proofs[1]).toEqual({
-          method: "GET",
-          url: `${RENEWED_ORIGIN}${loader.path}`,
-          accessToken: "renewed-token",
-        });
-        if (loader.name === "older thread history") {
-          expect(url.searchParams.get("cursor")).toBe("older-page");
-        }
-      }),
-  );
-
-  it.effect("renews credentials captured by the bounded snapshot loader", () =>
-    Effect.gen(function* () {
-      const harness = makeHarness((requestNumber) =>
-        requestNumber === 1
-          ? credentialRejectedResponse()
-          : Response.json(encodeBoundedSnapshot(BOUNDED_THREAD)),
-      );
-      const loaderLayer = boundedThreadSnapshotLoaderLayer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            harness.httpLayer,
-            Layer.succeed(
-              ManagedRelay.ManagedRelayDpopSigner,
-              Option.getOrThrow(harness.input.signer),
-            ),
-            Layer.succeed(
-              RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
-              harness.remoteAuthorization,
-            ),
-          ),
-        ),
-      );
-      const loader = yield* ThreadSnapshotLoader.ThreadSnapshotLoader.pipe(
-        Effect.provide(loaderLayer),
-      );
-      const result = yield* loader.load(PREPARED, THREAD.projection.thread.id);
-      expect(result).toEqual({
-        _tag: "present",
-        snapshot: { ...THREAD, latestLocalTurnOrdinal: BOUNDED_THREAD.latestLocalTurnOrdinal },
-        history: {
-          historyCursor: BOUNDED_THREAD.historyCursor,
-          hasMoreHistory: true,
-          latestLocalTurnOrdinal: BOUNDED_THREAD.latestLocalTurnOrdinal,
-        },
-      });
-      expect(harness.calls).toHaveLength(2);
-      expect(new Headers(harness.calls[1]!.init.headers).get("authorization")).toBe(
-        "DPoP renewed-token",
-      );
-    }),
-  );
-
   it.effect("uses the authorization service captured by the diff loader layer", () =>
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json(DIFF_RESULT));
-      const loaderLayer = PullRequestDiffLoader.layer.pipe(
+      const loaderLayer = pullRequestDiffLoaderLayer.pipe(
         Layer.provide(
           Layer.mergeAll(
             harness.httpLayer,
-            Layer.succeed(
-              ManagedRelay.ManagedRelayDpopSigner,
-              Option.getOrThrow(harness.input.signer),
-            ),
-            Layer.succeed(
-              RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
-              harness.remoteAuthorization,
-            ),
+            Layer.succeed(ManagedRelayDpopSigner, Option.getOrThrow(harness.input.signer)),
+            Layer.succeed(RemoteEnvironmentAuthorization, harness.remoteAuthorization),
           ),
         ),
       );
-      const loader = yield* PullRequestDiffLoader.PullRequestDiffLoader.pipe(
-        Effect.provide(loaderLayer),
-      );
+      const loader = yield* PullRequestDiffLoader.pipe(Effect.provide(loaderLayer));
       const result = yield* loader.load(PREPARED, DIFF);
 
       expect(result).toEqual(DIFF_RESULT);
@@ -428,10 +321,10 @@ describe("authenticated environment HTTP requests", () => {
   it.effect("preserves the credential rejection after the one recovery attempt fails", () =>
     Effect.gen(function* () {
       const harness = makeHarness(() => credentialRejectedResponse());
-      const error = yield* PullRequestDiffLoader.fetchEnvironmentPullRequestDiff({
-        ...harness.input,
-        diff: DIFF,
-      }).pipe(Effect.provide(harness.httpLayer), Effect.flip);
+      const error = yield* fetchEnvironmentPullRequestDiff({ ...harness.input, diff: DIFF }).pipe(
+        Effect.provide(harness.httpLayer),
+        Effect.flip,
+      );
 
       expect(error).toMatchObject({
         _tag: "PullRequestDiffCredentialRejectedError",
@@ -475,10 +368,10 @@ describe("authenticated environment HTTP requests", () => {
   ])("does not renew or retry on $name", ({ reply, errorTag }) =>
     Effect.gen(function* () {
       const harness = makeHarness(reply);
-      const error = yield* PullRequestDiffLoader.fetchEnvironmentPullRequestDiff({
-        ...harness.input,
-        diff: DIFF,
-      }).pipe(Effect.provide(harness.httpLayer), Effect.flip);
+      const error = yield* fetchEnvironmentPullRequestDiff({ ...harness.input, diff: DIFF }).pipe(
+        Effect.provide(harness.httpLayer),
+        Effect.flip,
+      );
 
       expect(error._tag).toBe(errorTag);
       expect(harness.calls).toHaveLength(1);
@@ -549,7 +442,7 @@ describe("authenticated environment HTTP requests", () => {
     Effect.gen(function* () {
       const harness = makeHarness(() => Response.json(SESSION));
       const authorizing = yield* Deferred.make<void>();
-      const remoteAuthorization = RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
+      const remoteAuthorization = RemoteEnvironmentAuthorization.of({
         ...harness.remoteAuthorization,
         authorizeDpopHttp: () =>
           Deferred.succeed(authorizing, undefined).pipe(Effect.andThen(Effect.never)),
@@ -581,7 +474,7 @@ describe("authenticated environment HTTP requests", () => {
       });
       const authorizing = yield* Deferred.make<void>();
       const authorize = yield* Deferred.make<void>();
-      const remoteAuthorization = RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
+      const remoteAuthorization = RemoteEnvironmentAuthorization.of({
         ...harness.remoteAuthorization,
         authorizeDpopHttp: (input) =>
           Deferred.succeed(authorizing, undefined).pipe(
@@ -618,7 +511,7 @@ describe("authenticated environment HTTP requests", () => {
         reason: "transport",
         detail: "Relay unavailable",
       });
-      const remoteAuthorization = RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization.of({
+      const remoteAuthorization = RemoteEnvironmentAuthorization.of({
         ...harness.remoteAuthorization,
         authorizeDpopHttp: () => Effect.fail(failure),
       });
@@ -652,19 +545,4 @@ describe("authenticated environment HTTP requests", () => {
       expect(harness.calls).toEqual([]);
     }),
   );
-});
-
-describe("orchestration HTTP compatibility header", () => {
-  it("announces the current protocol without replacing bearer or DPoP authentication", () => {
-    expect(
-      withOrchestrationProtocolHeader({
-        authorization: "DPoP access-token",
-        dpop: "signed-proof",
-      }),
-    ).toEqual({
-      authorization: "DPoP access-token",
-      dpop: "signed-proof",
-      [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-    });
-  });
 });

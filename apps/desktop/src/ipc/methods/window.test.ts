@@ -24,6 +24,7 @@ import * as DesktopBackendPool from "../../backend/DesktopBackendPool.ts";
 import * as ElectronDialog from "../../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../../settings/DesktopAppSettings.ts";
+import type { DesktopSettings } from "../../settings/DesktopAppSettings.ts";
 import {
   getLocalEnvironmentBootstraps,
   getWindowFullscreenState,
@@ -212,10 +213,7 @@ describe("pasteAsText", () => {
 });
 
 describe("pickProjectFavicon", () => {
-  const pickerLayer = (
-    pickFiles: () => Effect.Effect<Array<string>>,
-    settings?: DesktopAppSettings.DesktopSettings,
-  ) =>
+  const pickerLayer = (pickFiles: () => Effect.Effect<Array<string>>, settings?: DesktopSettings) =>
     Layer.mergeAll(
       Layer.mock(ElectronDialog.ElectronDialog)({ pickFiles }),
       Layer.mock(ElectronWindow.ElectronWindow)({

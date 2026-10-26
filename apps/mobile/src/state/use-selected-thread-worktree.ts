@@ -1,20 +1,20 @@
 import { useMemo } from "react";
 
-import { useSelectedThreadWorktreePath } from "./use-thread-detail";
+import { useSelectedThreadDetail } from "./use-thread-detail";
 import { useThreadSelection } from "./use-thread-selection";
 import { resolvePreferredThreadWorktreePath } from "../features/terminal/terminalLaunchContext";
 
 export function useSelectedThreadWorktree() {
   const { selectedThread, selectedThreadProject } = useThreadSelection();
-  const detailWorktreePath = useSelectedThreadWorktreePath();
+  const selectedThreadDetail = useSelectedThreadDetail();
 
   const selectedThreadWorktreePath = useMemo(
     () =>
       resolvePreferredThreadWorktreePath({
         threadShellWorktreePath: selectedThread?.worktreePath ?? null,
-        threadDetailWorktreePath: detailWorktreePath,
+        threadDetailWorktreePath: selectedThreadDetail?.worktreePath ?? null,
       }),
-    [detailWorktreePath, selectedThread?.worktreePath],
+    [selectedThread?.worktreePath, selectedThreadDetail?.worktreePath],
   );
 
   return {

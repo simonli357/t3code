@@ -13,6 +13,7 @@ import { TestClock } from "effect/testing";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+import * as T3ProjectFileLoader from "./T3ProjectFileLoader.ts";
 
 const normalizePathSeparators = (value: string) => value.replaceAll("\\", "/");
 const normalizeResolvedPath = (value: string) => normalizePathSeparators(value);
@@ -36,9 +37,130 @@ const makeRepositoryIdentityResolverTestLayer = (options: {
       cacheCapacity: 16,
       ...options,
     }),
-  ).pipe(Layer.provide(ProcessRunner.layer));
+  ).pipe(Layer.provide([ProcessRunner.layer, T3ProjectFileLoader.layer]));
 
 it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
+  it.effect.each([
+    [
+      "git@github-personal:sidecue/side_cue_app.git",
+      "hostname github.com\n",
+      0,
+      "github.com/sidecue/side_cue_app",
+    ],
+    [
+      "ssh://git@github-personal/sidecue/side_cue_app.git",
+      "hostname github.com\n",
+      0,
+      "github.com/sidecue/side_cue_app",
+    ],
+    ["git@github-personal:sidecue/side_cue_app.git", "", 1, "github-personal/sidecue/side_cue_app"],
+  ] as const)(
+    "resolves SSH alias identity for %s, retaining its Git locator",
+    ([remoteUrl, sshOutput, code, canonicalKey]) => {
+      const processRunner = Layer.succeed(ProcessRunner.ProcessRunner, {
+        run: (input) =>
+          Effect.succeed({
+            stdout:
+              input.command === "ssh"
+                ? sshOutput
+                : input.args.includes("rev-parse")
+                  ? "/repo\n"
+                  : `origin\t${remoteUrl} (fetch)\n`,
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(input.command === "ssh" ? code : 0),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          }),
+      });
+      const resolverLayer = Layer.effect(
+        RepositoryIdentityResolver.RepositoryIdentityResolver,
+        RepositoryIdentityResolver.make(),
+      ).pipe(Layer.provide([processRunner, T3ProjectFileLoader.layer]));
+      return Effect.gen(function* () {
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        const identity = yield* resolver.resolve("/repo");
+        expect(identity?.canonicalKey).toBe(canonicalKey);
+        expect(identity?.locator).toEqual({
+          source: "git-remote",
+          remoteName: "origin",
+          remoteUrl,
+        });
+      }).pipe(Effect.provide(resolverLayer));
+    },
+  );
+
+  it.effect.each(["blob:none", "tree:0", "blob:limit=1024", null])(
+    "resolves a promisor remote with filter %s without selecting its push URL",
+    (filter) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-partial-clone-" });
+        yield* git(cwd, ["init"]);
+        yield* git(cwd, ["remote", "add", "origin", "https://github.com/example/fork.git"]);
+        yield* git(cwd, ["remote", "add", "upstream", "https://github.com/example/source.git"]);
+        yield* git(cwd, ["config", "remote.upstream.promisor", "true"]);
+        if (filter !== null) {
+          yield* git(cwd, ["config", "remote.upstream.partialclonefilter", filter]);
+        }
+        yield* git(cwd, [
+          "remote",
+          "set-url",
+          "--push",
+          "upstream",
+          "git@github.com:other/push.git",
+        ]);
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        const identity = yield* resolver.resolve(cwd);
+        expect(identity?.canonicalKey).toBe("github.com/example/source");
+        expect(identity?.locator).toEqual({
+          source: "git-remote",
+          remoteName: "upstream",
+          remoteUrl: "https://github.com/example/source.git",
+        });
+      }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
+  it.effect(
+    "groups explicit corresponding folders and refreshes back to Git when the key is removed",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const first = yield* fs.makeTempDirectoryScoped({ prefix: "t3-project-key-first-" });
+        const second = yield* fs.makeTempDirectoryScoped({ prefix: "t3-project-key-second-" });
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        expect(yield* resolver.resolve(first)).toBeNull();
+        yield* git(first, ["init"]);
+        yield* git(first, ["remote", "add", "origin", "https://github.com/example/source.git"]);
+        for (const cwd of [first, second]) {
+          yield* fs.writeFileString(
+            path.join(cwd, "t3.json"),
+            '{"projectKey":"simon/surveyforge"}',
+          );
+        }
+        const a = yield* resolver.resolve(first, { refresh: true });
+        const b = yield* resolver.resolve(second);
+        expect(a?.canonicalKey).toBe("project:simon/surveyforge");
+        expect(b?.canonicalKey).toBe(a?.canonicalKey);
+        expect(b?.locator).toEqual({ source: "project-config", projectKey: "simon/surveyforge" });
+        expect(b?.rootPath).toBe(second);
+        expect(b?.provider).toBeUndefined();
+        yield* fs.writeFileString(path.join(second, "t3.json"), '{"projectKey":"simon/other"}');
+        expect((yield* resolver.resolve(second, { refresh: true }))?.canonicalKey).toBe(
+          "project:simon/other",
+        );
+        yield* fs.remove(path.join(first, "t3.json"));
+        expect((yield* resolver.resolve(first, { refresh: true }))?.canonicalKey).toBe(
+          "github.com/example/source",
+        );
+        yield* fs.remove(path.join(second, "t3.json"));
+        expect(yield* resolver.resolve(second, { refresh: true })).toBeNull();
+      }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
+  );
+
   it.effect("refreshes the Git root only when requested", () => {
     const calls: Array<ReadonlyArray<string>> = [];
     let rootPath = "/repo";
@@ -88,7 +210,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
           );
         },
       }),
-    ).pipe(Layer.provide(processRunner));
+    ).pipe(Layer.provide([processRunner, T3ProjectFileLoader.layer]));
 
     return Effect.gen(function* () {
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -118,7 +240,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
       expect(forgejo?.webUrl).toBe("http://forge.test:3000/git/team/repo");
       expect(forgejo?.provider).toBe("forgejo");
       expect(forgejo?.canonicalKey).toBe("ssh.forge.test/team/repo");
-      expect(forgejo?.locator.remoteUrl).toBe(remoteUrl);
+      expect(forgejo?.locator).toMatchObject({ remoteUrl });
       expect(yield* resolver.resolve(rootPath)).toEqual(forgejo);
       expect(refinements).toBe(3);
       refinementFails = true;
@@ -156,7 +278,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     const resolverLayer = Layer.effect(
       RepositoryIdentityResolver.RepositoryIdentityResolver,
       RepositoryIdentityResolver.make(),
-    ).pipe(Layer.provide(processRunner));
+    ).pipe(Layer.provide([processRunner, T3ProjectFileLoader.layer]));
 
     return Effect.gen(function* () {
       const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -281,7 +403,7 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
         const identity = yield* resolver.resolve(cwd, { refresh: true });
 
         expect(identity).not.toBeNull();
-        expect(identity?.locator.remoteName).toBe("upstream");
+        expect(identity?.locator).toMatchObject({ remoteName: "upstream" });
         expect(identity?.canonicalKey).toBe("github.com/t3tools/t3code");
         expect(identity?.displayName).toBe("t3tools/t3code");
         expect(yield* resolver.resolve(cwd)).toEqual(identity);

@@ -763,9 +763,8 @@ describe("listSourceProfiles Firefox fallback", () => {
     { platform: "win32" as const, profileDirectory: NodePath.join("Profiles", "windows.default") },
   ];
 
-  it.effect.each(cases)(
-    "scans the $platform profile location and excludes stale entries",
-    ({ platform, profileDirectory }) =>
+  for (const { platform, profileDirectory } of cases) {
+    it.effect(`scans the ${platform} profile location and excludes stale entries`, () =>
       run(
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
@@ -801,7 +800,8 @@ describe("listSourceProfiles Firefox fallback", () => {
           ]);
         }),
       ),
-  );
+    );
+  }
 
   it.effect("scans for profiles when profiles.ini declares only ones without cookies", () =>
     run(
@@ -1166,9 +1166,8 @@ describe("Safari profiles", () => {
     ),
   );
 
-  it.effect.each(["missing", "corrupt"] as const)(
-    "recovers separate cookie stores when metadata is %s",
-    (metadataState) =>
+  for (const metadataState of ["missing", "corrupt"] as const) {
+    it.effect(`recovers separate cookie stores when metadata is ${metadataState}`, () =>
       run(
         Effect.gen(function* () {
           const { context, store, metadata } = yield* fixture();
@@ -1182,7 +1181,8 @@ describe("Safari profiles", () => {
           assert.isTrue(yield* isSourceInstalled(safari, context));
         }),
       ),
-  );
+    );
+  }
 
   it.effect("keeps Safari without profiles available", () =>
     run(

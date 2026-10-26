@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { MessageId, RunId, type ReviewDiffPreviewSource } from "@t3tools/contracts";
-import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import {
+  MessageId,
+  TurnId,
+  type OrchestrationCheckpointSummary,
+  type ReviewDiffPreviewSource,
+} from "@t3tools/contracts";
 
 import {
   applyReviewDiffMetadata,
@@ -14,9 +18,9 @@ import {
 } from "./reviewModel";
 
 function makeCheckpoint(
-  input: Partial<ThreadCheckpointSummary> &
-    Pick<ThreadCheckpointSummary, "runId" | "checkpointTurnCount" | "completedAt">,
-): ThreadCheckpointSummary {
+  input: Partial<OrchestrationCheckpointSummary> &
+    Pick<OrchestrationCheckpointSummary, "turnId" | "checkpointTurnCount" | "completedAt">,
+): OrchestrationCheckpointSummary {
   return {
     checkpointRef: `refs/t3/checkpoints/thread/${input.checkpointTurnCount}` as any,
     status: "ready",
@@ -48,12 +52,12 @@ describe("buildReviewSectionItems", () => {
   it("keeps one chip per checkpoint and appends git sources", () => {
     const checkpoints = [
       makeCheckpoint({
-        runId: RunId.make("run-1"),
+        turnId: TurnId.make("turn-1"),
         checkpointTurnCount: 1,
         completedAt: "2026-04-01T00:00:00.000Z",
       }),
       makeCheckpoint({
-        runId: RunId.make("run-2"),
+        turnId: TurnId.make("turn-2"),
         checkpointTurnCount: 2,
         completedAt: "2026-04-02T00:00:00.000Z",
       }),
@@ -62,7 +66,7 @@ describe("buildReviewSectionItems", () => {
       {
         id: "working-tree",
         kind: "working-tree",
-        title: "Uncommitted",
+        title: "Dirty worktree",
         baseRef: "HEAD",
         headRef: null,
         diff: "diff --git a/a.ts b/a.ts",
@@ -72,7 +76,7 @@ describe("buildReviewSectionItems", () => {
       {
         id: "branch-range",
         kind: "branch-range",
-        title: "Changes vs main",
+        title: "Against main",
         baseRef: "main",
         headRef: "feature",
         diff: "diff --git a/a.ts b/a.ts",
@@ -105,28 +109,10 @@ describe("buildReviewSectionItems", () => {
       isLoading: false,
       diff: expect.stringContaining("loaded.ts"),
     });
-    expect(getDefaultReviewSectionId(items)).toBe("git:branch-range");
+    expect(getDefaultReviewSectionId(items)).toBe("turn:2");
   });
 
-  it("falls back to the first turn without git sections", () => {
-    const items = buildReviewSectionItems({
-      checkpoints: [
-        makeCheckpoint({
-          runId: RunId.make("run-1"),
-          checkpointTurnCount: 1,
-          completedAt: "2026-04-01T00:00:00.000Z",
-        }),
-      ],
-      gitSections: [],
-      turnDiffById: {},
-      loadingTurnIds: {},
-      loadingGitSections: false,
-    });
-
-    expect(getDefaultReviewSectionId(items)).toBe("turn:1");
-  });
-
-  it("holds the Changes place while git preview is loading", () => {
+  it("shows dirty worktree while git preview is loading", () => {
     const items = buildReviewSectionItems({
       checkpoints: [],
       gitSections: [],
@@ -137,14 +123,15 @@ describe("buildReviewSectionItems", () => {
 
     expect(items).toEqual([
       expect.objectContaining({
-        id: "git:branch-range",
-        kind: "branch-range",
-        title: "Changes",
+        id: "git:working-tree",
+        kind: "working-tree",
+        title: "Dirty worktree",
+        subtitle: "Tracked, staged, and untracked worktree changes",
         diff: null,
         isLoading: true,
       }),
     ]);
-    expect(getDefaultReviewSectionId(items)).toBe("git:branch-range");
+    expect(getDefaultReviewSectionId(items)).toBe("git:working-tree");
   });
 });
 

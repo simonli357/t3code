@@ -26,9 +26,9 @@ import {
   type PreparedConnection,
   type SupervisorConnectionState,
 } from "../connection/model.ts";
-import * as EnvironmentRegistry from "../connection/registry.ts";
-import * as EnvironmentSupervisor from "../connection/supervisor.ts";
-import * as Persistence from "../platform/persistence.ts";
+import { EnvironmentRegistry } from "../connection/registry.ts";
+import { EnvironmentSupervisor } from "../connection/supervisor.ts";
+import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { createServerEnvironmentAtoms } from "./server.ts";
@@ -106,7 +106,7 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
     probe: Effect.void,
     closed: Effect.never,
   };
-  const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+  const supervisor = EnvironmentSupervisor.of({
     target: TARGET,
     state: yield* SubscriptionRef.make<SupervisorConnectionState>({
       ...AVAILABLE_CONNECTION_STATE,
@@ -118,13 +118,13 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
     disconnect: Effect.void,
     retryNow: Effect.void,
   });
-  const environments = EnvironmentRegistry.EnvironmentRegistry.of({
+  const environments = EnvironmentRegistry.of({
     run: (_environmentId, effect) =>
-      Effect.provideService(effect, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      Effect.provideService(effect, EnvironmentSupervisor, supervisor),
     followStream: (_environmentId, stream) =>
-      Stream.provideService(stream, EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-  } as EnvironmentRegistry.EnvironmentRegistry["Service"]);
-  const cache = Persistence.EnvironmentCacheStore.of({
+      Stream.provideService(stream, EnvironmentSupervisor, supervisor),
+  } as EnvironmentRegistry["Service"]);
+  const cache = EnvironmentCacheStore.of({
     loadShell: () => Effect.succeedNone,
     saveShell: () => Effect.void,
     loadThread: () => Effect.succeedNone,
@@ -140,8 +140,8 @@ const makeHarness = Effect.fn("ServerUsageTest.makeHarness")(function* (
   });
   const runtime = Atom.runtime(
     Layer.merge(
-      Layer.succeed(EnvironmentRegistry.EnvironmentRegistry, environments),
-      Layer.succeed(Persistence.EnvironmentCacheStore, cache),
+      Layer.succeed(EnvironmentRegistry, environments),
+      Layer.succeed(EnvironmentCacheStore, cache),
     ),
   );
   const initialConfigValueAtom = Atom.make(CONFIG);

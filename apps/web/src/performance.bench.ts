@@ -1,4 +1,4 @@
-import { NodeId, PlanId, ProjectId, RunId } from "@t3tools/contracts";
+import { EventId, ProjectId, TurnId, type OrchestrationThreadActivity } from "@t3tools/contracts";
 import {
   getLatestThreadForProject,
   sortActiveThreadsByOrderKey,
@@ -8,11 +8,10 @@ import {
 import { formatHourShort, formatRelativeHourShort } from "@t3tools/shared/usageFormat";
 import { describe, test } from "vite-plus/test";
 
-import { makeThreadProjectionFixture } from "./test-fixtures";
 import { deriveActivePlanState } from "./session-logic";
 
 const projectId = ProjectId.make("benchmark-project");
-const runId = RunId.make("benchmark-run");
+const turnId = TurnId.make("benchmark-turn");
 const start = Date.parse("2026-08-11T00:00:00.000Z");
 const threads = Array.from({ length: 1_000 }, (_, index) => {
   const timestamp = new Date(start + ((index * 997) % 1_000) * 60_000).toISOString();
@@ -26,19 +25,16 @@ const threads = Array.from({ length: 1_000 }, (_, index) => {
     unsettledAt: null,
   };
 });
-const baseProjection = makeThreadProjectionFixture();
-const projection = {
-  ...baseProjection,
-  plans: Array.from({ length: 5 }, (_, index) => ({
-    id: PlanId.make(`plan-${index}`),
-    runId,
-    threadId: baseProjection.thread.id,
-    nodeId: NodeId.make("bench-node"),
-    status: "active" as const,
-    kind: "todo_list" as const,
-    steps: [{ id: "check", text: "Run checks", status: "running" as const }],
-  })),
-};
+const activities: OrchestrationThreadActivity[] = Array.from({ length: 500 }, (_, index) => ({
+  id: EventId.make(`activity-${index}`),
+  turnId,
+  sequence: index,
+  createdAt: new Date(start + index * 1_000).toISOString(),
+  kind: index % 100 === 0 ? "turn.plan.updated" : "tool.completed",
+  summary: "Benchmark activity",
+  tone: "info",
+  payload: index % 100 === 0 ? { plan: [{ step: "Run checks", status: "inProgress" }] } : {},
+}));
 const hours = Array.from({ length: 24 }, (_, index) =>
   new Date(start + index * 3_600_000).toISOString(),
 );
@@ -65,9 +61,9 @@ describe("client performance", () => {
       getLatestThreadForProject(threads, projectId, "updated_at");
     }).run();
   });
-  test("derive current plan from 5 normalized plans", async ({ bench }) => {
+  test("derive plan from 500 activities with 5 plan updates", async ({ bench }) => {
     await bench("derive", () => {
-      deriveActivePlanState(projection, runId);
+      deriveActivePlanState(activities, turnId);
     }).run();
   });
   test("format 24 hourly usage labels and tooltips", async ({ bench }) => {

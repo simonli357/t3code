@@ -66,7 +66,12 @@ export function applyUsageLimitsUpdate(input: {
   if (update.windows.length === 0 || previous?.unavailable?.reason === "unsupported") {
     return previous;
   }
-  const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
+  const merged = new Map<string, ServerProviderUsageWindow>(
+    previous?.windows.map(
+      (window) =>
+        [window.id, { ...window, checkedAt: window.checkedAt ?? previous.checkedAt }] as const,
+    ),
+  );
   // Codex sends this notification beside every token-usage tick, almost
   // always with unchanged numbers. Decide "nothing changed" per window on
   // the way through so the no-op case never allocates a new snapshot.
@@ -75,12 +80,24 @@ export function applyUsageLimitsUpdate(input: {
     const existing = merged.get(window.id);
     const next: ServerProviderUsageWindow = {
       ...window,
+      checkedAt: input.checkedAt,
       usedPercent: clampPercent(window.usedPercent),
       ...(window.resetsAt === undefined && existing?.resetsAt !== undefined
         ? { resetsAt: existing.resetsAt }
         : {}),
       ...(window.windowDurationMins === undefined && existing?.windowDurationMins !== undefined
         ? { windowDurationMins: existing.windowDurationMins }
+        : {}),
+      ...(window.applicableModels === undefined && existing?.applicableModels !== undefined
+        ? { applicableModels: existing.applicableModels }
+        : {}),
+      ...(window.modelScope === undefined && existing?.modelScope !== undefined
+        ? { modelScope: existing.modelScope }
+        : {}),
+      ...(window.enforcement === undefined &&
+      existing?.enforcement !== undefined &&
+      (window.modelScope === undefined || window.modelScope === existing.modelScope)
+        ? { enforcement: existing.enforcement }
         : {}),
     };
     if (existing === undefined || !usageWindowEquals(existing, next)) {
@@ -94,6 +111,12 @@ export function applyUsageLimitsUpdate(input: {
   return {
     ...makeUsageLimits({ checkedAt: input.checkedAt, windows: merged.values() }),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
+    ...(previous?.shortWindowAbsent !== undefined
+      ? { shortWindowAbsent: previous.shortWindowAbsent }
+      : {}),
+    ...(previous?.shortWindowAbsentCheckedAt !== undefined
+      ? { shortWindowAbsentCheckedAt: previous.shortWindowAbsentCheckedAt }
+      : {}),
   };
 }
 
@@ -103,8 +126,13 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
     a.kind === b.kind &&
     a.label === b.label &&
     a.usedPercent === b.usedPercent &&
+    a.inactive === b.inactive &&
     a.resetsAt === b.resetsAt &&
-    a.windowDurationMins === b.windowDurationMins
+    a.windowDurationMins === b.windowDurationMins &&
+    a.enforcement?.windowId === b.enforcement?.windowId &&
+    a.enforcement?.checkedAt === b.enforcement?.checkedAt &&
+    JSON.stringify(a.applicableModels) === JSON.stringify(b.applicableModels) &&
+    a.modelScope === b.modelScope
   );
 }
 

@@ -10,6 +10,16 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).toContain("call list_thread_pull_requests and link any PR");
   });
 
+  // Every provider adapter appends this text, so it is how a master told no computer learns to
+  // compare them, and that a computer, account or model the user named is never overridden.
+  it("tells masters to compare connected computers when none was named, as advice only", () => {
+    const instructions = buildRuntimeInstructions({ harness: "Codex" });
+    expect(instructions).toContain("When the user names no computer for a new worker");
+    expect(instructions).toContain("t3_recommend_computer");
+    expect(instructions).toContain("advice only");
+    expect(instructions).toContain("a computer, account or model the user named stays exact");
+  });
+
   it("keeps known model and effort metadata on one line", () => {
     expect(
       buildRuntimeInstructions({

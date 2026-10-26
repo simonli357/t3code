@@ -1,4 +1,3 @@
-import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
@@ -12,7 +11,7 @@ import {
 import { useCallback, useEffect, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
-import { useEnvironmentIds } from "../state/environments";
+import { useEnvironments } from "../state/environments";
 import { environmentShell } from "../state/shell";
 import {
   hasDesktopNotifications,
@@ -25,7 +24,7 @@ import { resolveSidebarThreadStatus } from "./Sidebar.logic";
 import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
-  const environmentIds = useEnvironmentIds();
+  const { environments } = useEnvironments();
   const mode = useClientSettings((settings) => settings.notificationMode);
   const inAppNotificationsEnabled = useClientSettings(
     (settings) => settings.inAppNotificationsEnabled,
@@ -40,7 +39,7 @@ export function ThreadNotificationCoordinator() {
   }, []);
 
   useEffect(() => {
-    const activeIds = new Set(environmentIds);
+    const activeIds = new Set(environments.map(({ environmentId }) => environmentId));
     const count = pending.current.size;
     for (const [tag, { environmentId, notification }] of pending.current) {
       if (activeIds.has(environmentId)) continue;
@@ -48,7 +47,7 @@ export function ThreadNotificationCoordinator() {
       pending.current.delete(tag);
     }
     if (count !== pending.current.size) setNotificationBadge(pending.current.size);
-  }, [environmentIds]);
+  }, [environments]);
 
   useEffect(() => {
     const clear = () => {
@@ -79,10 +78,10 @@ export function ThreadNotificationCoordinator() {
 
   if (mode === "off" && !inAppNotificationsEnabled) return null;
 
-  return environmentIds.map((environmentId) => (
+  return environments.map((environment) => (
     <EnvironmentNotifications
-      key={environmentId}
-      environmentId={environmentId}
+      key={environment.environmentId}
+      environmentId={environment.environmentId}
       onNotification={onNotification}
     />
   ));
@@ -114,21 +113,18 @@ function EnvironmentNotifications({
       return;
     }
     const next = new Map<ThreadId, { attention: string | null; completion: number | null }>();
-    for (const rawThread of shell.snapshot.value.threads) {
-      if (rawThread.lineage.relationshipToParent === "subagent") continue;
-      const thread = presentThreadShell(environmentId, rawThread);
+    for (const thread of shell.snapshot.value.threads) {
       let status = resolveSidebarThreadStatus(thread);
-      if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
+      if (status === "ready" && thread.latestTurn?.state === "error") status = "failed";
       const prior = previous.current.get(thread.id);
       const attention =
-        status === "input" || status === "approval" || status === "failed" || status === "limited"
-          ? `${thread.latestRun?.runId ?? ""}:${status}`
+        status === "input" || status === "approval" || status === "failed"
+          ? `${thread.latestTurn?.turnId ?? ""}:${status}`
           : null;
-      const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      // Commands left running (a dev server) read as ready; subagents and monitors wait.
+      const completedAt = Date.parse(thread.latestTurn?.completedAt ?? "");
       const completion =
         status === "ready" &&
-        thread.latestRun?.status === "completed" &&
+        thread.latestTurn?.state === "completed" &&
         Number.isFinite(completedAt)
           ? completedAt
           : (prior?.completion ?? null);
@@ -146,11 +142,9 @@ function EnvironmentNotifications({
           ? "Thread completed"
           : status === "approval"
             ? "Approval needed"
-            : status === "limited"
-              ? "Usage limit reached"
-              : status === "failed"
-                ? "Thread failed"
-                : "Input needed";
+            : status === "failed"
+              ? "Thread failed"
+              : "Input needed";
       if (hasNotificationSound(mode)) {
         void playNotificationSound(kind, () =>
           hasNotificationSound(getClientSettings().notificationMode),

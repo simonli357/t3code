@@ -28,13 +28,11 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import {
   codexModelFamily,
   createModelCapabilities,
-  formatCodexModelName,
   readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
-  AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   type ServerProviderDraft,
@@ -63,6 +61,11 @@ type CodexRateLimitsProbe =
   | { readonly failure: string };
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
+// Codex's probe does a full handshake plus account, models, and skills requests, which can
+// legitimately run past the shared 10s AUTH_PROBE_TIMEOUT_MS on a loaded or slow machine
+// (most often reported on Windows). Give Codex its own longer budget instead of raising the
+// timeout for every provider.
+const CODEX_AUTH_PROBE_TIMEOUT_MS = 20_000;
 
 const CODEX_PRESENTATION = {
   displayName: "Codex",
@@ -222,12 +225,19 @@ export function mapCodexModelCapabilities(
   });
 }
 
+const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string => {
+  // Capitalize 'gpt' to 'GPT-' and capitalize any letter following a dash
+  return model.displayName
+    .replace(/^gpt/i, "GPT") // Handle start with 'gpt' or 'GPT'
+    .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
+};
+
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
-    name: formatCodexModelName(model.displayName),
+    name: toDisplayName(model),
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     capabilities: mapCodexModelCapabilities(model),
@@ -373,7 +383,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
   // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
   // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`.
+  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = {
@@ -608,17 +618,30 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     });
   }
 
-  const probeResult = yield* probe({
-    binaryPath: codexSettings.binaryPath,
-    homePath: codexSettings.homePath,
-    launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
-    cwd: process.cwd(),
-    customModels: codexSettings.customModels,
-    environment: resolvedEnvironment,
-    ...(managedAuth ? { skipNativeUsage: true } : {}),
-  }).pipe(
+  const runProbe = Effect.suspend(() =>
+    probe({
+      binaryPath: codexSettings.binaryPath,
+      homePath: codexSettings.homePath,
+      launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
+      cwd: process.cwd(),
+      customModels: codexSettings.customModels,
+      environment: resolvedEnvironment,
+      ...(managedAuth ? { skipNativeUsage: true } : {}),
+    }),
+  ).pipe(
+    // Process shutdown must finish, but must not turn a successful reply into
+    // a timeout. Each attempt owns and closes its own app-server scope.
+    Effect.timeoutOption(Duration.millis(CODEX_AUTH_PROBE_TIMEOUT_MS)),
     Effect.scoped,
-    Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
+  );
+  const probeResult = yield* runProbe.pipe(
+    Effect.flatMap((snapshot) =>
+      Option.isNone(snapshot)
+        ? Effect.logDebug("Codex provider probe timed out; retrying with a fresh app-server.").pipe(
+            Effect.andThen(runProbe),
+          )
+        : Effect.succeed(snapshot),
+    ),
     Effect.result,
   );
 
@@ -677,6 +700,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
           })
         : codexRateLimitsToLimits({
+            completeRead: true,
             snapshot: snapshot.rateLimits.snapshot,
             rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
             resetCredits: snapshot.rateLimits.resetCredits,

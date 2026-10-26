@@ -6,7 +6,6 @@ import {
   useRoute,
   type StaticScreenProps,
 } from "@react-navigation/native";
-import type { EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Linking, Platform, View } from "react-native";
@@ -24,8 +23,6 @@ type ConnectionsNewRouteParams = {
   readonly mode?: string;
   readonly pairingUrl?: string;
   readonly autoConnect?: string;
-  /** Adds a route to this saved machine instead of a new environment. */
-  readonly routeFor?: EnvironmentId;
 };
 
 export function ConnectionsNewRouteScreen({
@@ -161,7 +158,7 @@ export function ConnectionsNewRouteScreen({
       setIsSubmitting(true);
       onChangeConnectionPairingUrl(pairingUrl);
       try {
-        const result = await onConnectPress(pairingUrl, params.routeFor);
+        const result = await onConnectPress(pairingUrl);
         if (AsyncResult.isSuccess(result)) {
           if (replaceWithHome || !navigation.canGoBack()) {
             navigation.dispatch(StackActions.replace("Home"));
@@ -173,7 +170,7 @@ export function ConnectionsNewRouteScreen({
         setIsSubmitting(false);
       }
     },
-    [navigation, onChangeConnectionPairingUrl, onConnectPress, params.routeFor],
+    [navigation, onChangeConnectionPairingUrl, onConnectPress],
   );
 
   const handleSubmit = useCallback(async () => {
