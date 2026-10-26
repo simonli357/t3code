@@ -125,6 +125,8 @@ const harness = Effect.gen(function* () {
             Layer.succeed(HostResources.HostResources, { read: resources }),
             Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
               getProjectShells: () => Effect.succeed([]),
+              getShellSnapshot: () =>
+                Effect.succeed({ snapshotSequence: 0, projects: [], threads: [], updatedAt: "" }),
             } as never),
             Layer.succeed(FileSystem.FileSystem, fileSystem),
             NodePath.layer,
@@ -176,7 +178,7 @@ const harness = Effect.gen(function* () {
 
 const inspect = (
   service: Computers.Computers["Service"],
-  section: "files" | "activity" | "folders",
+  section: "files" | "activity" | "folders" | "disks" | "holdings" | "holding",
   more: object = {},
 ) =>
   service
@@ -749,6 +751,43 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       }),
   );
 
+  it.effect("answers the storage sections from the same service, with kept bundles under Archives", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      yield* h.configure();
+      const scope = yield* Scope.make();
+      const service = yield* h.start(scope);
+      // The first look starts the library catalog in the background, as the file search does.
+      yield* inspect(service, "holdings", { groups: [] });
+      yield* h.written((file) => file.includes("/computers/catalog/"));
+      const holdings = (yield* inspect(service, "holdings", { groups: ["archives"] })).storageHoldings!;
+      expect(holdings.groups.map((group) => group.group)).toEqual([
+        "workspaces",
+        "archives",
+        "backups",
+        "other",
+      ]);
+      const archives = holdings.groups[1]!;
+      expect(archives).toMatchObject({ status: "complete", count: 1 });
+      expect(archives.entries[0]).toMatchObject({
+        id: `archive:${bundle.receipt.id}`,
+        title: "Evidence",
+        subtitle: "t3 · evidence",
+        // The library is reached over ssh: its bytes are not on this computer.
+        local: false,
+        size: { bytes: "selected".length + "notes".length, basis: "manifest", complete: true },
+        archive: { backup: "published", files: 2 },
+      });
+      // Other groups carry totals only, because only Archives was asked for.
+      expect(holdings.groups.filter((group) => group.entries.length).map((group) => group.group)).toEqual([
+        "archives",
+      ]);
+      const disks = (yield* inspect(service, "disks")).storageDisks!;
+      expect(disks.host.length).toBeGreaterThan(0);
+      yield* Scope.close(scope, Exit.void);
+    }),
+  );
+
   it.effect("restores a kept file onto this computer and records the restore", () =>
     Effect.gen(function* () {
       const h = yield* harness;
@@ -1182,6 +1221,25 @@ it.layer(NodeServices.layer)("the computers capacity reading", (it) => {
       yield* TestClock.adjust("31 seconds");
       yield* service.capacity().pipe(linux);
       expect(calls).toEqual(["df", "df"]);
+      yield* Scope.close(scope, Exit.void);
+    }),
+  );
+
+  it.effect("keeps the overview's disk list to real volumes", () =>
+    Effect.gen(function* () {
+      const h = yield* harness;
+      const { runner } = disksRunner(
+        df([
+          ["/dev/nvme0n1p2", 900 * GIB, 780 * GIB, "/"],
+          ["tmpfs", 8 * GIB, 0, "/run"],
+          ["/dev/loop4", 100 * 2 ** 20, 100 * 2 ** 20, "/snap/core/4"],
+          ["/dev/nvme0n1p1", 1 * GIB, 0.1 * GIB, "/boot/efi"],
+        ]),
+      );
+      const scope = yield* Scope.make();
+      const service = yield* h.start(scope, runner, h.base, Effect.succeed(reading)).pipe(linux);
+      const overview = yield* service.inspect({ section: "overview" }).pipe(linux);
+      expect(overview.disks.map((disk) => disk.path)).toEqual(["/"]);
       yield* Scope.close(scope, Exit.void);
     }),
   );

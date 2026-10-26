@@ -92,6 +92,11 @@ export class SessionWorkspaces extends Context.Service<
     readonly get: (
       threadId: string,
     ) => Effect.Effect<SessionWorkspace | null, SessionWorkspaceError>;
+    /**
+     * Every active session workspace of this environment, for read-only inventories. Rows that
+     * cannot be decoded are skipped; the list is bounded.
+     */
+    readonly list: () => Effect.Effect<ReadonlyArray<SessionWorkspace>, SessionWorkspaceError>;
     readonly verify: (
       threadId: string,
     ) => Effect.Effect<SessionWorkspace | null, SessionWorkspaceError>;
@@ -686,10 +691,20 @@ const make = Effect.gen(function* () {
     lock.withPermit,
     Effect.mapError(failure("renewal")),
   );
+  const list = () =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        binding_json: string;
+      }>`SELECT binding_json FROM session_workspaces WHERE active = 1 LIMIT 5000`;
+      return yield* Effect.forEach(rows, (row) =>
+        decode(row.binding_json).pipe(Effect.option),
+      ).pipe(Effect.map((jobs) => jobs.flatMap((job) => (job._tag === "Some" ? [job.value] : []))));
+    }).pipe(Effect.mapError(failure("inventory")));
   return SessionWorkspaces.of({
     prepare,
     inherit,
     get,
+    list,
     verify,
     movePath,
     registerMove,

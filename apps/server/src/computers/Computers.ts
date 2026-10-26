@@ -16,6 +16,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -24,7 +25,15 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
-import { buildArchive, fromLibraryManifest, toSource, type Archive } from "./Archive.ts";
+import * as ServerSettingsService from "../serverSettings.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
+import {
+  buildArchive,
+  fromLibraryManifest,
+  toSource,
+  type Archive,
+  type ArchiveSource,
+} from "./Archive.ts";
 import {
   indexableRoots,
   indexFiles,
@@ -32,7 +41,7 @@ import {
   searchFiles,
   sortFiles,
 } from "./ComputerFiles.ts";
-import { disks, folders, processes } from "./ComputerTelemetry.ts";
+import { disks, folders, processes, realVolumes } from "./ComputerTelemetry.ts";
 import {
   keepActivity,
   isPublished,
@@ -46,6 +55,7 @@ import {
   type ReceiptFile,
 } from "./Workenv.ts";
 import { listNames, writeJson } from "./ComputerStore.ts";
+import { makeStorage, type ShellInfo } from "./Storage.ts";
 import { decodeCatalogFile, loadCatalog, newCatalog, refreshCatalog } from "./LibraryCatalog.ts";
 import { isWithin } from "./paths.ts";
 import { readHandoffs, readJobs } from "./WorkenvActivity.ts";
@@ -392,6 +402,7 @@ const make = Effect.gen(function* () {
   let archiveState: {
     signature: string;
     archive: Archive;
+    sources: readonly ArchiveSource[];
     sorted: readonly ComputerFile[];
     builtAt: number;
   } | null = null;
@@ -417,6 +428,7 @@ const make = Effect.gen(function* () {
     archiveState = {
       signature,
       archive,
+      sources,
       sorted: sortFiles(archive.files),
       builtAt: yield* Clock.currentTimeMillis,
     };
@@ -528,6 +540,118 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /** The library catalog is brought up to date in the background, at most every `REFRESH_AFTER_MS`. */
+  const kickCatalog = Effect.fn("Computers.kickCatalog")(function* (
+    workenv: WorkenvConfig,
+    refresh: boolean,
+    sampledAt: number,
+  ) {
+    if (
+      cataloging ||
+      !(refresh || !catalogAttemptedAt || sampledAt - catalogAttemptedAt > REFRESH_AFTER_MS)
+    )
+      return;
+    cataloging = true;
+    catalogAttemptedAt = sampledAt;
+    yield* refreshCatalog(catalog, workenv, { cache: catalogDirectory, staging: directory }).pipe(
+      Effect.tap(() => pruneProofs),
+      Effect.tap((problems) =>
+        Effect.sync(() => {
+          catalogErrors = problems;
+        }),
+      ),
+      Effect.catch((cause) =>
+        Effect.sync(() => {
+          catalogErrors = [`The library catalog is unavailable: ${messageOf(cause)}`];
+        }),
+      ),
+      Effect.ensuring(
+        Effect.sync(() => {
+          cataloging = false;
+        }),
+      ),
+      Effect.provideContext(context),
+      Effect.forkIn(scope),
+    );
+  });
+
+  // --- storage views -----------------------------------------------------------------------------
+  const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
+  const serverSettings = yield* Effect.serviceOption(ServerSettingsService.ServerSettingsService);
+  const storage = yield* makeStorage({
+    directory,
+    workenv: load.pipe(Effect.provideContext(context)),
+    workenvJobs: (workenv) =>
+      readActivity(workenv).pipe(
+        Effect.map((read) =>
+          read.jobs.flatMap((job) =>
+            job.source ? [{ root: job.source, project: job.label, status: job.status }] : [],
+          ),
+        ),
+        Effect.orElseSucceed(() => []),
+        Effect.provideContext(context),
+      ),
+    archive: (workenv) =>
+      currentArchive(workenv).pipe(
+        Effect.map((state) => ({
+          sources: state.sources,
+          problem:
+            catalogErrors[0] ??
+            local?.errors[0] ??
+            (state.archive.truncated
+              ? "The kept archive is larger than can be listed; the oldest bundles are not shown."
+              : null),
+        })),
+        Effect.catch((cause) =>
+          Effect.succeed({
+            sources: [] as readonly ArchiveSource[],
+            problem: `The kept archive could not be read: ${messageOf(cause)}`,
+          }),
+        ),
+        Effect.provideContext(context),
+      ),
+    verified: () => verified,
+    sessions: Option.isSome(workspaces)
+      ? Effect.suspend(() => workspaces.value.list()).pipe(
+          Effect.map((jobs) => jobs.map((job) => ({ threadId: job.threadId, root: job.root }))),
+          Effect.orElseSucceed(() => []),
+        )
+      : Effect.succeed([]),
+    shells: Effect.suspend(() => projectQuery.getShellSnapshot()).pipe(
+      Effect.map((snapshot): ShellInfo => ({
+        projects: snapshot.projects.map((project) => ({
+          id: project.id,
+          title: project.title,
+          workspaceRoot: project.workspaceRoot,
+        })),
+        threads: snapshot.threads.map((thread) => ({
+          id: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          archived: thread.archivedAt !== null,
+          running: thread.session?.status === "running" || thread.session?.status === "starting",
+          updatedAt: Date.parse(thread.updatedAt) || null,
+          ownerId:
+            thread.organization?.owner?.environmentId == null
+              ? (thread.organization?.owner?.threadId ?? null)
+              : null,
+          ownerElsewhere: thread.organization?.owner?.environmentId != null,
+          workerIds: (thread.organization?.workers ?? [])
+            .filter((worker) => worker.environmentId == null)
+            .map((worker) => worker.threadId),
+        })),
+      })),
+      // Titles and owners are a courtesy: without them the folders are still listed.
+      Effect.catchCause(() => Effect.succeed<ShellInfo>({ projects: [], threads: [] })),
+    ),
+    agentWorkRoot: Option.isSome(serverSettings)
+      ? serverSettings.value.getSettings.pipe(
+          Effect.map((settings) => settings.agentWorkRoot.trim() || null),
+          Effect.orElseSucceed(() => null),
+        )
+      : Effect.succeed(null),
+  });
+
   const inspect = Effect.fn("Computers.inspect")(function* (input: ComputerInspectInput) {
     const sampledAt = yield* Clock.currentTimeMillis;
     const resources = input.section === "overview" ? yield* host.read : null;
@@ -580,6 +704,25 @@ const make = Effect.gen(function* () {
         errors: [...base.errors, ...listing.notices],
       };
     }
+    if (input.section === "disks")
+      return {
+        ...base,
+        storageDisks: yield* storage.disks(Boolean(input.refresh)),
+      };
+    if (input.section === "holdings") {
+      const { config: workenv } = yield* load;
+      if (workenv) yield* kickCatalog(workenv, Boolean(input.refresh), sampledAt);
+      return {
+        ...base,
+        storageHoldings: yield* storage.holdings(
+          Boolean(input.refresh),
+          input.groups,
+          Math.min(input.limit ?? 400, 5000),
+        ),
+      };
+    }
+    if (input.section === "holding")
+      return { ...base, storageDetail: yield* storage.detail(input.entry ?? "") };
     const { config: workenv, error: workenvError } = yield* load;
     const roots = yield* projectRoots(workenv);
     const projectNames = [...new Set(roots.map((root) => root.project))].sort();
@@ -587,6 +730,8 @@ const make = Effect.gen(function* () {
     if (input.section === "overview") {
       // Disks are the one part of the overview that depends on the platform: without them the
       // computer still shows its CPU, memory and projects, and says why.
+      // One measurement serves every client and the placement reading; the overview lists only the
+      // real volumes in it (see `realVolumes`), the storage views carry the full inventory.
       const read = yield* readDisks(sampledAt).pipe(Effect.result);
       if (read._tag === "Failure")
         return {
@@ -594,7 +739,12 @@ const make = Effect.gen(function* () {
           projects: projectNames,
           errors: [...withError, `Disks could not be read: ${read.failure.message}`],
         };
-      return { ...base, disks: read.success.disks, projects: projectNames, errors: withError };
+      return {
+        ...base,
+        disks: realVolumes(read.success.disks, platform),
+        projects: projectNames,
+        errors: withError,
+      };
     }
     if (input.section === "activity") {
       const rows: ComputerActivity[] = [...(yield* Ref.get(actions))];
@@ -652,30 +802,7 @@ const make = Effect.gen(function* () {
         Effect.forkIn(scope),
       );
     }
-    if (workenv && !cataloging && (refresh || stale(catalogAttemptedAt))) {
-      cataloging = true;
-      catalogAttemptedAt = sampledAt;
-      yield* refreshCatalog(catalog, workenv, { cache: catalogDirectory, staging: directory }).pipe(
-        Effect.tap(() => pruneProofs),
-        Effect.tap((problems) =>
-          Effect.sync(() => {
-            catalogErrors = problems;
-          }),
-        ),
-        Effect.catch((cause) =>
-          Effect.sync(() => {
-            catalogErrors = [`The library catalog is unavailable: ${messageOf(cause)}`];
-          }),
-        ),
-        Effect.ensuring(
-          Effect.sync(() => {
-            cataloging = false;
-          }),
-        ),
-        Effect.provideContext(context),
-        Effect.forkIn(scope),
-      );
-    }
+    if (workenv) yield* kickCatalog(workenv, refresh, sampledAt);
     if (workenv) {
       yield* readLocal(workenv);
       yield* pruneProofs;

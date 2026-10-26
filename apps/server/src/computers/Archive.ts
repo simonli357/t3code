@@ -72,15 +72,8 @@ export function fromLibraryManifest(
 
 const PRECEDENCE = { request: 0, receipt: 1, library: 2 } as const;
 
-export function buildArchive(
-  sources: readonly ArchiveSource[],
-  context: {
-    readonly config: WorkenvConfig;
-    readonly platform: NodeJS.Platform;
-    readonly verified: ReadonlyMap<string, BackupVerification>;
-  },
-): Archive {
-  const { config, platform, verified } = context;
+/** One published bundle per id: the record closest to what this computer wrote wins. */
+export function chooseBundles(sources: readonly ArchiveSource[]): Map<string, ArchiveSource> {
   const chosen = new Map<string, ArchiveSource>();
   for (const source of sources) {
     const { id, status, writer_path: writerPath, superseded } = source.receipt;
@@ -92,6 +85,19 @@ export function buildArchive(
     if (!previous || PRECEDENCE[source.origin] < PRECEDENCE[previous.origin])
       chosen.set(id, source);
   }
+  return chosen;
+}
+
+export function buildArchive(
+  sources: readonly ArchiveSource[],
+  context: {
+    readonly config: WorkenvConfig;
+    readonly platform: NodeJS.Platform;
+    readonly verified: ReadonlyMap<string, BackupVerification>;
+  },
+): Archive {
+  const { config, platform, verified } = context;
+  const chosen = chooseBundles(sources);
   const bundles: ArchiveBundle[] = [];
   const files: ComputerFile[] = [];
   let truncated = false;

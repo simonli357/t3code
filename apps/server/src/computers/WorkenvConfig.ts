@@ -21,10 +21,14 @@ const Policy = Schema.Struct({
 const Config = Schema.Struct({
   state: Schema.String,
   jobs_root: Schema.optionalKey(Schema.String),
+  /** Where workenv keeps its capacity configuration (per-computer reserves and paths). */
+  capacity_config: Schema.optionalKey(Schema.String),
   projects: Schema.Record(
     Schema.String,
     Schema.Struct({
       source: Schema.String,
+      /** `directory` for original data that is not a Git repository. */
+      mode: Schema.optionalKey(Schema.String),
       jobs_root: Schema.optionalKey(Schema.String),
       keep: Schema.optionalKey(Policy),
     }),

@@ -150,6 +150,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Worker tools and session messages can reach linked peer environments. */
   peerEnvironments: Schema.optionalKey(Schema.Boolean),
   computers: Schema.optionalKey(Schema.Boolean),
+  /** The `disks`, `holdings` and `holding` sections of the Computers inspection. */
+  computersStorage: Schema.optionalKey(Schema.Boolean),
   claudeSubagentStop: Schema.optionalKey(Schema.Boolean),
   providerSwitching: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin.reorder (and orderKey on thread.pin).

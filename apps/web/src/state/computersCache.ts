@@ -1,4 +1,4 @@
-import { ComputerInspection } from "@t3tools/contracts";
+import { ComputerInspection, StorageDisks, StorageHoldings } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const Snapshot = Schema.Struct({
@@ -7,6 +7,11 @@ const Snapshot = Schema.Struct({
   activity: Schema.NullOr(ComputerInspection),
   /** When this browser last read the file index, on its own clock; a computer's clock may differ. */
   filesReadAt: Schema.NullOr(Schema.Number),
+  /** The storage views' last known data; absent in what older versions saved. */
+  storageDisks: Schema.optionalKey(Schema.NullOr(StorageDisks)),
+  storageHoldings: Schema.optionalKey(Schema.NullOr(StorageHoldings)),
+  /** When this browser last read either of them, on its own clock. */
+  storageReadAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
 });
 export type ComputerCache = typeof Snapshot.Type;
 const decodeSnapshot = Schema.decodeUnknownSync(Snapshot);
@@ -23,7 +28,15 @@ function open(): Promise<IDBDatabase> {
 export async function readComputerCache(environmentId: string): Promise<ComputerCache | null> {
   const db = await open();
   try {
-    const sections = ["overview", "files", "activity", "filesReadAt"] as const;
+    const sections = [
+      "overview",
+      "files",
+      "activity",
+      "filesReadAt",
+      "storageDisks",
+      "storageHoldings",
+      "storageReadAt",
+    ] as const;
     const store = db.transaction("snapshots").objectStore("snapshots");
     const values = await Promise.all(
       sections.map(

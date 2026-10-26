@@ -13,6 +13,36 @@ computer's T3 server must be recent enough to report this; an older one says so.
 History fills while the page is open, so a computer nobody has looked at recently shows a short
 line. A size or time shown as "Not measured" or "Not verified" was not checked; it is never zero.
 
+## Storage
+
+Two more views sit beside the overview: **Disks** and **Workspaces & Archives**. Switch between them
+at the top of the page, or use **Open disks** and **Open workspaces and archives** in the command
+palette. Both work for every connected computer; one whose T3 server is too old says so.
+
+**Disks** lists each computer's physical disks and the volumes on them. Memory, kernel views,
+mounted images and other names for the same filesystem are not disks: they, and boot, swap and
+recovery partitions, are under **Advanced details**, which starts closed. Storage that another
+computer serves is listed apart as **Remote storage**, with that computer and the folder behind it.
+For each volume the page shows what the filesystem reports used, what you may still write, the
+reserve configured for that computer, and the agent-work headroom that is left of it. Select a
+volume to see its folders by size. A figure that could not be measured says so; it is never zero.
+
+**Workspaces & Archives** has four groups, all closed until you open them: **Workspaces** (whole
+session jobs: source, temporary files, builds, caches, outputs and evidence), **Archives** (kept
+results), **Backups** and **Other retained project data** (permanent source, original data and
+installed runtimes). A header counts its entries and the disk space they take, and says what the
+number leaves out: entries not fully measured (the total is then "at least"), files with several
+hard links that another entry may also count, and RAM-backed folders, which are listed with their
+job and their limit but are not disk space. An entry stored on another computer is listed with that
+computer and never counted against this one's disks. Sizes are measured in the background, one
+folder at a time, after you open the view, and each shows when it was measured. Open an entry to see
+its owner, location, state, expiry and the reason it is retained; a workspace also shows what it is
+made of. A group asks the computers for its entries when you open it, newest first; **Load more
+entries** asks for more of a long list.
+
+State, expiry, retention reasons, kept results and backups come from the lifecycle tool installed on
+the computer (Workenv). Without it a group says what is not reported instead of guessing.
+
 ## Find a file
 
 Search covers project folders, Workenv work folders and the kept archive on every connected
