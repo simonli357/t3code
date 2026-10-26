@@ -745,13 +745,33 @@ const make = Effect.gen(function* () {
       if (request.op === "probe") {
         if (!request.input || !request.driver || !request.modelSelection || !request.head)
           return yield* new SessionMoveError({ message: "Incomplete session-move probe." });
-        return yield* targetProbe(
+        if (request.manifest) {
+          const manifest = request.manifest;
+          if (
+            manifest.sourceEnvironmentId !== from ||
+            manifest.targetEnvironmentId !== local.environmentId ||
+            manifest.input.requestId !== request.requestId ||
+            encode(manifest.input) !== encode(request.input) ||
+            manifest.driver !== request.driver ||
+            encode(manifest.modelSelection) !== encode(request.modelSelection) ||
+            manifest.workspace.head !== request.head ||
+            (yield* row(request.requestId)) ||
+            (Option.isSome(workspaces) &&
+              (yield* sql`SELECT 1 FROM session_workspaces WHERE reservation_id = ${`move:${request.requestId}`}`)
+                .length > 0)
+          )
+            return yield* new SessionMoveError({
+              message: "Only an unreserved transfer can reconcile its destination workspace.",
+            });
+        }
+        const probe = yield* targetProbe(
           from,
           request.input,
           request.driver,
           request.modelSelection,
           request.head,
         );
+        return { ...probe, ...(request.manifest ? { unreserved: true } : {}) };
       }
       if (request.op === "begin") {
         const manifest = request.manifest;
@@ -990,7 +1010,7 @@ const make = Effect.gen(function* () {
         yield* sql`UPDATE custom_session_moves SET state = 'copying', error = NULL, updated_at = ${yield* now}
         WHERE id = ${value.id} AND state IN ('queued', 'copying', 'prepared') RETURNING id`;
       if (!claimed.length) return;
-      const manifest = yield* capture(value);
+      let manifest = yield* capture(value);
       if ((yield* row(value.id))?.state !== "copying") return;
       const call = (op: string, extra: Record<string, unknown> = {}) =>
         peers.call(
@@ -998,7 +1018,41 @@ const make = Effect.gen(function* () {
           { _tag: "sessionMove", op, requestId: input.requestId, ...extra },
           120_000,
         );
-      const remote = recordObject(yield* call("begin", { manifest }));
+      const remote = recordObject(
+        yield* call("begin", { manifest }).pipe(
+          Effect.catchTag("PeerRejected", (cause) =>
+            Effect.gen(function* () {
+              // A legacy capture may name a now-occupied job root. Only the authenticated
+              // destination, before it owns any receipt, can offer a replacement path.
+              const probe = recordObject(
+                yield* call("probe", {
+                  input: manifest.input,
+                  driver: manifest.driver,
+                  modelSelection: manifest.modelSelection,
+                  head: manifest.workspace.head,
+                  manifest,
+                }),
+              );
+              if (
+                probe.unreserved !== true ||
+                typeof probe.cwd !== "string" ||
+                probe.cwd === manifest.targetCwd
+              )
+                return yield* cause;
+              const revised = { ...manifest, targetCwd: probe.cwd };
+              const changed =
+                yield* sql`UPDATE custom_session_moves SET manifest_json = ${encode(revised)}
+            WHERE id = ${value.id} AND state = 'copying' AND manifest_json = ${encode(manifest)} RETURNING id`;
+              if (!changed.length)
+                return yield* new SessionMoveError({
+                  message: "The move changed during workspace reconciliation.",
+                });
+              manifest = revised;
+              return yield* call("begin", { manifest });
+            }),
+          ),
+        ),
+      );
       if (remote.state === "cancelled") return;
       if (remote.state === "copying") {
         const staging = yield* stagingDirectory(value);

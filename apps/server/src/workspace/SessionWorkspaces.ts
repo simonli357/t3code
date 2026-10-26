@@ -226,7 +226,7 @@ const make = Effect.gen(function* () {
     config: ServerSettings,
   ): SessionWorkspace => ({
     version: 1,
-    jobId: jobIdFor(input.threadId),
+    jobId: path.basename(input.root),
     ...input,
     workspaceDirectory: path.join(input.root, "repo"),
     tmpDirectory: path.join(input.root, "tmp"),
@@ -553,7 +553,20 @@ const make = Effect.gen(function* () {
         ORDER BY m.updated_at DESC LIMIT 1`;
       if (cancelled[0]) return (yield* decode(cancelled[0].binding_json)).workspaceDirectory;
       const configured = yield* configuredRoot();
-      return configured ? path.join(configured.root, jobIdFor(threadId), "repo") : null;
+      if (!configured) return null;
+      const root = path.join(configured.root, jobIdFor(threadId));
+      // Legacy work can share a thread's directory name without belonging to T3.
+      // Give this move its own stable root; never adopt or move that existing work.
+      const destination = (yield* fs.exists(root))
+        ? path.join(configured.root, jobIdFor(requestId))
+        : root;
+      if (yield* fs.exists(destination))
+        return yield* new SessionWorkspaceError({
+          threadId,
+          detail:
+            "The move-specific job path already exists without a reservation. Nothing was adopted or replaced.",
+        });
+      return path.join(destination, "repo");
     },
     Effect.mapError(failure("move")),
   );

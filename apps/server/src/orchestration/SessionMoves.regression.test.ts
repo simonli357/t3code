@@ -109,6 +109,7 @@ const makeFixture = (jobs = false) =>
     const offline = new Set<string>();
     let loseCommitResponse = false;
     let wrongNativeId = false;
+    let rejectBegin = false;
     let chunkGate:
       | { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void>; afterChunks?: number }
       | undefined;
@@ -196,6 +197,8 @@ const makeFixture = (jobs = false) =>
               ),
             ),
           call: (target, input) => {
+            if (rejectBegin && (input as { op?: string }).op === "begin")
+              return Effect.fail(new PeerRejected({ message: "Destination preflight refused" }));
             const handler = handlers.get(target);
             if (!handler || offline.has(target))
               return Effect.fail(
@@ -383,6 +386,9 @@ const makeFixture = (jobs = false) =>
       restoreResume: () => {
         wrongNativeId = false;
       },
+      rejectBegin: (value: boolean) => {
+        rejectBegin = value;
+      },
       holdChunk: (value: NonNullable<typeof chunkGate>) => {
         chunkGate = value;
       },
@@ -391,6 +397,152 @@ const makeFixture = (jobs = false) =>
       },
     };
   });
+
+it.effect("reconciles an unreserved legacy capture without adopting the colliding job", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture(true);
+    const { alpha, beta, input } = f;
+    yield* alpha.moves.request(input);
+    f.rejectBegin(true);
+    yield* alpha.moves.drain();
+    const before = decodeUnknown(
+      (yield* alpha.sql<{
+        manifest_json: string;
+      }>`SELECT manifest_json FROM custom_session_moves WHERE id = ${input.requestId}`)[0]!
+        .manifest_json,
+    ) as { targetCwd: string; nativeId: string; files: Files.MoveFile[] };
+    const legacy = NodePath.dirname(before.targetCwd);
+    yield* io(async () => {
+      await NodeFSP.mkdir(NodePath.join(legacy, "evidence"), { recursive: true });
+      await NodeFSP.writeFile(
+        NodePath.join(legacy, "evidence", "original.txt"),
+        "original retained work",
+      );
+    });
+    expect(yield* beta.sql`SELECT 1 FROM session_workspaces`).toHaveLength(0);
+    expect(yield* beta.sql`SELECT 1 FROM custom_session_moves`).toHaveLength(0);
+    f.rejectBegin(false);
+    yield* alpha.moves.request(input);
+    yield* alpha.moves.drain();
+    expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+      state: "complete",
+      error: null,
+      threadId,
+    });
+    const after = decodeUnknown(
+      (yield* alpha.sql<{
+        manifest_json: string;
+      }>`SELECT manifest_json FROM custom_session_moves WHERE id = ${input.requestId}`)[0]!
+        .manifest_json,
+    ) as typeof before;
+    expect(after).toEqual({ ...before, targetCwd: after.targetCwd });
+    expect(after.targetCwd).not.toBe(before.targetCwd);
+    expect(
+      yield* io(() => NodeFSP.readFile(NodePath.join(legacy, "evidence", "original.txt"), "utf8")),
+    ).toBe("original retained work");
+    expect(yield* io(() => NodeFSP.readdir(legacy))).toEqual(["evidence"]);
+    expect(yield* io(() => NodeFSP.readFile(NodePath.join(beta.home, transcriptName)))).toEqual(
+      f.bytes,
+    );
+    const target = Option.getOrThrow(yield* beta.snapshots.getThreadDetailById(threadId));
+    expect(target.messages.map((m) => m.text)).toContain("blue heron 74");
+    const workspace = yield* Workspaces.SessionWorkspaces.pipe(Effect.provide(beta.context));
+    const job = (yield* workspace.get(threadId))!;
+    expect(job.root).toBe(NodePath.dirname(after.targetCwd));
+    expect(job.jobId).toBe(NodePath.basename(job.root));
+    expect(job.reservationId).toBe(`move:${input.requestId}`);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "refuses reconciliation of a workspace reservation even without an incoming receipt",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture(true);
+      const { alpha, beta, input } = f;
+      f.rejectBegin(true);
+      yield* alpha.moves.request(input);
+      yield* alpha.moves.drain();
+      const saved = (yield* alpha.sql<{
+        manifest_json: string;
+      }>`SELECT manifest_json FROM custom_session_moves WHERE id = ${input.requestId}`)[0]!
+        .manifest_json;
+      const manifest = decodeUnknown(saved) as {
+        input: typeof input;
+        driver: string;
+        modelSelection: typeof selection;
+        targetCwd: string;
+        workspace: { head: string };
+      };
+      const workspace = yield* Workspaces.SessionWorkspaces.pipe(Effect.provide(beta.context));
+      yield* workspace.reserveMove({
+        threadId,
+        requestId: input.requestId,
+        sourceDirectory: beta.cwd,
+        cwd: manifest.targetCwd,
+        revision: manifest.workspace.head,
+        branch: Files.moveBranch(input.requestId),
+      });
+      const result = yield* beta.moves
+        .receive("alpha", {
+          _tag: "sessionMove",
+          op: "probe",
+          requestId: input.requestId,
+          input: manifest.input,
+          driver: manifest.driver,
+          modelSelection: manifest.modelSelection,
+          head: manifest.workspace.head,
+          manifest,
+        })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(yield* beta.sql`SELECT 1 FROM custom_session_moves`).toHaveLength(0);
+      expect(yield* beta.sql`SELECT 1 FROM session_workspaces`).toHaveLength(1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("refuses destination reconciliation once the incoming transfer owns a receipt", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture(true);
+    const { alpha, beta, input } = f;
+    f.wrongResume();
+    yield* alpha.moves.request(input);
+    yield* alpha.moves.drain();
+    const saved = (yield* beta.sql<{
+      manifest_json: string;
+    }>`SELECT manifest_json FROM custom_session_moves WHERE id = ${input.requestId}`)[0]!
+      .manifest_json;
+    const manifest = decodeUnknown(saved) as {
+      input: typeof input;
+      driver: string;
+      modelSelection: typeof selection;
+      workspace: { head: string };
+    };
+    const result = yield* beta.moves
+      .receive("alpha", {
+        _tag: "sessionMove",
+        op: "probe",
+        requestId: input.requestId,
+        input: manifest.input,
+        driver: manifest.driver,
+        modelSelection: manifest.modelSelection,
+        head: manifest.workspace.head,
+        manifest,
+      })
+      .pipe(Effect.result);
+    expect(result._tag).toBe("Failure");
+    expect(
+      (yield* beta.sql<{
+        manifest_json: string;
+      }>`SELECT manifest_json FROM custom_session_moves WHERE id = ${input.requestId}`)[0]!
+        .manifest_json,
+    ).toBe(saved);
+    f.restoreResume();
+    yield* alpha.moves.request(input);
+    yield* alpha.moves.drain();
+    expect((yield* alpha.moves.status({ requestId: input.requestId })).state).toBe("complete");
+  }).pipe(Effect.scoped),
+);
 
 for (const jobs of [false, true])
   it.effect(`R2 cancelled partial move retry jobs=${jobs}`, () =>
