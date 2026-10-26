@@ -74,6 +74,27 @@ export const disks = Effect.fn(function* () {
         : [];
     });
 });
+const BOOT_MOUNTS = new Set(["/boot", "/boot/efi", "/efi", "/boot/firmware"]);
+/**
+ * The filesystems of `disks` that are real volumes: on Linux, ones on a block device other than a
+ * loop device (a mounted image is not a disk), once per device, boot partitions left to the
+ * storage views' advanced details. `df` already hides most aliases of one device; this drops the
+ * memory, kernel and image mounts it lists, which are not disks either.
+ */
+export function realVolumes<D extends { path: string; label: string }>(
+  listed: readonly D[],
+  platform: string,
+): D[] {
+  if (platform !== "linux") return [...listed];
+  const byDevice = new Map<string, D>();
+  for (const disk of listed) {
+    if (!disk.label.startsWith("/dev/") || /^\/dev\/loop\d+$/.test(disk.label)) continue;
+    if (BOOT_MOUNTS.has(disk.path)) continue;
+    const known = byDevice.get(disk.label);
+    if (!known || disk.path.length < known.path.length) byDevice.set(disk.label, disk);
+  }
+  return [...byDevice.values()];
+}
 type Sample = {
   pid: number;
   name: string;
