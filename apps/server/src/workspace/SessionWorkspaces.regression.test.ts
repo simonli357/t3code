@@ -238,6 +238,46 @@ it.layer(testLayer)("independent review", (it) => {
       expect(yield* f.fs.exists(cwd)).toBe(false);
     }),
   );
+  it.effect("reserves a separate move job and refuses a collision at that fallback too", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const service = yield* Workspaces.SessionWorkspaces;
+      const threadId = ThreadId.make("move-with-legacy-work");
+      const initial = (yield* service.movePath(threadId, "incoming"))!;
+      const legacy = f.path.dirname(initial);
+      yield* f.fs.makeDirectory(legacy);
+      yield* f.fs.writeFileString(f.path.join(legacy, "original.txt"), "original work");
+      const cwd = (yield* service.movePath(threadId, "incoming"))!;
+      expect(cwd).not.toBe(initial);
+      expect(f.path.dirname(f.path.dirname(cwd))).toBe(f.jobs);
+      yield* f.fs.makeDirectory(f.path.dirname(cwd));
+      yield* f.fs.writeFileString(f.path.join(f.path.dirname(cwd), "other.txt"), "another owner");
+      expect((yield* service.movePath(threadId, "incoming").pipe(Effect.result))._tag).toBe(
+        "Failure",
+      );
+      expect(yield* f.fs.readFileString(f.path.join(legacy, "original.txt"))).toBe("original work");
+      expect(yield* f.fs.readFileString(f.path.join(f.path.dirname(cwd), "other.txt"))).toBe(
+        "another owner",
+      );
+      expect(yield* service.transferDirectory(threadId, "incoming")).toBeNull();
+      const requestId = "separate-incoming";
+      const separate = (yield* service.movePath(threadId, requestId))!;
+      const input = {
+        threadId,
+        requestId,
+        sourceDirectory: f.primary,
+        cwd: separate,
+        revision: (yield* f.run(["rev-parse", "HEAD"])).stdout.trim(),
+        branch: "incoming",
+      };
+      const reservation = (yield* service.reserveMove(input))!;
+      const job = (yield* service.registerMove(input))!;
+      expect(job).toEqual(reservation);
+      expect(job.jobId).toBe(f.path.basename(job.root));
+      expect(yield* service.movePath(threadId, requestId)).toBe(separate);
+      expect(yield* service.reserveMove(input)).toEqual(job);
+    }),
+  );
   for (const enabled of [false, true])
     for (const kind of ["nongit", "emptygit"] as const) {
       it.effect(
