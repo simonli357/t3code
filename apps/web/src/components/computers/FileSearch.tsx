@@ -139,13 +139,16 @@ export function SearchBar({
           options={search.computerOptions}
           onChange={(computerId) => actions.onFiltersChange({ ...filters, computerId })}
         />
-        <FilterSelect
-          label="File type"
-          allLabel="All file types"
-          value={filters.fileType}
-          options={search.fileTypeOptions}
-          onChange={(fileType) => actions.onFiltersChange({ ...filters, fileType })}
-        />
+        <InputGroup>
+          <InputGroupInput
+            aria-label="File extension"
+            placeholder="File extension"
+            value={filters.fileType ?? ""}
+            onChange={(event) =>
+              actions.onFiltersChange({ ...filters, fileType: event.currentTarget.value || null })
+            }
+          />
+        </InputGroup>
         {hasActiveFilters(filters) ? (
           <Button
             size="sm"

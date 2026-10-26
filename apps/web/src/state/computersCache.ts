@@ -3,10 +3,7 @@ import * as Schema from "effect/Schema";
 
 const Snapshot = Schema.Struct({
   overview: Schema.NullOr(ComputerInspection),
-  files: Schema.NullOr(ComputerInspection),
   activity: Schema.NullOr(ComputerInspection),
-  /** When this browser last read the file index, on its own clock; a computer's clock may differ. */
-  filesReadAt: Schema.NullOr(Schema.Number),
   /** The storage views' last known data; absent in what older versions saved. */
   storageDisks: Schema.optionalKey(Schema.NullOr(StorageDisks)),
   storageHoldings: Schema.optionalKey(Schema.NullOr(StorageHoldings)),
@@ -18,8 +15,22 @@ const decodeSnapshot = Schema.decodeUnknownSync(Snapshot);
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open("t3-computers", 1);
-    request.addEventListener("upgradeneeded", () => request.result.createObjectStore("snapshots"));
+    const request = indexedDB.open("t3-computers", 2);
+    request.addEventListener("upgradeneeded", (event) => {
+      const store =
+        event.oldVersion === 0
+          ? request.result.createObjectStore("snapshots")
+          : request.transaction!.objectStore("snapshots");
+      // Remove legacy full indexes without reading their values into the browser.
+      const cursor = store.openKeyCursor();
+      cursor.addEventListener("success", () => {
+        const entry = cursor.result;
+        if (!entry) return;
+        if (Array.isArray(entry.key) && ["files", "filesReadAt"].includes(String(entry.key[1])))
+          store.delete(entry.key);
+        entry.continue();
+      });
+    });
     request.addEventListener("success", () => resolve(request.result));
     request.addEventListener("error", () => reject(request.error));
   });
@@ -30,9 +41,7 @@ export async function readComputerCache(environmentId: string): Promise<Computer
   try {
     const sections = [
       "overview",
-      "files",
       "activity",
-      "filesReadAt",
       "storageDisks",
       "storageHoldings",
       "storageReadAt",

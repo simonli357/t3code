@@ -286,7 +286,6 @@ export interface ComputersSearchModel {
   readonly filters: SearchFilters;
   readonly projectOptions: ReadonlyArray<FilterOption>;
   readonly computerOptions: ReadonlyArray<FilterOption>;
-  readonly fileTypeOptions: ReadonlyArray<FilterOption>;
   readonly results: SearchResults;
 }
 

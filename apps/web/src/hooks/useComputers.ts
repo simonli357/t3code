@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useDeferredValue,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -17,11 +16,9 @@ import { readComputerCache, writeComputerCache, type ComputerCache } from "../st
 import { createComputerDetailReader } from "../state/computersDetail";
 import { createComputersSync } from "../state/computersSync";
 import {
-  createCatalogMemo,
-  findRecord,
+  mergeFilePages,
   keepOffer,
   restoreOffer,
-  searchFiles,
   type SearchSource,
 } from "../state/computersFiles";
 import {
@@ -34,7 +31,7 @@ import {
   processList,
   searchCaveats,
 } from "../state/computersView";
-import { formatMoment } from "../components/computers/computersFormat";
+import { createComputersSearch } from "../state/computersSearch";
 import type {
   ActionState,
   ComputersActions,
@@ -43,18 +40,14 @@ import type {
   ProcessFocus,
   SearchFilters,
 } from "../components/computers/computersViewModel";
-import { useClientSettings } from "./useSettings";
 
 const POLL_MS = 10_000;
 const DETAIL_POLL_MS = 5_000;
-const RESULTS_PAGE_SIZE = 200;
 
 const idle: ActionState = { status: "idle" };
 const emptyCache: ComputerCache = {
   overview: null,
-  files: null,
   activity: null,
-  filesReadAt: null,
 };
 
 type Selection =
@@ -89,7 +82,6 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
       ),
     [connections],
   );
-  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   const readCommand = useAtomCommand(serverEnvironment.computerRead, { reportFailure: false });
   const actCommand = useAtomCommand(serverEnvironment.computerAction, { reportFailure: false });
 
@@ -145,49 +137,65 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
     computerId: null,
     fileType: null,
   });
-  const [limit, setLimit] = useState(RESULTS_PAGE_SIZE);
-  // Typing stays responsive while a large saved index is searched behind it.
-  const searchedQuery = useDeferredValue(query);
-  const catalogOf = useMemo(() => createCatalogMemo(), []);
+  const search = useMemo(() => createComputersSearch(read), [read]);
+  const { pages, loading } = useSyncExternalStore(search.subscribe, search.getState);
+  const searching = Boolean(
+    query.trim() || filters.projectId || filters.computerId || filters.fileType,
+  );
+  const [waiting, setWaiting] = useState(false);
+  const searchIds = useMemo(
+    () =>
+      searching ? onlineIds.filter((id) => !filters.computerId || id === filters.computerId) : [],
+    [onlineIds, filters.computerId, searching],
+  );
+  const searchInput = useMemo(
+    (): ComputerInspectInput => ({
+      section: "files",
+      query,
+      ...(filters.projectId ? { project: filters.projectId } : {}),
+      ...(filters.fileType ? { extension: filters.fileType } : {}),
+    }),
+    [query, filters.projectId, filters.fileType],
+  );
+  useEffect(() => {
+    // Debounce typing before sending a new search to every online computer.
+    const timer = window.setTimeout(() => {
+      setWaiting(false);
+      void search.search(searchIds, searchInput);
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      search.invalidate();
+    };
+  }, [search, searchIds, searchInput]);
   const sources = useMemo(
     (): SearchSource[] =>
-      environments.map((env) => ({
+      environments.filter(online).map((env) => ({
         environmentId: env.environmentId,
         label: env.label,
-        online: online(env),
-        files: snapshots[env.environmentId]?.files?.files ?? [],
+        online: true,
+        files: pages[env.environmentId]?.result?.files ?? [],
       })),
-    [environments, snapshots],
+    [environments, pages],
   );
-  const catalog = catalogOf(sources);
-  const request = useMemo(
-    () => ({ words: searchedQuery.toLowerCase().split(/\s+/).filter(Boolean), ...filters }),
-    [searchedQuery, filters],
+  const records = useMemo(() => mergeFilePages(sources), [sources]);
+  const findRecord = (id: string) => records.find((record) => record.row.id === id) ?? null;
+  const total = Object.values(pages).reduce((sum, page) => sum + (page.result?.totalFiles ?? 0), 0);
+  const hasMore = Object.values(pages).some(
+    (page) => page.result && page.result.files.length < page.result.totalFiles,
   );
-  const searching = Boolean(
-    searchedQuery.trim() || filters.projectId || filters.computerId || filters.fileType,
-  );
-  const found = useMemo(
-    () => (searching ? searchFiles(catalog, request, limit) : null),
-    [searching, catalog, request, limit],
-  );
-  const formatTime = useMemo(
-    () => (value: string) => formatMoment(value, Date.now(), timestampFormat) ?? value,
-    [timestampFormat],
-  );
-  const caveats = environments.flatMap((env) =>
-    searchCaveats(
-      env,
-      snapshots[env.environmentId] ?? emptyCache,
-      [errors[env.environmentId] ?? null, cacheErrors[env.environmentId] ?? null],
-      formatTime,
-    ).map((message) => ({ computerName: env.label, message })),
-  );
+  const caveats = environments
+    .filter((env) => !filters.computerId || env.environmentId === filters.computerId)
+    .flatMap((env) =>
+      searchCaveats(env, pages[env.environmentId]?.result ?? null, [
+        pages[env.environmentId]?.error ?? null,
+      ]).map((message) => ({ computerName: env.label, message })),
+    );
   const projectOptions = useMemo(
     () =>
       [
         ...new Set(
-          environments.flatMap((env) => snapshots[env.environmentId]?.files?.projects ?? []),
+          environments.flatMap((env) => snapshots[env.environmentId]?.overview?.projects ?? []),
         ),
       ]
         .sort()
@@ -238,10 +246,7 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
     if (next && next.kind !== "file") void readDetail(next, refresh);
   };
 
-  const fileRecord = useMemo(
-    () => (selection?.kind === "file" ? findRecord(catalog, selection.fileId) : null),
-    [catalog, selection],
-  );
+  const fileRecord = selection?.kind === "file" ? findRecord(selection.fileId) : null;
   let detail: ComputersDetail | null = null;
   if (selection?.kind === "disk") {
     const slash = selection.path.includes("\\") ? "\\" : "/";
@@ -308,7 +313,7 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
           }
         : {
             status: "error",
-            message: "This file is no longer in the saved index. Refresh the search.",
+            message: "This file is no longer in the search results. Refresh the search.",
           },
     };
   }
@@ -347,19 +352,24 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
 
   const actions: ComputersActions = {
     onRefresh: () => {
+      void search.search(searchIds, { ...searchInput, refresh: true });
       setRefreshing(true);
-      void sync.refresh(onlineIds, { force: true }).finally(() => setRefreshing(false));
+      void sync.refresh(onlineIds).finally(() => setRefreshing(false));
       if (watched) void readDetail(watched, true);
     },
     onQueryChange: (value) => {
+      setWaiting(true);
       setQuery(value);
-      setLimit(RESULTS_PAGE_SIZE);
+      search.invalidate();
     },
     onFiltersChange: (value) => {
+      setWaiting(true);
       setFilters(value);
-      setLimit(RESULTS_PAGE_SIZE);
+      search.invalidate();
     },
-    onLoadMoreResults: () => setLimit((value) => value + RESULTS_PAGE_SIZE),
+    onLoadMoreResults: () => {
+      void search.next();
+    },
     onOpenDisk: (target) => {
       const again =
         selection?.kind === "disk" &&
@@ -377,7 +387,7 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
     },
     onCloseDetail: () => select(null),
     onKeep: ({ fileId, reason }) => {
-      const target = findRecord(catalog, fileId);
+      const target = findRecord(fileId);
       const copy = target?.copies.find((candidate) => candidate.online);
       void fileAction("keep", fileId, async () => {
         if (!target || !copy) throw new Error("No reachable computer holds this file.");
@@ -389,7 +399,7 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
       });
     },
     onRestore: ({ fileId, computerId, destination }) => {
-      const target = findRecord(catalog, fileId);
+      const target = findRecord(fileId);
       const copy = target?.copies.find((candidate) => candidate.computerId === computerId);
       void fileAction("restore", fileId, async () => {
         if (!target || !copy?.online || copy.restorable !== true)
@@ -477,16 +487,16 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
           value: env.environmentId,
           label: env.label,
         })),
-        fileTypeOptions: catalog.fileTypes.map((value) => ({ value, label: value })),
         results: searching
-          ? query !== searchedQuery || !found
+          ? waiting || (loading && records.length === 0)
             ? { status: "loading" }
             : {
                 status: "ready",
-                rows: found.records.map((record) => record.row),
-                totalCount: found.total,
-                hasMore: found.total > found.records.length,
-                loadingMore: false,
+                rows: records.map((record) => record.row),
+                // Shared archive copies can overlap across computers' unread pages.
+                totalCount: hasMore ? (searchIds.length === 1 ? total : null) : records.length,
+                hasMore,
+                loadingMore: loading,
                 caveats,
               }
           : { status: "idle" },

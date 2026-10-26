@@ -46,16 +46,16 @@ the computer (Workenv). Without it a group says what is not reported instead of 
 ## Find a file
 
 Search covers project folders, Workenv work folders and the kept archive on every connected
-computer. It skips caches and system files. Filter by project, computer, and file type. Each result
+computer. It skips caches and system files. Filter by project, computer, and file extension. Each result
 shows its computer, path, size, last modified time, and backup state.
 
-- An offline computer is searched from the file list this browser last saved, and the results say
-  when that was.
+- Search needs the computer online. Results load one page at a time; choose **Show more** to fetch
+  the next page.
 - A very large project can exceed what the index scans in one pass, and the first time a computer
   reads the kept archive it can take a few minutes; until then the results say they may be
   incomplete.
 - **Published** means a copy reached the kept archive. Only a confirmed backup is shown as backed
-  up; open the result to see when it was verified. Offline results retain that last-known check.
+  up; open the result to see when it was verified.
 
 ## Keep, restore, and retry
 

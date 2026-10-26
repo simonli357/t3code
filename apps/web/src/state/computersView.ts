@@ -152,29 +152,17 @@ export function activityRow(
   };
 }
 
-/**
- * Why a search over this computer's saved files may be short or stale, in the words shown beside the
- * results. Empty when the files are current and complete.
- */
+/** Explains the computers a server-side search could not cover. */
 export function searchCaveats(
   environment: ComputerEnvironment,
-  cache: ComputerCache,
+  files: ComputerInspection | null,
   problems: ReadonlyArray<string | null>,
-  formatTime: (iso: string) => string,
 ): string[] {
-  const files = cache.files;
-  const savedAt = iso(files?.indexedAt ?? cache.filesReadAt);
   const caveats = [...problems, ...(files?.errors ?? [])];
-  if (!connected(environment))
-    caveats.push(
-      files
-        ? `Offline. Searching the file list saved ${savedAt ? formatTime(savedAt) : "at an unknown time"}.`
-        : "Offline, and no file list was saved.",
-    );
+  if (!connected(environment)) caveats.push("Search needs this computer online.");
   else if (computersSupport(environment) === false)
     caveats.push("Update this computer’s T3 server to search its files.");
-  else if (!files) caveats.push("Loading the file list.");
-  if (files?.indexing) caveats.push("Indexing; results are incomplete.");
+  if (files?.indexing) caveats.push("Indexing; results are incomplete. Refresh to try again.");
   return caveats.filter((message): message is string => Boolean(message));
 }
 

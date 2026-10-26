@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   EnvironmentId,
-  type ComputerActivity,
-  type ComputerFile,
   type ComputerInspection,
   type ComputerInspectInput,
 } from "@t3tools/contracts";
@@ -26,27 +24,6 @@ const inspection = (overrides: Partial<ComputerInspection> = {}): ComputerInspec
   errors: [],
   ...overrides,
 });
-const file = (path: string): ComputerFile => ({
-  path,
-  name: path.split("/").at(-1)!,
-  project: "P",
-  sizeBytes: 1,
-  modifiedAt: 1,
-  directory: false,
-  backup: "not-verified",
-  reference: null,
-});
-const transfer = (status: string): ComputerActivity => ({
-  id: "keep-1",
-  kind: "transfer",
-  label: "Keep drawings",
-  status,
-  updatedAt: 5,
-  detail: null,
-  source: "/p",
-  retryable: false,
-});
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -66,7 +43,6 @@ function harness(
   } = {},
 ) {
   const calls: ComputerInspectInput[] = [];
-  let clock = 1_000_000;
   const sync = createComputersSync({
     read: async (_environmentId, input) => {
       calls.push(input);
@@ -78,128 +54,25 @@ function harness(
     saveCache: async () => {
       if (options.saveFails) throw new Error("quota exceeded");
     },
-    now: () => clock,
   });
   const stop = sync.start();
   return {
     sync,
     stop,
     calls,
-    advance: (ms: number) => {
-      clock += ms;
-    },
     snapshot: () => sync.getState().snapshots[computer],
     fileReads: () => calls.filter((call) => call.section === "files").length,
   };
 }
 
 describe("keeping a computer's snapshot current", () => {
-  it("reads a file index in pages until it has every file", async () => {
-    const all = ["a", "b", "c", "d", "e"].map((name) => file(`/p/${name}`));
-    const t = harness((input) => {
-      if (input.section !== "files") return inspection();
-      const offset = input.offset ?? 0;
-      return inspection({ files: all.slice(offset, offset + 2), totalFiles: 5, indexedAt: 7 });
-    });
+  it("polls small snapshots without ever reading files, across repeated refreshes", async () => {
+    const t = harness(() => inspection());
     await t.sync.refresh([computer]);
-    expect(t.snapshot()?.files?.files.map((item) => item.path)).toEqual(
-      all.map((item) => item.path),
-    );
-    const pages = t.calls.filter((call) => call.section === "files");
-    expect(pages.map((call) => call.offset ?? 0)).toEqual([0, 2, 4]);
-    // Big pages keep a 100,000-file index to tens of requests rather than hundreds.
-    expect(pages.every((call) => call.limit === 2000)).toBe(true);
-  });
-
-  it("keeps the last complete index while the computer reindexes, and says so", async () => {
-    let reindexing = false;
-    const t = harness((input) =>
-      input.section !== "files"
-        ? inspection()
-        : reindexing
-          ? inspection({ indexing: true, errors: ["still scanning"] })
-          : inspection({ files: [file("/p/a")], totalFiles: 1, indexedAt: 1 }),
-    );
-    await t.sync.refresh([computer]);
-    reindexing = true;
-    await t.sync.refresh([computer], { force: true });
-    expect(t.snapshot()?.files?.files.map((item) => item.path)).toEqual(["/p/a"]);
-    expect(t.snapshot()?.files).toMatchObject({ indexing: true, errors: ["still scanning"] });
-
-    // Once it finishes, the next ordinary refresh replaces the index without being forced.
-    reindexing = false;
-    await t.sync.refresh([computer]);
-    expect(t.snapshot()?.files).toMatchObject({ indexing: false, errors: [] });
-  });
-
-  it("does not stitch pages from two different indexes together", async () => {
-    let page = 0;
-    const t = harness((input) => {
-      if (input.section !== "files") return inspection();
-      page += 1;
-      return page === 1
-        ? inspection({ files: [file("/p/a")], totalFiles: 2, indexedAt: 1 })
-        : inspection({ files: [file("/p/z")], totalFiles: 2, indexedAt: 2 });
-    });
-    await t.sync.refresh([computer]);
-    expect(t.snapshot()?.files?.files.map((item) => item.path)).toEqual(["/p/a"]);
-    expect(t.snapshot()?.files?.indexing).toBe(true);
-  });
-
-  it("asks again after a file list that changed while it was being read", async () => {
-    let page = 0;
-    const t = harness((input) => {
-      if (input.section !== "files") return inspection();
-      page += 1;
-      if (page === 1) return inspection({ files: [file("/p/a")], totalFiles: 2, indexedAt: 1 });
-      if (page === 2) return inspection({ files: [file("/p/b")], totalFiles: 3, indexedAt: 1 });
-      return inspection({ files: [file("/p/a")], totalFiles: 1, indexedAt: 1 });
-    });
-    await t.sync.refresh([computer]);
-    expect(t.sync.getState().errors[computer]).toContain("changed while it was being read");
-    expect(t.snapshot()?.files).toBeNull();
-
-    await t.sync.refresh([computer]);
-    expect(t.sync.getState().errors[computer]).toBeNull();
-    expect(t.snapshot()?.files?.files.map((item) => item.path)).toEqual(["/p/a"]);
-  });
-
-  it("reads the index again after fifteen minutes on this browser's clock, not the computer's", async () => {
-    // The computer's clock is hours behind, which must not make its index look stale.
-    const t = harness((input) =>
-      input.section === "files"
-        ? inspection({ files: [file("/p/a")], totalFiles: 1, indexedAt: 1, sampledAt: 5 })
-        : inspection(),
-    );
-    await t.sync.refresh([computer]);
-    t.advance(14 * 60_000);
-    await t.sync.refresh([computer]);
-    expect(t.fileReads()).toBe(1);
-    t.advance(2 * 60_000);
-    await t.sync.refresh([computer]);
-    expect(t.fileReads()).toBe(2);
-  });
-
-  it("reads the file list again when a transfer changes, since the kept archive may have", async () => {
-    let activities: ComputerActivity[] = [];
-    const t = harness((input) =>
-      input.section === "activity"
-        ? inspection({ activities })
-        : input.section === "files"
-          ? inspection({ files: [file("/p/a")], totalFiles: 1, indexedAt: 1 })
-          : inspection(),
-    );
-    await t.sync.refresh([computer]);
-    await t.sync.refresh([computer]);
-    expect(t.fileReads()).toBe(1);
-
-    activities = [transfer("copying")];
-    await t.sync.refresh([computer]);
-    activities = [transfer("published")];
-    await t.sync.refresh([computer]);
-    expect(t.fileReads()).toBe(3);
-    await t.sync.refresh([computer]);
-    expect(t.fileReads()).toBe(3);
+    await t.sync.refresh([computer], { queue: true });
+    expect(t.fileReads()).toBe(0);
+    expect(t.calls.filter((call) => call.section === "overview")).toHaveLength(2);
+    expect(t.calls.filter((call) => call.section === "activity")).toHaveLength(2);
   });
 
   it("waits for the saved copy before reading, so an old copy cannot replace a newer answer", async () => {
@@ -209,9 +82,7 @@ describe("keeping a computer's snapshot current", () => {
     expect(t.calls).toEqual([]);
     saved.resolve({
       overview: inspection({ sampledAt: 1 }),
-      files: null,
       activity: null,
-      filesReadAt: null,
     });
     await refreshing;
     expect(t.snapshot()?.overview?.sampledAt).toBe(2);
@@ -276,7 +147,7 @@ describe("keeping a computer's snapshot current", () => {
     expect(overviews).toBe(2);
   });
 
-  it.each(["activity", "files"] as const)(
+  it.each(["activity"] as const)(
     "publishes advancing telemetry while a %s read is still pending",
     async (section) => {
       const detailStarted = deferred<void>();
@@ -309,19 +180,6 @@ describe("keeping a computer's snapshot current", () => {
       unsubscribe();
     },
   );
-
-  it("stops paging a file index when stopped, without saving the part it had", async () => {
-    let reads = 0;
-    const t = harness((input) => {
-      if (input.section !== "files") return inspection();
-      reads += 1;
-      if (reads === 2) t.stop();
-      return inspection({ files: [file(`/p/${reads}`)], totalFiles: 3, indexedAt: 1 });
-    });
-    await t.sync.refresh([computer]);
-    expect(reads).toBe(2);
-    expect(t.snapshot()?.files).toBeNull();
-  });
 });
 
 describe("page lifetimes sharing offline storage", () => {

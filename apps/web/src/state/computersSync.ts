@@ -2,13 +2,7 @@ import type { ComputerInspection, ComputerInspectInput, EnvironmentId } from "@t
 import type { ComputerCache } from "./computersCache";
 import { failure } from "./computersView";
 
-/** A saved file index older than this is read again. Reindexing on the computer is its own, bigger cost. */
-const FILE_INDEX_MAX_AGE_MS = 15 * 60_000;
-
-/** Rows per request when reading the whole index; the computer caps a page at 5000. */
-const FILE_PAGE_LIMIT = 2000;
-
-const empty: ComputerCache = { overview: null, files: null, activity: null, filesReadAt: null };
+const empty: ComputerCache = { overview: null, activity: null };
 
 export interface ComputersSyncState {
   readonly snapshots: Readonly<Record<string, ComputerCache>>;
@@ -29,41 +23,15 @@ export interface ComputersSyncDeps {
     patch: Partial<ComputerCache>,
     signal: AbortSignal,
   ) => Promise<void>;
-  readonly now?: () => number;
 }
 
 export interface RefreshOptions {
-  /** Ask the computer to rebuild its file index rather than serve the one it has. */
-  readonly force?: boolean;
   /** Run once more after a refresh already in flight, so something that just happened is seen. */
   readonly queue?: boolean;
 }
 
-/** Whether a computer's transfers, backups or restores changed, which is when its kept archive may have too. */
-const archiveSignature = (snapshot: ComputerInspection | null | undefined) =>
-  snapshot
-    ? snapshot.activities
-        .filter((activity) => activity.kind !== "job")
-        .map((activity) => `${activity.id}:${activity.status}`)
-        .sort()
-        .join("|")
-    : null;
-
-/**
- * Keeps one snapshot per computer fresh and saved for offline use. It is the page's only owner of
- * network and IndexedDB work: React subscribes to `getState`, so nothing here sets React state.
- *
- * Each computer has one telemetry read and one detail refresh at a time, so slow activity or file
- * reads cannot stall telemetry. Its saved copy is loaded before the first read so an old
- * copy can never replace a newer answer, and a file index is replaced only by a complete one: while
- * the computer is reindexing, the last complete index stays and is marked as indexing.
- */
-export function createComputersSync({
-  read,
-  loadCache,
-  saveCache,
-  now = Date.now,
-}: ComputersSyncDeps) {
+/** Keeps small telemetry and activity snapshots fresh and saved for offline use. */
+export function createComputersSync({ read, loadCache, saveCache }: ComputersSyncDeps) {
   let state: ComputersSyncState = { snapshots: {}, errors: {}, cacheErrors: {} };
   let controller = new AbortController();
   controller.abort();
@@ -74,7 +42,6 @@ export function createComputersSync({
   const overviewFlights = new Map<string, Promise<void>>();
   const overviewErrors = new Map<string, string>();
   const detailErrors = new Map<string, string>();
-  const filesDue = new Set<string>();
 
   const update = (next: ComputersSyncState) => {
     state = next;
@@ -119,44 +86,6 @@ export function createComputersSync({
     return loading;
   };
 
-  async function syncFiles(
-    id: EnvironmentId,
-    previous: ComputerInspection | null,
-    force: boolean,
-    signal: AbortSignal,
-  ) {
-    let page = await read(id, {
-      section: "files",
-      limit: FILE_PAGE_LIMIT,
-      ...(force ? { refresh: true } : {}),
-    });
-    const files = [...page.files];
-    while (!signal.aborted && !page.indexing && files.length < page.totalFiles) {
-      const next = await read(id, {
-        section: "files",
-        offset: files.length,
-        limit: FILE_PAGE_LIMIT,
-      });
-      if (next.indexedAt !== page.indexedAt || next.indexing) {
-        page = { ...next, indexing: true };
-        break;
-      }
-      if (next.files.length === 0 || next.totalFiles !== page.totalFiles)
-        throw new Error("The file list changed while it was being read; it will be read again.");
-      files.push(...next.files);
-    }
-    if (signal.aborted) return;
-    await save(
-      id,
-      page.indexing && previous
-        ? { files: { ...previous, indexing: true, errors: page.errors } }
-        : { files: { ...page, files }, filesReadAt: now() },
-      signal,
-    );
-    // An index that is still being built is read again next time, whatever its age.
-    if (!signal.aborted && !page.indexing) filesDue.delete(id);
-  }
-
   function noteReadError(id: string, lane: Map<string, string>, message: string | null) {
     if (message) lane.set(id, message);
     else lane.delete(id);
@@ -188,7 +117,7 @@ export function createComputersSync({
     return started;
   }
 
-  async function syncOnce(id: EnvironmentId, force: boolean, signal: AbortSignal) {
+  async function syncOnce(id: EnvironmentId, signal: AbortSignal) {
     await loadOffline(id, signal);
     if (signal.aborted) return;
     const [, activity] = await Promise.allSettled([
@@ -200,28 +129,7 @@ export function createComputersSync({
     const failures: string[] = [];
     if (activity.status === "fulfilled") patch.activity = activity.value;
     else failures.push(failure(activity.reason));
-    const before = archiveSignature(state.snapshots[id]?.activity);
-    if (before !== null && patch.activity && before !== archiveSignature(patch.activity))
-      filesDue.add(id);
     await save(id, patch, signal);
-    if (signal.aborted) return;
-    const previous = state.snapshots[id]?.files ?? null;
-    const readAt = state.snapshots[id]?.filesReadAt ?? null;
-    if (
-      force ||
-      filesDue.has(id) ||
-      !previous ||
-      previous.indexing ||
-      readAt === null ||
-      now() - readAt > FILE_INDEX_MAX_AGE_MS
-    ) {
-      filesDue.add(id);
-      try {
-        await syncFiles(id, previous, force, signal);
-      } catch (error) {
-        failures.push(failure(error));
-      }
-    }
     if (signal.aborted) return;
     noteReadError(id, detailErrors, failures.join("; ") || null);
   }
@@ -231,16 +139,15 @@ export function createComputersSync({
     if (signal.aborted) return Promise.resolve();
     const flight = flights.get(id);
     if (flight) {
-      if (options.force || options.queue)
-        queued.set(id, queued.get(id) === true || options.force === true);
+      if (options.queue) queued.set(id, true);
       return Promise.all([flight, refreshOverview(id, signal)]).then(() => undefined);
     }
     const started = (async () => {
-      let force: boolean | undefined = options.force === true;
-      while (force !== undefined && !signal.aborted) {
-        await syncOnce(id, force, signal);
+      let again = true;
+      while (again && !signal.aborted) {
+        await syncOnce(id, signal);
         if (signal.aborted) return;
-        force = queued.get(id);
+        again = queued.get(id) === true;
         queued.delete(id);
       }
     })().finally(() => {
@@ -261,7 +168,7 @@ export function createComputersSync({
         listeners.delete(listener);
       };
     },
-    /** Allows work to proceed; the returned function stops it, including a file index being paged in. */
+    /** Allows work to proceed; the returned function stops it, including pending reads. */
     start: () => {
       controller.abort();
       controller = new AbortController();

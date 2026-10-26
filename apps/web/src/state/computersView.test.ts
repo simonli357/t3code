@@ -44,9 +44,7 @@ const snapshot: ComputerInspection = {
 };
 const nothingSaved: ComputerCache = {
   overview: null,
-  files: null,
   activity: null,
-  filesReadAt: null,
 };
 const activity = (overrides: Partial<ComputerActivity>): ComputerActivity => ({
   id: "a1",
@@ -59,7 +57,6 @@ const activity = (overrides: Partial<ComputerActivity>): ComputerActivity => ({
   retryable: false,
   ...overrides,
 });
-const formatTime = (iso: string) => `at ${iso}`;
 
 describe("a computer's panel", () => {
   it("keeps dated offline readings without replacing unknown CPU or RAM with zero", () => {
@@ -162,22 +159,15 @@ describe("activity rows", () => {
 describe("why a search may be short", () => {
   const savedIndex: ComputerInspection = { ...snapshot, indexedAt: 2000 };
 
-  it("says an offline computer is searched from its saved list, dated, or has none", () => {
-    expect(searchCaveats(offline, { ...nothingSaved, files: savedIndex }, [], formatTime)).toEqual([
-      "Offline. Searching the file list saved at 1970-01-01T00:00:02.000Z.",
-    ]);
-    expect(searchCaveats(offline, nothingSaved, [], formatTime)).toEqual([
-      "Offline, and no file list was saved.",
-    ]);
+  it("requires offline computers to come online for search", () => {
+    expect(searchCaveats(offline, null, [])).toEqual(["Search needs this computer online."]);
   });
 
   it("says an outdated server cannot be searched, but not while it is still loading its configuration", () => {
-    expect(
-      searchCaveats({ ...connected, serverConfig: outdatedServer }, nothingSaved, [], formatTime),
-    ).toEqual(["Update this computer’s T3 server to search its files."]);
-    expect(searchCaveats(connected, nothingSaved, [], formatTime)).toEqual([
-      "Loading the file list.",
+    expect(searchCaveats({ ...connected, serverConfig: outdatedServer }, null, [])).toEqual([
+      "Update this computer’s T3 server to search its files.",
     ]);
+    expect(searchCaveats(connected, null, [])).toEqual([]);
   });
 
   it("passes on what the computer and the browser reported, and says when it is still indexing", () => {
@@ -187,16 +177,11 @@ describe("why a search may be short", () => {
       errors: ["File index reached its bounded scan limit."],
     };
     expect(
-      searchCaveats(
-        connected,
-        { ...nothingSaved, files: indexing },
-        ["Could not save offline data: quota exceeded", null],
-        formatTime,
-      ),
+      searchCaveats(connected, indexing, ["Could not save offline data: quota exceeded", null]),
     ).toEqual([
       "Could not save offline data: quota exceeded",
       "File index reached its bounded scan limit.",
-      "Indexing; results are incomplete.",
+      "Indexing; results are incomplete. Refresh to try again.",
     ]);
   });
 });
