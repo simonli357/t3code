@@ -8,7 +8,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as PlatformError from "effect/PlatformError";
 import * as FileSystem from "effect/FileSystem";
 import * as ProcessRunner from "../processRunner.ts";
-import { folders, processes, processUsage } from "./ComputerTelemetry.ts";
+import { folders, processes, processUsage, realVolumes } from "./ComputerTelemetry.ts";
 import { output, toJson } from "./testSupport.ts";
 
 describe("process usage", () => {
@@ -280,4 +280,30 @@ describe("process listing", () => {
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
+});
+
+describe("the overview's list of disks", () => {
+  const listed = (label: string, path: string) => ({ label, path });
+  it("keeps real volumes once each and drops memory, kernel, image and boot mounts", () => {
+    expect(
+      realVolumes(
+        [
+          listed("/dev/nvme1n1p2", "/"),
+          listed("tmpfs", "/run"),
+          listed("efivarfs", "/sys/firmware/efi/efivars"),
+          listed("/dev/loop3", "/snap/core/3"),
+          listed("/dev/nvme1n1p1", "/boot/efi"),
+          listed("/dev/nvme0n1p1", "/data"),
+          listed("/dev/nvme0n1p1", "/srv/archive"),
+          listed("/dev/sda1", "/media/user/stick"),
+        ],
+        "linux",
+      ).map((disk) => disk.path),
+    ).toEqual(["/", "/data", "/media/user/stick"]);
+  });
+
+  it("leaves a Windows drive list as it is", () => {
+    const drives = [listed("Windows", "C:\\"), listed("Data", "D:\\")];
+    expect(realVolumes(drives, "win32")).toEqual(drives);
+  });
 });

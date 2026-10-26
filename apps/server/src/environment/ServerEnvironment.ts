@@ -246,6 +246,7 @@ export const make = Effect.gen(function* () {
       orchestratorHandoff: true,
       peerEnvironments: true,
       computers: true,
+      computersStorage: true,
       claudeSubagentStop: true,
       providerSwitching: true,
       threadPinReorder: true,
