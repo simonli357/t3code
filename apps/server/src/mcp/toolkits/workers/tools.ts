@@ -23,17 +23,18 @@ import * as Schema from "effect/Schema";
 import * as Tool from "effect/unstable/ai/Tool";
 import * as Toolkit from "effect/unstable/ai/Toolkit";
 import * as Workers from "../../../orchestration/WorkerControls.ts";
+import * as Assignments from "../../../allocation/AllocationAssignments.ts";
 import * as Invocation from "../../McpInvocationContext.ts";
 
 const dependencies = [Workers.WorkerControls, Invocation.McpInvocationContext];
 const failure = Schema.Union([Workers.WorkerError]);
 const spawn = Tool.make("t3_worker_spawn", {
   description:
-    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the selected account, preserving its native and visible history, modes, branch and worktree. Use the project's worker skill to resolve the title, explicit provider/model, and fixed reasoning options. Pass a stable destination UUID across retries. The worker keeps its selected account/model/options on follow-ups. Set environment to a linked peer's label to run the worker on that machine: give its projectId or sourceThreadId there, and its account/model. When the user named no computer, compare them first with t3_recommend_computer. Ownership, reports and the other worker tools then work across machines. Retirement does not block new launches: the first successful action returns one informational warning, remembered across restarts. Proceed without asking the user to confirm or reclaim previously transferred workers. New workers belong to this session. Acceptance means queued, not task completed. Spawning starts the worker communication window (default 15 wall-clock minutes, live execution-computer setting; zero disables). Queued startup preserves the full window. During it only an explicit t3_worker_report outcome done for the entire assignment may pass; questions and blockers cannot pass. Review the latest output and evidence when reports arrive.",
-  parameters: Workers.RemoteSpawnInput,
-  success: Workers.WorkerResult,
+    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the selected account, preserving its native and visible history, modes, branch and worktree. Always supply assessment {difficulty 0-10, difficultyReason, stakes 0-10, stakesReason} for the assignment. Every spawn runs the model/effort, account and computer recommendations and records them next to the actual choice; a fork keeps its source's account and model with a recorded continuity reason. For a legacy fresh worker, give overrides.model/account/computer with the reason for each pinned choice that differs, such as \"user specified ES Opus xhigh\"; the error lists what differs. Prefer t3_start_allocated_assignment for fresh workers. Pass a stable destination UUID across retries. The worker keeps its selected account/model/options on follow-ups. Set environment to a linked peer's label to run the worker on that machine: give its projectId or sourceThreadId there, and its account/model. When the user named no computer, compare them first with t3_recommend_computer. Ownership, reports and the other worker tools then work across machines. Retirement does not block new launches: the first successful action returns one informational warning, remembered across restarts. Proceed without asking the user to confirm or reclaim previously transferred workers. New workers belong to this session. Acceptance means queued, not task completed. Spawning starts the worker communication window (default 15 wall-clock minutes, live execution-computer setting; zero disables). Queued startup preserves the full window. During it only an explicit t3_worker_report outcome done for the entire assignment may pass; questions and blockers cannot pass. Review the latest output and evidence when reports arrive.",
+  parameters: Assignments.ManagedSpawnInput,
+  success: Assignments.ManagedSpawnResult,
   failure,
-  dependencies,
+  dependencies: [...dependencies, Assignments.AllocationAssignments],
 });
 const list = Tool.make("t3_worker_list", {
   description:
@@ -186,6 +187,7 @@ export const WorkersToolkit = Toolkit.make(
 export const handlers = WorkersToolkit.toLayer(
   Effect.gen(function* () {
     const service = yield* Workers.WorkerControls;
+    const assignments = yield* Assignments.AllocationAssignments;
     const bases = yield* BaseSessions.BaseSessions;
     const providerService = yield* ProviderService.ProviderService;
     const owner = Effect.map(Invocation.McpInvocationContext, (scope) => scope.threadId);
@@ -213,7 +215,7 @@ export const handlers = WorkersToolkit.toLayer(
           Effect.flatMap((threadId) => service.changeOwnership(input, { threadId, userRequest })),
         ),
       t3_worker_reclaim: (input) => owner.pipe(Effect.flatMap((id) => service.reclaim(id, input))),
-      t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => service.spawn(id, input))),
+      t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => assignments.spawn(id, input))),
       t3_worker_list: () => owner.pipe(Effect.flatMap((id) => service.list(id))),
       t3_worker_read: (input) => owner.pipe(Effect.flatMap((id) => service.read(id, input))),
       t3_worker_send: (input) => owner.pipe(Effect.flatMap((id) => service.send(id, input))),

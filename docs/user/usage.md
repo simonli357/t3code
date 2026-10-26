@@ -193,8 +193,10 @@ requires explicit consent. Transport or installation failures alone are not reas
 escalate. **Connection** shows coordinator status and refreshes the saved version.
 
 Agents use the same preview and managed startup services through `t3_allocate_account` and
-`t3_start_allocated_assignment`, supplying an automatic assessment or retaining their existing
-exact request. They read the same saved table. Retry the identical IDs and intent after a lost
+`t3_start_allocated_assignment`. Every agent-created worker, including forks, carries the
+master's assessment; the server always records the table's model/effort, the recommended
+account and computer advice next to the actual choice, with the master's reason for each
+choice that differs. They read the same saved table. Retry the identical IDs and intent after a lost
 response; use new IDs for new work. Native mobile edits the same table in **Settings → Model
 selection**, including relay connections, with the same version and catalog checks. Use the web
 editor for human-session startup, exact-override and reassessment controls, previous-policy

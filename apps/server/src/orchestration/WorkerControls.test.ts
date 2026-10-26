@@ -277,6 +277,13 @@ for (const automatic of [false, true])
           projectId: ProjectId.make("allocated-fresh"),
           title: "allocated_astra",
           prompt: "perform allocated work",
+          assessment: {
+            difficulty: 8,
+            stakes: 8,
+            difficultyReason: "Interacting state machines",
+            stakesReason: "Consequential startup",
+          },
+          overrides: { model: "test pins the profile" },
           request: {
             assignmentId: "integrated-start",
             explicitInstanceId: ProviderInstanceId.make("codex_antoine"),
@@ -3348,7 +3355,7 @@ const encodeMcpResult = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 const mcpLayer = McpServer.toolkit(WorkerTools.WorkersToolkit).pipe(
   Layer.provide(WorkerTools.handlers),
   Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(testLayer),
+  Layer.provideMerge(allocatedWorkerLayer),
 );
 it.effect(
   "model selection MCP previews and starts exactly one worker owned by the authenticated master",
@@ -3474,14 +3481,26 @@ it.layer(mcpLayer)("worker MCP", (it) => {
                 Effect.provideService(Invocation.McpInvocationContext, scope),
                 Effect.provideService(McpSchema.McpServerClient, client),
               );
+          const assessment = {
+            difficulty: 3,
+            difficultyReason: "Routine follow-up",
+            stakes: 3,
+            stakesReason: "Reversible",
+          };
           const spawnInput = fresh
             ? {
                 threadId: worker,
                 title: input.title,
                 modelSelection: input.modelSelection,
                 prompt: input.prompt,
+                assessment,
+                overrides: {
+                  model: "test pins the model",
+                  account: "test pins the account",
+                  computer: "test pins the computer",
+                },
               }
-            : input;
+            : { ...input, assessment };
           const spawned = yield* call("t3_worker_spawn", {
             ...spawnInput,
             ownerThreadId: "forged",
@@ -5112,6 +5131,17 @@ for (const automatic of [false, true])
           projectId: ProjectId.make("missing-project"),
           title: "allocated remote",
           prompt: "task",
+          assessment: {
+            difficulty: 8,
+            stakes: 8,
+            difficultyReason: "Interacting state machines",
+            stakesReason: "Consequential startup",
+          },
+          overrides: {
+            model: "test pins the profile",
+            account: "test pins the account",
+            computer: "test pins the computer",
+          },
           request: {
             assignmentId: "remote-refused",
             environmentId: "env-beta",

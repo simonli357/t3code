@@ -152,12 +152,13 @@ export const ModelRoutingRequest = Schema.Struct({
     Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 })),
   ),
   contextTokens: Schema.optional(NonNegativeInt),
-  // Exact user instructions remain exact, even outside the automatic allowlist.
+  // Exact user instructions remain exact, even outside the automatic allowlist. Omit
+  // options to pin only the model and take the effort from the table.
   override: Schema.optional(
     Schema.Struct({
       driver: ProviderDriverKind,
       model: TrimmedNonEmptyString,
-      options: Schema.Array(ProviderOptionSelection),
+      options: Schema.optional(Schema.Array(ProviderOptionSelection)),
       reason: Reason,
     }),
   ),

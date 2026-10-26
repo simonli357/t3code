@@ -145,6 +145,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     connection === "connected" &&
     snapshotEpoch === connectionState.epoch;
   const overrideEffortId = routingEffortOptionId(request.override?.driver ?? "codex");
+  const overrideOptions = request.override?.options ?? [];
   const accounts =
     snapshot?.inventories
       .flatMap((i) => i.accounts)
@@ -502,21 +503,18 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 <input
                   className={field}
                   value={String(
-                    request.override.options.find((o) => o.id === overrideEffortId)?.value ?? "",
+                    overrideOptions.find((o) => o.id === overrideEffortId)?.value ?? "",
                   )}
                   onChange={(e) =>
                     setRequest({
                       ...request,
                       override: {
                         ...request.override!,
-                        options: request.override!.options.some((o) => o.id === overrideEffortId)
-                          ? request.override!.options.map((o) =>
+                        options: overrideOptions.some((o) => o.id === overrideEffortId)
+                          ? overrideOptions.map((o) =>
                               o.id === overrideEffortId ? { ...o, value: e.target.value } : o,
                             )
-                          : [
-                              ...request.override!.options,
-                              { id: overrideEffortId, value: e.target.value },
-                            ],
+                          : [...overrideOptions, { id: overrideEffortId, value: e.target.value }],
                       },
                     })
                   }
@@ -524,7 +522,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               </label>
               <p>
                 Retained exact constraints:{" "}
-                {request.override.options
+                {overrideOptions
                   .filter((o) => o.id !== overrideEffortId)
                   .map((o) => `${o.id}: ${String(o.value)}`)
                   .join(", ") || "none"}

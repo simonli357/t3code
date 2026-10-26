@@ -34,8 +34,7 @@ import * as Store from "./AllocationStore.ts";
 import * as Allocation from "./ProviderAllocation.ts";
 import * as Assignments from "./AllocationAssignments.ts";
 import * as Computers from "../computers/Computers.ts";
-import { recommendPlacement } from "./placement.ts";
-import { PeerLinks, PeerUnavailable } from "../orchestration/PeerLinks.ts";
+import { PeerLinks, PeerRejected, PeerUnavailable } from "../orchestration/PeerLinks.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -54,6 +53,8 @@ const expectHistoricalWarning = (response: AllocationResponse, present: boolean)
   ).toBe(present);
 };
 const at = "1970-01-01T00:00:00.000Z";
+/** Peer reads a managed worker start makes for its recommendation before allocating. */
+const ADVICE_READS = 2;
 const report: UsageMeasurementsReport = {
   observedAt: at,
   monitoredInstanceIds: [],
@@ -290,6 +291,13 @@ const startInput = {
   projectId: ProjectId.make("project"),
   title: "task",
   prompt: "PRIVATE TASK CONTENT",
+  assessment: {
+    difficulty: 3,
+    difficultyReason: "Routine change",
+    stakes: 4,
+    stakesReason: "Reversible",
+  },
+  overrides: { computer: "The project checkout is on this computer." },
   request: {
     assignmentId: "assignment",
     environmentId: "local",
@@ -302,6 +310,8 @@ const startInput = {
     ],
   },
 } satisfies AllocationStart;
+// Automatic requests carry their own assessment.
+const { assessment: _assessment, ...automaticStartInput } = startInput;
 
 function fixture(
   options: {
@@ -476,12 +486,13 @@ for (const observation of ["hung", "offline"] as const) {
               explicitInstanceId: provider.instanceId,
             },
           };
-          // PeerLinks bounds the real caller-to-coordinator RPC at 15 seconds.
+          // PeerLinks bounds the real caller-to-coordinator RPC at 15 seconds; computer advice
+          // gives up on this mock's unbounded peer after its own 20 seconds.
           const started = yield* assignments
             .start(input, ThreadId.make("master"))
-            .pipe(Effect.timeout("15 seconds"), Effect.forkChild);
+            .pipe(Effect.timeout("35 seconds"), Effect.forkChild);
           yield* Deferred.await(attempted);
-          yield* TestClock.adjust("15 seconds");
+          yield* TestClock.adjust("20 seconds");
           const result = yield* Fiber.join(started);
           expect(result.state).toBe("submitted");
           expect(result.allocation!.decision.reasons.join(" ")).toMatch(
@@ -579,6 +590,7 @@ it.effect(
             .start(input, ThreadId.make("master"))
             .pipe(Effect.forkChild);
           yield* Deferred.await(attempted);
+          // Computer advice gives an unanswered computer one peer deadline, then lists it offline.
           yield* TestClock.adjust("15 seconds");
           expect((yield* Fiber.join(started)).state).toBe("submitted");
           expect(yield* client.store.reservations).toEqual([]);
@@ -616,7 +628,8 @@ for (const failure of ["HTTP 401: authentication failed", "transport disconnecte
           input._tag === "allocationProbe"
         )
           return Effect.succeed({ state: "pending" });
-        return ++reads >= 2 && !recovered
+        // Computer advice and its model preview read the execution host first.
+        return ++reads >= 2 + ADVICE_READS && !recovered
           ? Effect.fail(new PeerUnavailable({ environmentId: id, message: failure }))
           : Effect.succeed(execution);
       },
@@ -670,7 +683,7 @@ it.effect(
       let reads = 0;
       const f = fixture({
         peerCall: () =>
-          ++reads === 1
+          ++reads <= 1 + ADVICE_READS
             ? Effect.succeed(execution)
             : Deferred.succeed(waiting, undefined).pipe(Effect.andThen(Effect.never)),
       });
@@ -752,9 +765,9 @@ it.effect(
         f.state.peers = [other];
         const started = yield* assignments
           .start(startInput, ThreadId.make("master"))
-          .pipe(Effect.timeout("15 seconds"), Effect.forkChild);
+          .pipe(Effect.timeout("35 seconds"), Effect.forkChild);
         yield* Deferred.await(attempted);
-        yield* TestClock.adjust("15 seconds");
+        yield* TestClock.adjust("20 seconds");
         const result = yield* Fiber.join(started);
         expect(result.state).toBe("submitted");
         const chosen = (decision: typeof baseline) =>
@@ -814,7 +827,7 @@ it.effect("model allocation and lifecycle start do not repeat an unrelated peer 
       const started = yield* assignments
         .start(
           {
-            ...startInput,
+            ...automaticStartInput,
             request: {
               selection: "automatic",
               assignmentId: "model-hung",
@@ -838,9 +851,9 @@ it.effect("model allocation and lifecycle start do not repeat an unrelated peer 
           },
           ThreadId.make("master"),
         )
-        .pipe(Effect.timeout("15 seconds"), Effect.forkChild);
+        .pipe(Effect.timeout("35 seconds"), Effect.forkChild);
       yield* Deferred.await(attempted);
-      yield* TestClock.adjust("15 seconds");
+      yield* TestClock.adjust("20 seconds");
       const result = yield* Fiber.join(started);
       expect(result.state).toBe("submitted");
       expect(result.selection?.allocation?.decision.request.model).toBe("astra");
@@ -872,7 +885,7 @@ it.effect("model startup remains available when unrelated observations are incom
     expect(snapshot.authorityAvailable).toBe(true);
     const result = yield* assignments.start(
       {
-        ...startInput,
+        ...automaticStartInput,
         request: {
           selection: "automatic",
           assignmentId: startInput.request.assignmentId,
@@ -1005,7 +1018,7 @@ it.effect("quota warnings do not prevent exact managed startup or alter its dura
   return Effect.gen(function* () {
     const { assignments, store } = yield* f.setup;
     const input: AllocationStart = {
-      ...startInput,
+      ...automaticStartInput,
       request: {
         selection: "automatic",
         assignmentId: startInput.request.assignmentId,
@@ -1924,15 +1937,15 @@ it.effect(
 );
 
 it.effect(
-  "placement is routed to the allocation coordinator with the repository already resolved",
+  "placement stays on this server when an older coordinator refuses it, repository resolved",
   () => {
-    const answer = recommendPlacement({
-      at,
-      policy: { maxReadingAgeMinutes: 10 },
-      request: {},
-      inventories: [linkedInventory("remote", { computer: capacityAt(0) })],
+    const f = fixture({
+      remote: true,
+      peerCall: (id, input) =>
+        (input as { _tag?: string })._tag === "allocation"
+          ? Effect.fail(new PeerRejected({ message: `${id}: Invalid allocation peer request.` }))
+          : Effect.succeed(linkedInventory(id, { computer: capacityAt(0) })),
     });
-    const f = fixture({ remote: true, peerCall: () => Effect.succeed({ placement: answer }) });
     f.state.peers = [linkedInventory("remote")];
     f.state.projects = [checkout("local-project", "scratch", "repo:example")];
     return Effect.gen(function* () {
@@ -1943,22 +1956,18 @@ it.effect(
           request: { projectId: ProjectId.make("local-project") },
         }),
       );
-      expect(placement).toEqual(answer);
-      expect(f.peerCalls).toEqual([
-        {
-          _tag: "allocation",
-          operation: {
-            _tag: "placement",
-            request: { projectId: "local-project", repositoryKey: "repo:example" },
-          },
-        },
+      expect(placement.hosts.map((host) => host.environmentId).toSorted()).toEqual([
+        "local",
+        "remote",
       ]);
-      // The coordinator reads the computers, so this one measured nothing itself.
-      expect(f.state.workPaths).toHaveLength(0);
+      expect(placement.hosts.every((host) => host.state !== "offline")).toBe(true);
+      expect(f.peerCalls).toEqual([
+        { _tag: "allocationInventory", placement: { repositoryKey: "repo:example" } },
+      ]);
+      expect(f.state.workPaths).toHaveLength(1);
     }).pipe(Effect.provide(f.layer));
   },
 );
-
 it.effect("two servers exchange capacity and checkouts over the peer wire", () =>
   Effect.gen(function* () {
     const peer = fixture({ localId: "remote", label: "Remote" });
@@ -2033,16 +2042,213 @@ it.effect("placement advice never gates or changes a managed start", () => {
   }).pipe(Effect.provide(f.layer));
 });
 
-it.effect("placement advice says plainly when its coordinator cannot be reached", () => {
+it.effect("placement lists an unreachable computer with its error and ranks the rest", () => {
   const f = fixture({
     remote: true,
-    peerCall: (id) => Effect.fail(new PeerUnavailable({ environmentId: id, message: "offline" })),
+    peerCall: (id) =>
+      Effect.fail(new PeerUnavailable({ environmentId: id, message: `${id}: unreachable` })),
   });
+  f.state.peers = [linkedInventory("remote")];
   return Effect.gen(function* () {
     const { allocation } = yield* f.setup;
-    const error = yield* allocation.execute({ _tag: "placement", request: {} }).pipe(Effect.flip);
-    expect(error).toMatchObject({ code: "unavailable" });
-    expect(error.detail).toContain("Choosing a computer yourself stays allowed.");
-    expect(error.detail).not.toContain("reserved");
+    const placement = placementOf(yield* allocation.execute({ _tag: "placement", request: {} }));
+    const remote = placement.hosts.find((host) => host.environmentId === "remote");
+    expect(remote?.state).toBe("offline");
+    expect(remote?.warnings.join(" ")).toContain("remote: unreachable");
+    expect(placement.recommendedEnvironmentId).toBe("local");
+  }).pipe(Effect.provide(f.layer));
+});
+const tableModels = defaultModelRoutingPolicy.codex.allowedModels.map((slug) => ({
+  ...provider.models[0]!,
+  slug,
+  capabilities: {
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Effort",
+        type: "select" as const,
+        options: ["medium", "high", "max", "xhigh"].map((id) => ({ id, label: id })),
+      },
+    ],
+  },
+}));
+// Difficulty 3 / stakes 4 maps to gpt-6.1-sol / high in the default Codex table.
+const tableStart = {
+  ...startInput,
+  overrides: {},
+  request: {
+    ...startInput.request,
+    model: "gpt-6-astra",
+    options: [{ id: "reasoningEffort", value: "xhigh" }],
+  },
+} satisfies AllocationStart;
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const storedRecommendations = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return (yield* sql<{
+    thread_id: string;
+    record_json: string;
+  }>`SELECT thread_id, record_json FROM worker_recommendations`).map((row) => ({
+    threadId: row.thread_id,
+    ...(decodeJson(row.record_json) as {
+      recommendation: { model: { overrideReason?: string } };
+      computers: Array<{ environmentId: string; state: string; warnings: string[] }>;
+    }),
+  }));
+});
+
+it.effect("every managed start needs the master's assessment", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments } = yield* f.setup;
+    const { assessment: _missing, ...unscored } = startInput;
+    const error = yield* Effect.flip(assignments.start(unscored, ThreadId.make("master")));
+    expect(error.detail).toContain("assessment: { difficulty");
+    const spawnError = yield* Effect.flip(
+      assignments.spawn(ThreadId.make("master"), {
+        threadId: ThreadId.make("fork"),
+        sourceThreadId: ThreadId.make("source"),
+        title: "fork",
+        prompt: "task",
+        modelSelection: { instanceId: provider.instanceId, model: "astra" },
+      }),
+    );
+    expect(spawnError.message).toContain("assessment: { difficulty");
+    expect(f.calls).toHaveLength(0);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("an exact choice records the table recommendation and the master's reason", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    f.state.providers = [{ ...provider, models: tableModels }];
+    const error = yield* Effect.flip(assignments.start(tableStart, ThreadId.make("master")));
+    expect(error.detail).toContain(
+      "overrides.model (recommended gpt-6.1-sol / high, chosen gpt-6-astra / xhigh)",
+    );
+    expect(yield* store.reservations).toHaveLength(0);
+    const result = yield* assignments.start(
+      { ...tableStart, overrides: { model: "user specified Astra xhigh" } },
+      ThreadId.make("master"),
+    );
+    expect(result.state).toBe("submitted");
+    expect(result.recommendation?.model).toEqual({
+      recommended: "gpt-6.1-sol / high",
+      chosen: "gpt-6-astra / xhigh",
+      overrideReason: "user specified Astra xhigh",
+    });
+    expect(result.recommendation?.account).toEqual({ recommended: "chosen", chosen: "chosen" });
+    expect(result.recommendation?.computer).toEqual({ recommended: "local", chosen: "local" });
+    expect(f.calls[0]?.modelSelection.model).toBe("gpt-6-astra");
+    const [stored] = yield* storedRecommendations;
+    expect(stored?.recommendation.model.overrideReason).toBe("user specified Astra xhigh");
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a model-only pin takes its effort from the table", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments } = yield* f.setup;
+    f.state.providers = [{ ...provider, models: tableModels }];
+    const result = yield* assignments.start(
+      {
+        ...automaticStartInput,
+        overrides: { model: "user specified Astra" },
+        request: {
+          selection: "automatic",
+          assignmentId: "pinned-model",
+          threadId: startInput.request.threadId,
+          environmentId: "local",
+          allowedDrivers: [provider.driver],
+          explicitInstanceId: provider.instanceId,
+          assessment: startInput.assessment,
+          override: { driver: provider.driver, model: "gpt-6-astra", reason: "User named Astra" },
+        },
+      },
+      ThreadId.make("master"),
+    );
+    expect(result.state).toBe("submitted");
+    expect(f.calls[0]?.modelSelection).toEqual({
+      instanceId: provider.instanceId,
+      model: "gpt-6-astra",
+      options: [{ id: "reasoningEffort", value: "high" }],
+    });
+    expect(result.recommendation?.model.chosen).toBe("gpt-6-astra / high");
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a fork records its recommendation with the continuity reason", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments } = yield* f.setup;
+    f.state.providers = [{ ...provider, models: tableModels }];
+    const result = yield* assignments.spawn(ThreadId.make("master"), {
+      threadId: ThreadId.make("fork"),
+      sourceThreadId: ThreadId.make("source"),
+      title: "fork",
+      prompt: "task",
+      modelSelection: {
+        instanceId: provider.instanceId,
+        model: "gpt-6-astra",
+        options: [{ id: "reasoningEffort", value: "xhigh" }],
+      },
+      assessment: startInput.assessment,
+    });
+    expect(result.recommendation?.model).toEqual({
+      recommended: "gpt-6.1-sol / high",
+      chosen: "gpt-6-astra / xhigh",
+      overrideReason: "Fork keeps the source session's account and model for native continuity.",
+    });
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0]).not.toHaveProperty("assessment");
+    expect((yield* storedRecommendations).map((r) => r.threadId)).toEqual(["fork"]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("computer advice lists a failing peer with its error and ranks the rest", () => {
+  const f = fixture({
+    peerCall: (id) =>
+      id === "broken"
+        ? Effect.fail(
+            new PeerUnavailable({
+              environmentId: id,
+              message: "broken: Invalid allocation peer request.",
+            }),
+          )
+        : Effect.succeed(f.state.peers.find((p) => p.environmentId === id)!),
+  });
+  return Effect.gen(function* () {
+    const { allocation, assignments } = yield* f.setup;
+    const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    f.state.peers = [
+      { ...own, environmentId: "broken", accounts: [] },
+      { ...own, environmentId: "idle", accounts: [], demand: [] },
+    ];
+    const result = yield* assignments.start(startInput, ThreadId.make("master"));
+    expect(result.state).toBe("submitted");
+    const [stored] = yield* storedRecommendations;
+    const broken = stored!.computers.find((h) => h.environmentId === "broken")!;
+    expect(broken.state).toBe("offline");
+    expect(broken.warnings.join(" ")).toContain("Invalid allocation peer request");
+    expect(stored!.computers.find((h) => h.environmentId === "local")?.state).toBe("fresh");
+    // The idle peer has no matching account, so this computer still ranks first.
+    expect(result.recommendation?.computer.recommended).toBe("local");
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("an identical retry reuses the recorded recommendation without duplicates", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    const first = yield* assignments.start(startInput, ThreadId.make("master"));
+    yield* TestClock.adjust("1 minute");
+    const reads = f.peerCalls.length;
+    const retry = yield* assignments.start(startInput, ThreadId.make("master"));
+    expect(retry.state).toBe("submitted");
+    expect(retry.recommendation).toEqual(first.recommendation);
+    expect(f.peerCalls.length).toBe(reads);
+    expect(yield* store.reservations).toHaveLength(1);
+    expect(yield* storedRecommendations).toHaveLength(1);
   }).pipe(Effect.provide(f.layer));
 });

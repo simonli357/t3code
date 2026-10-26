@@ -71,17 +71,38 @@ export function modelCandidates(
           "Exact user override conflicts with allowed provider families. Resolve the instruction explicitly.",
         ],
       };
+    let options = override.options;
+    if (!options) {
+      // A model-only pin keeps the table's effort for this score pair.
+      if (override.driver !== "codex" && override.driver !== "claudeAgent")
+        return {
+          rule,
+          candidates,
+          reasons: [
+            `${override.driver}: the table has no effort for this provider; give the override's options.`,
+          ],
+        };
+      const table = override.driver === "codex" ? policy.codex : policy.claudeAgent;
+      const cell = table.cells[difficulty]![stakes]!;
+      options = [{ id: routingEffortOptionId(override.driver), value: cell.effort }];
+    }
     candidates.push({
       request: {
         ...constraints,
         driver: override.driver,
         model: override.model,
-        options: override.options,
+        options,
       },
       profile: null,
-      reason: `Exact user override: ${override.reason}`,
+      reason: override.options
+        ? `Exact user override: ${override.reason}`
+        : `Exact user model override with table effort: ${override.reason}`,
     });
-    return { rule: "Exact user override", candidates, reasons };
+    return {
+      rule: override.options ? "Exact user override" : `${rule}; model pinned`,
+      candidates,
+      reasons,
+    };
   }
   for (const driver of [...allowedDrivers].sort()) {
     if (driver !== "codex" && driver !== "claudeAgent") {

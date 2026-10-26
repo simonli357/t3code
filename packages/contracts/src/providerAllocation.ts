@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { ModelRoutingPolicy, ModelRoutingRequest } from "./modelRouting.ts";
+import { AssignmentAssessment, ModelRoutingPolicy, ModelRoutingRequest } from "./modelRouting.ts";
 import {
   IsoDateTime,
   NonNegativeInt,
@@ -406,21 +406,106 @@ export const AllocationLifecycle = Schema.Struct({
   threadId: ThreadId,
   action: Schema.Literals(["start", "consume", "release"]),
 });
+const OverrideReason = TrimmedNonEmptyString.check(Schema.isMaxLength(500));
+/**
+ * Why the master chose differently from a recommendation, per dimension, such as "user
+ * specified ES Opus xhigh". Required only for a pinned choice that differs.
+ */
+export const RecommendationOverrides = Schema.Struct({
+  model: Schema.optional(OverrideReason),
+  account: Schema.optional(OverrideReason),
+  computer: Schema.optional(OverrideReason),
+});
+export type RecommendationOverrides = typeof RecommendationOverrides.Type;
+export const RecommendedChoice = Schema.Struct({
+  /** Null when no recommendation could be computed; `unavailable` says why. */
+  recommended: Schema.NullOr(Schema.String),
+  chosen: Schema.String,
+  overrideReason: Schema.optional(Schema.String),
+  unavailable: Schema.optional(Schema.String),
+});
+export type RecommendedChoice = typeof RecommendedChoice.Type;
+/** Recommended-vs-chosen record for one worker creation. Advice only; never an admission veto. */
+export const WorkerRecommendation = Schema.Struct({
+  at: IsoDateTime,
+  assessment: AssignmentAssessment,
+  /** `model / effort` from the difficulty/stakes table. */
+  model: RecommendedChoice,
+  /** Provider instance ID from allocation. */
+  account: RecommendedChoice,
+  /** Environment ID from computer advice. */
+  computer: RecommendedChoice,
+  /** Advisory warnings for the chosen account and computer. */
+  warnings: Schema.Array(Schema.String),
+});
+export type WorkerRecommendation = typeof WorkerRecommendation.Type;
+/** One computer in stored advice. `unknown` is reachable but unmeasured; never zero load. */
+export const ComputerAdviceHost = Schema.Struct({
+  environmentId: Schema.String,
+  label: Schema.String,
+  rank: NonNegativeInt,
+  state: Schema.Literals(["fresh", "stale", "unknown", "offline"]),
+  sessions: Schema.NullOr(NonNegativeInt),
+  warnings: Schema.Array(Schema.String),
+});
+export type ComputerAdviceHost = typeof ComputerAdviceHost.Type;
 export const AllocationStart = Schema.Struct({
   request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
   kind: Schema.Literals(["session", "worker"]),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100000)),
+  /** Required for workers with an exact request; automatic requests carry their own. */
+  assessment: Schema.optional(AssignmentAssessment),
+  overrides: Schema.optional(RecommendationOverrides),
 });
 export type AllocationStart = typeof AllocationStart.Type;
 export const AllocationStartResult = Schema.Struct({
   allocation: Schema.NullOr(AllocationResult),
   selection: Schema.optional(ModelRoutingDecision),
+  recommendation: Schema.optional(WorkerRecommendation),
   threadId: ThreadId,
   state: Schema.Literals(["observation", "unavailable", "submitted"]),
 });
 export type AllocationStartResult = typeof AllocationStartResult.Type;
+/** What a managed worker start returns to agents: the choice and its recommendation, no candidate lists. */
+export const AllocationWorkerStartResult = Schema.Struct({
+  threadId: ThreadId,
+  state: AllocationStartResult.fields.state,
+  chosen: Schema.NullOr(
+    Schema.Struct({
+      environmentId: Schema.String,
+      instanceId: Schema.NullOr(ProviderInstanceId),
+      driver: ProviderDriverKind,
+      model: Schema.String,
+      options: Schema.Array(ProviderOptionSelection),
+    }),
+  ),
+  recommendation: Schema.optional(WorkerRecommendation),
+  reasons: Schema.Array(Schema.String),
+});
+export type AllocationWorkerStartResult = typeof AllocationWorkerStartResult.Type;
+export function compactAllocationStart(result: AllocationStartResult): AllocationWorkerStartResult {
+  const decision = result.allocation?.decision ?? result.selection?.allocation?.decision;
+  return {
+    threadId: result.threadId,
+    state: result.state,
+    chosen: decision
+      ? {
+          environmentId: decision.request.environmentId,
+          instanceId: decision.selectedInstanceId,
+          driver: decision.request.driver,
+          model: decision.request.model,
+          options: decision.request.options,
+        }
+      : null,
+    ...(result.recommendation ? { recommendation: result.recommendation } : {}),
+    reasons:
+      result.state === "submitted"
+        ? []
+        : [...(result.selection?.reasons ?? []), ...(decision?.reasons ?? [])].slice(0, 10),
+  };
+}
 export const AllocationOperation = Schema.TaggedUnion({
   modelSnapshot: {},
   modelPolicy: { expectedVersion: NonNegativeInt, policy: ModelRoutingPolicy },

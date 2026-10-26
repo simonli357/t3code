@@ -2,7 +2,8 @@ import {
   AllocationRequest,
   AllocationResult,
   AllocationStart,
-  AllocationStartResult,
+  AllocationWorkerStartResult,
+  compactAllocationStart,
   AllocationError,
   ComputerPlacement,
   ComputerPlacementRequest,
@@ -28,7 +29,7 @@ const recommendComputer = Tool.make("t3_recommend_computer", {
 });
 const allocate = Tool.make("t3_allocate_account", {
   description:
-    "Recommend compatible accounts and profiles with visible quota, pacing and load warnings. The master decides; forecasts and historical rejection projections never veto managed startup. Supply stable assignmentId/threadId and exact execution environment (when the user named no computer, choose it first with t3_recommend_computer). preview=true recommends without reserving or starting; otherwise records accounting for the proposed account. Use t3_start_allocated_assignment with explicitInstanceId to start the master's chosen account. Keep exact model/options/host. For model recommendations use selection=automatic with allowedDrivers and assessment; only configured capability alternatives apply, never quota-driven downgrades. Preview does not promise runtime success." +
+    "Recommend compatible accounts and profiles with visible quota, pacing and load warnings. The master decides; forecasts and historical rejection projections never veto managed startup. Supply stable assignmentId/threadId and exact execution environment (when the user named no computer, choose it first with t3_recommend_computer). preview=true recommends without reserving or starting; otherwise records accounting for the proposed account. For model recommendations use selection=automatic with allowedDrivers and assessment; only configured capability alternatives apply, never quota-driven downgrades. Preview does not promise runtime success. t3_start_allocated_assignment runs every recommendation itself; preview is optional." +
     MODEL_SCORING_RUBRIC,
   parameters: Schema.Struct({
     request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
@@ -40,10 +41,10 @@ const allocate = Tool.make("t3_allocate_account", {
 });
 const start = Tool.make("t3_start_allocated_assignment", {
   description:
-    "Start a fresh managed worker on the master's chosen account/profile/host (compare computers with t3_recommend_computer first unless the user named one). Use kind=worker and explicitInstanceId for an exact account. Quota, pacing, reserve and stale/unknown estimate warnings are advisory; legacy observation mode does not suppress this explicit Start. Actual unsupported requests, ownership conflicts, transport and provider errors remain errors. Previously denied or observation-only proposals may start with the same assignment/thread IDs and an explicit account choice before execution begins. After an attempted startup, retry the entire input unchanged to prevent duplicates. Does not replace native sessions. selection=automatic resolves only unspecified profile values using assessment and allowedDrivers." +
+    'Start a fresh managed worker (kind=worker). Always score the assignment: request.assessment with selection=automatic, otherwise top-level assessment. Every start runs all three recommendations, model/effort from the difficulty/stakes table, account from allocation and computer advice, and records them next to the actual choice. Pin only what the user specified: selection=automatic with explicitInstanceId pins the account, override {driver, model, reason} pins the model with the table\'s effort, and override options pin the effort too; selection=explicit pins model and options. environmentId is always the chosen computer; compare computers first with t3_recommend_computer unless the user named one. A pinned choice that differs from its recommendation needs overrides.model/account/computer with the reason, such as "user specified ES Opus xhigh"; the error lists what differs. Recommendations, quota, pacing and stale/unknown warnings are advice, never an admission veto; unavailable advice is recorded and the start proceeds. Actual unsupported requests, ownership conflicts, transport and provider errors remain errors. After an attempted startup, retry the entire input unchanged to prevent duplicates. Does not replace native sessions. Returns the chosen profile and a compact recommended-vs-chosen summary.' +
     MODEL_SCORING_RUBRIC,
   parameters: Schema.Struct({ ...AllocationStart.fields, kind: Schema.Literal("worker") }),
-  success: AllocationStartResult,
+  success: AllocationWorkerStartResult,
   failure: AllocationError,
   dependencies: [Assignments.AllocationAssignments, Invocation.McpInvocationContext],
 });
@@ -87,7 +88,7 @@ export const handlers = AllocationToolkit.toLayer(
           ),
       t3_start_allocated_assignment: (input) =>
         Effect.flatMap(Invocation.McpInvocationContext, (caller) =>
-          assignments.start(input, caller.threadId),
+          assignments.start(input, caller.threadId).pipe(Effect.map(compactAllocationStart)),
         ),
     };
   }),

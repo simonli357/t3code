@@ -32,8 +32,8 @@ import * as Allocation from "./ProviderAllocation.ts";
 
 /**
  * Several servers wired together through the real peer client (its real call deadline), a fake HTTP
- * layer standing in for the network, and one virtual clock. A master on a server that is not the
- * allocation coordinator calls the coordinator, which reads its own computer and the linked ones.
+ * layer standing in for the network, and one virtual clock. Every server links the others. A master
+ * reads its own computer and the linked ones itself, whichever server is the allocation coordinator.
  */
 const GIB = 2 ** 30;
 const report: UsageMeasurementsReport = {
@@ -68,7 +68,9 @@ type Delivery =
   | "never"
   | "refuse"
   | { readonly after: number }
-  | { readonly reject: string };
+  | { readonly reject: string }
+  /** An older server: it serves inventory reads but refuses allocation operations it predates. */
+  | "older";
 
 interface ServerSpec {
   readonly id: string;
@@ -208,6 +210,12 @@ const topology = (options: {
       if (how === "never") return Effect.never;
       if (how === "refuse") return Effect.fail(new Error("connection refused"));
       if (how === "prompt") return reach;
+      if (how === "older")
+        return typeof request === "object" &&
+          request !== null &&
+          (request as { _tag?: unknown })._tag === "allocation"
+          ? Effect.succeed({ rejected: "Invalid allocation peer request." })
+          : reach;
       if ("reject" in how) return Effect.succeed({ rejected: how.reject });
       return Effect.sleep(how.after).pipe(Effect.andThen(reach));
     };
@@ -225,7 +233,12 @@ const topology = (options: {
       deliver,
     );
     servers.source = yield* buildServer(
-      { id: "source", label: "Source", coordinator: "coord", peers: [link("coord", "Coord")] },
+      {
+        id: "source",
+        label: "Source",
+        coordinator: "coord",
+        peers: [link("coord", "Coord"), link("third", "Third")],
+      },
       deliver,
     );
     servers.third = yield* buildServer(
@@ -233,7 +246,7 @@ const topology = (options: {
         id: "third",
         label: "Third",
         coordinator: "coord",
-        peers: [link("coord", "Coord")],
+        peers: [link("coord", "Coord"), link("source", "Source")],
         ...(options.thirdReading === undefined ? {} : { reading: options.thirdReading }),
       },
       deliver,
@@ -339,8 +352,8 @@ it.effect("a slow computer is read while the coordinator takes its own reading, 
 
 it.effect("a reading that never finishes leaves its computer unknown and delays no other", () =>
   Effect.gen(function* () {
-    const { source } = yield* topology({ coordinatorReading: "never", third: "never" });
-    const { seconds, exit } = yield* advice(source);
+    const { coord } = yield* topology({ coordinatorReading: "never", third: "never" });
+    const { seconds, exit } = yield* advice(coord);
     expect(failureOf(exit)).toBe("");
     expect(seconds).toBeGreaterThanOrEqual(15);
     expect(seconds).toBeLessThan(16);
@@ -364,27 +377,32 @@ it.effect("a computer named by the user stays the answer when it never answers",
   }).pipe(Effect.scoped),
 );
 
-it.effect("tells the true reason when the coordinator itself cannot answer", () =>
-  Effect.gen(function* () {
-    const gone = yield* topology({ coordinator: "refuse" });
-    const refused = yield* advice(gone.source);
-    expect(failureOf(refused.exit)).toContain("Computer advice is unavailable: Coord: unreachable");
-    expect(failureOf(refused.exit)).toContain("connection refused");
-    expect(failureOf(refused.exit)).toContain("Choosing a computer yourself stays allowed.");
-    expect(failureOf(refused.exit)).not.toContain("does not support it");
+it.effect(
+  "an older coordinator cannot fail the advice; a failing computer shows its own error",
+  () =>
+    Effect.gen(function* () {
+      // The coordinator predates placement and refuses it; the master never asks it to place.
+      const older = yield* topology({ coordinator: "older" });
+      const kept = yield* advice(older.source);
+      expect(failureOf(kept.exit)).toBe("");
+      expect(hostsOf(kept.exit).toSorted()).toEqual([
+        ["Coord", "fresh"],
+        ["Source", "fresh"],
+        ["Third", "fresh"],
+      ]);
 
-    const strict = yield* topology({ coordinator: { reject: "Invalid allocation peer request." } });
-    const rejected = yield* advice(strict.source);
-    expect(failureOf(rejected.exit)).toContain(
-      "Computer advice is unavailable: Coord: Invalid allocation peer request.",
-    );
-
-    // A coordinator that never answers is given two peer deadlines, then reported as it is.
-    const silent = yield* topology({ coordinator: "never" });
-    const hung = yield* advice(silent.source);
-    expect(hung.seconds).toBe(30);
-    expect(failureOf(hung.exit)).toContain("Computer advice is unavailable: Coord: unreachable");
-  }).pipe(Effect.scoped),
+      const broken = yield* topology({ coordinator: "older", third: "refuse" });
+      const { exit } = yield* advice(broken.source);
+      expect(failureOf(exit)).toBe("");
+      const placement = Exit.isSuccess(exit) ? exit.value.placement! : undefined;
+      const third = placement?.hosts.find((host) => host.label === "Third");
+      expect(third?.state).toBe("offline");
+      expect(third?.warnings.join(" ")).toContain("connection refused");
+      expect(
+        placement?.hosts.filter((host) => host.state === "fresh").map((host) => host.label),
+      ).toEqual(expect.arrayContaining(["Coord", "Source"]));
+      expect(placement?.recommendedEnvironmentId).not.toBe("third");
+    }).pipe(Effect.scoped),
 );
 
 it.effect("ordinary previews keep the single peer deadline", () =>

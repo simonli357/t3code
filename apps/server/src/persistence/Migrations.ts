@@ -1,6 +1,7 @@
 import Migration0068 from "./Migrations/068_BaseSessions.ts";
 import Migration0071 from "./Migrations/071_WorkerCommunicationWindow.ts";
 import Migration0072 from "./Migrations/072_WorkerRenewalIndexes.ts";
+import Migration0073 from "./Migrations/073_WorkerRecommendations.ts";
 import Migration0070 from "./Migrations/070_SessionRenewals.ts";
 /**
  * Migration runner with an inline loader.
@@ -99,6 +100,7 @@ const migrationEntries = [
   [70, "SessionRenewals", Migration0070],
   [71, "WorkerCommunicationWindow", Migration0071],
   [72, "WorkerRenewalIndexes", Migration0072],
+  [73, "WorkerRecommendations", Migration0073],
   [68, "BaseSessions", Migration0068],
   [69, "SessionWorkspaces", Migration0069],
   [67, "AllocationSessionEvidenceIndex", Migration0067],

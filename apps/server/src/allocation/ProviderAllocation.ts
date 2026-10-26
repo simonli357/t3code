@@ -8,6 +8,8 @@ import {
   ModelSelection,
   ThreadId,
   type AllocationSnapshot,
+  type AllocationPolicy,
+  type ComputerPlacement,
   type ComputerPlacementRequest,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -60,18 +62,11 @@ const decodeSelection = Schema.decodeUnknownEffect(Schema.fromJsonString(ModelSe
 const now = Clock.currentTimeMillis.pipe(
   Effect.map((n) => DateTime.formatIso(DateTime.makeUnsafe(n))),
 );
-/**
- * A placement read runs this computer's own reading and every linked computer's together, and each
- * gives up after one peer deadline, so the coordinator answers within about one. A master on
- * another server waits for the coordinator one deadline longer, for the call itself and the work
- * around the readings; with only one it would give up as the coordinator does and report a working
- * coordinator as unreachable.
- */
-const PLACEMENT_REQUEST_TIMEOUT_MS = 2 * Peers.PEER_CALL_TIMEOUT_MS;
-/** A computer that could not be read for a placement: listed offline, never left out or zero. */
+/** A computer that could not be read for a placement: listed offline with its error, never left out or zero. */
 const unreadInventory = (
   peer: { environmentId: string; label: string },
   observedAt: string,
+  cause?: string,
 ): AllocationInventory => ({
   coordinatorEnvironmentId: null,
   environmentId: peer.environmentId,
@@ -80,18 +75,8 @@ const unreadInventory = (
   accounts: [],
   demand: [],
   complete: false,
-  notices: [`${peer.label}: load unavailable for this decision.`],
+  notices: [`${peer.label}: load unavailable for this decision${cause ? `: ${cause}` : "."}`],
 });
-/** What actually went wrong with a placement call, so a slow computer is never blamed on the coordinator. */
-const adviceUnavailable = (cause: unknown) =>
-  new AllocationError({
-    code: "unavailable",
-    detail: `Computer advice is unavailable: ${
-      cause instanceof Peers.PeerUnavailable || cause instanceof Peers.PeerRejected
-        ? cause.message.replace(/\.$/, "")
-        : "the allocation coordinator answered something this server cannot read"
-    }. Choosing a computer yourself stays allowed.`,
-  });
 
 export class ProviderAllocation extends Context.Service<
   ProviderAllocation,
@@ -100,6 +85,17 @@ export class ProviderAllocation extends Context.Service<
       operation: AllocationOperation,
     ) => Effect.Effect<AllocationResponse, AllocationError>;
     readonly receive: (from: string, request: unknown) => Effect.Effect<unknown, AllocationError>;
+    /**
+     * Computer advice plus the inventories it ranked, read on this computer. Placement needs no
+     * allocation authority, so it never goes through the coordinator.
+     */
+    readonly place: (request: ComputerPlacementRequest) => Effect.Effect<
+      {
+        readonly placement: ComputerPlacement;
+        readonly inventories: readonly AllocationInventory[];
+      },
+      AllocationError
+    >;
   }
 >()("t3/allocation/ProviderAllocation") {}
 
@@ -319,7 +315,7 @@ const make = Effect.gen(function* () {
             ...remote.map((result, index) =>
               result._tag === "Success"
                 ? result.success
-                : unreadInventory(linked[index]!, own.observedAt),
+                : unreadInventory(linked[index]!, own.observedAt, result.failure.message),
             ),
           ];
         }
@@ -388,6 +384,21 @@ const make = Effect.gen(function* () {
         );
       }
     }
+  });
+  /** Advice only: it reads every linked computer, reserves nothing and gates nothing. */
+  const placeLocal = Effect.fn("ProviderAllocation.placeLocal")(function* (
+    request: ComputerPlacementRequest,
+    policy: AllocationPolicy,
+  ) {
+    const inventories = yield* collect(
+      undefined,
+      undefined,
+      request.repositoryKey === undefined ? {} : { repositoryKey: request.repositoryKey },
+    );
+    return {
+      placement: recommendPlacement({ at: yield* now, policy, request, inventories }),
+      inventories,
+    };
   });
   const executeLocal = Effect.fn("ProviderAllocation.executeLocal")(function* (
     operation: AllocationOperation,
@@ -488,24 +499,8 @@ const make = Effect.gen(function* () {
         }),
       };
     }
-    if (operation._tag === "placement") {
-      // Advice only: it reads every linked computer, reserves nothing and gates nothing.
-      const inventories = yield* collect(
-        undefined,
-        undefined,
-        operation.request.repositoryKey === undefined
-          ? {}
-          : { repositoryKey: operation.request.repositoryKey },
-      );
-      return {
-        placement: recommendPlacement({
-          at: yield* now,
-          policy,
-          request: operation.request,
-          inventories,
-        }),
-      };
-    }
+    if (operation._tag === "placement")
+      return { placement: (yield* placeLocal(operation.request, policy)).placement };
     if (operation._tag === "policy") {
       if (operation.input.policy.coordinatorEnvironmentId !== local.environmentId)
         return yield* new AllocationError({
@@ -620,6 +615,12 @@ const make = Effect.gen(function* () {
     const repositoryKey = project.repositoryIdentity?.canonicalKey;
     return repositoryKey === undefined ? request : { ...request, repositoryKey };
   });
+  // Only this computer knows its project IDs; checkouts elsewhere match by repository.
+  const place = Effect.fn("ProviderAllocation.place")(function* (
+    request: ComputerPlacementRequest,
+  ) {
+    return yield* placeLocal(yield* withRepositoryKey(request), yield* store.policy);
+  });
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
     operation: AllocationOperation,
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
@@ -687,30 +688,21 @@ const make = Effect.gen(function* () {
       }
       return {};
     }
-    // Only this computer knows its project IDs; the coordinator matches checkouts by repository.
-    const routed =
-      operation._tag === "placement"
-        ? { ...operation, request: yield* withRepositoryKey(operation.request) }
-        : operation;
+    // Placement reads every linked computer itself and needs no authority, so it stays here:
+    // an older coordinator that does not know the operation cannot fail the whole advice.
+    if (operation._tag === "placement")
+      return { placement: (yield* place(operation.request)).placement };
     const id = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
       .allocationCoordinatorEnvironmentId;
     if (id && id !== local.environmentId)
       return yield* peers
-        .call(
-          id,
-          { _tag: "allocation", operation: routed },
-          routed._tag === "placement" ? PLACEMENT_REQUEST_TIMEOUT_MS : undefined,
-        )
-        .pipe(
-          Effect.flatMap(decodeResponse),
-          Effect.mapError((cause) =>
-            routed._tag === "placement" ? adviceUnavailable(cause) : unavailable(),
-          ),
-        );
-    return yield* executeLocal(routed);
+        .call(id, { _tag: "allocation", operation })
+        .pipe(Effect.flatMap(decodeResponse), Effect.mapError(unavailable));
+    return yield* executeLocal(operation);
   });
   return ProviderAllocation.of({
     execute,
+    place,
     receive: Effect.fn("ProviderAllocation.receive")(function* (from, raw) {
       if (Option.isNone(yield* peers.resolve(from)))
         return yield* new AllocationError({
