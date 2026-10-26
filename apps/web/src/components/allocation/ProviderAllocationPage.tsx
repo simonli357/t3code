@@ -982,6 +982,21 @@ function DecisionView({
               {w.id}: actual {w.actualPoints.toFixed(1)} / target {w.targetPoints.toFixed(1)};
               forecast {w.forecastPoints.toFixed(1)} points, remaining headroom{" "}
               {w.headroomPoints.toFixed(1)}.
+              {w.budgetHeadroomPoints !== undefined && (
+                <>
+                  {" "}
+                  Running {w.runningForecastPoints?.toFixed(1)}, queued/reserved{" "}
+                  {w.queuedForecastPoints?.toFixed(1)}, incoming{" "}
+                  {w.incomingForecastPoints?.toFixed(1)}, aggregate/reading-age allowance{" "}
+                  {w.unobservedForecastPoints?.toFixed(1)}; budget {w.budgetPoints?.toFixed(1)},
+                  projected budget headroom {w.budgetHeadroomPoints.toFixed(1)}
+                  {w.budgetHeadroomPoints ===
+                  Math.min(...c.windows.map((v) => v.budgetHeadroomPoints ?? v.headroomPoints))
+                    ? " (limiting)"
+                    : ""}
+                  .
+                </>
+              )}
             </p>
           ))}
         </details>

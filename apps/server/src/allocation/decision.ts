@@ -53,9 +53,13 @@ function activeDemand(
   inventories: readonly AllocationInventory[],
   reservations: readonly AllocationReservation[],
   at: string,
+  maxReadingAgeMinutes: number,
 ): AllocationDemand[] {
-  const demand = inventories.flatMap((host) => host.demand);
-  const keys = new Set(demand.map((d) => `${d.environmentId}:${d.threadId}`));
+  const keyFor = (d: { environmentId: string; threadId: string }) =>
+    JSON.stringify([d.environmentId, d.threadId]);
+  const bySession = new Map<string, AllocationDemand>();
+  for (const host of [...inventories].sort((a, b) => compare(b.observedAt, a.observedAt)))
+    for (const d of host.demand) if (!bySession.has(keyFor(d))) bySession.set(keyFor(d), d);
   for (const reservation of reservations) {
     if (
       reservation.state !== "starting" &&
@@ -64,20 +68,50 @@ function activeDemand(
     )
       continue;
     const request = reservation.request;
-    const key = `${request.environmentId}:${request.threadId}`;
-    if (keys.has(key)) continue;
-    keys.add(key);
-    demand.push({
+    const key = keyFor(request);
+    if (bySession.has(key)) continue;
+    // A fresh complete snapshot confirms that a consumed session is now idle.
+    // Missing/stale hosts cannot release this accounting on their own.
+    const observedIdle = inventories.some(
+      (host) =>
+        host.environmentId === request.environmentId &&
+        host.complete &&
+        host.observedAt >= reservation.createdAt &&
+        host.observedAt <= at &&
+        Date.parse(at) - Date.parse(host.observedAt) <= maxReadingAgeMinutes * 60_000,
+    );
+    if (reservation.state === "consumed" && observedIdle) continue;
+    bySession.set(key, {
       environmentId: request.environmentId,
       threadId: request.threadId,
       instanceId: reservation.instanceId,
       accountKey: reservation.accountKey,
       model: request.model,
       options: request.options,
-      state: "pending",
+      state: reservation.state === "consumed" ? "uncertain" : "pending",
     });
   }
-  return demand;
+  return [...bySession.values()];
+}
+
+/** Weights and continuity can move a recommendation only within the live preference margin. */
+export function allocationScore(
+  candidate: AllocationCandidate,
+  policy: AllocationPolicy,
+  driver: string,
+  previousAccountKey?: string,
+): number {
+  const headroom = candidate.windows.length
+    ? Math.min(...candidate.windows.map((w) => w.budgetHeadroomPoints ?? w.headroomPoints))
+    : -Infinity;
+  const weight = allocationPreferenceWeight(
+    policy,
+    allocationPreferenceKey({ ...candidate, driver }),
+  );
+  return (
+    headroom +
+    policy.hysteresisPoints * (weight / 100 + (candidate.accountKey === previousAccountKey ? 1 : 0))
+  );
 }
 
 /** Pure replay boundary. Callers persist the exact policy, inventories and timestamp. */
@@ -120,7 +154,11 @@ export function decideAllocation(input: {
     globalWarnings.push(
       "Expected duration exceeds the configured forecast horizon. Raise the horizon or split the assignment.",
     );
-  const demand = activeDemand(inventories, input.reservations, at);
+  const demand = activeDemand(inventories, input.reservations, at, policy.maxReadingAgeMinutes);
+  if (demand.some((d) => d.state === "uncertain"))
+    globalWarnings.push(
+      "An active reservation has unconfirmed execution state; its forecast remains counted.",
+    );
   if (demand.some((d) => !d.accountKey))
     globalWarnings.push(
       "An active assignment has unknown account identity; its demand cannot be reconciled safely.",
@@ -252,7 +290,14 @@ export function decideAllocation(input: {
         )
       )
         warnings.push("No applicable short-window reading for this model.");
-      let confidence: "low" | "medium" = incompleteLoad ? "low" : "medium";
+      let confidence: "low" | "medium" =
+        incompleteLoad ||
+        demand.some((d) => d.state === "uncertain" || !d.accountKey) ||
+        !account.accountKey ||
+        !relevant.length ||
+        account.shortWindow === "unknown"
+          ? "low"
+          : "medium";
       let behind = 0;
       const windows = relevant.map((window) => {
         const issues: string[] = [];
@@ -265,6 +310,7 @@ export function decideAllocation(input: {
         const resetHours = window.resetsAt ? (Date.parse(window.resetsAt) - now) / HOUR : null;
         if (resetHours !== null && resetHours <= 0)
           issues.push("Reset time passed; replenishment is not confirmed.");
+        if (issues.length) confidence = "low";
         const short =
           window.kind === "session" ||
           (window.durationHours !== null && window.durationHours <= 24);
@@ -306,7 +352,21 @@ export function decideAllocation(input: {
         const bucketDemand = existing.filter(
           (d) => !window.models || window.models.includes(d.model),
         );
-        const knownLoadRate = bucketDemand.length * perAssignment;
+        // Use each ongoing model/effort's measured variability, never the incoming
+        // assignment's profile. Missing profile evidence uses the existing fallback.
+        const demandRate = (d: AllocationDemand) => {
+          const effort =
+            d.options.find((o) => o.id === "reasoningEffort" || o.id === "effort")?.value ?? null;
+          const variability = siblings
+            .flatMap((s) => s.usageProfiles ?? [])
+            .filter(
+              (p) =>
+                p.model === d.model && p.effort === effort && p.samples >= policy.minimumSamples,
+            )
+            .reduce((margin, p) => Math.max(margin, p.uncertainty ?? 1), 1);
+          return Math.max(0.1, cold) * policy.uncertaintyMultiplier * Math.min(2, variability);
+        };
+        const knownLoadRate = bucketDemand.reduce((sum, d) => sum + demandRate(d), 0);
         // The measured delta includes external hosts, terminals and subagents. It is an
         // aggregate floor, NOT another worker to add to observed local demand.
         const observedRate = comparable
@@ -320,6 +380,8 @@ export function decideAllocation(input: {
         );
         const horizon = Math.min(duration * policy.uncertaintyMultiplier, horizonCap);
         let ongoingHorizon = horizon;
+        let runningForecastPoints = 0;
+        let queuedForecastPoints = 0;
         const knownDemandPoints = bucketDemand.reduce((sum, d) => {
           const held = input.reservations.find(
             (r) =>
@@ -343,13 +405,21 @@ export function decideAllocation(input: {
             ),
           );
           ongoingHorizon = Math.max(ongoingHorizon, remaining);
-          return sum + perAssignment * remaining;
+          const points = demandRate(d) * remaining;
+          if (d.state === "pending") queuedForecastPoints += points;
+          else runningForecastPoints += points;
+          return sum + points;
         }, 0);
-        const forecastPoints =
-          Math.max(knownDemandPoints, observedRate * ongoingHorizon) +
-          perAssignment * horizon +
+        const incomingForecastPoints = perAssignment * horizon;
+        const unobservedForecastPoints =
+          Math.max(0, observedRate * ongoingHorizon - knownDemandPoints) +
           ((Math.max(knownLoadRate, observedRate) + perAssignment) * ageMinutes) / 60;
+        const forecastPoints =
+          knownDemandPoints + incomingForecastPoints + unobservedForecastPoints;
         const headroomPoints = usable - window.usedPoints - forecastPoints;
+        const budgetPoints =
+          !short && window.cycleStartedAt ? Math.min(usable, target + curve.borrowPoints) : usable;
+        const budgetHeadroomPoints = budgetPoints - window.usedPoints - forecastPoints;
         if (headroomPoints < 0) {
           issues.push("Insufficient headroom for ongoing and incoming demand.");
         }
@@ -369,6 +439,12 @@ export function decideAllocation(input: {
           targetPoints: target,
           forecastPoints,
           headroomPoints,
+          budgetPoints,
+          budgetHeadroomPoints,
+          runningForecastPoints,
+          queuedForecastPoints,
+          incomingForecastPoints,
+          unobservedForecastPoints,
           samples: window.samples,
           ageMinutes,
           resetsAt: window.resetsAt,
@@ -397,25 +473,13 @@ export function decideAllocation(input: {
         compare(a.accountKey ?? "", b.accountKey ?? "") ||
         compare(a.instanceId, b.instanceId),
     );
-  const weights = new Map(
-    allAccounts.map((account) => [
-      JSON.stringify([account.environmentId, account.instanceId]),
-      allocationPreferenceWeight(policy, allocationPreferenceKey(account)),
-    ]),
-  );
-  const preference = (candidate: AllocationCandidate) =>
-    weights.get(JSON.stringify([candidate.environmentId, candidate.instanceId])) ?? 50;
   const eligible = candidates
     .filter((c) => c.eligible)
     .sort((a, b) => {
-      const score = (c: AllocationCandidate) =>
-        c.behindPoints + (c.accountKey === input.previousAccountKey ? policy.hysteresisPoints : 0);
       return (
         (a.warnings?.length ?? 0) - (b.warnings?.length ?? 0) ||
-        // Weight ranks otherwise comparable valid choices. It cannot exclude one,
-        // change a forecast, or bypass explicit/native/allowed-account constraints.
-        preference(b) - preference(a) ||
-        score(b) - score(a) ||
+        allocationScore(b, policy, request.driver, input.previousAccountKey) -
+          allocationScore(a, policy, request.driver, input.previousAccountKey) ||
         (a.resetInHours ?? Infinity) - (b.resetInHours ?? Infinity) ||
         compare(a.accountKey ?? "", b.accountKey ?? "") ||
         compare(a.instanceId, b.instanceId)
@@ -435,6 +499,7 @@ export function decideAllocation(input: {
           request.explicitInstanceId
             ? "Explicit compatible account selected. Forecasts are advisory; provider success is not guaranteed."
             : "Recommended compatible account. The master chooses whether to start.",
+          "Comparable warnings are ranked by the tightest projected budget headroom, with bounded account preferences.",
           ...(selected.warnings ?? []),
         ]
       : [

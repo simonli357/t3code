@@ -115,6 +115,47 @@ const args = {
   expectedPolicyVersion: 1,
   expectedModelVersion: 0,
 };
+it.effect(
+  "compares projected headroom across approved provider profiles as concurrent work changes",
+  () =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* setup;
+        const current = {
+          ...inventory,
+          accounts: inventory.accounts.map((a) => ({
+            ...a,
+            windows: a.windows.map((w) => ({ ...w, usedPoints: a.driver === "codex" ? 9 : 10 })),
+          })),
+        };
+        const idle = yield* store.selectModel({ ...args, reserve: false, inventories: [current] });
+        expect(idle.allocation?.decision.request.driver).toBe("codex");
+        const profile = idle.allocation!.decision.request;
+        const busy = yield* store.selectModel({
+          ...args,
+          reserve: false,
+          inventories: [
+            {
+              ...current,
+              demand: [
+                {
+                  environmentId: "host",
+                  threadId: ThreadId.make("ongoing"),
+                  instanceId: ProviderInstanceId.make("codex"),
+                  accountKey: "codex",
+                  model: profile.model,
+                  options: profile.options,
+                  state: "running",
+                },
+              ],
+            },
+          ],
+        });
+        expect(busy.allocation?.decision.request.driver).toBe("claudeAgent");
+        expect(busy.profiles.every((p) => p.eligible)).toBe(true);
+      }),
+    ),
+);
 it.effect("retains family consent through denied lineage after store reconstruction", () =>
   run(
     Effect.gen(function* () {

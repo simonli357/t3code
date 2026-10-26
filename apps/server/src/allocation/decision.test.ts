@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   type AllocationAccount,
+  type AllocationDemand,
   type AllocationInventory,
   type AllocationRequest,
   type AllocationReservation,
@@ -604,7 +605,19 @@ describe("bounded assignment duration forecasts", () => {
     const oneHourOld = "2026-10-23T11:00:00.000Z";
     expect(points(withLegacy([held(4, { createdAt: oneHourOld })]))).toBe(40.3125);
     expect(points(withLegacy([held(8)]))).toBe(62.8125);
-    expect(points(withLegacy([held(8)]))).toBe(points(run({ reservations: [held(8)] })));
+    expect(points(withLegacy([held(8)]))).toBe(
+      points(
+        run({
+          inventories: [
+            {
+              ...inventory([account("a", { shortWindow: "known-absent", windows: [window()] })]),
+              complete: false,
+            },
+          ],
+          reservations: [held(8)],
+        }),
+      ),
+    );
     expect(points(withLegacy([held(0.25)]))).toBe(5.625);
     expect(points(withLegacy([held(undefined)]))).toBe(14.0625);
   });
@@ -776,6 +789,266 @@ describe("advisory account preferences", () => {
       },
     });
     expect(result.selectedInstanceId).toBe("b");
+  });
+});
+
+describe("projected budget recommendations", () => {
+  const policy = {
+    ...defaultAllocationPolicy,
+    uncertaintyMultiplier: 1,
+    coldLongPointsPerHour: 2,
+    coldShortPointsPerHour: 2,
+    codex: {
+      ...defaultAllocationPolicy.codex,
+      burstPoints: 80,
+      dailyPoints: 0,
+      reservePoints: 20,
+      borrowPoints: 0,
+    },
+  };
+  const a = (id: string, usedPoints: number) =>
+    account(id, {
+      shortWindow: "known-absent",
+      windows: [window({ usedPoints })],
+    });
+  const load = (id: string, threadId = id) => ({
+    environmentId: "host",
+    threadId: ThreadId.make(threadId),
+    instanceId: ProviderInstanceId.make(id),
+    accountKey: id,
+    model: request.model,
+    options: request.options,
+    state: "running" as const,
+  });
+  const run = (
+    accounts: AllocationAccount[],
+    demand: AllocationDemand[] = [],
+    patch: Partial<Parameters<typeof decideAllocation>[0]> = {},
+  ) =>
+    decideAllocation({
+      ...input(),
+      policy,
+      inventories: [{ ...inventory(accounts), coordinatorEnvironmentId: null, demand }],
+      ...patch,
+    });
+  const held = (
+    d: AllocationDemand = load("SL"),
+    state: AllocationReservation["state"] = "reserved",
+  ): AllocationReservation => ({
+    assignmentId: d.threadId,
+    request: { ...request, environmentId: d.environmentId, threadId: d.threadId },
+    accountKey: d.accountKey,
+    instanceId: d.instanceId,
+    createdAt: at,
+    expiresAt: "2026-10-23T12:05:00.000Z",
+    state,
+    decision: decideAllocation(input()),
+  });
+
+  it("recommends AD at 19 points headroom over SL at 7 before either has a warning", () => {
+    const decision = run(
+      [a("SL", 61), a("AD", 59)],
+      Array.from({ length: 5 }, (_, n) => load("SL", `session-${n}`)),
+    );
+    expect(decision.selectedInstanceId).toBe("AD");
+    expect(decision.candidates.every((c) => c.warnings?.length === 0)).toBe(true);
+    expect(decision.candidates.find((c) => c.instanceId === "SL")?.windows[0]).toMatchObject({
+      actualPoints: 61,
+      forecastPoints: 12,
+      budgetPoints: 80,
+      budgetHeadroomPoints: 7,
+      runningForecastPoints: 10,
+      queuedForecastPoints: 0,
+      incomingForecastPoints: 2,
+    });
+    expect(decision.candidates.find((c) => c.instanceId === "AD")?.windows[0]).toMatchObject({
+      actualPoints: 59,
+      forecastPoints: 2,
+      budgetHeadroomPoints: 19,
+    });
+    // Moving the same load changes the recommendation, without changing observed usage.
+    expect(
+      run(
+        [a("SL", 61), a("AD", 59)],
+        Array.from({ length: 5 }, (_, n) => load("AD", `session-${n}`)),
+      ).selectedInstanceId,
+    ).toBe("SL");
+  });
+
+  it("accounts for concurrent work despite a tiny pacing advantage or a maximum preference", () => {
+    const accounts = [a("SL", 59), a("AD", 59.1)];
+    const weighted = {
+      ...policy,
+      accountWeights: [
+        { key: allocationPreferenceKey(accounts[0]!), weight: 100 },
+        { key: allocationPreferenceKey(accounts[1]!), weight: 0 },
+      ],
+    };
+    expect(run(accounts, [], { policy: weighted }).selectedInstanceId).toBe("SL");
+    expect(run(accounts, [load("SL")], { policy: weighted }).selectedInstanceId).toBe("AD");
+    expect(
+      run(accounts, [load("SL")], {
+        policy: weighted,
+        request: { ...request, explicitInstanceId: accounts[0]!.instanceId },
+      }).selectedInstanceId,
+    ).toBe("SL");
+  });
+
+  it("uses the tighter short or weekly allowance and ignores unrelated model buckets", () => {
+    const withShort = (id: string, weekly: number, short: number) => ({
+      ...a(id, weekly),
+      shortWindow: "reported" as const,
+      windows: [
+        window({ usedPoints: weekly }),
+        window({ id: "short", kind: "session", usedPoints: short, durationHours: 5 }),
+      ],
+    });
+    expect(run([withShort("a", 50, 70), withShort("b", 60, 20)]).selectedInstanceId).toBe("b");
+    expect(run([withShort("a", 50, 20), withShort("b", 70, 10)]).selectedInstanceId).toBe("a");
+    const scoped = a("a", 50);
+    expect(
+      run([
+        {
+          ...scoped,
+          windows: [...scoped.windows, window({ id: "other", models: ["other"], usedPoints: 100 })],
+        },
+        a("b", 60),
+      ]).selectedInstanceId,
+    ).toBe("a");
+  });
+
+  it("uses released initial/daily budgets and borrowing rather than raw quota alone", () => {
+    const accounts = [
+      a("a", 50),
+      {
+        ...a("b", 60),
+        windows: [window({ usedPoints: 60, cycleStartedAt: "2026-10-20T12:00:00.000Z" })],
+      },
+    ];
+    const paced = {
+      ...policy,
+      codex: { ...policy.codex, burstPoints: 40, dailyPoints: 10, borrowPoints: 20 },
+    };
+    // a: 70 - 50 - 2 = 18; b: 80 - 60 - 2 = 18. Stable tie favors a.
+    expect(run(accounts, [], { policy: paced }).selectedInstanceId).toBe("a");
+    const daily = { ...paced, codex: { ...paced.codex, dailyPoints: 11 } };
+    // a: 71 - 50 - 2 = 19; b: 80 - 60 - 2 = 18, still a.
+    expect(run(accounts, [], { policy: daily }).selectedInstanceId).toBe("a");
+    const early = { ...paced, codex: { ...paced.codex, burstPoints: 30 } };
+    // a: 60 - 50 - 2 = 8; b: 80 - 60 - 2 = 18.
+    expect(run(accounts, [], { policy: early }).selectedInstanceId).toBe("b");
+  });
+
+  it("counts queued, reserved and remote shared sessions once and excludes the incoming session", () => {
+    const sl = a("SL", 59),
+      ad = a("AD", 60);
+    const live = load("SL", "live");
+    const queued = { ...load("SL", "queued"), state: "pending" as const };
+    const remote = {
+      ...load("SL", "remote"),
+      environmentId: "peer",
+      instanceId: ProviderInstanceId.make("alias"),
+    };
+    const decision = run([sl, ad], [], {
+      inventories: [
+        {
+          ...inventory([sl, ad]),
+          demand: [live, live, queued, { ...load("SL"), threadId: request.threadId }],
+        },
+        {
+          ...inventory([{ ...sl, environmentId: "peer", instanceId: remote.instanceId }]),
+          environmentId: "peer",
+          demand: [remote],
+        },
+      ],
+      reservations: [
+        held(live, "consumed"),
+        held(queued),
+        held(load("SL", "reserved")),
+        held(load("SL", "released"), "released"),
+        { ...held(load("SL", "expired")), expiresAt: at },
+      ],
+    });
+    expect(decision.selectedInstanceId).toBe("AD");
+    expect(decision.candidates.find((c) => c.instanceId === "SL")?.windows[0]).toMatchObject({
+      runningForecastPoints: 4,
+      queuedForecastPoints: 4,
+      incomingForecastPoints: 2,
+      forecastPoints: 10,
+    });
+  });
+
+  it("drops confirmed idle consumed sessions but retains uncertain reservations on stale/missing peers", () => {
+    const accounts = [a("SL", 59), a("AD", 60)];
+    expect(
+      run(accounts, [], { reservations: [held(load("SL"), "consumed")] }).selectedInstanceId,
+    ).toBe("SL");
+    for (const host of [
+      { ...inventory(accounts), complete: false },
+      { ...inventory(accounts), observedAt: "2026-10-23T11:00:00.000Z" },
+    ]) {
+      const d = run(accounts, [], {
+        inventories: [host],
+        reservations: [held(load("SL"), "consumed")],
+      });
+      expect(d.selectedInstanceId).toBe("AD");
+      expect(d.confidence).toBe("low");
+      expect(d.reasons.join(" ")).toContain("unconfirmed execution");
+      expect(d.reasons.join(" ")).toContain("unknown or stale");
+    }
+    const missing = run(accounts, [], {
+      reservations: [held({ ...load("SL"), environmentId: "offline" }, "consumed")],
+    });
+    expect(missing.selectedInstanceId).toBe("AD");
+    expect(missing.confidence).toBe("low");
+    expect(missing.reasons.join(" ")).toContain("unconfirmed execution");
+    const unknown = run([a("SL", 59), { ...a("AD", 0), windows: [], shortWindow: "unknown" }]);
+    expect(unknown.selectedInstanceId).toBe("SL");
+    expect(unknown.candidates.find((c) => c.instanceId === "AD")?.warnings?.join(" ")).toContain(
+      "No measured allowance",
+    );
+  });
+
+  it("forecasts each ongoing model/effort with its own variability and reserved duration", () => {
+    const sl = {
+      ...a("SL", 50),
+      profileUncertainty: 2,
+      usageProfiles: [
+        {
+          model: "sol",
+          effort: "max",
+          contextBand: "under32k",
+          samples: 8,
+          observedAt: at,
+          outputTokensPerHour: 50,
+          uncertainty: 1.5,
+        },
+        {
+          model: "sol",
+          effort: "high",
+          contextBand: "under32k",
+          samples: 8,
+          observedAt: at,
+          outputTokensPerHour: 50,
+          uncertainty: 2,
+        },
+      ],
+    };
+    const d = { ...load("SL"), model: "sol", options: [{ id: "reasoningEffort", value: "max" }] };
+    const reservation = {
+      ...held(d),
+      request: { ...held(d).request, model: d.model, options: d.options, expectedHours: 2 },
+    };
+    const decision = run([sl], [d], { reservations: [reservation] });
+    expect(decision.candidates[0]?.windows[0]).toMatchObject({
+      runningForecastPoints: 6,
+      incomingForecastPoints: 4,
+      forecastPoints: 10,
+    });
+    expect(
+      run([{ ...sl, usageProfiles: [] }], [d], { reservations: [reservation] }).candidates[0]
+        ?.windows[0]?.runningForecastPoints,
+    ).toBe(4);
   });
 });
 

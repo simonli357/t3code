@@ -66,9 +66,11 @@ Use **Save settings** to apply changes; no assignment preview is required. **Res
 changes the draft, then Save applies it. Neither restores enforcement. Reconnecting keeps unsaved
 edits. If someone saved a newer version, **Reload saved settings** discards your old draft explicitly.
 
-Account weights default equally to 50. A higher weight favors that account among compatible choices
-with comparable warnings; zero does not block an explicit choice. Family shares show relative
-preference, not guaranteed usage. Known shared identities count once across computers; unidentified
+Recommendations subtract forecast running, queued, reserved and incoming work from the available
+budget, comparing the tightest short or weekly window. Account weights default equally to 50 and
+favor close choices within the **Account preference margin** under advanced estimation settings.
+The same margin favors the previous account; zero weight does not block an explicit choice. Family
+shares show relative preference, not guaranteed usage. Known shared identities count once across computers; unidentified
 accounts stay separate. Usage analytics show account allowance points/hour when measured. Model and
 effort token samples are separate evidence, not subscription percentages; missing rates say
 **Not enough data**. Collection remains limited to accounts already opted into measurements.

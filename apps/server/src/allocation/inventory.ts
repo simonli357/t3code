@@ -29,6 +29,13 @@ const contextBand = (tokens: number | undefined) =>
         : tokens < 256_000
           ? "128k-256k"
           : "256k+";
+const profileUncertainty = (profile: UsageMeasurementsReport["profiles"][number]) =>
+  profile.turns >= 5 && profile.medianOutputTokensPerTurnHour > 0
+    ? Math.max(
+        1,
+        Math.min(2, profile.p90OutputTokensPerTurnHour / profile.medianOutputTokensPerTurnHour),
+      )
+    : 1;
 
 export function allocationInventory(input: {
   environmentId: string;
@@ -187,6 +194,7 @@ export function allocationInventory(input: {
           contextBand: item.contextBand,
           samples: item.turns,
           outputTokensPerHour: item.medianOutputTokensPerTurnHour,
+          uncertainty: profileUncertainty(item),
           observedAt:
             measurements.turns
               .filter(
@@ -204,16 +212,7 @@ export function allocationInventory(input: {
       profileSamples: profile?.turns ?? 0,
       // Token rates never become quota. Comparable variability can only increase
       // the cold-start margin, bounded to 2x; absent context remains unknown.
-      profileUncertainty:
-        profile && profile.turns >= 5 && profile.medianOutputTokensPerTurnHour > 0
-          ? Math.max(
-              1,
-              Math.min(
-                2,
-                profile.p90OutputTokensPerTurnHour / profile.medianOutputTokensPerTurnHour,
-              ),
-            )
-          : 1,
+      profileUncertainty: profile ? profileUncertainty(profile) : 1,
     };
   });
   return {

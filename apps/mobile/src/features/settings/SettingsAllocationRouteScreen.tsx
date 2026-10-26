@@ -179,8 +179,13 @@ export function SettingsAllocationRouteScreen() {
             ))}
             <Text className="font-semibold">Account preferences</Text>
             <Text>
-              Relative recommendation preference, not a hard quota. Explicit valid choices always
-              win.
+              Weights favor close choices within the account preference margin. The tightest
+              projected budget headroom ranks accounts. Explicit valid choices always win.
+            </Text>
+            <Text>
+              Account preference margin: {snapshot.policy.hysteresisPoints} / default{" "}
+              {defaultAllocationPolicy.hysteresisPoints} points. The previous account gets this
+              margin too. Edit in the web settings page.
             </Text>
             {allocationAccountGroups(snapshot, snapshot.policy).map((account) => (
               <Text key={account.key}>
@@ -283,6 +288,27 @@ export function SettingsAllocationRouteScreen() {
                     {allocationAccountLabel(snapshot, c.environmentId, c.instanceId)}:{" "}
                     {c.eligible ? "Compatible" : c.reasons.join(" ")}
                     {c.warnings?.length ? ` - Warnings: ${c.warnings.join(" ")}` : ""}
+                    {c.windows.map((w) =>
+                      w.budgetHeadroomPoints === undefined ? null : (
+                        <Text key={w.id}>
+                          {"\n"}
+                          {w.id}: observed {w.actualPoints.toFixed(1)} + running{" "}
+                          {w.runningForecastPoints?.toFixed(1)} + queued/reserved{" "}
+                          {w.queuedForecastPoints?.toFixed(1)} + incoming{" "}
+                          {w.incomingForecastPoints?.toFixed(1)} + aggregate/reading-age allowance{" "}
+                          {w.unobservedForecastPoints?.toFixed(1)}; budget{" "}
+                          {w.budgetPoints?.toFixed(1)}, projected budget headroom{" "}
+                          {w.budgetHeadroomPoints.toFixed(1)}
+                          {w.budgetHeadroomPoints ===
+                          Math.min(
+                            ...c.windows.map((v) => v.budgetHeadroomPoints ?? v.headroomPoints),
+                          )
+                            ? " (limiting)"
+                            : ""}
+                          .
+                        </Text>
+                      ),
+                    )}
                   </Text>
                 ))}
               </View>

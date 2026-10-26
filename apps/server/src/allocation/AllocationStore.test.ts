@@ -90,6 +90,79 @@ const run = <A, E>(effect: Effect.Effect<A, E, Store.AllocationStore | SqlClient
   effect.pipe(Effect.provide(layer));
 
 it.effect(
+  "applies saved preference margins and forecast settings to the next recommendation without restart",
+  () =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* setup;
+        const a = {
+          ...inventory("a").accounts[0]!,
+          accountKey: "a",
+          windows: inventory("a").accounts[0]!.windows.map((w) => ({ ...w, usedPoints: 59 })),
+        };
+        const b = {
+          ...a,
+          instanceId: ProviderInstanceId.make("b"),
+          accountKey: "b",
+          windows: a.windows.map((w) => ({ ...w, usedPoints: 59.5 })),
+        };
+        let current = yield* store.savePolicy({
+          expectedVersion: 1,
+          policy: {
+            ...defaultAllocationPolicy,
+            uncertaintyMultiplier: 1,
+            coldLongPointsPerHour: 2,
+            codex: {
+              ...defaultAllocationPolicy.codex,
+              burstPoints: 80,
+              dailyPoints: 0,
+              reservePoints: 20,
+              borrowPoints: 0,
+            },
+            accountWeights: [
+              { key: allocationPreferenceKey(a), weight: 0 },
+              { key: allocationPreferenceKey(b), weight: 100 },
+            ],
+          },
+        });
+        const hosts = [
+          { ...inventory("a"), accounts: [a, b], demand: [] as AllocationInventory["demand"] },
+        ];
+        const recommend = () =>
+          store.allocate({
+            at,
+            request,
+            inventories: hosts,
+            authorityAvailable: true,
+            reserve: false,
+            stableSelection: true,
+          });
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("b");
+        current = yield* store.savePolicy({
+          expectedVersion: current.version,
+          policy: { ...current, hysteresisPoints: 0 },
+        });
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
+        hosts[0]!.demand = Array.from({ length: 3 }, (_, n) => ({
+          environmentId: "a",
+          threadId: ThreadId.make(`active-${n}`),
+          instanceId: a.instanceId,
+          accountKey: a.accountKey,
+          model: request.model,
+          options: [],
+          state: "running",
+        }));
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("b");
+        yield* store.savePolicy({
+          expectedVersion: current.version,
+          policy: { ...current, coldLongPointsPerHour: 0.1 },
+        });
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
+      }),
+    ),
+);
+
+it.effect(
   "serializes simultaneous hosts against shared identity and replays duplicate assignments",
   () =>
     run(

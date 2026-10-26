@@ -189,6 +189,8 @@ export const AllocationAccount = Schema.Struct({
         samples: NonNegativeInt,
         observedAt: Schema.NullOr(IsoDateTime),
         outputTokensPerHour: Schema.Number,
+        /** Token variability margin only, never a conversion to quota points. */
+        uncertainty: Schema.optional(Schema.Number),
       }),
     ),
   ),
@@ -307,6 +309,13 @@ const AllocationWindowDecision = Schema.Struct({
   targetPoints: Points,
   forecastPoints: Schema.Number,
   headroomPoints: Schema.Number,
+  /** Optional for decisions saved before projected-budget ranking. */
+  budgetPoints: Schema.optional(Schema.Number),
+  budgetHeadroomPoints: Schema.optional(Schema.Number),
+  runningForecastPoints: Schema.optional(Schema.Number),
+  queuedForecastPoints: Schema.optional(Schema.Number),
+  incomingForecastPoints: Schema.optional(Schema.Number),
+  unobservedForecastPoints: Schema.optional(Schema.Number),
   samples: NonNegativeInt,
   ageMinutes: Schema.Number,
   resetsAt: Schema.NullOr(IsoDateTime),

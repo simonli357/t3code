@@ -203,12 +203,12 @@ export const allocationEstimateFields = [
 
   {
     key: "hysteresisPoints",
-    label: "Previous account preference",
+    label: "Account preference margin",
     unit: "points",
     min: 0,
     max: 5,
     step: 0.1,
-    help: "Pacing tie preference for the previous account when account weights are equal.",
+    help: "Maximum budget headroom points added by account weights (weight / 100). The previous account gets this many extra points. Changes apply immediately.",
   },
 ] as const;
 

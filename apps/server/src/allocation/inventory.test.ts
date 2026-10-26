@@ -1,6 +1,10 @@
 import { expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
-import { ServerProvider, type UsageMeasurementsReport } from "@t3tools/contracts";
+import {
+  OrchestrationThreadShell,
+  ServerProvider,
+  type UsageMeasurementsReport,
+} from "@t3tools/contracts";
 import { allocationIdentity, allocationInventory } from "./inventory.ts";
 
 const at = "2026-10-23T18:00:00.000Z";
@@ -64,6 +68,70 @@ const measurements: UsageMeasurementsReport = {
   profiles: [],
   limitations: [],
 };
+
+it("counts running, starting and working background sessions, excluding completed, idle and monitoring sessions", () => {
+  const decode = Schema.decodeUnknownSync(OrchestrationThreadShell);
+  const thread = (id: string, status: string, backgroundLiveness?: string) =>
+    decode({
+      id,
+      projectId: "project",
+      title: id,
+      modelSelection: {
+        instanceId: "alias",
+        model: "astra",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      latestTurn: null,
+      createdAt: at,
+      updatedAt: at,
+      latestUserMessageAt: at,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      ...(backgroundLiveness ? { backgroundLiveness } : {}),
+      session: {
+        threadId: id,
+        status,
+        providerName: "codex",
+        providerInstanceId: "alias",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: at,
+      },
+    });
+  const result = allocationInventory({
+    environmentId: "host",
+    at,
+    providers: [provider("a@example.test")],
+    measurements,
+    threads: [
+      thread("running", "running"),
+      thread("starting", "starting"),
+      thread("background", "ready", "working"),
+      thread("idle", "idle"),
+      thread("completed", "ready"),
+      thread("monitoring", "ready", "monitoring"),
+      thread("stopped", "stopped"),
+    ],
+  });
+  expect(result.demand.map((d) => [d.threadId, d.state])).toEqual([
+    ["running", "running"],
+    ["starting", "pending"],
+    ["background", "running"],
+  ]);
+  expect(
+    result.demand.every(
+      (d) =>
+        d.accountKey === result.accounts[0]!.accountKey &&
+        d.model === "astra" &&
+        d.options[0]?.value === "high",
+    ),
+  ).toBe(true);
+});
 it("uses login identity across host-specific profiles, never the alias", () => {
   expect(allocationIdentity(provider())).toBeNull();
   expect(allocationIdentity(provider("USER@example.test", "machine-one"))).toBe(
@@ -172,6 +240,7 @@ it("exports existing model token samples without inventing a quota rate or optin
       samples: 8,
       observedAt: null,
       outputTokensPerHour: 50,
+      uncertainty: 1.4,
     },
   ]);
   expect(result.accounts[0]!.windows.every((w) => w.ratePointsPerHour === null)).toBe(true);

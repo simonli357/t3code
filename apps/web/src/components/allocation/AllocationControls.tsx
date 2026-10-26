@@ -181,8 +181,9 @@ export function AllocationControls({
       <section aria-label="Account preferences" className="grid min-w-0 gap-3">
         <h2 className="font-semibold">Account preferences</h2>
         <p className="text-sm text-muted-foreground">
-          Weights are relative recommendation preferences among compatible accounts with comparable
-          warnings, not hard quotas or rejection rules; an explicit valid choice always wins.
+          Weights favor close choices within the account preference margin. Recommendations compare
+          projected budget headroom after running, queued and incoming work, using the tightest
+          allowance window. An explicit valid choice always wins.
         </p>
         <p className="text-xs text-muted-foreground">
           Equal defaults: 50 per account. Shares are normalized within each provider family,

@@ -19,7 +19,7 @@ import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { decideAllocation } from "./decision.ts";
+import { allocationScore, decideAllocation } from "./decision.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { modelCandidates, modelPolicyIssues } from "./modelDecision.ts";
 
@@ -503,7 +503,8 @@ const make = Effect.gen(function* () {
               .sort(
                 (a, b) =>
                   (a.c.warnings?.length ?? 0) - (b.c.warnings?.length ?? 0) ||
-                  b.c.behindPoints - a.c.behindPoints ||
+                  allocationScore(b.c, allocationPolicy, b.p.request.driver) -
+                    allocationScore(a.c, allocationPolicy, a.p.request.driver) ||
                   (a.c.resetInHours ?? Infinity) - (b.c.resetInHours ?? Infinity) ||
                   compare(a.c.accountKey ?? "", b.c.accountKey ?? "") ||
                   compare(a.c.instanceId, b.c.instanceId) ||
