@@ -15,12 +15,13 @@ const compare = <T extends number | string>(a: T, b: T) => (a < b ? -1 : a > b ?
 
 /** How the computers are put in order. Shown to the agent, so it must match `rankOrder` below. */
 const ORDER_NOTE =
-  "Ordered by: reachable, compatible with the request, declared needs fit, reading recency, then the largest share left free on the tightest of memory and CPU (and disk when a disk need is declared); ties go to fewer running sessions and jobs, then name. Advice only: it never blocks a start, and an explicit computer, account or model stays exact.";
+  "Ordered by: reachable, below the active-session cap, compatible with the request, declared needs fit, reading recency, then the largest share left free on the tightest of memory and CPU (and disk when a disk need is declared); ties go to fewer running sessions and jobs, then name. Advice only: it never blocks a start, and an explicit computer, account or model stays exact.";
 
 /** Lower is better for every field except `tightest`, where a larger free share is better. */
 interface Standing {
   readonly offline: number;
   readonly compatibility: number;
+  readonly capped: number;
   readonly fit: number;
   readonly reading: number;
   readonly tightest: number;
@@ -28,6 +29,7 @@ interface Standing {
 }
 const rankOrder = (a: Standing, b: Standing) =>
   compare(a.offline, b.offline) ||
+  compare(a.capped, b.capped) ||
   compare(a.compatibility, b.compatibility) ||
   compare(a.fit, b.fit) ||
   compare(a.reading, b.reading) ||
@@ -102,7 +104,16 @@ export function recommendPlacement(input: {
         `Reading is ${Math.round(ageSeconds! / 60)} min old; the allocation policy allows ${policy.maxReadingAgeMinutes} min.`,
       );
     if (computer) warnings.push(...computer.notices);
-    const sessions = inventory.complete ? inventory.demand.length : null;
+    const sessions = inventory.complete
+      ? inventory.demand.filter((session) => session.state === "running").length
+      : null;
+    const cap = inventory.maxActiveAgentSessions ?? 6;
+    const capped = sessions !== null && sessions >= cap;
+    if (sessions !== null) reasons.push(`${sessions} active agent sessions; advisory cap ${cap}.`);
+    if (capped)
+      warnings.push(
+        `At or over the active agent session cap (${sessions}/${cap}); prefer a computer below its cap. Starts remain allowed.`,
+      );
 
     let unmet = 0;
     let unverified = 0;
@@ -246,6 +257,7 @@ export function recommendPlacement(input: {
     const standing: Standing = {
       offline: state === "offline" ? 1 : 0,
       compatibility: unmet > 0 ? 2 : unverified > 0 ? 1 : 0,
+      capped: capped ? 1 : 0,
       fit: fit === "short" ? 2 : fit === "unknown" ? 1 : 0,
       reading: state === "fresh" ? 0 : state === "stale" ? 1 : 2,
       tightest: tightest?.left ?? Number.NEGATIVE_INFINITY,

@@ -69,7 +69,7 @@ blockers, including requests for user action, are refused without being queued.
 Runtime notices wait and are discarded if they are no longer relevant. Original
 errors and approval requests remain visible in the worker's conversation.
 
-Set **Worker communication** in **Settings → General** on web/desktop, or
+Set the communication window under **Worker automation** in **Settings → General** on web/desktop, or
 **Settings → Server controls → Agent behavior** on mobile. The window is in minutes
 (default **15**; **0** disables). The worker's execution computer
 controls it. Changes recalculate existing windows immediately without a restart
@@ -77,6 +77,14 @@ or reload. All-computer scope edits the selected connected computers. The master
 can always inspect the worker and send new instructions, which restart the window.
 Ownership, queued assignments, read positions, and the window anchor survive a
 server restart. A completed turn alone does not mean the assignment is done.
+
+The same settings include an advisory active-agent cap (default **6** per computer).
+Computer recommendations prefer hosts below their cap; the cap never prevents a start.
+Automatic account switching is on by default for managed workers: after a provider usage
+limit, T3 chooses another account with quota headroom, preferring the same provider family,
+and retries the failed prompt once. A cross-family switch carries conversation context
+through a handoff. Masters do not switch automatically. Turn the setting off on the
+worker's execution computer to retain manual account selection.
 
 Ask the master to pause worker reports or cancel a queued assignment when needed.
 Use the worker thread's **Stop** control to stop running work. Earlier standalone

@@ -493,6 +493,7 @@ const session = Effect.fn(function* (
   status: "running" | "ready" | "error" | "stopped" | "interrupted",
   suffix: string,
   providerInstanceId?: ProviderInstanceId,
+  error = "Test provider error",
 ) {
   const engine = yield* OrchestrationEngineService;
   yield* engine.dispatch({
@@ -506,7 +507,7 @@ const session = Effect.fn(function* (
       ...(providerInstanceId ? { providerInstanceId } : {}),
       runtimeMode: "full-access",
       activeTurnId: status === "running" ? TurnId.make(suffix) : null,
-      lastError: status === "error" ? "Test provider error" : null,
+      lastError: status === "error" ? error : null,
       updatedAt: timestamp,
     },
     createdAt: timestamp,
@@ -5752,4 +5753,100 @@ it.layer(testLayer)("strict window renewal", (it) => {
       expect((yield* f.service.readOwnership(successor)).ownerThreadId).toBe(newMaster);
     }),
   );
+});
+
+const usageRecoveryLayer = Workers.layer.pipe(
+  Layer.provideMerge(
+    Layer.mock(Allocation.ProviderAllocation)({
+      replacement: (threadId) =>
+        Effect.succeed(selections[threadId.includes("cross-family") ? 2 : 1]!),
+    }),
+  ),
+  Layer.provideMerge(infrastructure),
+  Layer.provideMerge(providerLayer),
+  Layer.provideMerge(registry),
+  Layer.provideMerge(noPeers),
+);
+it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
+  for (const family of ["same-family", "cross-family"] as const)
+    it.effect(
+      `switches and retries once with ${family}, preserving the prompt and one runtime notice`,
+      () =>
+        Effect.gen(function* () {
+          const service = yield* Workers.WorkerControls;
+          const sql = yield* SqlClient.SqlClient;
+          const snapshots = yield* ProjectionSnapshotQuery;
+          const replacement = selections[family === "cross-family" ? 2 : 1]!;
+          const { owner, worker, input } = yield* seed(`usage-recovery-${family}`);
+          yield* service.spawn(owner, input);
+          yield* session(worker, "running", "usage-first");
+          yield* service.send(owner, {
+            threadId: worker,
+            clientRequestId: `${family}-followup`,
+            prompt: "next task",
+          });
+          yield* session(worker, "error", "usage-failed", undefined, "Codex usage limit reached.");
+          yield* service.drain();
+          expect(
+            Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).modelSelection,
+          ).toEqual(replacement);
+          const retries = yield* sql<{
+            id: string;
+            prompt: string;
+            state: string;
+          }>`SELECT id, prompt, state FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`;
+          expect(retries).toHaveLength(1);
+          expect(retries[0]!.prompt).toBe(input.prompt);
+          expect(retries[0]!.state).toBe("submitted");
+          const notices = yield* sql<{
+            prompt: string;
+          }>`SELECT prompt FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE '%:usage-switch'`;
+          expect(notices).toHaveLength(1);
+          expect(notices[0]!.prompt).toContain(
+            `from codex to ${replacement.instanceId} after a usage limit`,
+          );
+          yield* session(worker, "running", "usage-second", replacement.instanceId);
+          yield* session(
+            worker,
+            "error",
+            "usage-second-failed",
+            replacement.instanceId,
+            "Codex usage limit reached.",
+          );
+          yield* service.drain();
+          const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+          yield* restarted.drain();
+          expect(
+            yield* sql`SELECT id FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`,
+          ).toHaveLength(1);
+        }),
+    );
+  for (const scenario of ["disabled", "ordinary-error", "master"] as const)
+    it.effect(`does not switch for ${scenario}`, () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const settings = yield* Settings.ServerSettingsService;
+        const { owner, worker, input } = yield* seed(`usage-${scenario}`);
+        yield* settings.updateSettings({ workerAutoSwitchOnUsageLimit: scenario !== "disabled" });
+        yield* service.spawn(owner, input);
+        if (scenario === "master") {
+          const child = ThreadId.make(`${worker}-child`);
+          yield* service.spawn(worker, { ...input, threadId: child });
+        }
+        yield* session(worker, "running", `${scenario}-running`);
+        yield* session(
+          worker,
+          "error",
+          `${scenario}-failed`,
+          undefined,
+          scenario === "ordinary-error" ? "Network unavailable" : "Codex usage limit reached.",
+        );
+        yield* service.drain();
+        const sql = yield* SqlClient.SqlClient;
+        expect(
+          yield* sql`SELECT id FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`,
+        ).toHaveLength(0);
+        yield* settings.updateSettings({ workerAutoSwitchOnUsageLimit: true });
+      }),
+    );
 });

@@ -1166,6 +1166,13 @@ export const ServerSettings = Schema.Struct({
   workerCommunicationWindowMinutes: WorkerCommunicationWindowMinutes.pipe(
     Schema.withDecodingDefault(Effect.succeed(15)),
   ),
+  workerAutoSwitchOnUsageLimit: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  /** Advisory active-session cap for this computer; never blocks a start. */
+  maxActiveAgentSessions: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(6)),
+  ),
   workerRenewal: WorkerRenewalSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorkerRenewalSettings)({}))),
   ),
@@ -1563,6 +1570,8 @@ export const ServerSettingsPatch = Schema.Struct({
       ]),
     ),
   ),
+  workerAutoSwitchOnUsageLimit: Schema.optionalKey(Schema.Boolean),
+  maxActiveAgentSessions: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
   workerCommunicationWindowMinutes: Schema.optionalKey(WorkerCommunicationWindowMinutes),
   workerRenewal: Schema.optionalKey(
     Schema.Struct({

@@ -66,6 +66,7 @@ const report: UsageMeasurementsReport = {
   profiles: [],
   limitations: [],
 };
+const decodeProvider = Schema.decodeUnknownEffect(ServerProvider);
 const provider = Schema.decodeUnknownSync(ServerProvider)({
   instanceId: "chosen",
   driver: "codex",
@@ -2251,4 +2252,135 @@ it.effect("an identical retry reuses the recorded recommendation without duplica
     expect(yield* store.reservations).toHaveLength(1);
     expect(yield* storedRecommendations).toHaveLength(1);
   }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("usage recovery prefers another same-family account and observes live headroom", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+    const spare = {
+      ...provider,
+      instanceId: ProviderInstanceId.make("spare"),
+      auth: { ...provider.auth, email: "spare@example.test" },
+    };
+    f.state.providers = [provider, spare];
+    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toEqual({
+      ...selection,
+      instanceId: spare.instanceId,
+    });
+    f.state.providers = [
+      provider,
+      {
+        ...spare,
+        usageLimits: {
+          ...spare.usageLimits!,
+          windows: spare.usageLimits!.windows.map((w) => ({ ...w, usedPercent: 100 })),
+        },
+      },
+    ];
+    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+    f.state.providers = [provider, { ...spare, auth: provider.auth }];
+    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+    f.state.providers = [provider, { ...spare, usageLimits: undefined }];
+    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
+it.effect("usage recovery falls back to the other family's configured profile", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const profile = defaultModelRoutingPolicy.claudeAgent.cells[5]![5]!;
+    const other = yield* decodeProvider({
+      ...provider,
+      instanceId: "claude-spare",
+      driver: "claudeAgent",
+      auth: { ...provider.auth, email: "other@example.test" },
+      models: [
+        {
+          slug: profile.model,
+          name: profile.model,
+          isCustom: false,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                label: "Effort",
+                type: "select",
+                options: [{ id: profile.effort, label: profile.effort }],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const same = {
+      ...provider,
+      instanceId: ProviderInstanceId.make("same-family"),
+      auth: { ...provider.auth, email: "same@example.test" },
+    };
+    f.state.providers = [provider, other, same];
+    expect(
+      (yield* allocation.replacement(ThreadId.make("worker"), {
+        instanceId: provider.instanceId,
+        model: "astra",
+        options: [],
+      }))?.instanceId,
+    ).toBe(same.instanceId);
+    f.state.providers = [provider, other];
+    expect(
+      yield* allocation.replacement(ThreadId.make("worker"), {
+        instanceId: provider.instanceId,
+        model: "astra",
+        options: [],
+      }),
+    ).toEqual({
+      instanceId: other.instanceId,
+      model: profile.model,
+      options: [{ id: "effort", value: profile.effort }],
+    });
+    yield* TestClock.adjust("11 minutes");
+    expect(
+      yield* allocation.replacement(ThreadId.make("worker"), {
+        instanceId: provider.instanceId,
+        model: "astra",
+        options: [],
+      }),
+    ).toBeNull();
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
+it.effect("computer advice observes each computer's live session cap", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    f.state.threads = Array.from({ length: 3 }, (_, index) => ({
+      ...shell(),
+      id: ThreadId.make(`running-${index}`),
+    }));
+    const first = yield* allocation.place({});
+    const local = first.inventories[0]!;
+    f.state.peers = [
+      {
+        ...local,
+        environmentId: "peer",
+        environmentLabel: "peer",
+        demand: [],
+        computer: {
+          ...local.computer!,
+          resources: { ...local.computer!.resources, availableMemoryBytes: 2 * GIB },
+        },
+      },
+    ];
+    expect((yield* allocation.place({})).placement.recommendedEnvironmentId).toBe("local");
+    yield* (yield* Settings.ServerSettingsService).updateSettings({ maxActiveAgentSessions: 3 });
+    const limited = (yield* allocation.place({})).placement;
+    expect(limited.recommendedEnvironmentId).toBe("peer");
+    expect(
+      limited.hosts.find((host) => host.environmentId === "local")?.warnings.join(" "),
+    ).toContain("3/3");
+    yield* (yield* Settings.ServerSettingsService).updateSettings({ maxActiveAgentSessions: 4 });
+    expect((yield* allocation.place({})).placement.recommendedEnvironmentId).toBe("local");
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
 });

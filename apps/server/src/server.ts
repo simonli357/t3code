@@ -622,7 +622,7 @@ const commandReadinessLayer = HttpRouter.middleware(
 );
 
 // One instance serves the clients and agents' placement reads, so their measurements are shared.
-const ComputersLive = Computers.layer.pipe(Layer.provide(ProcessRunner.layer));
+const ComputersLive = Computers.liveLayer;
 
 export const makeRoutesLayer = Layer.mergeAll(
   Layer.mergeAll(
@@ -663,7 +663,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   Layer.provide(commandReadinessLayer),
   Layer.provide(browserApiCorsLayer),
   Layer.provide(httpCompressionLayer),
-  Layer.provide(ProviderAllocation.liveLayer.pipe(Layer.provide(ComputersLive))),
+  Layer.provide(ProviderAllocation.liveLayer),
 );
 
 const makeServerLayer = Layer.unwrap(

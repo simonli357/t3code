@@ -1026,3 +1026,13 @@ describe("global instruction settings", () => {
     ).toThrow();
   });
 });
+
+it("defaults worker placement and usage recovery settings and accepts live changes", () => {
+  expect(DEFAULT_SERVER_SETTINGS.maxActiveAgentSessions).toBe(6);
+  expect(DEFAULT_SERVER_SETTINGS.workerAutoSwitchOnUsageLimit).toBe(true);
+  expect(
+    decodeServerSettingsPatch({ maxActiveAgentSessions: 3, workerAutoSwitchOnUsageLimit: false }),
+  ).toEqual({ maxActiveAgentSessions: 3, workerAutoSwitchOnUsageLimit: false });
+  for (const cap of [0, -1, 1.5])
+    expect(() => decodeServerSettingsPatch({ maxActiveAgentSessions: cap })).toThrow();
+});

@@ -1,3 +1,4 @@
+import * as ProviderAllocation from "../allocation/ProviderAllocation.ts";
 import {
   renewalIntentSql,
   renewalToolWaitsSql,
@@ -578,6 +579,7 @@ const make = Effect.gen(function* () {
   const baseContext = yield* Effect.context<Layer.Services<typeof baseLayer>>();
   const directory = yield* ProviderSessionDirectory;
   const catalog = yield* ProviderRegistry;
+  const allocation = yield* Effect.serviceOption(ProviderAllocation.ProviderAllocation);
   const peers = yield* PeerLinks;
   const settings = yield* ServerSettingsService;
   const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
@@ -675,7 +677,7 @@ const make = Effect.gen(function* () {
           const suffix = originalId.slice(`notice:${source.id}:`.length);
           if (suffix === "terminal") {
             relevant &&= ["error", "interrupted"].includes(source.state);
-          } else {
+          } else if (suffix !== "usage-switch") {
             const activity = (yield* sql<{
               kind: string;
               payload_json: string;
@@ -1181,6 +1183,7 @@ const make = Effect.gen(function* () {
       const session = yield* snapshots.getThreadShellById(ThreadId.make(job.target_id));
       let state = turn?.state ?? job.state;
       let error = job.error;
+      let failedStart = false;
       const sessionInstance = Option.isSome(session)
         ? session.value.session?.providerInstanceId
         : undefined;
@@ -1196,6 +1199,7 @@ const make = Effect.gen(function* () {
         }>`SELECT summary FROM projection_thread_activities
           WHERE thread_id = ${job.target_id} AND kind = 'provider.turn.start.failed'
             AND json_extract(payload_json, '$.requestId') = ${`worker-job:${job.id}`} LIMIT 1`;
+        failedStart = failed[0] !== undefined;
         if (
           failed[0] ||
           Option.isNone(session) ||
@@ -1208,6 +1212,66 @@ const make = Effect.gen(function* () {
             failed[0]?.summary ??
             (Option.isSome(session) ? session.value.session?.lastError : null) ??
             "Worker stopped before its turn started.";
+        }
+      }
+      if (
+        state === "error" &&
+        (turn?.state === "error" || failedStart) &&
+        job.state === "submitted" &&
+        worker.state === "ready" &&
+        worker.owner_id !== null &&
+        !job.id.startsWith("usage-retry:") &&
+        /usage[ _-]?limit|usageLimitExceeded|quota[ _-]?(?:exceeded|exhausted)/i.test(
+          error ?? "",
+        ) &&
+        (yield* settings.getSettings).workerAutoSwitchOnUsageLimit &&
+        Option.isSome(allocation) &&
+        Option.isSome(session) &&
+        session.value.archivedAt === null &&
+        session.value.settledAt === null &&
+        session.value.snoozedUntil == null &&
+        !(yield* busy(session.value)) &&
+        !(yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${worker.thread_id} LIMIT 1`)
+          .length
+      ) {
+        const retryId = `usage-retry:${job.id}`;
+        if (!(yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${retryId}`).length) {
+          const recovered = yield* Effect.gen(function* () {
+            const target = session.value;
+            const selection = yield* allocation.value.replacement(target.id, target.modelSelection);
+            if (!selection || !job.prompt.trim()) return false;
+            // Claim this failure before switching. Only submitted jobs can auto-switch, so
+            // a restart or another failure on the retry cannot repeat the attempt.
+            yield* sql`UPDATE custom_worker_jobs SET state = 'error', error = ${error} WHERE id = ${job.id}`;
+            yield* controlUnlocked(ThreadId.make(worker.owner_id!), {
+              threadId: target.id,
+              modelSelection: selection,
+            });
+            const providers = yield* catalog.getProviders;
+            const label = (id: string) =>
+              providers.find((p) => p.instanceId === id)?.displayName ?? id;
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+                  VALUES (${retryId}, ${worker.thread_id}, ${worker.thread_id}, 'work', ${job.prompt}, ${yield* now})`;
+                yield* sql`UPDATE custom_worker_jobs SET reported = 1 WHERE id = ${job.id}`;
+                yield* report(
+                  worker,
+                  { ...job, id: retryId },
+                  "usage-switch",
+                  `switched ${target.title} from ${label(target.modelSelection.instanceId)} to ${label(selection.instanceId)} after a usage limit`,
+                );
+              }),
+            );
+            return true;
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Worker usage-limit recovery failed", { cause }).pipe(
+                Effect.as(false),
+              ),
+            ),
+          );
+          if (recovered) continue;
         }
       }
       if (terminal(state)) {
@@ -1419,7 +1483,7 @@ const make = Effect.gen(function* () {
           WHERE kind = 'work' AND state = 'completed'
         )`;
     const jobs =
-      yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY CASE WHEN id LIKE 'handoff-start:%' THEN 0 WHEN kind = 'work' THEN 2 ELSE 1 END, rowid`;
+      yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE state = 'queued' ORDER BY CASE WHEN id LIKE 'handoff-start:%' THEN 0 WHEN id LIKE 'usage-retry:%' THEN 2 WHEN kind = 'work' THEN 3 ELSE 1 END, rowid`;
     let communicationDeadline: number | undefined;
     const blocked = new Set<string>();
     const unreachable = new Set<string>();
@@ -2202,73 +2266,73 @@ const make = Effect.gen(function* () {
     Effect.scoped,
     Effect.mapError(failure),
   );
-  const control = Effect.fn("WorkerControls.control")(
-    function* (owner: ThreadId, input: typeof ControlInput.Type) {
-      const worker = yield* owned(owner, input.threadId);
-      if (input.modelSelection && input.adoptCurrentSettings)
-        return yield* new WorkerError({
-          message: "Choose modelSelection or adoptCurrentSettings, not both.",
-        });
-      const cancelled = input.cancelRequestId
-        ? yield* getJob(worker, input.cancelRequestId)
-        : undefined;
-      if (cancelled && cancelled.state !== "queued")
-        return yield* new WorkerError({
-          message:
-            "Only queued assignments can be cancelled here. Stop a running worker through T3.",
-        });
-      let adopted: string | undefined;
-      if (input.adoptCurrentSettings || input.modelSelection) {
-        const target = yield* thread(input.threadId);
-        const plan = decodePlan(worker.plan_json);
-        yield* checkPermissions(owner, target, plan.ownerRuntimeMode);
-        const selection = input.modelSelection ?? target.modelSelection;
-        yield* checkSelection(selection);
-        if (input.modelSelection) {
-          if (worker.state !== "ready")
-            return yield* new WorkerError({
-              message: "Finish creating the worker before changing its provider or account.",
-            });
-          if (
-            target.runtimeMode !== plan.runtimeMode ||
-            target.interactionMode !== plan.interactionMode
-          )
-            return yield* new WorkerError({
-              message:
-                "Worker modes changed. Restore them or explicitly adoptCurrentSettings before changing its provider/model.",
-            });
-          if (selectionKey(selection) !== selectionKey(target.modelSelection))
-            yield* engine.dispatch({
-              type: "thread.meta.update",
-              commandId: CommandId.make(`worker-settings:${yield* crypto.randomUUIDv4}`),
-              threadId: input.threadId,
-              modelSelection: selection,
-            });
-        }
-        adopted = encodePlan({
-          ...plan,
-          modelSelection: selection,
-          runtimeMode: target.runtimeMode,
-          interactionMode: target.interactionMode,
-        });
+  const controlUnlocked = Effect.fn("WorkerControls.control")(function* (
+    owner: ThreadId,
+    input: typeof ControlInput.Type,
+  ) {
+    const worker = yield* owned(owner, input.threadId);
+    if (input.modelSelection && input.adoptCurrentSettings)
+      return yield* new WorkerError({
+        message: "Choose modelSelection or adoptCurrentSettings, not both.",
+      });
+    const cancelled = input.cancelRequestId
+      ? yield* getJob(worker, input.cancelRequestId)
+      : undefined;
+    if (cancelled && cancelled.state !== "queued")
+      return yield* new WorkerError({
+        message: "Only queued assignments can be cancelled here. Stop a running worker through T3.",
+      });
+    let adopted: string | undefined;
+    if (input.adoptCurrentSettings || input.modelSelection) {
+      const target = yield* thread(input.threadId);
+      const plan = decodePlan(worker.plan_json);
+      yield* checkPermissions(owner, target, plan.ownerRuntimeMode);
+      const selection = input.modelSelection ?? target.modelSelection;
+      yield* checkSelection(selection);
+      if (input.modelSelection) {
+        if (worker.state !== "ready")
+          return yield* new WorkerError({
+            message: "Finish creating the worker before changing its provider or account.",
+          });
+        if (
+          target.runtimeMode !== plan.runtimeMode ||
+          target.interactionMode !== plan.interactionMode
+        )
+          return yield* new WorkerError({
+            message:
+              "Worker modes changed. Restore them or explicitly adoptCurrentSettings before changing its provider/model.",
+          });
+        if (selectionKey(selection) !== selectionKey(target.modelSelection))
+          yield* engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make(`worker-settings:${yield* crypto.randomUUIDv4}`),
+            threadId: input.threadId,
+            modelSelection: selection,
+          });
       }
-      // Dispatch uses the engine's own transaction; never hold a SQL transaction
-      // while awaiting it. A retry repairs a crash between metadata and plan writes.
-      yield* sql.withTransaction(
-        Effect.gen(function* () {
-          if (adopted !== undefined)
-            yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
-          if (input.notifications !== undefined)
-            yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
-          if (cancelled)
-            yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${cancelled.id}`;
-        }),
-      );
-      return yield* describe(yield* owned(owner, input.threadId));
-    },
-    lock.withPermit,
-    Effect.mapError(failure),
-  );
+      adopted = encodePlan({
+        ...plan,
+        modelSelection: selection,
+        runtimeMode: target.runtimeMode,
+        interactionMode: target.interactionMode,
+      });
+    }
+    // Dispatch uses the engine's own transaction; never hold a SQL transaction
+    // while awaiting it. A retry repairs a crash between metadata and plan writes.
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        if (adopted !== undefined)
+          yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
+        if (input.notifications !== undefined)
+          yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
+        if (cancelled)
+          yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${cancelled.id}`;
+      }),
+    );
+    return yield* describe(yield* owned(owner, input.threadId));
+  }, Effect.mapError(failure));
+  const control = (owner: ThreadId, input: typeof ControlInput.Type) =>
+    lock.withPermit(controlUnlocked(owner, input));
   const retargetReports = Effect.fn(function* (
     ids: ReadonlyArray<string>,
     owners: ReadonlyArray<string>,
@@ -4017,7 +4081,11 @@ const make = Effect.gen(function* () {
     const settingChanges = yield* settings.subscribeChanges;
     yield* settingChanges.pipe(
       Stream.map((value) =>
-        JSON.stringify([value.workerRenewal, value.workerCommunicationWindowMinutes]),
+        JSON.stringify([
+          value.workerRenewal,
+          value.workerCommunicationWindowMinutes,
+          value.workerAutoSwitchOnUsageLimit,
+        ]),
       ),
       Stream.changes,
       Stream.runForEach(() =>
@@ -4244,4 +4312,7 @@ const make = Effect.gen(function* () {
 });
 /** Requires {@link PeerLinks}; tests provide their own links between environments. */
 export const layer = Layer.effect(WorkerControls, make);
-export const liveLayer = layer.pipe(Layer.provide(peerLinksLayer));
+export const liveLayer = layer.pipe(
+  Layer.provide(ProviderAllocation.liveLayer),
+  Layer.provide(peerLinksLayer),
+);

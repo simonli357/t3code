@@ -356,6 +356,18 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                     <WorkerCommunicationSettings
                       key={`communication:${targets.map((target) => target.environment.environmentId).join(",")}`}
                       value={reference.settings.workerCommunicationWindowMinutes}
+                      autoSwitch={reference.settings.workerAutoSwitchOnUsageLimit}
+                      switchMixed={displayTargets.some(
+                        (target) =>
+                          target.settings.workerAutoSwitchOnUsageLimit !==
+                          reference.settings.workerAutoSwitchOnUsageLimit,
+                      )}
+                      maxActiveAgentSessions={reference.settings.maxActiveAgentSessions}
+                      capMixed={displayTargets.some(
+                        (target) =>
+                          target.settings.maxActiveAgentSessions !==
+                          reference.settings.maxActiveAgentSessions,
+                      )}
                       disabled={disabledFor("workerCommunicationWindowMinutes")}
                       mixed={displayTargets.some(
                         (target) =>

@@ -1,11 +1,13 @@
 import {
   AllocationError,
+  AssignmentAssessment,
   AllocationInventory,
   AllocationOperation,
   AllocationResponse,
   AllocationRequest,
   ComputerPlacementProbe,
   ModelSelection,
+  ProviderDriverKind,
   ThreadId,
   type AllocationSnapshot,
   type AllocationPolicy,
@@ -84,6 +86,11 @@ export class ProviderAllocation extends Context.Service<
     readonly execute: (
       operation: AllocationOperation,
     ) => Effect.Effect<AllocationResponse, AllocationError>;
+    /** A local replacement with observed quota headroom; same profile/family first. */
+    readonly replacement: (
+      threadId: ThreadId,
+      current: ModelSelection,
+    ) => Effect.Effect<ModelSelection | null, AllocationError>;
     readonly receive: (from: string, request: unknown) => Effect.Effect<unknown, AllocationError>;
     /**
      * Computer advice plus the inventories it ranked, read on this computer. Placement needs no
@@ -98,6 +105,8 @@ export class ProviderAllocation extends Context.Service<
     >;
   }
 >()("t3/allocation/ProviderAllocation") {}
+
+const decodeAssessment = Schema.decodeUnknownEffect(Schema.fromJsonString(AssignmentAssessment));
 
 const make = Effect.gen(function* () {
   const store = yield* Store.AllocationStore;
@@ -212,6 +221,7 @@ const make = Effect.gen(function* () {
     }
     return {
       ...current,
+      maxActiveAgentSessions: (yield* settings.getSettings).maxActiveAgentSessions,
       environmentLabel: local.label,
       demand,
       coordinatorEnvironmentId: (yield* settings.getSettings).allocationCoordinatorEnvironmentId,
@@ -220,6 +230,87 @@ const make = Effect.gen(function* () {
         ? { projects: checkouts.slice(0, 20).map(({ id, title }) => ({ id, title })) }
         : {}),
     };
+  }, Effect.mapError(unavailable));
+  const replacement = Effect.fn("ProviderAllocation.replacement")(function* (
+    threadId: ThreadId,
+    current: ModelSelection,
+  ) {
+    const policy = yield* store.policy;
+    const at = yield* now;
+    const localInventory = yield* inventory(undefined);
+    const currentAccount = localInventory.accounts.find((a) => a.instanceId === current.instanceId);
+    const driver = currentAccount?.driver;
+    if (driver !== "codex" && driver !== "claudeAgent") return null;
+    // Unknown or expired readings cannot establish headroom for an automatic retry.
+    const accounts = localInventory.accounts.filter(
+      (a) =>
+        a.available &&
+        a.instanceId !== current.instanceId &&
+        (!currentAccount?.accountKey || a.accountKey !== currentAccount.accountKey) &&
+        a.windows.length > 0 &&
+        a.windows.every(
+          (w) =>
+            w.usedPoints < 100 &&
+            Date.parse(at) - Date.parse(w.checkedAt) <= policy.maxReadingAgeMinutes * 60_000 &&
+            (w.resetsAt === null || w.resetsAt > at),
+        ),
+    );
+    const inventories = [{ ...localInventory, accounts }];
+    const base = {
+      assignmentId: `usage-switch:${threadId}`,
+      environmentId: local.environmentId,
+      threadId,
+    };
+    const same = {
+      ...base,
+      driver,
+      model: current.model,
+      options: current.options ?? [],
+    };
+    const decide = (request: AllocationRequest) =>
+      decideAllocation({
+        at,
+        policy,
+        request,
+        inventories,
+        reservations: [],
+        authorityAvailable: true,
+      }).selectedInstanceId;
+    const sameInstance = decide(same);
+    if (sameInstance) return { ...current, instanceId: sameInstance };
+    const rows = yield* sql<{
+      assessment: string | null;
+    }>`SELECT json_extract(record_json, '$.recommendation.assessment') AS assessment FROM worker_recommendations WHERE thread_id = ${threadId}`;
+    // Legacy workers lack a task assessment. Use the middle routing-table cell.
+    const assessment = rows[0]?.assessment
+      ? yield* decodeAssessment(rows[0].assessment).pipe(Effect.mapError(unavailable))
+      : {
+          difficulty: 5,
+          stakes: 5,
+          difficultyReason: "Legacy worker usage recovery",
+          stakesReason: "Legacy worker usage recovery",
+        };
+    const modelPolicy = yield* store.modelPolicy;
+    for (const family of [
+      driver,
+      ProviderDriverKind.make(driver === "codex" ? "claudeAgent" : "codex"),
+    ]) {
+      const candidates = modelCandidates(
+        modelPolicy,
+        {
+          ...base,
+          selection: "automatic",
+          assessment,
+          allowedDrivers: [family],
+        },
+        inventories,
+      ).candidates;
+      for (const { request } of candidates) {
+        const instanceId = decide(request);
+        if (instanceId) return { instanceId, model: request.model, options: request.options };
+      }
+    }
+    return null;
   }, Effect.mapError(unavailable));
   const probe = Effect.fn("ProviderAllocation.probe")(function* (
     threadId: ThreadId,
@@ -701,6 +792,7 @@ const make = Effect.gen(function* () {
     return yield* executeLocal(operation);
   });
   return ProviderAllocation.of({
+    replacement,
     execute,
     place,
     receive: Effect.fn("ProviderAllocation.receive")(function* (from, raw) {
@@ -732,4 +824,8 @@ const make = Effect.gen(function* () {
   });
 });
 export const layer = Layer.effect(ProviderAllocation, make);
-export const liveLayer = layer.pipe(Layer.provide(Store.layer), Layer.provide(Peers.layer));
+export const liveLayer = layer.pipe(
+  Layer.provide(Store.layer),
+  Layer.provide(Peers.layer),
+  Layer.provide(Computers.liveLayer),
+);

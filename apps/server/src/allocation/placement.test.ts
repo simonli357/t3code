@@ -473,3 +473,40 @@ describe("computer placement", () => {
     expect(decodePlacement(JSON.parse(JSON.stringify(result)))).toEqual(result);
   });
 });
+
+describe("active session caps", () => {
+  it("ranks a computer at its default cap below a busier computer under its own cap", () => {
+    const result = place([
+      host("roomy", { sessions: 6, computer: computer({ memory: [15, 16], idle: 0.9 }) }),
+      host("available", { sessions: 7, maxActiveAgentSessions: 8 }),
+    ]);
+    expect(order(result)).toEqual(["available", "roomy"]);
+    expect(result.recommendedEnvironmentId).toBe("available");
+    expect(result.hosts[1]?.warnings.join(" ")).toContain("6/6");
+  });
+
+  it("applies a changed cap on the next advice read and keeps explicit placement advisory", () => {
+    const roomy = host("roomy", {
+      sessions: 6,
+      computer: computer({ memory: [15, 16], idle: 0.9 }),
+    });
+    const other = host("other");
+    expect(place([roomy, other]).recommendedEnvironmentId).toBe("other");
+    expect(place([{ ...roomy, maxActiveAgentSessions: 7 }, other]).recommendedEnvironmentId).toBe(
+      "roomy",
+    );
+    expect(place([roomy, other], { environmentId: "roomy" }).recommendedEnvironmentId).toBe(
+      "roomy",
+    );
+  });
+
+  it("counts running agents rather than queued assignments and leaves offline counts unknown", () => {
+    const queued = host("queued", { sessions: 9 });
+    const result = place([
+      { ...queued, demand: queued.demand.map((d) => ({ ...d, state: "pending" })) },
+      offline("offline"),
+    ]);
+    expect(result.hosts[0]?.sessions).toBe(0);
+    expect(result.hosts[1]?.sessions).toBeNull();
+  });
+});

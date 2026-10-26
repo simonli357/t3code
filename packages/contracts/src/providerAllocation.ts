@@ -207,6 +207,8 @@ export const AllocationDemand = Schema.Struct({
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
 export const AllocationInventory = Schema.Struct({
+  /** Live advisory cap owned by this environment. Older computers default to six. */
+  maxActiveAgentSessions: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
   environmentLabel: Schema.optional(Schema.String),
   coordinatorEnvironmentId: Schema.optional(Schema.NullOr(Schema.String)),
   environmentId: Schema.String,
