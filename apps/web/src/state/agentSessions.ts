@@ -1,0 +1,43 @@
+import { WS_METHODS } from "@t3tools/contracts";
+import {
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+} from "@t3tools/client-runtime/state/runtime";
+
+import { connectionAtomRuntime } from "../connection/runtime";
+
+/**
+ * Scan of Claude Code / Codex home directories on an environment, surfacing
+ * project candidates for the welcome wizard's import step. The scan walks the
+ * filesystem server-side, so results are cached briefly and refreshed when the
+ * import step remounts.
+ */
+export const agentSessionScan = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:scan",
+  tag: WS_METHODS.agentSessionsScan,
+  staleTimeMs: 30_000,
+  idleTtlMs: 5 * 60_000,
+});
+
+export const agentSessionImport = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:import",
+  tag: WS_METHODS.agentSessionsImport,
+});
+
+export const agentSessionFork = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-sessions:fork",
+  tag: WS_METHODS.agentSessionsFork,
+});
+
+export const agentTaskStop = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:agent-tasks:stop",
+  tag: WS_METHODS.agentTasksStop,
+});
+export const sessionMoveRequest = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:session-moves:request",
+  tag: WS_METHODS.sessionMovesRequest,
+});
+export const sessionMoveStatus = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:session-moves:status",
+  tag: WS_METHODS.sessionMovesStatus,
+});
