@@ -1578,7 +1578,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(reports).toHaveLength(1);
     }).pipe(Effect.scoped),
   );
-  it.effect("delivers reports despite an outstanding master steer", () =>
+  it.effect("delivers waiting reports after an outstanding master steer finishes", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -1587,6 +1587,9 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* session(owner, "running", "master-active");
       yield* directInput(owner, "master-steer");
       yield* replyAndReport(worker, "worker-result", "Finished the assignment");
+      expect((yield* service.list(owner))[0]!.pendingReports).toBe(1);
+      yield* session(owner, "ready", "master-steer-ended");
+      yield* service.drain();
       expect((yield* service.list(owner))[0]!.pendingReports).toBe(0);
       const master = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner));
       expect(master.messages.filter((m) => m.text.includes("T3 worker report"))).toHaveLength(1);
@@ -1622,6 +1625,9 @@ it.layer(testLayer)("persistent workers", (it) => {
           `pending-worker-result-${kind}`,
           "Done with verified evidence",
         );
+        expect((yield* service.list(owner))[0]!.pendingReports).toBe(1);
+        yield* session(owner, "ready", `pending-master-ended-${kind}`);
+        yield* service.drain();
         expect((yield* service.list(owner))[0]!.pendingReports).toBe(0);
         const master = Option.getOrThrow(yield* snapshots.getThreadShellById(owner));
         expect(
@@ -1967,6 +1973,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         prompt: "Take over",
         modelSelection: selections[0]!,
       });
+      yield* session(next, "running", "reclaim-digest-active");
       yield* engine.dispatch({
         type: "thread.turn.interrupt",
         commandId: CommandId.make("stop-digest-master"),
@@ -1975,7 +1982,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       });
       yield* replyAndReport(worker, "digest-one", "First result");
       yield* replyAndReport(second, "digest-two", "Second result");
-      yield* TestClock.adjust("21 minutes");
+      yield* session(next, "interrupted", "reclaim-digest-stopped");
       yield* service.drain();
       expect(
         yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id LIKE 'digest:%' AND state = 'queued'`,
@@ -2139,7 +2146,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       ).toContain("archived");
     }),
   );
-  it.effect("holds finished reports while other workers run, then sends one digest", () =>
+  it.effect("digests reports when the master turn ends", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -2147,6 +2154,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, worker, input } = yield* seed("digest");
       const second = ThreadId.make("digest-worker-2");
       yield* service.spawn(owner, input);
+      yield* session(owner, "running", "digest-master-active");
       yield* service.spawn(owner, { ...input, threadId: second, title: "digest_WORKER_2" });
       const ownerTexts = () =>
         snapshots
@@ -2180,6 +2188,11 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* TestClock.adjust("3 minutes");
       yield* replyAndReport(second, "digest-second", "Second part finished");
       yield* service.drain();
+      expect((yield* ownerTexts()).some((text) => text.includes("Second part finished"))).toBe(
+        false,
+      );
+      yield* session(owner, "ready", "digest-master-ended");
+      yield* service.drain();
       const digests = (yield* ownerTexts()).filter((text) =>
         text.startsWith("[T3 worker reports — 2 finished]"),
       );
@@ -2197,7 +2210,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.list(owner)).map((entry) => entry.pendingReports)).toEqual([0, 0]);
     }),
   );
-  it.effect("releases a held report after the digest wait", () =>
+  it.effect("delivers a done report to an idle master without waiting for other workers", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -2218,9 +2231,6 @@ it.layer(testLayer)("persistent workers", (it) => {
               Option.getOrThrow(thread).messages.some((m) => m.text.includes("Finished alone")),
             ),
           );
-      yield* service.drain();
-      expect(yield* delivered()).toBe(false);
-      yield* TestClock.adjust("21 minutes");
       yield* service.drain();
       expect(yield* delivered()).toBe(true);
       expect(
@@ -2378,12 +2388,15 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, worker, input } = yield* seed("concise-digest");
       const second = ThreadId.make("concise-digest-second");
       yield* service.spawn(owner, input);
+      yield* session(owner, "running", "concise-digest-active");
       yield* service.spawn(owner, { ...input, threadId: second, title: "concise_second" });
       yield* TestClock.setTime(Date.parse("2026-07-16T00:05:00Z"));
       yield* replyAndReport(worker, "concise-digest-first", "First part finished.");
       yield* service.drain();
       yield* TestClock.adjust("5 minutes");
       yield* replyAndReport(second, "concise-digest-second", "Second part finished.");
+      yield* service.drain();
+      yield* session(owner, "ready", "concise-digest-ended");
       yield* service.drain();
       const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
       expect(messages).toHaveLength(1);
@@ -2464,6 +2477,7 @@ it.layer(testLayer)("persistent workers", (it) => {
           threadId: owner,
           createdAt: timestamp,
         });
+        yield* session(owner, "interrupted", "master-stopped");
         yield* replyAndReport(worker, "first-result", "Verified result one");
         yield* replyAndReport(worker, "second-result", "Verified result two");
         const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
@@ -2583,7 +2597,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         }),
     );
   }
-  it.effect("queues starting-worker assignments but immediately reports to a running master", () =>
+  it.effect("queues starting workers and reports after the master turn", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -2603,7 +2617,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* session(worker, "ready", "first-finished");
       yield* service.drain();
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
-        1,
+        0,
       );
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(worker)).messages.filter(
