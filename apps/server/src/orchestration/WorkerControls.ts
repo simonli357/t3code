@@ -1163,6 +1163,26 @@ const make = Effect.gen(function* () {
         yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
       const worker = workers[0];
       if (!worker) continue;
+      // A busy send uses the normal turn path. Its provider receipt, rather
+      // than command acceptance, tells us whether steering actually succeeded.
+      const steering =
+        job.state === "submitted" &&
+        (yield* sql`SELECT 1 FROM orchestration_command_receipts
+          WHERE command_id = ${`worker-job:${job.id}:${job.attempt}:steer`} AND status = 'accepted'`)
+          .length > 0;
+      const delivery = steering
+        ? (yield* sql<{ kind: string; turn_id: string | null }>`SELECT kind, turn_id
+            FROM projection_thread_activities WHERE thread_id = ${job.target_id}
+              AND kind IN ('provider.turn.steered', 'provider.turn.start.failed')
+              AND json_extract(payload_json, '$.requestId') = ${`worker-job:${job.id}`}
+            ORDER BY rowid DESC LIMIT 1`)[0]
+        : undefined;
+      if (delivery?.kind === "provider.turn.start.failed") {
+        // Retry once idle, retaining the same durable job and message identity.
+        yield* sql`UPDATE custom_worker_jobs SET state = 'queued', attempt = attempt + 1,
+          turn_id = NULL, dispatched_at = NULL, error = NULL WHERE id = ${job.id}`;
+        continue;
+      }
       const turns = yield* sql<{
         state: string;
         turn_id: string | null;
@@ -1171,7 +1191,7 @@ const make = Effect.gen(function* () {
           SELECT row_id FROM projection_turns WHERE thread_id = ${job.target_id}
             AND pending_message_id = ${`worker-job:${job.id}`}
           UNION ALL
-          SELECT row_id FROM projection_turns WHERE thread_id = ${job.target_id} AND turn_id = ${job.turn_id})
+          SELECT row_id FROM projection_turns WHERE thread_id = ${job.target_id} AND turn_id = ${delivery?.turn_id ?? job.turn_id})
         ORDER BY row_id DESC LIMIT 1`;
       let turn = turns[0];
       if (!turn && job.state === "submitted") {
@@ -1619,12 +1639,15 @@ const make = Effect.gen(function* () {
           );
         continue;
       }
+      let steering = false;
       const attempt = Effect.gen(function* () {
-        const commandId = CommandId.make(`worker-job:${job.id}:${job.attempt}`);
+        let commandId = CommandId.make(`worker-job:${job.id}:${job.attempt}`);
         const receipts = yield* sql<{
+          command_id: string;
           status: string;
           error: string | null;
-        }>`SELECT status, error FROM orchestration_command_receipts WHERE command_id = ${commandId}`;
+        }>`SELECT command_id, status, error FROM orchestration_command_receipts WHERE command_id IN (${commandId}, ${`${commandId}:steer`})`;
+        steering = receipts[0]?.command_id.endsWith(":steer") ?? false;
         if (receipts[0]?.status === "accepted") {
           yield* sql`UPDATE custom_worker_jobs SET state = ${job.kind !== "work" ? "completed" : "submitted"}, error = NULL WHERE id = ${job.id}`;
           return;
@@ -1699,8 +1722,25 @@ const make = Effect.gen(function* () {
           ]);
           if (intent[0]?.event_type === "thread.turn-interrupt-requested") return;
         } else if (yield* busy(target)) {
-          blocked.add(job.target_id);
-          return;
+          // Startup and a failed steer keep today's queue.
+          // A settings change is for the next turn, never the running provider.
+          const changedSettings = yield* sql`SELECT 1 FROM orchestration_events
+            WHERE stream_id = ${target.id} AND event_type = 'thread.meta-updated'
+              AND json_extract(payload_json, '$.modelSelection') IS NOT NULL
+              AND sequence > COALESCE((SELECT MAX(sequence) FROM orchestration_events
+                WHERE stream_id = ${target.id} AND event_type = 'thread.turn-start-requested'), 0)
+            LIMIT 1`;
+          if (
+            job.attempt > 0 ||
+            target.session?.status !== "running" ||
+            !target.session.activeTurnId ||
+            changedSettings.length
+          ) {
+            blocked.add(job.target_id);
+            return;
+          }
+          steering = true;
+          commandId = CommandId.make(`${commandId}:steer`);
         }
         if (job.kind === "work" && worker) yield* checkWorkerSettings(worker, target);
         const dispatchedAt = job.dispatched_at ?? (yield* now);
@@ -1728,7 +1768,7 @@ const make = Effect.gen(function* () {
         Effect.catch((cause) =>
           Effect.gen(function* () {
             const message = failure(cause).message;
-            if (message.includes("Worker dispatch precondition changed")) {
+            if (steering || message.includes("Worker dispatch precondition changed")) {
               blocked.add(job.target_id);
               yield* sql`UPDATE custom_worker_jobs SET attempt = attempt + 1 WHERE id = ${job.id}`;
               return;

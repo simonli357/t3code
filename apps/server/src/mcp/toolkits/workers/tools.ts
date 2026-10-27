@@ -53,7 +53,7 @@ const read = Tool.make("t3_worker_read", {
 });
 const send = Tool.make("t3_worker_send", {
   description:
-    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Rejects changed settings immediately; queues durably if busy and settings still match. Use a new clientRequestId per assignment, stable across retries with identical prompt. Each new accepted assignment restarts the worker communication window; identical retries and rejected sends do not. During the window only explicit t3_worker_report outcome done for the entire assignment may pass; blockers cannot pass. Does not interrupt or steer active work.",
+    "Send an assignment or correction to the SAME worker conversation, retaining its provider/model/options. Rejects changed settings immediately. Messages steer active work through the normal turn path; unsupported or failed steering falls back to the durable queue. Idle workers start a turn. Use a new clientRequestId per assignment, stable across retries with identical prompt. Each new accepted assignment restarts the worker communication window; identical retries and rejected sends do not. During the window only explicit t3_worker_report outcome done for the entire assignment may pass; blockers cannot pass. Use t3_worker_control for account/model changes; those are never steered.",
   parameters: Workers.SendInput,
   success: Workers.JobResult,
   failure,

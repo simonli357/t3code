@@ -491,7 +491,7 @@ const confirmedMessage = Effect.fn(function* (
 });
 const session = Effect.fn(function* (
   threadId: ThreadId,
-  status: "running" | "ready" | "error" | "stopped" | "interrupted",
+  status: "starting" | "running" | "ready" | "error" | "stopped" | "interrupted",
   suffix: string,
   providerInstanceId?: ProviderInstanceId,
   error = "Test provider error",
@@ -1014,7 +1014,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         const owned = (yield* service.list(successor))[0]!;
         expect(owned.threadId).toBe(worker);
         expect(owned.latestRequest?.requestId).toBe(follow.requestId);
-        expect(owned.latestRequest?.state).toBe("queued");
+        expect(owned.latestRequest?.state).toBe("submitted");
         expect(owned.modelSelection).toEqual(input.modelSelection);
         expect(
           (yield* sql`SELECT read_seq, read_offset FROM custom_workers WHERE thread_id = ${worker}`)[0],
@@ -2515,7 +2515,75 @@ it.layer(testLayer)("persistent workers", (it) => {
         }),
     );
   }
-  it.effect("queues busy-worker assignments but immediately reports to a running master", () =>
+  for (const succeeds of [true, false]) {
+    it.effect(
+      succeeds
+        ? "steers a busy worker and reconciles the provider receipt"
+        : "queues a failed or unsupported steer until idle, including after restart",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* Workers.WorkerControls;
+          const engine = yield* OrchestrationEngineService;
+          const snapshots = yield* ProjectionSnapshotQuery;
+          const { owner, worker, input } = yield* seed(`worker-steer-${succeeds}`);
+          yield* service.spawn(owner, input);
+          yield* session(worker, "running", "active-worker");
+          const follow = {
+            threadId: worker,
+            clientRequestId: "correction",
+            prompt: "Correct course now.",
+          };
+          const sequence = yield* engine.latestSequence;
+          const sent = yield* service.send(owner, follow);
+          expect(sent.state).toBe("submitted");
+          const requests = yield* engine.readEvents(sequence).pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "thread.turn-start-requested" &&
+                event.commandId === `worker-job:${sent.requestId}:0:steer`,
+            ),
+            Stream.runCollect,
+          );
+          expect(requests).toHaveLength(1);
+          yield* engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`steer-result-${worker}`),
+            threadId: worker,
+            activity: {
+              id: EventId.make(`steer-result-${worker}`),
+              kind: succeeds ? "provider.turn.steered" : "provider.turn.start.failed",
+              summary: succeeds ? "Message delivered to the active turn" : "Provider cannot steer",
+              tone: succeeds ? "info" : "error",
+              turnId: succeeds ? TurnId.make("active-worker") : null,
+              payload: { requestId: `worker-job:${sent.requestId}` },
+              createdAt: timestamp,
+            },
+            createdAt: timestamp,
+          });
+          yield* service.drain();
+          expect((yield* service.send(owner, follow)).state).toBe(
+            succeeds ? "submitted" : "queued",
+          );
+          if (succeeds) expect((yield* service.send(owner, follow)).turnId).toBe("active-worker");
+          const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
+          yield* restarted.drain();
+          expect((yield* restarted.send(owner, follow)).state).toBe(
+            succeeds ? "submitted" : "queued",
+          );
+          yield* session(worker, "ready", "active-worker-ended");
+          yield* restarted.drain();
+          expect((yield* restarted.send(owner, follow)).state).toBe(
+            succeeds ? "completed" : "submitted",
+          );
+          expect(
+            Option.getOrThrow(yield* snapshots.getThreadDetailById(worker)).messages.filter(
+              (message) => message.text === follow.prompt,
+            ),
+          ).toHaveLength(1);
+        }),
+    );
+  }
+  it.effect("queues starting-worker assignments but immediately reports to a running master", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const snapshots = yield* ProjectionSnapshotQuery;
@@ -2523,6 +2591,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       yield* session(owner, "running", "master-turn");
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "worker-first");
+      yield* session(worker, "starting", "worker-first-waiting");
       const follow = {
         threadId: worker,
         clientRequestId: "correction",
@@ -2685,6 +2754,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         const { owner, worker, input } = yield* seed("adopt");
         yield* service.spawn(owner, input);
         yield* session(worker, "running", "adopt-active");
+        yield* session(worker, "starting", "adopt-active-waiting");
         const follow = {
           threadId: worker,
           clientRequestId: "accepted",
@@ -2736,11 +2806,11 @@ it.layer(testLayer)("persistent workers", (it) => {
             clientRequestId: "next",
             prompt: "continue on chosen account",
           };
-          yield* service.send(owner, follow);
           const changed = yield* service.control(owner, {
             threadId: worker,
             modelSelection: selections[index]!,
           });
+          expect((yield* service.send(owner, follow)).state).toBe("queued");
           expect(changed.modelSelection).toEqual(selections[index]);
           const active = Option.getOrThrow(yield* snapshots.getThreadDetailById(worker));
           expect(active.session?.activeTurnId).toBe(`switch-active-${index}`);
@@ -2897,6 +2967,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, worker, input } = yield* seed("late-switch");
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "late-active");
+      yield* session(worker, "starting", "late-active-waiting");
       const follow = { threadId: worker, clientRequestId: "queued", prompt: "must not deliver" };
       yield* service.send(owner, follow);
       yield* engine.dispatch({
@@ -3173,6 +3244,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, source, worker, input } = yield* seed("busy-queue");
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "busy-queue-turn");
+      yield* session(worker, "starting", "busy-queue-turn-waiting");
       yield* service.send(owner, {
         threadId: worker,
         clientRequestId: "next",
@@ -4333,6 +4405,7 @@ it.layer(testLayer)("session organization", (it) => {
         const { owner, source, worker, input } = yield* seed("organization-transfer");
         yield* service.spawn(owner, input);
         yield* session(worker, "running", "organization-active");
+        yield* session(worker, "starting", "organization-active-waiting");
         const queued = yield* service.send(owner, {
           threadId: worker,
           clientRequestId: "queued",
