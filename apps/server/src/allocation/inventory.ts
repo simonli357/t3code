@@ -46,6 +46,7 @@ export function allocationInventory(input: {
   quotaEvidence?: readonly QuotaEvidence[];
   maxReadingAgeMinutes?: number;
   request?: AllocationRequest;
+  workerDisabledInstanceIds?: readonly string[];
 }): AllocationInventory {
   const { environmentId, at, providers, threads, measurements, request } = input;
   const accounts: AllocationAccount[] = providers.map((p) => {
@@ -108,6 +109,7 @@ export function allocationInventory(input: {
       !failed &&
       !limits?.unavailable;
     return {
+      availableForWorkers: !input.workerDisabledInstanceIds?.includes(p.instanceId),
       retainHistory: measurements.monitoredInstanceIds.includes(p.instanceId),
       environmentId,
       instanceId: p.instanceId,

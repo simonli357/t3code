@@ -1,4 +1,8 @@
-import { allocationPreferenceKey, allocationPreferenceWeight } from "@t3tools/contracts";
+import {
+  allocationPreferenceKey,
+  allocationPreferenceWeight,
+  WORKER_ACCOUNT_DISABLED_REASON,
+} from "@t3tools/contracts";
 import type {
   AllocationAccount,
   AllocationCandidate,
@@ -239,6 +243,8 @@ export function decideAllocation(input: {
         windows: [...windowsById.values()].sort((a, b) => compare(a.id, b.id)),
       };
       const reasons: string[] = [];
+      if (request.kind !== "session" && account.availableForWorkers === false)
+        reasons.push(WORKER_ACCOUNT_DISABLED_REASON);
       if (account.environmentId !== request.environmentId)
         reasons.push("Different execution environment.");
       if (account.driver !== request.driver) reasons.push("Different provider family.");
@@ -504,6 +510,13 @@ export function decideAllocation(input: {
         ]
       : [
           ...globalReasons,
+          ...(request.explicitInstanceId
+            ? (candidates.find(
+                (c) =>
+                  c.environmentId === request.environmentId &&
+                  c.instanceId === request.explicitInstanceId,
+              )?.reasons ?? [])
+            : []),
           "No account matches the requested profile, host and identity constraints.",
         ],
     waitUntil: null,

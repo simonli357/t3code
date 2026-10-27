@@ -5,6 +5,7 @@ import type {
   ComputerPlacementHost,
   ComputerPlacementRequest,
 } from "@t3tools/contracts";
+import { WORKER_ACCOUNT_DISABLED_REASON } from "@t3tools/contracts";
 
 const GIB = 2 ** 30;
 const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)} GiB`;
@@ -239,14 +240,20 @@ export function recommendPlacement(input: {
               account.instanceId === request.instanceId ||
               (account.accountKey !== null && wantedLogins.has(account.accountKey))),
         );
-        if (matching.length === 0) {
+        const workerAccounts = matching.filter((account) => account.availableForWorkers !== false);
+        if (matching.length > 0 && workerAccounts.length === 0) {
+          unmet++;
+          warnings.push(WORKER_ACCOUNT_DISABLED_REASON);
+        } else if (matching.length === 0) {
           unmet++;
           warnings.push("No matching provider account or model on this computer.");
         } else {
-          reasons.push(`Provider runtime present: ${matching.map((a) => a.label).join(", ")}.`);
+          reasons.push(
+            `Provider runtime present: ${workerAccounts.map((a) => a.label).join(", ")}.`,
+          );
           // Sign-in and quota state are reported, never used to pick a computer.
-          const first = matching[0]!;
-          if (matching.every((account) => !account.available))
+          const first = workerAccounts[0]!;
+          if (workerAccounts.every((account) => !account.available))
             warnings.push(
               `${first.label} is not ready here: ${first.unavailableReason ?? "unavailable"}`,
             );

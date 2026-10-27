@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
+  WORKER_ACCOUNT_DISABLED_REASON,
   AllocationError,
   AssignmentAssessment,
   RecommendationOverrides,
@@ -138,7 +139,7 @@ const make = Effect.gen(function* () {
    * Runs all three recommendations: the table's model/effort and allocation's account for
    * that profile (one model preview), and computer placement read on this server from every
    * linked computer.
-   * Each degrades to a recorded reason; none blocks a start.
+   * Advice failures degrade to recorded reasons; disabled worker accounts are rejected.
    */
   const advise = Effect.fn("AllocationAssignments.advise")(function* (input: {
     readonly environment: string;
@@ -206,6 +207,20 @@ const make = Effect.gen(function* () {
           i.environmentId === input.environment ||
           (i.environmentLabel ?? i.environmentId).toLowerCase() === environment,
       )?.environmentId ?? input.environment;
+    if (
+      inventories.some((i) =>
+        i.accounts.some(
+          (a) =>
+            a.environmentId === environmentId &&
+            a.instanceId === input.instanceId &&
+            a.availableForWorkers === false,
+        ),
+      )
+    )
+      return yield* new AllocationError({
+        code: "invalid",
+        detail: WORKER_ACCOUNT_DISABLED_REASON,
+      });
     const driver =
       input.drivers?.length === 1
         ? input.drivers[0]
@@ -335,7 +350,9 @@ const make = Effect.gen(function* () {
                   : raw.request.model,
             })
           : undefined;
-      let routed = raw.request;
+      let routed = { ...raw.request };
+      if (managed) delete routed.kind;
+      else routed = { ...routed, kind: "session" };
       // A model-only pin takes the table's effort, resolved here so older coordinators
       // still receive the exact override they understand.
       if (automatic?.override && !automatic.override.options) {
@@ -343,7 +360,8 @@ const make = Effect.gen(function* () {
         const options =
           reused?.request?.options ??
           advice?.selection?.profiles.find((p) => p.driver === override.driver)?.options;
-        if (options) routed = { ...automatic, override: { ...override, options } };
+        if (options && routed.selection === "automatic")
+          routed = { ...routed, override: { ...override, options } };
       }
       const pinnedModel =
         routed.selection === "automatic"
@@ -415,6 +433,13 @@ const make = Effect.gen(function* () {
       const result = response.result;
       if (!result) return yield* invalid("Allocation returned no decision.");
       const chosenModel = profileLabel(request.driver, request.model, request.options);
+      if (
+        managed &&
+        request.explicitInstanceId &&
+        !result.decision.selectedInstanceId &&
+        result.decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
+      )
+        return yield* invalid(WORKER_ACCOUNT_DISABLED_REASON);
       if (!result.reservation || !result.decision.selectedInstanceId)
         return {
           allocation: result,

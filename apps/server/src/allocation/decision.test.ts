@@ -1083,3 +1083,28 @@ it("missing or stale advisory load lowers confidence without claiming the reacha
     expect(decision.reasons.join(" ")).not.toContain("coordinator unavailable");
   }
 });
+
+it("keeps worker availability local to each instance, including shared logins on peers", () => {
+  const disabled = account("disabled", { availableForWorkers: false, accountKey: "shared" });
+  const enabled = account("enabled", { accountKey: "shared" });
+  const elsewhere = account("disabled", { environmentId: "peer", accountKey: "shared" });
+  const result = decideAllocation({
+    ...input(),
+    inventories: [
+      inventory([disabled, enabled]),
+      { ...inventory([elsewhere]), environmentId: "peer" },
+    ],
+  });
+  expect(result.selectedInstanceId).toBe("enabled");
+  expect(
+    result.candidates.find((c) => c.environmentId === "host" && c.instanceId === "disabled")
+      ?.eligible,
+  ).toBe(false);
+  expect(
+    decideAllocation({
+      ...input(),
+      inventories: [inventory([disabled]), { ...inventory([elsewhere]), environmentId: "peer" }],
+      request: { ...request, environmentId: "peer" },
+    }).selectedInstanceId,
+  ).toBe("disabled");
+});

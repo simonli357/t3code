@@ -138,6 +138,7 @@ export function accountSupportsRoutingProfile(
   return descriptor?.type === "select" && descriptor.options.some((o) => o.id === profile.effort);
 }
 export const ModelRoutingRequest = Schema.Struct({
+  kind: Schema.optional(Schema.Literals(["worker", "session"])),
   selection: Schema.Literal("automatic"),
   assignmentId: TrimmedNonEmptyString,
   environmentId: TrimmedNonEmptyString,

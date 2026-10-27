@@ -2384,3 +2384,107 @@ it.effect("computer advice observes each computer's live session cap", () => {
     expect((yield* allocation.place({})).placement.recommendedEnvironmentId).toBe("local");
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
+
+it.effect(
+  "worker availability defaults on and disabling an account excludes only new workers",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation, assignments } = yield* f.setup;
+      const settings = yield* Settings.ServerSettingsService;
+      expect((yield* settings.getSettings).workerDisabledInstanceIds).toEqual([]);
+      const preview = () => allocation.execute({ _tag: "preview", request: startInput.request });
+      expect((yield* preview()).result?.decision.selectedInstanceId).toBe(provider.instanceId);
+      yield* settings.updateSettings({ workerDisabledInstanceIds: [provider.instanceId] });
+      const disabled = (yield* preview()).result!.decision;
+      expect(disabled.selectedInstanceId).toBeNull();
+      expect(disabled.candidates[0]).toMatchObject({
+        eligible: false,
+        reasons: ["Turned off for workers in Provider allocation settings"],
+      });
+      const error = yield* Effect.flip(
+        assignments.start(
+          {
+            ...startInput,
+            request: { ...startInput.request, explicitInstanceId: provider.instanceId },
+          },
+          ThreadId.make("master"),
+        ),
+      );
+      expect(error.detail).toBe("Turned off for workers in Provider allocation settings");
+      expect(f.calls).toHaveLength(0);
+      expect((yield* assignments.start({ ...startInput, kind: "session" })).state).toBe(
+        "submitted",
+      );
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "usage-limit recovery skips disabled worker accounts and can use them again when enabled",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const settings = yield* Settings.ServerSettingsService;
+      const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+      const spare = {
+        ...provider,
+        instanceId: ProviderInstanceId.make("spare"),
+        auth: { ...provider.auth, email: "spare@example.test" },
+      };
+      const enabled = {
+        ...provider,
+        instanceId: ProviderInstanceId.make("enabled"),
+        auth: { ...provider.auth, email: "enabled@example.test" },
+      };
+      f.state.providers = [provider, spare, enabled];
+      yield* settings.updateSettings({ workerDisabledInstanceIds: [spare.instanceId] });
+      expect((yield* allocation.replacement(ThreadId.make("worker"), selection))?.instanceId).toBe(
+        enabled.instanceId,
+      );
+      yield* settings.updateSettings({
+        workerDisabledInstanceIds: [spare.instanceId, enabled.instanceId],
+      });
+      expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+      yield* settings.updateSettings({ workerDisabledInstanceIds: [enabled.instanceId] });
+      expect((yield* allocation.replacement(ThreadId.make("worker"), selection))?.instanceId).toBe(
+        spare.instanceId,
+      );
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect("explicit peer worker starts use the destination's availability setting", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation, assignments } = yield* f.setup;
+    const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    f.state.peers = [
+      {
+        ...own,
+        environmentId: "peer",
+        accounts: own.accounts.map((a) => ({
+          ...a,
+          environmentId: "peer",
+          availableForWorkers: false,
+        })),
+      },
+    ];
+    const error = yield* Effect.flip(
+      assignments.start(
+        {
+          ...startInput,
+          request: {
+            ...startInput.request,
+            environmentId: "peer",
+            explicitInstanceId: provider.instanceId,
+          },
+        },
+        ThreadId.make("master"),
+      ),
+    );
+    expect(error.detail).toBe("Turned off for workers in Provider allocation settings");
+    expect(f.calls).toHaveLength(0);
+  }).pipe(Effect.provide(f.layer));
+});

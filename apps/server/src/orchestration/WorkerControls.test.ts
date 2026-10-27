@@ -52,6 +52,7 @@ import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDi
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Workers from "./WorkerControls.ts";
+import { makeCoordination } from "./SessionMoveCoordination.ts";
 import * as Computers from "../computers/Computers.ts";
 import * as Allocation from "../allocation/ProviderAllocation.ts";
 import * as AllocationStore from "../allocation/AllocationStore.ts";
@@ -5850,3 +5851,70 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
       }),
     );
 });
+
+it.effect(
+  "worker account availability blocks spawn, switches and renewals while existing work continues",
+  () =>
+    Effect.gen(function* () {
+      const { owner, worker, input } = yield* seed("worker-availability");
+      const service = yield* Workers.WorkerControls;
+      const settings = yield* Settings.ServerSettingsService;
+      const reason = "Turned off for workers in Provider allocation settings";
+      yield* settings.updateSettings({
+        workerDisabledInstanceIds: [input.modelSelection.instanceId],
+      });
+      expect((yield* Effect.flip(service.spawn(owner, input))).message).toBe(reason);
+      yield* settings.updateSettings({ workerDisabledInstanceIds: [] });
+      yield* service.spawn(owner, input);
+      yield* service.drain();
+      yield* settings.updateSettings({
+        workerDisabledInstanceIds: [input.modelSelection.instanceId, selections[1]!.instanceId],
+      });
+      expect(
+        (yield* Effect.flip(
+          service.control(owner, {
+            threadId: worker,
+            modelSelection: selections[1]!,
+          }),
+        )).message,
+      ).toBe(reason);
+      expect(
+        (yield* Effect.flip(
+          service.handoff(worker, {
+            threadId: ThreadId.make("worker-availability-successor"),
+            title: "Renewed worker",
+            modelSelection: input.modelSelection,
+            prompt: "continue",
+          }),
+        )).message,
+      ).toBe(reason);
+      yield* service.control(owner, { threadId: worker, notifications: false });
+      const sql = yield* SqlClient.SqlClient;
+      const [record] = yield* sql`SELECT * FROM custom_workers WHERE thread_id = ${worker}`;
+      const coordination = yield* makeCoordination;
+      expect(
+        (yield* Effect.flip(
+          coordination.importState(
+            "peer",
+            worker,
+            {
+              worker: record,
+              children: [],
+              jobs: [],
+              aliases: [],
+              authority: null,
+              handoffs: [],
+            },
+            selections[1]!,
+          ),
+        )).message,
+      ).toBe(reason);
+      yield* service.send(owner, {
+        threadId: worker,
+        clientRequestId: "continue-disabled",
+        prompt: "continue existing work",
+      });
+      yield* service.drain();
+      expect((yield* service.list(owner)).find((w) => w.threadId === worker)?.error).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+);

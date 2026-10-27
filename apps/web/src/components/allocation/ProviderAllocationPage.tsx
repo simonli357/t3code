@@ -30,6 +30,8 @@ import { useEnvironment } from "../../state/environments";
 import { randomUUID } from "../../lib/utils";
 import { AllocationControls, AllocationAnalytics } from "./AllocationControls";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
+import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const decodePolicy = Schema.decodeUnknownSync(AllocationPolicy);
@@ -45,6 +47,7 @@ export function ProviderAllocationPage({ environmentId }: { environmentId: Envir
 function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
   const start = useAtomCommand(commands.start, { reportFailure: false });
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
   const connection = useEnvironment(environmentId)?.connection.phase ?? "offline";
   const [connectionState, setConnectionState] = useState({ phase: connection, epoch: 0 });
   if (connectionState.phase !== connection)
@@ -766,6 +769,38 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                     <h4 className="font-medium">
                       {a.label} · {PROVIDER_DISPLAY_NAMES[a.driver] ?? "Other provider"}
                     </h4>
+                    <label>
+                      Available for workers
+                      <Switch
+                        checked={a.availableForWorkers !== false}
+                        disabled={busy || !ready}
+                        onCheckedChange={async (checked) => {
+                          setBusy(true);
+                          setError("");
+                          try {
+                            const result = await updateSettings({
+                              environmentId: EnvironmentId.make(host.environmentId),
+                              input: {
+                                patch: {
+                                  workerDisabledInstanceIds: host.accounts
+                                    .filter((account) =>
+                                      account.instanceId === a.instanceId
+                                        ? !checked
+                                        : account.availableForWorkers === false,
+                                    )
+                                    .map((account) => account.instanceId),
+                                },
+                              },
+                            });
+                            if (result._tag === "Success") await load();
+                            else
+                              setError("Could not save worker availability. Reconnect and retry.");
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      />
+                    </label>
                     <p className="text-xs">
                       Short window:{" "}
                       {a.shortWindow === "known-absent"

@@ -9,6 +9,7 @@ import {
   ModelSelection,
   ProviderDriverKind,
   ThreadId,
+  WORKER_ACCOUNT_DISABLED_REASON,
   type AllocationSnapshot,
   type AllocationPolicy,
   type ComputerPlacement,
@@ -194,6 +195,7 @@ const make = Effect.gen(function* () {
       environmentId: local.environmentId,
       at: yield* now,
       providers: currentProviders,
+      workerDisabledInstanceIds: (yield* settings.getSettings).workerDisabledInstanceIds,
       threads,
       quotaEvidence,
       maxReadingAgeMinutes: (yield* store.policy).maxReadingAgeMinutes,
@@ -621,8 +623,9 @@ const make = Effect.gen(function* () {
           if (!decision.selectedInstanceId)
             return yield* new AllocationError({
               code: "unavailable",
-              detail:
-                "Reserved account no longer supports the exact requested profile or identity constraints.",
+              detail: decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
+                ? WORKER_ACCOUNT_DISABLED_REASON
+                : "Reserved account no longer supports the exact requested profile or identity constraints.",
             });
         }
       }
@@ -786,9 +789,14 @@ const make = Effect.gen(function* () {
     const id = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
       .allocationCoordinatorEnvironmentId;
     if (id && id !== local.environmentId)
-      return yield* peers
-        .call(id, { _tag: "allocation", operation })
-        .pipe(Effect.flatMap(decodeResponse), Effect.mapError(unavailable));
+      return yield* peers.call(id, { _tag: "allocation", operation }).pipe(
+        Effect.flatMap(decodeResponse),
+        Effect.mapError((cause) =>
+          cause.message.includes(WORKER_ACCOUNT_DISABLED_REASON)
+            ? new AllocationError({ code: "invalid", detail: WORKER_ACCOUNT_DISABLED_REASON })
+            : unavailable(),
+        ),
+      );
     return yield* executeLocal(operation);
   });
   return ProviderAllocation.of({

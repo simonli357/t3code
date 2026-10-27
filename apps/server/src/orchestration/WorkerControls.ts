@@ -23,6 +23,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   WorkerRenewalSettings,
+  WORKER_ACCOUNT_DISABLED_REASON,
 } from "@t3tools/contracts";
 import { makeSessionOrganizationQuery } from "./SessionOrganizationQuery.ts";
 import * as Context from "effect/Context";
@@ -1076,6 +1077,16 @@ const make = Effect.gen(function* () {
         });
     }
   });
+  const checkWorkerAccount = Effect.fn(function* (selection: ModelSelection) {
+    if ((yield* settings.getSettings).workerDisabledInstanceIds.includes(selection.instanceId))
+      return yield* new WorkerError({ message: WORKER_ACCOUNT_DISABLED_REASON });
+  });
+  const checkSuccessorAccount = Effect.fn(function* (owner: string, selection: ModelSelection) {
+    const [worker] = yield* sql<{
+      owner_id: string | null;
+    }>`SELECT owner_id FROM custom_workers WHERE thread_id = ${owner}`;
+    if (worker?.owner_id) yield* checkWorkerAccount(selection);
+  });
   const checkPermissions = Effect.fn(function* (
     ownerId: string,
     target: OrchestrationThreadShell,
@@ -2064,6 +2075,8 @@ const make = Effect.gen(function* () {
         return yield* new WorkerError({
           message: "The base has broader permissions than the master.",
         });
+      if (forHandoff) yield* checkSuccessorAccount(owner, input.modelSelection);
+      else yield* checkWorkerAccount(input.modelSelection);
       yield* checkSelection(input.modelSelection);
       if (source && (yield* busy(source)))
         return yield* new WorkerError({
@@ -2288,6 +2301,8 @@ const make = Effect.gen(function* () {
       const plan = decodePlan(worker.plan_json);
       yield* checkPermissions(owner, target, plan.ownerRuntimeMode);
       const selection = input.modelSelection ?? target.modelSelection;
+      if (input.modelSelection || selectionKey(selection) !== selectionKey(plan.modelSelection))
+        yield* checkWorkerAccount(selection);
       yield* checkSelection(selection);
       if (input.modelSelection) {
         if (worker.state !== "ready")
@@ -3118,6 +3133,7 @@ const make = Effect.gen(function* () {
         if (Option.isSome(yield* snapshots.getThreadShellById(input.threadId)))
           return yield* new WorkerError({ message: "That destination thread already exists." });
       }
+      yield* checkSuccessorAccount(owner, input.modelSelection);
       yield* checkSelection(input.modelSelection);
       if (input.sourceThreadId) yield* checkPermissions(owner, yield* thread(input.sourceThreadId));
       yield* sql`INSERT INTO custom_orchestrator_handoffs (thread_id, owner_id, plan_json)
@@ -3344,6 +3360,7 @@ const make = Effect.gen(function* () {
           modelSelection: target.modelSelection,
           prompt: `Automatic renewal of ${id}. Continue only its unfinished task. Read the preceding conversation with t3_thread_read if the checkpoint leaves anything unclear. Original workspace: ${previousWorkspace}. Continue work in that exact workspace. The successor retains its existing workspace binding and lifecycle registration when present; preserve its unfinished files. Existing work and files remain there; inspect them before continuing and do not repeat completed work.\n\n${summary.slice(0, 48000)}${summary.length > 48000 ? "\n[Checkpoint truncated; read the original conversation before continuing.]" : ""}`,
         };
+        yield* checkSuccessorAccount(id, input.modelSelection);
         yield* checkSelection(input.modelSelection);
         yield* sql`INSERT INTO custom_orchestrator_handoffs (thread_id, owner_id, plan_json)
           VALUES (${input.threadId}, ${id}, ${encodeUnknown(input)})`;

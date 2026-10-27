@@ -15,7 +15,11 @@ import { ProviderOptionSelection, ModelCapabilities } from "./model.ts";
 const Points = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
 const Hours = Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 }));
 const Names = Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(100));
+export const WORKER_ACCOUNT_DISABLED_REASON =
+  "Turned off for workers in Provider allocation settings";
 export const AllocationRequest = Schema.Struct({
+  /** Unspecified requests are worker recommendations; human starts set session on the server. */
+  kind: Schema.optional(Schema.Literals(["worker", "session"])),
   selection: Schema.optional(Schema.Literal("explicit")),
   assignmentId: TrimmedNonEmptyString,
   environmentId: TrimmedNonEmptyString,
@@ -157,6 +161,8 @@ export const AllocationWindow = Schema.Struct({
 });
 export type AllocationWindow = typeof AllocationWindow.Type;
 export const AllocationAccount = Schema.Struct({
+  /** Missing on older environments means available for workers. */
+  availableForWorkers: Schema.optional(Schema.Boolean),
   retainHistory: Schema.optional(Schema.Boolean),
   environmentId: Schema.String,
   instanceId: ProviderInstanceId,

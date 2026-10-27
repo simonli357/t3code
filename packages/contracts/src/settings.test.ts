@@ -1036,3 +1036,14 @@ it("defaults worker placement and usage recovery settings and accepts live chang
   for (const cap of [0, -1, 1.5])
     expect(() => decodeServerSettingsPatch({ maxActiveAgentSessions: cap })).toThrow();
 });
+
+it("defaults every account to available for workers on existing installs and persists disabled instances", () => {
+  expect(decodeServerSettings({}).workerDisabledInstanceIds).toEqual([]);
+  const workerDisabledInstanceIds = [ProviderInstanceId.make("codex_ara")];
+  const patch = decodeServerSettingsPatch({ workerDisabledInstanceIds });
+  expect(patch.workerDisabledInstanceIds).toEqual(workerDisabledInstanceIds);
+  const settings = decodeServerSettings(patch);
+  expect(decodeServerSettings(encodeServerSettings(settings)).workerDisabledInstanceIds).toEqual(
+    workerDisabledInstanceIds,
+  );
+});

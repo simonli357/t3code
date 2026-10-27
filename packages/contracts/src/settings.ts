@@ -1141,6 +1141,10 @@ const GlobalInstructions = Schema.Struct({
 });
 
 export const ServerSettings = Schema.Struct({
+  /** Environment-local provider instances excluded from new worker placement. */
+  workerDisabledInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   allocationCoordinatorEnvironmentId: Schema.NullOr(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1536,6 +1540,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  workerDisabledInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   allocationCoordinatorEnvironmentId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   globalInstructions: Schema.optionalKey(
     Schema.Struct({

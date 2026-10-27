@@ -1,4 +1,9 @@
-import { SessionMoveError, ThreadId, ModelSelection } from "@t3tools/contracts";
+import {
+  SessionMoveError,
+  ThreadId,
+  ModelSelection,
+  WORKER_ACCOUNT_DISABLED_REASON,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -10,6 +15,7 @@ import * as Files from "../project/SessionMoveFiles.ts";
 import { PeerLinks } from "./PeerLinks.ts";
 import { WorkerControls } from "./WorkerControls.ts";
 import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 
 type WorkerRow = {
   thread_id: string;
@@ -153,6 +159,7 @@ export const makeCoordination = Effect.gen(function* () {
   const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
   const sql = yield* SqlClient.SqlClient;
   const workers = yield* WorkerControls;
+  const settings = yield* ServerSettingsService;
   const peers = yield* PeerLinks;
   const config = yield* ServerConfig;
   const fs = yield* FileSystem.FileSystem;
@@ -241,6 +248,11 @@ export const makeCoordination = Effect.gen(function* () {
           () => new SessionMoveError({ message: "Invalid worker coordination state." }),
         ),
       );
+      if (
+        value.worker?.owner_id &&
+        (yield* settings.getSettings).workerDisabledInstanceIds.includes(selection.instanceId)
+      )
+        return yield* new SessionMoveError({ message: WORKER_ACCOUNT_DISABLED_REASON });
       if (value.authority) {
         if (value.authority.thread_id !== threadId)
           return yield* new SessionMoveError({

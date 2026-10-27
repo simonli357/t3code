@@ -29,6 +29,8 @@ import { AppText as Text } from "../../components/AppText";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 
 import { SettingsScreen } from "./components/SettingsScreen";
+import { ThemedSwitch } from "../../components/ThemedSwitch";
+import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 
@@ -38,6 +40,7 @@ export function SettingsAllocationRouteScreen() {
   const target = selectedTargets[0];
 
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
 
   const [snapshot, setSnapshot] = useState<AllocationSnapshot | null>(null);
 
@@ -329,6 +332,37 @@ export function SettingsAllocationRouteScreen() {
                 <Text>
                   {a.label} · {a.shortWindow}
                 </Text>
+                <View className="flex-row items-center justify-between">
+                  <Text>Available for workers</Text>
+                  <ThemedSwitch
+                    accessibilityLabel={`Available for workers: ${a.label}`}
+                    value={a.availableForWorkers !== false}
+                    disabled={busy}
+                    onValueChange={async (checked) => {
+                      setBusy(true);
+                      try {
+                        const result = await updateSettings({
+                          environmentId: EnvironmentId.make(host.environmentId),
+                          input: {
+                            patch: {
+                              workerDisabledInstanceIds: host.accounts
+                                .filter((account) =>
+                                  account.instanceId === a.instanceId
+                                    ? !checked
+                                    : account.availableForWorkers === false,
+                                )
+                                .map((account) => account.instanceId),
+                            },
+                          },
+                        });
+                        if (result._tag === "Success") await refresh();
+                        else setMessage("Could not save worker availability. Reconnect and retry.");
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  />
+                </View>
                 {a.windows.map((w) => (
                   <Text key={w.id}>
                     {w.label}: {w.usedPoints.toFixed(1)}% used · {w.samples} samples · reset{" "}

@@ -510,3 +510,19 @@ describe("active session caps", () => {
     expect(result.hosts[1]?.sessions).toBeNull();
   });
 });
+
+it("reports disabled worker accounts in placement and prefers an enabled peer", () => {
+  const result = place(
+    [
+      host("disabled", {
+        accounts: [account("chosen", { environmentId: "disabled", availableForWorkers: false })],
+      }),
+      host("enabled", { accounts: [account("chosen", { environmentId: "enabled" })] }),
+    ],
+    { driver: ProviderDriverKind.make("codex") },
+  );
+  expect(result.recommendedEnvironmentId).toBe("enabled");
+  expect(result.hosts.find((h) => h.environmentId === "disabled")?.warnings).toContain(
+    "Turned off for workers in Provider allocation settings",
+  );
+});

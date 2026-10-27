@@ -35,6 +35,9 @@ vi.mock("../../state/environments", async () => {
   };
 });
 vi.mock("../../connection/runtime", () => ({ connectionAtomRuntime: {} }));
+vi.mock("../../state/server", () => ({
+  serverEnvironment: { updateSettings: { label: "updateSettings" } },
+}));
 vi.mock("@t3tools/client-runtime/state/provider-allocation", async (original) => ({
   ...(await original<typeof import("@t3tools/client-runtime/state/provider-allocation")>()),
   createAllocationCommands: () => ({ execute: { label: "execute" }, start: { label: "start" } }),
