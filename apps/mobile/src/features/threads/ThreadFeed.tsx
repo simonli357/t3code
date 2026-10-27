@@ -1,4 +1,9 @@
 import {
+  buildSessionHierarchy,
+  sessionOwnerChain,
+} from "@t3tools/client-runtime/state/session-organization";
+import { useThreadShells } from "../../state/entities";
+import {
   WorktreeWorkingHeader,
   WorktreeSetupCard,
   type WorktreeSetupCardProps,
@@ -1361,6 +1366,7 @@ function renderFeedEntry(
     | "dispatchingMessageId"
     | "onEditPendingMessage"
   > & {
+    readonly masterTitle: string | null;
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly expandedReasoningMessageIds: ReadonlySet<string>;
@@ -1551,8 +1557,8 @@ function renderFeedEntry(
       const visibleAttachments = attachments.filter(
         (attachment) => isImageAttachment(attachment) || !inlineAttachmentIds.has(attachment.id),
       );
-      // A report or peer message T3 delivered, not something the user wrote.
-      const workerMessage = presentWorkerMessage(message);
+      // A master instruction, report or peer message T3 delivered.
+      const workerMessage = presentWorkerMessage(message, { masterTitle: props.masterTitle });
       const userContent = {
         text: renderedText,
         environmentId: props.environmentId,
@@ -1891,17 +1897,19 @@ function WorkerMessageContent(
           </View>
         ))
       )}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded }}
-        hitSlop={8}
-        className="self-start"
-        onPress={onToggle}
-      >
-        <Text className="font-t3-medium text-xs text-user-bubble-foreground-muted">
-          {expanded ? "Hide details" : "Show details"}
-        </Text>
-      </Pressable>
+      {view.entries.length !== 1 || view.entries[0]?.text !== content.text ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          hitSlop={8}
+          className="self-start"
+          onPress={onToggle}
+        >
+          <Text className="font-t3-medium text-xs text-user-bubble-foreground-muted">
+            {expanded ? "Hide details" : "Show details"}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -2020,6 +2028,12 @@ function ThreadFeedPlaceholder(props: {
 }
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
+  const shells = useThreadShells();
+  const masterTitle = useMemo(() => {
+    const key = scopedThreadKey(props.environmentId, props.threadId);
+    const owner = sessionOwnerChain(buildSessionHierarchy(shells), key).at(-1);
+    return owner?.state === "available" ? owner.title : null;
+  }, [shells, props.environmentId, props.threadId]);
   const navigation = useNavigation();
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2361,6 +2375,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       setupWorkingStartedAt: props.setupWorkingStartedAt,
       dispatchingMessageId: props.dispatchingMessageId,
       unsettledTurnId,
+      masterTitle,
       copiedRowId,
       expandedWorkRows,
       expandedReasoningMessageIds,
@@ -2377,6 +2392,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.setupWorkingStartedAt,
       props.dispatchingMessageId,
       unsettledTurnId,
+      masterTitle,
       copiedRowId,
       expandedWorkRows,
       expandedReasoningMessageIds,
@@ -2829,6 +2845,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             environmentId: props.environmentId,
             dispatchingMessageId: props.dispatchingMessageId,
             onEditPendingMessage: props.onEditPendingMessage,
+            masterTitle,
             copiedRowId,
             expandedWorkRows,
             expandedReasoningMessageIds,
@@ -2874,6 +2891,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       setupAnchorIndex,
       props.dispatchingMessageId,
       props.onEditPendingMessage,
+      masterTitle,
       copiedRowId,
       disclosureToggleSettling,
       expandedWorkRows,

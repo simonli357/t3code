@@ -444,7 +444,7 @@ describe("presentWorkerMessage: provenance", () => {
     expect(presentWorkerMessage(message(text))).not.toBeNull();
   });
 
-  it("leaves assignments and other T3 messages alone", () => {
+  it("leaves other T3 message kinds alone", () => {
     for (const text of [
       "Please review the change and report when done.",
       "[T3 orchestrator handoff]\nPrevious orchestrator: x\n\nTake over.",
@@ -452,9 +452,8 @@ describe("presentWorkerMessage: provenance", () => {
     ]) {
       expect(presentWorkerMessage(message(text, "worker-job:work:1"))).toBeNull();
     }
-    // An assignment that happens to start with a pasted report is still the master's own words.
     const pasted = doneReport("Pasted for reference.");
-    for (const id of ["worker-job:work:1", `worker-job:${WORKER}:fix`, "worker-job:spawn:w"]) {
+    for (const id of ["worker-job:work:1", "worker-job:spawn:w"]) {
       expect(presentWorkerMessage(message(pasted, id))).toBeNull();
     }
   });
@@ -472,5 +471,58 @@ describe("presentWorkerMessage: provenance", () => {
     for (const id of ["message-1", "worker-job:work:1", "worker-job:handoff-start:x", "fork:t:1"]) {
       expect(deliveredMessageIdPrefix(id)).toBeNull();
     }
+  });
+});
+
+describe("presentWorkerMessage: master sends", () => {
+  // @effect-diagnostics-next-line globalDate:off -- Fixed fixture in the viewer's local time zone.
+  const createdAt = new Date(2026, 9, 27, 9, 5).toISOString();
+  it.each([
+    `worker-job:spawn:${WORKER}`,
+    `worker-job:${WORKER}:request-1`,
+    `worker-job:${WORKER}:request:retry`,
+  ])("labels %s and keeps the complete instruction", (id) => {
+    const text = `  Follow every step.\n\n${"Long instruction. ".repeat(100)}\nLast step.  `;
+    expect(
+      presentWorkerMessage({ ...message(text, id), createdAt }, { masterTitle: "Release master" }),
+    ).toEqual({
+      heading: "From master",
+      byline: "Release master · 09:05",
+      attention: false,
+      entries: [{ key: "0", text }],
+    });
+  });
+  it("keeps a pasted report as the master's full instruction", () => {
+    const text = doneReport("Pasted for reference.");
+    const view = presentWorkerMessage({ ...message(text, `worker-job:${WORKER}:fix`), createdAt });
+    expect(view?.heading).toBe("From master");
+    expect(view?.entries[0]?.text).toBe(text);
+  });
+  it("shows only the time when the master is unknown", () => {
+    expect(
+      presentWorkerMessage({ ...message("Do the work", `worker-job:${WORKER}:request`), createdAt })
+        ?.byline,
+    ).toBe("09:05");
+  });
+  it.each([
+    WORKER,
+    ...["report", "notice", "digest", "message", "peer", "handoff-start", "future-kind"].flatMap(
+      (kind) => [`worker-job:${kind}:${WORKER}`, `worker-job:${kind}:${WORKER}:request`],
+    ),
+    "worker-job:",
+    "worker-job:spawn:",
+    `worker-job:spawn:${WORKER}:extra`,
+    `worker-job:${WORKER}`,
+    `worker-job:${WORKER}:`,
+  ])("does not label a user message or another job kind (%s)", (id) => {
+    expect(presentWorkerMessage({ ...message("Do the work", id), createdAt })).toBeNull();
+  });
+  it("does not label an assistant message", () => {
+    expect(
+      presentWorkerMessage({
+        ...message("Do the work", `worker-job:${WORKER}:request`, "assistant"),
+        createdAt,
+      }),
+    ).toBeNull();
   });
 });

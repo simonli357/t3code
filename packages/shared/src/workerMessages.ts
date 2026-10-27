@@ -1,14 +1,23 @@
 /**
- * The text T3 writes into a thread when a worker reports to its master or one session messages
- * another. The agent receives all of it. Clients show `presentWorkerMessage` by default and keep
- * the complete text one click away, so the short view never replaces what the agent was given.
+ * Messages T3 delivers between masters, workers and peer sessions. The agent receives all of it.
+ * Clients show `presentWorkerMessage` by default and keep any hidden text one click away.
  *
- * Only T3's exact templates are recognised, current and earlier. Anything else, including a user
- * typing the same words, is an ordinary message.
+ * Master sends are recognised by their assignment ids; reports and peers use T3's exact
+ * templates, current and earlier. User-typed messages remain ordinary messages.
  */
 
-// T3 gives every report, notice, digest and peer message it delivers an id like this; assignments
-// and messages users send never have one.
+// Only a UUID thread identity may occupy the first segment of a follow-up send.
+const WORKER_THREAD_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const MASTER_MESSAGE_ID = new RegExp(
+  `^worker-job:(?:spawn:${WORKER_THREAD_ID}|${WORKER_THREAD_ID}:.+)$`,
+  "i",
+);
+const MASTER_MESSAGE_TIME = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+// Reports, notices, digests and peer messages have their own named job kinds.
 const DELIVERED_MESSAGE_ID = /^worker-job:(?:report|notice|digest|message|peer):/;
 
 /** The start of a delivered message's id, which carries its provenance; null for any other id. */
@@ -290,17 +299,32 @@ export function workerMessagePreview(view: WorkerMessageView): string {
 
 /**
  * A short default for a message T3 delivered for a worker job, or null for everything else.
- * Reports show the worker's own summary; peer messages show the sender's first paragraph.
+ * Master instructions stay complete; reports show the worker's own summary and peers their first paragraph.
  * Nothing is paraphrased: text is quoted, or clipped with an ellipsis, so hidden words never
  * change what the visible ones say.
  */
-export function presentWorkerMessage(message: {
-  readonly id: string;
-  readonly role: string;
-  readonly text: string;
-}): WorkerMessageView | null {
+export function presentWorkerMessage(
+  message: {
+    readonly id: string;
+    readonly role: string;
+    readonly text: string;
+    readonly createdAt?: string;
+  },
+  options: { readonly masterTitle?: string | null } = {},
+): WorkerMessageView | null {
   const { text } = message;
-  if (message.role !== "user" || deliveredMessageIdPrefix(message.id) === null) return null;
+  if (message.role !== "user") return null;
+  if (MASTER_MESSAGE_ID.test(message.id)) {
+    const timestamp = message.createdAt ? Date.parse(message.createdAt) : Number.NaN;
+    const time = Number.isFinite(timestamp) ? MASTER_MESSAGE_TIME.format(timestamp) : null;
+    return {
+      heading: "From master",
+      byline: byline(options.masterTitle, time),
+      attention: false,
+      entries: [{ key: "0", text }],
+    };
+  }
+  if (deliveredMessageIdPrefix(message.id) === null) return null;
   const digest = DIGEST_HEADER.exec(text);
   if (digest) return parseDigest(text.slice(digest[0].length), Number(digest[1]));
   if (text.startsWith(PEER_PREFIX)) return parsePeerMessage(text);

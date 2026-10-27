@@ -1,3 +1,7 @@
+import {
+  buildSessionHierarchy,
+  sessionOwnerChain,
+} from "@t3tools/client-runtime/state/session-organization";
 import { ArrowUpIcon, ClockIcon } from "lucide-react";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -157,7 +161,7 @@ import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { useAtomValue } from "@effect/atom-react";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
-import { useProject, useThread } from "../../state/entities";
+import { useThreadShells, useProject, useThread } from "../../state/entities";
 import { serverEnvironment } from "../../state/server";
 import {
   CHAT_TIMELINE_ANCHOR_OFFSET,
@@ -273,6 +277,7 @@ interface TimelineRowSharedState {
   listRef: React.RefObject<LegendListRef | null>;
   timestampFormat: TimestampFormat;
   routeThreadKey: string;
+  masterTitle: string | null;
   threadRef: ScopedThreadRef | null;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
@@ -529,6 +534,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  const shells = useThreadShells();
+  const masterTitle = useMemo(() => {
+    const owner = sessionOwnerChain(buildSessionHierarchy(shells), listIdentityKey).at(-1);
+    return owner?.state === "available" ? owner.title : null;
+  }, [shells, listIdentityKey]);
   const rememberedPosition = useMemo(
     () => readTimelinePosition(listIdentityKey),
     [listIdentityKey],
@@ -812,7 +822,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     queuedMessages,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
-  const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
+  const minimapItems = useMemo(
+    () => deriveTimelineMinimapItems(rows, masterTitle),
+    [rows, masterTitle],
+  );
   const restoreRowIndex =
     restoringThreadPosition && rememberedPosition?.atEnd === false
       ? rows.findIndex((row) => row.id === rememberedPosition.rowId)
@@ -1147,6 +1160,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       timestampFormat,
       routeThreadKey,
       // Keep Markdown callbacks memoized during unrelated activity updates.
+      masterTitle,
       threadRef: citationThreadRef,
       markdownCwd,
       resolvedTheme,
@@ -1184,6 +1198,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       timestampFormat,
       routeThreadKey,
       citationThreadRef,
+      masterTitle,
       markdownCwd,
       resolvedTheme,
       workspaceRoot,
@@ -1987,8 +2002,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
-  // A worker report or peer message T3 delivered, not something the user wrote.
-  const workerMessage = useMemo(() => presentWorkerMessage(row.message), [row.message]);
+  // A master instruction, report or peer message T3 delivered.
+  const workerMessage = useMemo(
+    () => presentWorkerMessage(row.message, { masterTitle: ctx.masterTitle }),
+    [row.message, ctx.masterTitle],
+  );
   const previewImages = useMemo(
     () => userImages.filter((image) => image.name.startsWith("preview-annotation-")),
     [userImages],
@@ -4058,19 +4076,21 @@ const WorkerMessageBody = memo(function WorkerMessageBody(props: {
           </div>
         ))
       )}
-      <div className="mt-1.5">
-        <Button
-          type="button"
-          size="xs"
-          variant="ghost-muted"
-          aria-expanded={expanded}
-          data-scroll-anchor-ignore
-          onClick={() => setExpanded((value) => !value)}
-          className="-ml-1"
-        >
-          {expanded ? "Hide details" : "Show details"}
-        </Button>
-      </div>
+      {view.entries.length !== 1 || view.entries[0]?.text !== props.fullText ? (
+        <div className="mt-1.5">
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost-muted"
+            aria-expanded={expanded}
+            data-scroll-anchor-ignore
+            onClick={() => setExpanded((value) => !value)}
+            className="-ml-1"
+          >
+            {expanded ? "Hide details" : "Show details"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 });

@@ -11,6 +11,7 @@ export interface TimelineMinimapItem {
 /** Keep full source text untouched until a minimap preview is opened. */
 export function deriveTimelineMinimapItems(
   rows: ReadonlyArray<MessagesTimelineRow>,
+  masterTitle: string | null = null,
 ): TimelineMinimapItem[] {
   const items: TimelineMinimapItem[] = [];
   for (let index = 0; index < rows.length; index += 1) {
@@ -19,8 +20,8 @@ export function deriveTimelineMinimapItems(
       continue;
     }
 
-    // A delivered report or peer message previews as its summary, like the row itself.
-    const delivered = presentWorkerMessage(row.message);
+    // Delivered messages keep the same author and text as their timeline card.
+    const delivered = presentWorkerMessage(row.message, { masterTitle });
     items.push({
       id: row.id,
       rowIndex: index,
