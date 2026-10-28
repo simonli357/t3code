@@ -6,6 +6,42 @@ import {
   appendGlobalInstructionContext,
 } from "./GlobalInstructions.ts";
 
+it("reports the retained launch workspace separately from expiring jobs", () => {
+  const settings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    globalInstructions: { enabled: true, text: "Keep work" },
+  };
+  const workspace = "/sessions/id/repo";
+  const launchEnvironment = {
+    WORKENV_JOB_ROOT: "/sessions/id",
+    WORKENV_JOB_REPO: workspace,
+    TMPDIR: "/sessions/id/tmp",
+  };
+  const context = buildGlobalInstructionContext(
+    settings,
+    workspace,
+    false,
+    null,
+    launchEnvironment,
+  )!;
+  const facts = JSON.parse(context.context.runtimeFacts);
+  expect(facts.retainedWorkspace.root).toBe("/sessions/id");
+  expect(facts.retainedWorkspace.launchEnvironment.TMPDIR).toBe("/sessions/id/tmp");
+  expect(facts.sessionWorkspace).toBeUndefined();
+  const disabled = buildGlobalInstructionContext(
+    { ...settings, globalInstructions: { enabled: false, text: "Ignored instructions" } },
+    workspace,
+    false,
+    null,
+    launchEnvironment,
+  )!;
+  expect(disabled.active).toBe(false);
+  expect(JSON.parse(disabled.context.runtimeFacts).retainedWorkspace).toEqual(
+    facts.retainedWorkspace,
+  );
+  expect(disabled.context.instructions).not.toContain("Ignored instructions");
+});
+
 describe("global instruction snapshots", () => {
   it("leaves unconfigured sessions alone", () => {
     expect(buildGlobalInstructionContext(DEFAULT_SERVER_SETTINGS, undefined)).toBeUndefined();

@@ -726,6 +726,89 @@ describe("composed fork recovery and destination launch", () => {
   }
 });
 
+describe("retained workspace launch", () => {
+  const harness = makeProviderServiceLayer();
+  harness.layer("released binding", (it) => {
+    it.effect("replaces obsolete launch paths on resume without changing native identity", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId("d819e837-a0c4-4004-bfab-bff7316c8c31");
+        const root = fixtureCwd(`sessions/${threadId}`);
+        const cwd = fixtureCwd(`sessions/${threadId}/repo`);
+        const from = NodePath.join(fixtureCwdRoot, "old-jobs", threadId);
+        const paths = Object.fromEntries(
+          ["tmp", "build", "cache", "downloads", "outputs", "evidence"].map((name) => [
+            name + "Directory",
+            fixtureCwd(`sessions/${threadId}/${name}`),
+          ]),
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(root, ".workenv.json"),
+          encodeJson({
+            identity: ["t3", NodeOS.homedir(), threadId],
+            status: "released",
+            root,
+            repo: cwd,
+            source: fixtureCwdRoot,
+            relocated_to: root,
+            t3_relocation: { from, to: root },
+            t3_registration: {
+              jobId: threadId,
+              threadId,
+              root,
+              workspaceDirectory: cwd,
+              sourceDirectory: fixtureCwdRoot,
+              ...paths,
+            },
+          }),
+        );
+        const resumeCursor = { threadId: "native-conversation-preserved" };
+        yield* directory.upsert({
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          status: "stopped",
+          resumeCursor,
+          runtimePayload: {
+            cwd,
+            workspaceEnvironment: { T3_WORKSPACE_JOB_ROOT: from, TMPDIR: from + "/tmp" },
+          },
+        });
+        yield* service.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        const started = harness.codex.startSession.mock.calls.at(-1)![0];
+        assert.equal(started.cwd, cwd);
+        assert.deepEqual(started.resumeCursor, resumeCursor);
+        assert.equal(started.workspaceEnvironment?.WORKENV_JOB_ROOT, root);
+        assert.equal(started.workspaceEnvironment?.TMPDIR, paths.tmpDirectory);
+        assert.isUndefined(started.workspaceEnvironment?.T3_WORKSPACE_JOB_ROOT);
+        const saved = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepInclude(saved.runtimePayload, {
+          workspaceEnvironment: started.workspaceEnvironment,
+        });
+        yield* service.stopSession({ threadId });
+        yield* service.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          cwd: fixtureCwdRoot,
+        });
+        const cleared = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepInclude(cleared.runtimePayload, { workspaceEnvironment: {} });
+        assert.deepEqual(
+          harness.codex.startSession.mock.calls.at(-1)![0].resumeCursor,
+          resumeCursor,
+        );
+      }),
+    );
+  });
+});
+
 describe("durable workspace launch", () => {
   const workspace = sessionWorkspaceFixture(process.cwd());
   const harness = makeProviderServiceLayer({ workspace });

@@ -93,6 +93,7 @@ import {
 } from "../GlobalInstructions.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as SessionWorkspaces from "../../workspace/SessionWorkspaces.ts";
+import { retainedWorkspaceEnvironment } from "../../workspace/RetainedWorkspace.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const decodeWorkspaceEnvironment = Schema.decodeUnknownOption(
   Schema.Record(Schema.String, Schema.String),
@@ -515,16 +516,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     instanceId: ProviderInstanceId,
     cwd: string | undefined,
   ) {
-    if (Option.isNone(workspaceService)) return {};
-    const job = yield* workspaceService.value
-      .verify(threadId)
-      .pipe(
-        Effect.mapError((cause) =>
-          toValidationError("ProviderService.workspace", cause.message, cause),
-        ),
-      );
-    if (!job) return {};
-    if (cwd !== undefined && cwd !== job.workspaceDirectory)
+    const job = Option.isNone(workspaceService)
+      ? null
+      : yield* workspaceService.value
+          .verify(threadId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toValidationError("ProviderService.workspace", cause.message, cause),
+            ),
+          );
+    const environment = job
+      ? SessionWorkspaces.workspaceEnvironment(job)
+      : yield* Effect.try({
+          try: () => retainedWorkspaceEnvironment(threadId, cwd),
+          catch: (cause) =>
+            toValidationError(
+              "ProviderService.workspace",
+              cause instanceof Error ? cause.message : "Could not read retained workspace",
+              cause,
+            ),
+        });
+    if (!environment)
+      return {} as Partial<Pick<ProviderSessionStartInput, "cwd" | "workspaceEnvironment">>;
+    if (job && cwd !== undefined && cwd !== job.workspaceDirectory)
       return yield* toValidationError(
         "ProviderService.workspace",
         "Requested cwd differs from the durable session workspace.",
@@ -538,12 +552,18 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       ),
     );
-    const environment = SessionWorkspaces.workspaceEnvironment(job);
     for (const variable of config.providerInstances[instanceId]?.environment ?? []) {
-      if (variable.name in environment && !variable.name.startsWith("T3_WORKSPACE_"))
+      if (
+        variable.name in environment &&
+        !variable.name.startsWith("T3_WORKSPACE_") &&
+        !variable.name.startsWith("WORKENV_JOB_")
+      )
         environment[variable.name] = variable.value;
     }
-    return { cwd: job.workspaceDirectory, workspaceEnvironment: environment };
+    return {
+      cwd: job?.workspaceDirectory ?? environment.WORKENV_JOB_REPO!,
+      workspaceEnvironment: environment,
+    };
   });
   const projectionQuery = yield* Effect.serviceOption(
     ProjectionSnapshotQuery.ProjectionSnapshotQuery,
@@ -1408,9 +1428,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* upsertSessionBinding(
         { ...resumed, providerInstanceId: bindingInstanceId },
         input.binding.threadId,
-        workspace.workspaceEnvironment
-          ? { workspaceEnvironment: workspace.workspaceEnvironment }
-          : undefined,
+        { workspaceEnvironment: workspace.workspaceEnvironment ?? {} },
       );
       yield* analytics.record("provider.session.recovered", {
         provider: resumed.provider,
@@ -1586,7 +1604,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               (persistedBinding?.provider === resolvedProvider
                 ? persistedBinding.resumeCursor
                 : undefined));
-        const workspace = yield* workspaceLaunch(threadId, resolvedInstanceId, input.cwd);
+        const workspace = yield* workspaceLaunch(
+          threadId,
+          resolvedInstanceId,
+          input.cwd ??
+            (persistedBinding?.providerInstanceId === resolvedInstanceId
+              ? readPersistedCwd(persistedBinding.runtimePayload)
+              : undefined),
+        );
         const effectiveCwd =
           workspace.cwd ??
           input.cwd ??
@@ -1657,9 +1682,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           currentInstanceId: resolvedInstanceId,
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
-          ...(workspace.workspaceEnvironment
-            ? { workspaceEnvironment: workspace.workspaceEnvironment }
-            : {}),
+          workspaceEnvironment: workspace.workspaceEnvironment ?? {},
           modelSelection: input.modelSelection,
           ...(effectiveResumeCursor != null || input.contextHandoff
             ? { globalInstructionsInheritedContext: true }

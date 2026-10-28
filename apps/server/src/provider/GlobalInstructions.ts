@@ -13,7 +13,17 @@ export function buildGlobalInstructionContext(
 ) {
   const { enabled, text } = settings.globalInstructions;
   const active = enabled && text.trim().length > 0;
-  if (!active && !previouslySubmitted && !job) return undefined;
+  const retainedWorkspace =
+    !job && launchEnvironment?.WORKENV_JOB_ROOT && launchEnvironment.WORKENV_JOB_REPO === workspace
+      ? {
+          root: launchEnvironment.WORKENV_JOB_ROOT,
+          cwd: workspace,
+          launchEnvironment,
+          retention:
+            "Retained session outside automatic job expiry. Use this existing workspace and workenv placement for generated work.",
+        }
+      : undefined;
+  if (!active && !previouslySubmitted && !job && !retainedWorkspace) return undefined;
   const revision = NodeCrypto.createHash("sha256")
     .update(active ? text : "")
     .digest("hex");
@@ -28,6 +38,7 @@ export function buildGlobalInstructionContext(
   const runtimeFacts = JSON.stringify({
     host: NodeOS.hostname(),
     ...(workspace ? { workspace } : {}),
+    ...(retainedWorkspace ? { retainedWorkspace } : {}),
     ...(job
       ? {
           sessionWorkspace: {
