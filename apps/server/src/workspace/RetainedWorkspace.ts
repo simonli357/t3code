@@ -6,6 +6,7 @@ import { workspaceEnvironment, type SessionWorkspace } from "./SessionWorkspaces
 export function retainedWorkspaceEnvironment(
   threadId: string,
   cwd: string | undefined,
+  persistedWorktreePath?: string | null,
 ): Record<string, string> | undefined {
   if (!cwd || !NodePath.isAbsolute(cwd) || NodePath.basename(cwd).toLowerCase() !== "repo")
     return undefined;
@@ -40,7 +41,8 @@ export function retainedWorkspaceEnvironment(
     !same(request?.root, root) ||
     !same(request?.workspaceDirectory, cwd) ||
     request?.jobId !== NodePath.basename(root).toLowerCase() ||
-    request?.threadId !== threadId ||
+    (request?.threadId !== threadId &&
+      (!same(persistedWorktreePath, cwd) || request?.threadId !== request?.jobId)) ||
     job.identity?.[2] !== request?.jobId ||
     !same(request?.sourceDirectory, job.source)
   )

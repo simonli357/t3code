@@ -511,6 +511,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const workspaceService = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
+  const projectionQuery = yield* Effect.serviceOption(
+    ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+  );
   const workspaceLaunch = Effect.fn(function* (
     threadId: ThreadId,
     instanceId: ProviderInstanceId,
@@ -525,10 +528,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               toValidationError("ProviderService.workspace", cause.message, cause),
             ),
           );
+    // Forked threads may retain the same worktree as its original registration.
+    const persistedThread =
+      !job && cwd && Option.isSome(projectionQuery)
+        ? yield* projectionQuery.value
+            .getThreadShellById(threadId)
+            .pipe(
+              Effect.mapError((cause) =>
+                toValidationError(
+                  "ProviderService.workspace",
+                  "Could not verify retained workspace binding.",
+                  cause,
+                ),
+              ),
+            )
+        : Option.none();
     const environment = job
       ? SessionWorkspaces.workspaceEnvironment(job)
       : yield* Effect.try({
-          try: () => retainedWorkspaceEnvironment(threadId, cwd),
+          try: () =>
+            retainedWorkspaceEnvironment(
+              threadId,
+              cwd,
+              Option.getOrUndefined(persistedThread)?.worktreePath,
+            ),
           catch: (cause) =>
             toValidationError(
               "ProviderService.workspace",
@@ -565,9 +588,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       workspaceEnvironment: environment,
     };
   });
-  const projectionQuery = yield* Effect.serviceOption(
-    ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-  );
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const fileSystem = yield* FileSystem.FileSystem;

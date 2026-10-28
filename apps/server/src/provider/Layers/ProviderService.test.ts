@@ -428,6 +428,7 @@ function makeProviderServiceLayer(
     readonly workspace?: SessionWorkspaces.SessionWorkspace;
     readonly workspaceError?: boolean;
     readonly workspaceThreadOnly?: boolean;
+    readonly persistedThread?: OrchestrationThreadShell;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter(CODEX_DRIVER, input.supportsConversationRollback);
@@ -456,6 +457,19 @@ function makeProviderServiceLayer(
   const layer = it.layer(
     Layer.mergeAll(
       makeProviderServiceLive().pipe(
+        Layer.provide(
+          input.persistedThread
+            ? Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+                getThreadShellById: (id) =>
+                  Effect.succeed(
+                    id === input.persistedThread!.id
+                      ? Option.some(input.persistedThread!)
+                      : Option.none(),
+                  ),
+                getProjectShellById: () => Effect.succeed(Option.none()),
+              })
+            : Layer.empty,
+        ),
         Layer.provide(
           input.workspace
             ? Layer.mock(SessionWorkspaces.SessionWorkspaces)({
@@ -726,87 +740,113 @@ describe("composed fork recovery and destination launch", () => {
   }
 });
 
+const decodeRetainedThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
+
 describe("retained workspace launch", () => {
-  const harness = makeProviderServiceLayer();
-  harness.layer("released binding", (it) => {
-    it.effect("replaces obsolete launch paths on resume without changing native identity", () =>
-      Effect.gen(function* () {
-        const service = yield* ProviderService.ProviderService;
-        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-        const threadId = asThreadId("d819e837-a0c4-4004-bfab-bff7316c8c31");
-        const root = fixtureCwd(`sessions/${threadId}`);
-        const cwd = fixtureCwd(`sessions/${threadId}/repo`);
-        const from = NodePath.join(fixtureCwdRoot, "old-jobs", threadId);
-        const paths = Object.fromEntries(
-          ["tmp", "build", "cache", "downloads", "outputs", "evidence"].map((name) => [
-            name + "Directory",
-            fixtureCwd(`sessions/${threadId}/${name}`),
-          ]),
-        );
-        NodeFS.writeFileSync(
-          NodePath.join(root, ".workenv.json"),
-          encodeJson({
-            identity: ["t3", NodeOS.homedir(), threadId],
-            status: "released",
-            root,
-            repo: cwd,
-            source: fixtureCwdRoot,
-            relocated_to: root,
-            t3_relocation: { from, to: root },
-            t3_registration: {
-              jobId: threadId,
-              threadId,
-              root,
-              workspaceDirectory: cwd,
-              sourceDirectory: fixtureCwdRoot,
-              ...paths,
-            },
-          }),
-        );
-        const resumeCursor = { threadId: "native-conversation-preserved" };
-        yield* directory.upsert({
-          threadId,
-          provider: CODEX_DRIVER,
-          providerInstanceId: codexInstanceId,
-          runtimeMode: "full-access",
-          status: "stopped",
-          resumeCursor,
-          runtimePayload: {
-            cwd,
-            workspaceEnvironment: { T3_WORKSPACE_JOB_ROOT: from, TMPDIR: from + "/tmp" },
-          },
-        });
-        yield* service.startSession(threadId, {
-          threadId,
-          providerInstanceId: codexInstanceId,
-          runtimeMode: "full-access",
-        });
-        const started = harness.codex.startSession.mock.calls.at(-1)![0];
-        assert.equal(started.cwd, cwd);
-        assert.deepEqual(started.resumeCursor, resumeCursor);
-        assert.equal(started.workspaceEnvironment?.WORKENV_JOB_ROOT, root);
-        assert.equal(started.workspaceEnvironment?.TMPDIR, paths.tmpDirectory);
-        assert.isUndefined(started.workspaceEnvironment?.T3_WORKSPACE_JOB_ROOT);
-        const saved = Option.getOrThrow(yield* directory.getBinding(threadId));
-        assert.deepInclude(saved.runtimePayload, {
-          workspaceEnvironment: started.workspaceEnvironment,
-        });
-        yield* service.stopSession({ threadId });
-        yield* service.startSession(threadId, {
-          threadId,
-          providerInstanceId: codexInstanceId,
-          runtimeMode: "full-access",
-          cwd: fixtureCwdRoot,
-        });
-        const cleared = Option.getOrThrow(yield* directory.getBinding(threadId));
-        assert.deepInclude(cleared.runtimePayload, { workspaceEnvironment: {} });
-        assert.deepEqual(
-          harness.codex.startSession.mock.calls.at(-1)![0].resumeCursor,
-          resumeCursor,
-        );
-      }),
+  for (const fork of [false, true]) {
+    const ownerId = asThreadId(
+      fork ? "6a5c482c-5427-4e36-93c9-104f47ec7b8a" : "d819e837-a0c4-4004-bfab-bff7316c8c31",
     );
-  });
+    const activeId = fork ? asThreadId("6c9bc721-fcaa-4a52-ab1a-a274f13db278") : ownerId;
+    const harness = makeProviderServiceLayer({
+      persistedThread: decodeRetainedThreadShell({
+        id: activeId,
+        projectId: "retained-project",
+        title: "Retained fork",
+        modelSelection: createModelSelection(codexInstanceId, "gpt-5.4"),
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: fixtureCwd(`sessions/${ownerId}/repo`),
+        latestTurn: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+      }),
+    });
+    harness.layer(fork ? "shared retained fork" : "released binding", (it) => {
+      it.effect("replaces obsolete launch paths on resume without changing native identity", () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = activeId;
+          const root = fixtureCwd(`sessions/${ownerId}`);
+          const cwd = fixtureCwd(`sessions/${ownerId}/repo`);
+          const from = NodePath.join(fixtureCwdRoot, "old-jobs", ownerId);
+          const paths = Object.fromEntries(
+            ["tmp", "build", "cache", "downloads", "outputs", "evidence"].map((name) => [
+              name + "Directory",
+              fixtureCwd(`sessions/${ownerId}/${name}`),
+            ]),
+          );
+          NodeFS.writeFileSync(
+            NodePath.join(root, ".workenv.json"),
+            encodeJson({
+              identity: ["t3", NodeOS.homedir(), ownerId],
+              status: "released",
+              root,
+              repo: cwd,
+              source: fixtureCwdRoot,
+              relocated_to: root,
+              t3_relocation: { from, to: root },
+              t3_registration: {
+                jobId: ownerId,
+                threadId: ownerId,
+                root,
+                workspaceDirectory: cwd,
+                sourceDirectory: fixtureCwdRoot,
+                ...paths,
+              },
+            }),
+          );
+          const resumeCursor = { threadId: "native-conversation-preserved" };
+          yield* directory.upsert({
+            threadId,
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+            status: "stopped",
+            resumeCursor,
+            runtimePayload: {
+              cwd,
+              workspaceEnvironment: { T3_WORKSPACE_JOB_ROOT: from, TMPDIR: from + "/tmp" },
+            },
+          });
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+          });
+          const started = harness.codex.startSession.mock.calls.at(-1)![0];
+          assert.equal(started.cwd, cwd);
+          assert.deepEqual(started.resumeCursor, resumeCursor);
+          assert.equal(started.workspaceEnvironment?.WORKENV_JOB_ROOT, root);
+          assert.equal(started.workspaceEnvironment?.TMPDIR, paths.tmpDirectory);
+          assert.isUndefined(started.workspaceEnvironment?.T3_WORKSPACE_JOB_ROOT);
+          const saved = Option.getOrThrow(yield* directory.getBinding(threadId));
+          assert.deepInclude(saved.runtimePayload, {
+            workspaceEnvironment: started.workspaceEnvironment,
+          });
+          yield* service.stopSession({ threadId });
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+            cwd: fixtureCwdRoot,
+          });
+          const cleared = Option.getOrThrow(yield* directory.getBinding(threadId));
+          assert.deepInclude(cleared.runtimePayload, { workspaceEnvironment: {} });
+          assert.deepEqual(
+            harness.codex.startSession.mock.calls.at(-1)![0].resumeCursor,
+            resumeCursor,
+          );
+        }),
+      );
+    });
+  }
 });
 
 describe("durable workspace launch", () => {

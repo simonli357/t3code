@@ -51,6 +51,13 @@ describe("retained workspace launch", () => {
         }
       }
       expect(() => retainedWorkspaceEnvironment("unrelated", cwd)).toThrow("Reconcile");
+      expect(retainedWorkspaceEnvironment("fork", cwd, cwd)).toEqual(env);
+      expect(() => retainedWorkspaceEnvironment("fork", cwd, base)).toThrow("Reconcile");
+      job.t3_registration.threadId = "different-owner";
+      write();
+      expect(() => retainedWorkspaceEnvironment("fork", cwd, cwd)).toThrow("Reconcile");
+      job.t3_registration.threadId = threadId;
+      write();
       job.root = from;
       write();
       expect(() => retainedWorkspaceEnvironment(threadId, cwd)).toThrow("Reconcile");
