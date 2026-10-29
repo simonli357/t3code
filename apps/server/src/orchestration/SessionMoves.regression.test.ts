@@ -306,9 +306,9 @@ const makeFixture = (jobs = false) =>
       (typeof environments)[number],
     ];
     const bytes = Buffer.from(
-      '{"type":"session_meta","id":"' +
+      '{"type":"session_meta","payload":{"id":"' +
         nativeId +
-        '"}\n{"type":"compacted","context":"all intermediate context"}\n' +
+        '"}}\n{"type":"compacted","context":"all intermediate context"}\n' +
         "x".repeat(Files.MOVE_CHUNK_BYTES + 33),
     );
     yield* io(async () => {

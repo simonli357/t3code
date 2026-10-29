@@ -35,6 +35,7 @@ import { attachmentRelativePath } from "../attachmentStore.ts";
 import { resolveTranscriptHome, findSessionTranscripts } from "../project/AgentTranscripts.ts";
 import * as Files from "../project/SessionMoveFiles.ts";
 import * as CodexState from "../project/CodexMoveState.ts";
+import * as CodexHistory from "../project/CodexMoveHistory.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";
@@ -64,6 +65,7 @@ const Manifest = Schema.Struct({
   targetEnvironmentId: Schema.String,
   driver: Schema.Literals(["codex", "claudeAgent"]),
   nativeId: Schema.String,
+  nativeIds: Schema.optional(Schema.Array(Schema.String)),
   resumeCursor: Schema.Unknown,
   modelSelection: ModelSelection,
   title: Schema.String,
@@ -383,12 +385,14 @@ const make = Effect.gen(function* () {
         ? yield* io(() => CodexState.captureCodexMoveState(home.homePath, nativeId))
         : null;
     const family = nativeState?.nativeIds ?? [nativeId];
-    let entries = (yield* Effect.forEach(family, (id) =>
-      findSessionTranscripts(home, id).pipe(
-        Effect.provideService(Path.Path, path),
-        Effect.provideService(FileSystem.FileSystem, fs),
-      ),
-    )).flat();
+    let entries = nativeState?.rollouts
+      ? nativeState.rollouts.map((entry) => ({ path: Files.contained(home.homePath, entry.name) }))
+      : (yield* Effect.forEach(family, (id) =>
+          findSessionTranscripts(home, id).pipe(
+            Effect.provideService(Path.Path, path),
+            Effect.provideService(FileSystem.FileSystem, fs),
+          ),
+        )).flat();
     if (driver === "claudeAgent") {
       const currentDirectory = path.join(
         home.homePath,
@@ -434,6 +438,7 @@ const make = Effect.gen(function* () {
           return yield* new SessionMoveError({
             message: "Multiple native transcript copies need disambiguation before moving.",
           });
+        const prefixBytes = nativeState?.rollouts?.find((entry) => entry.name === name)?.bytes;
         files.push(
           yield* io(() =>
             Files.copyMoveFile({
@@ -442,6 +447,7 @@ const make = Effect.gen(function* () {
               staging,
               kind: "native",
               name,
+              ...(prefixBytes === undefined ? {} : { bytes: prefixBytes }),
             }),
           ),
         );
@@ -540,6 +546,7 @@ const make = Effect.gen(function* () {
       targetEnvironmentId: value.peer_environment_id,
       driver,
       nativeId,
+      ...(nativeState ? { nativeIds: nativeState.nativeIds } : {}),
       resumeCursor: binding.value.resumeCursor,
       modelSelection: selection,
       title: thread.title,
@@ -638,16 +645,34 @@ const make = Effect.gen(function* () {
         ? home.homePath
         : path.join(home.homePath, "projects", manifest.targetCwd.replace(/[^a-zA-Z0-9]/g, "-"));
     yield* fs.makeDirectory(nativeRoot, { recursive: true });
-    for (const file of manifest.files.filter((entry) => entry.kind === "native"))
+    if (nativeState) {
+      if (
+        !nativeState.nativeIds.includes(manifest.nativeId) ||
+        (manifest.nativeIds && encode(manifest.nativeIds) !== encode(nativeState.nativeIds))
+      )
+        return yield* new SessionMoveError({
+          message: "Codex move ownership does not match its native state.",
+        });
       yield* io(() =>
-        Files.installMoveFile(
+        CodexHistory.installCodexMoveHistory(
           staging,
-          file,
           nativeRoot,
-          file.name,
+          nativeState.nativeIds,
+          manifest.files,
           parked.length > 0 || imported.length > 0,
         ),
       );
+    } else
+      for (const file of manifest.files.filter((entry) => entry.kind === "native"))
+        yield* io(() =>
+          Files.installMoveFile(
+            staging,
+            file,
+            nativeRoot,
+            file.name,
+            parked.length > 0 || imported.length > 0,
+          ),
+        );
     if (manifest.driver === "claudeAgent") {
       const workerArgs = isExecutable
         ? ["__claude-history"]
@@ -831,15 +856,17 @@ const make = Effect.gen(function* () {
         if (!nativeFiles.length)
           return yield* new SessionMoveError({ message: "The native transcript is missing." });
         const bindings = yield* directory.listBindings();
-        const nativeIds = new Set([
-          manifest.nativeId,
-          ...nativeFiles.flatMap((file) => {
-            const id = /-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i.exec(
-              file.name,
-            )?.[1];
-            return id ? [id] : [];
-          }),
-        ]);
+        const nativeIds = new Set(
+          manifest.nativeIds ?? [
+            manifest.nativeId,
+            ...nativeFiles.flatMap((file) => {
+              const id = /-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i.exec(
+                file.name,
+              )?.[1];
+              return id ? [id] : [];
+            }),
+          ],
+        );
         if (
           bindings.some(
             (entry) =>

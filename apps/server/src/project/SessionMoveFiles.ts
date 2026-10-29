@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
+import * as NodeStreamPromises from "node:stream/promises";
 
 const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 export const MOVE_CHUNK_BYTES = 512 * 1024;
@@ -46,9 +47,13 @@ export function contained(root: string, name: string): string {
     throw new Error("Transfer path escapes its directory.");
   return resolved;
 }
-export async function digestFile(file: string): Promise<string> {
+export async function digestFile(file: string, bytes?: number): Promise<string> {
   const hash = NodeCrypto.createHash("sha256");
-  for await (const chunk of NodeFS.createReadStream(file)) hash.update(chunk);
+  for await (const chunk of NodeFS.createReadStream(
+    file,
+    bytes === undefined ? {} : { end: bytes - 1 },
+  ))
+    hash.update(chunk);
   return hash.digest("hex");
 }
 async function noLinks(file: string, root: string, allowMissing = false): Promise<void> {
@@ -72,21 +77,36 @@ export async function copyMoveFile(input: {
   staging: string;
   kind: MoveFile["kind"];
   name: string;
+  bytes?: number;
 }): Promise<MoveFile> {
   await noLinks(input.source, input.sourceRoot);
   const before = await NodeFSP.stat(input.source);
   if (!before.isFile()) throw new Error("A transfer entry is not a regular file.");
   const destination = contained(NodePath.join(input.staging, input.kind), input.name);
   await NodeFSP.mkdir(NodePath.dirname(destination), { recursive: true, mode: 0o700 });
-  await NodeFSP.copyFile(input.source, destination);
+  if (input.bytes !== undefined) {
+    if (!Number.isSafeInteger(input.bytes) || input.bytes < 1 || input.bytes > before.size)
+      throw new Error("Invalid session history prefix length.");
+    await NodeStreamPromises.pipeline(
+      NodeFS.createReadStream(input.source, { end: input.bytes - 1 }),
+      NodeFS.createWriteStream(destination, { mode: 0o600 }),
+    );
+  } else await NodeFSP.copyFile(input.source, destination);
   const after = await NodeFSP.stat(input.source);
-  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs)
+  const sha256 = await digestFile(destination);
+  if (
+    input.bytes !== undefined
+      ? after.size < input.bytes ||
+        (await NodeFSP.stat(destination)).size !== input.bytes ||
+        (await digestFile(input.source, input.bytes)) !== sha256
+      : before.size !== after.size || before.mtimeMs !== after.mtimeMs
+  )
     throw new Error("A session file changed during capture. Retry after its turn has stopped.");
   return {
     name: input.name,
     kind: input.kind,
-    bytes: before.size,
-    sha256: await digestFile(destination),
+    bytes: input.bytes ?? before.size,
+    sha256,
     executable: (before.mode & 0o111) !== 0,
   };
 }

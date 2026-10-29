@@ -275,9 +275,9 @@ const makeFixture = (jobs = false) =>
       (typeof environments)[number],
     ];
     const bytes = Buffer.from(
-      '{"type":"session_meta","id":"' +
+      '{"type":"session_meta","payload":{"id":"' +
         nativeId +
-        '"}\n{"type":"compacted","context":"all intermediate context"}\n' +
+        '"}}\n{"type":"compacted","context":"all intermediate context"}\n' +
         "x".repeat(Files.MOVE_CHUNK_BYTES + 33),
     );
     yield* io(async () => {
@@ -476,6 +476,66 @@ it.effect(
           .n,
       ).toBe(1);
     }).pipe(Effect.scoped),
+);
+
+it.effect("moves a fork while a compatible ancestor remains owned at the destination", () =>
+  Effect.gen(function* () {
+    const { alpha, beta, input } = yield* fixture;
+    const ancestor = "019b1111-2222-7333-8444-777777777777";
+    const baseThread = ThreadId.make("destination-base");
+    const baseName = transcriptName.replace(nativeId, ancestor);
+    const base =
+      encodeUnknown({
+        type: "session_meta",
+        payload: { id: ancestor, history_mode: "paginated" },
+      }) + "\n";
+    const fork =
+      encodeUnknown({
+        type: "session_meta",
+        payload: {
+          id: nativeId,
+          history_mode: "paginated",
+          forked_from_id: ancestor,
+          history_base: {
+            thread_id: ancestor,
+            end_ordinal_exclusive: 1,
+            end_byte_offset: Buffer.byteLength(base),
+          },
+        },
+      }) + "\n";
+    yield* io(async () => {
+      await NodeFSP.writeFile(NodePath.join(alpha.home, baseName), base);
+      await NodeFSP.writeFile(NodePath.join(alpha.home, transcriptName), fork);
+      await NodeFSP.mkdir(NodePath.dirname(NodePath.join(beta.home, baseName)), {
+        recursive: true,
+      });
+      await NodeFSP.writeFile(NodePath.join(beta.home, baseName), base + '{"type":"event_msg"}\n');
+    });
+    yield* beta.directory.upsert({
+      threadId: baseThread,
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: selection.instanceId,
+      status: "running",
+      runtimeMode: "full-access",
+      resumeCursor: { threadId: ancestor },
+      runtimePayload: { cwd: beta.cwd },
+    });
+    const before = yield* beta.directory.getBinding(baseThread);
+    yield* alpha.moves.request(input, threadId);
+    yield* alpha.moves.drain();
+    expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+      state: "complete",
+      error: null,
+    });
+    expect(yield* beta.directory.getBinding(baseThread)).toEqual(before);
+    expect(yield* io(() => NodeFSP.readFile(NodePath.join(beta.home, baseName), "utf8"))).toBe(
+      base + '{"type":"event_msg"}\n',
+    );
+    expect(yield* io(() => NodeFSP.readFile(NodePath.join(alpha.home, baseName), "utf8"))).toBe(
+      base,
+    );
+    expect((yield* alpha.moves.request(input, threadId)).state).toBe("complete");
+  }).pipe(Effect.scoped),
 );
 
 it.effect(

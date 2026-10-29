@@ -40,11 +40,20 @@ it("moves only the selected native family, dynamic tools and goal budgets, leavi
   const destination = await home();
   const state = new NodeSqlite.DatabaseSync(NodePath.join(source, "state_5.sqlite"));
   for (const id of [main, child, unrelated]) {
+    const rollout = NodePath.join(
+      source,
+      "sessions/2026/10/22/rollout-2026-10-22T12-00-00-" + id + ".jsonl",
+    );
+    await NodeFSP.mkdir(NodePath.dirname(rollout), { recursive: true });
+    await NodeFSP.writeFile(
+      rollout,
+      JSON.stringify({ type: "session_meta", payload: { id, history_mode: "paginated" } }) + "\n",
+    );
     state
       .prepare("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)")
       .run(
         id,
-        NodePath.join(source, "sessions/2026/10/22/rollout-" + id + ".jsonl"),
+        NodePath.join(source, "sessions/2026/10/22/rollout-2026-10-22T12-00-00-" + id + ".jsonl"),
         source,
         1,
         100,
@@ -56,6 +65,25 @@ it("moves only the selected native family, dynamic tools and goal budgets, leavi
   }
   state.prepare("INSERT INTO thread_spawn_edges VALUES (?,?,?)").run(main, child, "completed");
   state.close();
+  const ancestor = NodePath.join(
+    source,
+    "sessions/2026/10/22/rollout-2026-10-22T12-00-00-" + unrelated + ".jsonl",
+  );
+  await NodeFSP.writeFile(
+    NodePath.join(source, "sessions/2026/10/22/rollout-2026-10-22T12-00-00-" + main + ".jsonl"),
+    JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: main,
+        history_mode: "paginated",
+        history_base: {
+          thread_id: unrelated,
+          end_ordinal_exclusive: 1,
+          end_byte_offset: (await NodeFSP.stat(ancestor)).size,
+        },
+      },
+    }) + "\n",
+  );
   const goals = new NodeSqlite.DatabaseSync(NodePath.join(source, "goals_1.sqlite"));
   goals
     .prepare("INSERT INTO thread_goals VALUES (?,?,?,?)")
@@ -64,8 +92,11 @@ it("moves only the selected native family, dynamic tools and goal budgets, leavi
   const exported = await captureCodexMoveState(source, main);
   expect(exported.nativeIds).toEqual([main, child]);
   expect(JSON.stringify(exported)).not.toContain("never-export-me");
-  expect(JSON.stringify(exported)).not.toContain(unrelated);
-  expect(codexRolloutName(exported, main)).toBe("sessions/2026/10/22/rollout-" + main + ".jsonl");
+  expect(JSON.stringify(exported.databases)).not.toContain(unrelated);
+  expect(exported.rollouts?.map((entry) => entry.id)).toEqual([unrelated, main, child]);
+  expect(codexRolloutName(exported, main)).toBe(
+    "sessions/2026/10/22/rollout-2026-10-22T12-00-00-" + main + ".jsonl",
+  );
   const target = new NodeSqlite.DatabaseSync(NodePath.join(destination, "state_5.sqlite"));
   target
     .prepare("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)")

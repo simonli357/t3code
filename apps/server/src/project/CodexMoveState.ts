@@ -4,6 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { contained } from "./SessionMoveFiles.ts";
 import * as Schema from "effect/Schema";
+import { captureCodexMoveHistory, CodexMoveRollout } from "./CodexMoveHistory.ts";
 
 const Cell = Schema.Union([
   Schema.String,
@@ -20,6 +21,7 @@ const Table = Schema.Struct({
 type Table = typeof Table.Type;
 export const CodexMoveState = Schema.Struct({
   nativeIds: Schema.Array(Schema.String),
+  rollouts: Schema.optional(Schema.Array(CodexMoveRollout)),
   databases: Schema.Array(Schema.Struct({ name: Schema.String, tables: Schema.Array(Table) })),
 });
 export type CodexMoveState = typeof CodexMoveState.Type;
@@ -198,7 +200,11 @@ export async function captureCodexMoveState(
       db.close();
     }
   }
-  return { nativeIds: [...nativeIds], databases };
+  return {
+    nativeIds: [...nativeIds],
+    databases,
+    rollouts: await captureCodexMoveHistory(home, [...nativeIds]),
+  };
 }
 
 /** Native app-server creates/migrates its schema first. Merge just these thread rows. */
