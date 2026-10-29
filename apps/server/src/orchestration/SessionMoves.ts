@@ -1277,7 +1277,6 @@ const make = Effect.gen(function* () {
       Effect.repeat(Schedule.spaced("15 seconds")),
       Effect.forkScoped,
     );
-    yield* drain();
   });
   return SessionMoves.of({ request, status, receive, drain, start });
 });

@@ -362,6 +362,28 @@ const makeFixture = (jobs = false) =>
   });
 const fixture = makeFixture();
 
+it.effect("starts durable move recovery without blocking startup on its pending transfer", () =>
+  Effect.gen(function* () {
+    const { alpha, input, holdChunk } = yield* fixture;
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    holdChunk({ entered, release });
+    yield* alpha.sql`INSERT INTO custom_session_moves
+      (id, thread_id, target_thread_id, direction, peer_environment_id, input_json, created_at, updated_at)
+      VALUES (${input.requestId}, ${threadId}, ${threadId}, 'out', 'beta', ${encodeUnknown(input)}, ${timestamp}, ${timestamp})`;
+    const starting = yield* alpha.moves.start().pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    yield* Fiber.join(starting);
+    expect((yield* alpha.moves.status({ requestId: input.requestId })).state).toBe("copying");
+    yield* Deferred.succeed(release, undefined);
+    yield* alpha.moves.drain();
+    expect(yield* alpha.moves.status({ requestId: input.requestId })).toMatchObject({
+      state: "complete",
+      error: null,
+    });
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "round-trips a job with one logical identity and preserves each parked host workspace",
   () =>
