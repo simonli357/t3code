@@ -119,7 +119,7 @@ computer.
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
-| DeepSeek Harness | Install the [T3-pinned ACP build](https://github.com/simonli357/deepseek-harness/tree/60052b5d4fe3dce42b8c5ce3e6ef60885f906ca6), then add a DeepSeek API key in T3 Code. |
+| DeepSeek Harness | Install the [T3-pinned ACP build](https://github.com/simonli357/deepseek-harness/tree/2ab60e149340fad75f884c7250ec9e93acbb3afb), then add a DeepSeek API key in T3 Code. |
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
 **Binary path** in provider settings, especially when using a version manager.

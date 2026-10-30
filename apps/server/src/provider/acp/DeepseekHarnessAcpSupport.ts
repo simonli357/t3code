@@ -77,7 +77,7 @@ const TEXT_FILE_EXTENSIONS = new Set([
 const MAX_INLINE_TEXT_BYTES = 1024 * 1024;
 
 /** DSH fork commit containing the T3 ACP lifecycle used by this adapter. */
-export const DEEPSEEK_HARNESS_T3_COMMIT = "60052b5d4fe3dce42b8c5ce3e6ef60885f906ca6";
+export const DEEPSEEK_HARNESS_T3_COMMIT = "2ab60e149340fad75f884c7250ec9e93acbb3afb";
 export const DEEPSEEK_HARNESS_T3_SOURCE =
   `https://github.com/simonli357/deepseek-harness/tree/${DEEPSEEK_HARNESS_T3_COMMIT}`;
 
