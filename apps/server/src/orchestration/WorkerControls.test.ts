@@ -4449,6 +4449,35 @@ it.layer(testLayer)("session organization", (it) => {
         expect((yield* service.list(owner)).map((worker) => worker.threadId)).toEqual([source]);
       }),
   );
+  it.effect("ignores finished moves that stay locked but waits for one in flight", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, source } = yield* seed("organization-move-guard");
+      const move = (id: string, direction: string, state: string) =>
+        sql`INSERT INTO custom_session_moves
+          (id, thread_id, target_thread_id, direction, peer_environment_id, state, locked, input_json, created_at, updated_at)
+          VALUES (${id}, ${id}, ${id}, ${direction}, 'peer', ${state}, 1, '{}', ${timestamp}, ${timestamp})`;
+      yield* move("cancelled-copy", "in", "cancelled");
+      yield* move("moved-away", "out", "complete");
+      yield* move("in-flight", "out", "copying");
+      const input = {
+        clientRequestId: "adopt-guarded",
+        threadId: source,
+        ownerThreadId: owner,
+        expectedOwnerThreadId: null,
+        expectedRevision: 0,
+      };
+      expect((yield* service.changeOwnership(input).pipe(Effect.flip)).message).toBe(
+        "Wait for the native session move to finish.",
+      );
+      yield* sql`UPDATE custom_session_moves SET state = 'complete', locked = 0 WHERE id = 'in-flight'`;
+      // A refused request is final; retry under a new request ID.
+      expect(
+        (yield* service.changeOwnership({ ...input, clientRequestId: "adopt-after-move" })).revision,
+      ).toBe(1);
+    }),
+  );
   it.effect(
     "transfers and releases ownership atomically while preserving running and queued work and held reports",
     () =>

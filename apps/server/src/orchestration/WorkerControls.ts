@@ -2594,8 +2594,11 @@ const make = Effect.gen(function* () {
           code: "conflict",
           message: "Finish or cancel the pending master renewal before changing ownership.",
         });
+      // Completed moves and cancelled incoming copies stay locked on purpose;
+      // they are finished and must not block ownership changes.
       if (
-        (yield* sql`SELECT 1 FROM custom_session_moves WHERE locked = 1 AND state != 'complete' LIMIT 1`)
+        (yield* sql`SELECT 1 FROM custom_session_moves WHERE locked = 1
+          AND state != 'complete' AND NOT (direction = 'in' AND state = 'cancelled') LIMIT 1`)
           .length
       )
         return yield* new WorkerError({
