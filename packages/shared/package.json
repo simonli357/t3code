@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workerMessages": {
+      "types": "./src/workerMessages.ts",
+      "import": "./src/workerMessages.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

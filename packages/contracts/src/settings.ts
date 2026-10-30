@@ -1145,7 +1145,24 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const WorkerCommunicationWindowMinutes = Schema.Number.check(
+  Schema.isFinite(),
+  Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER / 60_000 }),
+);
+
+/** Why a provider instance cannot take a worker while `workerDisabledInstanceIds` lists it. */
+export const WORKER_ACCOUNT_DISABLED_REASON =
+  "Turned off for workers in Provider allocation settings";
+
 export const ServerSettings = Schema.Struct({
+  /** Environment-local provider instances excluded from new worker placement. */
+  workerDisabledInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Execution-computer scope. Live elapsed wall-clock window; zero disables. */
+  workerCommunicationWindowMinutes: WorkerCommunicationWindowMinutes.pipe(
+    Schema.withDecodingDefault(Effect.succeed(15)),
+  ),
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   providerModelPreferences: Schema.NullOr(ProviderModelPreferences).pipe(
@@ -1481,6 +1498,8 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  workerDisabledInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+  workerCommunicationWindowMinutes: Schema.optionalKey(WorkerCommunicationWindowMinutes),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),
