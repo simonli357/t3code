@@ -822,6 +822,53 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         ]);
       });
 
+      it("does not resurrect Pi's placeholder beside its canonical model", () => {
+        const placeholder = {
+          slug: "pi-default",
+          name: "Pi default",
+          isCustom: false,
+          isDefault: true,
+          capabilities: null,
+        } as const;
+        const flash = {
+          slug: "deepseek/deepseek-flash",
+          name: "DeepSeek V4.1 Flash",
+          isCustom: false,
+          capabilities: null,
+        } as const;
+        const pro = {
+          slug: "deepseek/deepseek-v4-pro",
+          name: "DeepSeek V4 Pro",
+          isCustom: false,
+          isDefault: true,
+          aliases: ["pi-default"],
+          capabilities: null,
+        } as const;
+        const canonical = {
+          instanceId: ProviderInstanceId.make("pi"),
+          driver: ProviderDriverKind.make("pi"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-30T00:00:00.000Z",
+          version: "1.4.0",
+          models: [flash, pro],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const startupPlaceholder = {
+          ...canonical,
+          status: "warning",
+          models: [placeholder],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(canonical, startupPlaceholder).models,
+          [flash, pro],
+        );
+      });
+
       it("drops stale OpenCode models missing from a successful refresh", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("opencode"),

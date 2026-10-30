@@ -151,9 +151,18 @@ const mergeProviderModels = (
   // current list, so a custom model missing from `nextModels` was removed by
   // the user and must not be resurrected from the previous snapshot.
   const retainablePreviousModels = previousModels.filter((model) => !model.isCustom);
+  const catalogAliasSlugs = new Set(
+    [...nextModels, ...retainablePreviousModels]
+      .filter((model) => !model.isCustom)
+      .flatMap((model) => model.aliases ?? []),
+  );
+  const withoutShadowedCatalogAliases = (
+    models: ReadonlyArray<ServerProvider["models"][number]>,
+  ) =>
+    models.filter((model) => model.isCustom || !catalogAliasSlugs.has(model.slug));
 
   if (shouldRetainMissingModels && nextModels.length === 0 && retainablePreviousModels.length > 0) {
-    return retainablePreviousModels;
+    return withoutShadowedCatalogAliases(retainablePreviousModels);
   }
 
   const previousBySlug = new Map(previousModels.map((model) => [model.slug, model] as const));
@@ -168,9 +177,10 @@ const mergeProviderModels = (
     };
   });
   const nextSlugs = new Set(nextModels.map((model) => model.slug));
-  return shouldRetainMissingModels
+  const merged = shouldRetainMissingModels
     ? [...mergedModels, ...retainablePreviousModels.filter((model) => !nextSlugs.has(model.slug))]
     : mergedModels;
+  return withoutShadowedCatalogAliases(merged);
 };
 
 /**
