@@ -9,7 +9,7 @@ import { buildAcpPrompt } from "./AcpPrompt.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 /** DSH fork commit containing the T3 ACP lifecycle used by this adapter. */
-export const DEEPSEEK_HARNESS_T3_COMMIT = "0c8b364efa1c3308b9b4be8da99e60a12427f921";
+export const DEEPSEEK_HARNESS_T3_COMMIT = "8e02db92bd0cb21e0792338dbfdc24b5e013fb9c";
 export const DEEPSEEK_HARNESS_T3_SOURCE = `https://github.com/simonli357/deepseek-harness/tree/${DEEPSEEK_HARNESS_T3_COMMIT}`;
 
 export interface DeepseekHarnessAcpRuntimeInput extends Omit<
