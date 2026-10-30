@@ -10,6 +10,7 @@ import {
   type SessionOwnershipResult,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
+  WorkerRenewalSettings,
 } from "@t3tools/contracts";
 import {
   WORKER_REVIEW_BLOCKED as REVIEW_BLOCKED,
@@ -67,7 +68,9 @@ import {
   retirementWarning,
   selectionKey,
 } from "./workerSchemas.ts";
+import { measureWorkingTime, workLine } from "./workingTime.ts";
 
+const decodeWorkerRenewal = Schema.decodeSync(WorkerRenewalSettings);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodePlan = Schema.decodeUnknownSync(Schema.fromJsonString(Plan));
 const decodePlanRecord = Schema.decodeUnknownSync(
@@ -1235,6 +1238,37 @@ const make = Effect.gen(function* () {
     Effect.tap(() => kick()),
   );
 
+  const renewal = settings.getSettings.pipe(
+    Effect.map((current) => current.workerRenewal),
+    Effect.orElseSucceed(() => decodeWorkerRenewal({})),
+  );
+  const renewalAdvice = (kind: "worker" | "master", hard: number | null, scale: number) =>
+    hard === null
+      ? kind === "worker"
+        ? "Consider renewing this worker; this warning does not stop work."
+        : "Consider a handoff at a convenient point; this warning does not stop work."
+      : `A hard limit of ${hard * scale} h is configured. Automatic renewal is not available here, so renew manually at a safe turn boundary.`;
+  // Warning lines only: a failed measurement must never hold back a report.
+  const usageLines = Effect.fn("WorkerService.usageLines")(function* (
+    workerId: string,
+    masterId: string,
+  ) {
+    const limits = yield* renewal;
+    const line = Effect.fn(function* (kind: "worker" | "master", id: string) {
+      const work = yield* measureWorkingTime(sql, id, limits);
+      if (!work) return "";
+      const hard = kind === "worker" ? limits.workerHardHours : limits.masterHardHours;
+      const soft = kind === "worker" ? limits.workerHours : limits.masterHours;
+      const who = kind === "worker" ? "Worker working time" : "Your working time as master";
+      return workLine(who, work, soft, renewalAdvice(kind, hard, work.scale));
+    });
+    const lines = yield* Effect.all([line("worker", workerId), line("master", masterId)]).pipe(
+      Effect.orElseSucceed(() => ["", ""]),
+    );
+    const present = lines.filter((value) => value !== "");
+    return present.length === 0 ? "" : `\n\n${present.join("\n")}`;
+  });
+
   const report = Effect.fn("WorkerService.report")(
     function* (workerId: ThreadId, input: typeof ReportInput.Type) {
       const worker = yield* workerOf(workerId);
@@ -1252,13 +1286,14 @@ const make = Effect.gen(function* () {
           ? "done"
           : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
       const body = `\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
+      const usage = yield* usageLines(workerId, worker.owner_id);
       const createdAt = yield* now;
       const runId = source.activeRunId ?? source.latestRunId;
       // Persisted without the queue lock so a report is never lost behind a long pass. Reading
       // the owner in the insert keeps it consistent with a handoff, which retargets queued
       // reports in one transaction.
       yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
-        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${reportHeader(source.title, createdAt) + body}, ${createdAt}, ${runId}
+        SELECT ${reportId}, thread_id, owner_id, ${input.outcome}, ${reportHeader(source.title, createdAt) + body + usage}, ${createdAt}, ${runId}
         FROM custom_workers WHERE thread_id = ${workerId} AND owner_id IS NOT NULL
         ON CONFLICT(id) DO NOTHING`;
       const job = yield* jobById(reportId);

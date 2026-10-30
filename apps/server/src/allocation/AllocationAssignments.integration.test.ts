@@ -9,12 +9,15 @@ import {
   type AllocationStart,
   type ProviderInstanceId as InstanceId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   failLatestRun,
@@ -27,6 +30,7 @@ import {
 import * as WorkerService from "../workers/WorkerService.ts";
 import * as Assignments from "./AllocationAssignments.ts";
 import { allocationIdentity } from "./inventory.ts";
+import * as AllocationStore from "./AllocationStore.ts";
 import * as Allocation from "./ProviderAllocation.ts";
 import * as UsageCapEnforcement from "./UsageCapEnforcement.ts";
 
@@ -214,15 +218,41 @@ it.layer(layerWorld(providers))("allocation over the real orchestrator", (it) =>
     Effect.gen(function* () {
       yield* TestClock.setTime(START);
       yield* seed();
+      const assignments = yield* Assignments.AllocationAssignments;
       const allocation = yield* Allocation.ProviderAllocation;
-      const before = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!;
-      assert.isAbove(before.history.length, 0);
-      assert.isAbove(before.reservations.length, 0);
       const sql = yield* SqlClient.SqlClient;
-      const rows = yield* sql<{
+      const first = yield* assignments.start(automatic("thread:restart"), master);
+      const before = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!;
+      const recordBefore = yield* recorded("thread:restart");
+
+      // A restart rebuilds the services over the same database and runtime.
+      const context = yield* Effect.context<
+        | SqlClient.SqlClient
+        | WorkerService.WorkerService
+        | ServerSettingsService
+        | ThreadManagementService.ThreadManagementService
+        | Orchestrator.OrchestratorV2
+      >();
+      const rebuilt = yield* Layer.build(
+        Assignments.layer.pipe(
+          Layer.provideMerge(Allocation.layer.pipe(Layer.provideMerge(AllocationStore.layer))),
+          Layer.fresh,
+          Layer.provide(Layer.succeedContext(context)),
+        ),
+      );
+      const restartedAssignments = Context.get(rebuilt, Assignments.AllocationAssignments);
+      const restartedAllocation = Context.get(rebuilt, Allocation.ProviderAllocation);
+      const after = (yield* restartedAllocation.execute({ _tag: "snapshot" })).snapshot!;
+      assert.deepEqual(after.history, before.history);
+      assert.deepEqual(after.reservations, before.reservations);
+      assert.deepEqual(yield* recorded("thread:restart"), recordBefore);
+
+      const again = yield* restartedAssignments.start(automatic("thread:restart"), master);
+      assert.equal(again.threadId, first.threadId);
+      const counts = yield* sql<{
         count: number;
-      }>`SELECT COUNT(*) AS count FROM provider_allocation_decisions`;
-      assert.equal(rows[0]!.count, before.history.length);
+      }>`SELECT COUNT(*) AS count FROM worker_recommendations WHERE thread_id = ${"thread:restart"}`;
+      assert.equal(counts[0]!.count, 1);
     }),
   );
 

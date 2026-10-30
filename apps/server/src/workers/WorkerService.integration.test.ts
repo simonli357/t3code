@@ -75,6 +75,32 @@ it.layer(layerWorld())("workers over the real orchestrator", (it) => {
     }),
   );
 
+  it.effect("adds working time and a renewal warning to a done report", () =>
+    Effect.gen(function* () {
+      yield* seed();
+      const workers = yield* WorkerService.WorkerService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const worker = ThreadId.make("thread:worker-hours");
+      yield* settings.updateSettings({ workerRenewal: { workerHours: 1 } });
+      yield* workers.spawn(master, spawnInput(worker, "Long task"));
+      yield* setLatestRun(worker, "running");
+      yield* TestClock.adjust(Duration.minutes(90));
+      yield* workers.report(worker, {
+        clientRequestId: "report-hours",
+        outcome: "done",
+        summary: "Done after a long while.",
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const text = (yield* sql<{
+        prompt: string;
+      }>`SELECT prompt FROM custom_worker_jobs WHERE id = ${`report:${worker}:report-hours`}`)[0]!
+        .prompt;
+      assert.match(text, /Worker working time: \d+\.\d h over 1 turn, 0 compactions\./);
+      assert.include(text, "Over the 1.5 h renewal threshold");
+      yield* settings.updateSettings({ workerRenewal: { workerHours: 3.5 } });
+    }),
+  );
+
   it.effect("keeps a queued assignment and its report across a service restart", () =>
     Effect.gen(function* () {
       yield* seed();
