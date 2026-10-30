@@ -315,7 +315,9 @@ const make = Effect.gen(function* () {
   const profile = Effect.fn(function* (driver: MoveDriver, selection: typeof ModelSelection.Type) {
     const choices = yield* registry.getProviders;
     const instance = choices.find((entry) => entry.instanceId === selection.instanceId);
-    const model = instance?.models.find((entry) => entry.slug === selection.model);
+    const model = instance?.models.find(
+      (entry) => entry.slug === selection.model || entry.aliases?.includes(selection.model),
+    );
     if (
       !instance ||
       instance.driver !== driver ||
