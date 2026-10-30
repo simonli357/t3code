@@ -234,7 +234,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       aliases: ["pi-default"],
       capabilities: emptyCapabilities,
     } as const;
-    const cachedPi = makeProvider(PI_DRIVER, { models: [flash, pro] });
+    const cachedPi = makeProvider(PI_DRIVER, { models: [placeholder, flash, pro] });
     const fallbackPi = makeProvider(PI_DRIVER, { models: [placeholder] });
 
     assert.deepStrictEqual(

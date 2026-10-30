@@ -31,7 +31,10 @@ const mergeProviderModels = (
   // while the cache was stale and must not come back.
   return [
     ...resolvedFallbackModels,
-    ...cachedModels.filter((model) => !model.isCustom && !fallbackSlugs.has(model.slug)),
+    ...cachedModels.filter(
+      (model) =>
+        !model.isCustom && !fallbackSlugs.has(model.slug) && !cachedAliases.has(model.slug),
+    ),
   ];
 };
 
