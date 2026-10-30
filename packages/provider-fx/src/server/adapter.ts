@@ -24,7 +24,10 @@ import {
   makeFxAcpRuntime,
   withFxSessionMode,
 } from "./acpSupport.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  mergeProviderInstanceEnvironment,
+  mergeWorkspaceEnvironment,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -167,11 +170,14 @@ export interface FxAdapterV2Options {
 function makeFxAcpAdapterFlavor(options: FxAdapterV2Options): AcpAdapterV2Flavor {
   const makeRuntime =
     options.makeRuntime ??
-    (({ runtimePolicy: _runtimePolicy, processEnvironment, ...input }: AcpAdapterV2RuntimeInput) =>
+    (({ runtimePolicy, processEnvironment, ...input }: AcpAdapterV2RuntimeInput) =>
       makeFxAcpRuntime({
         ...input,
         fxSettings: options.settings,
-        environment: { ...options.environment, ...processEnvironment },
+        environment: mergeWorkspaceEnvironment(
+          { ...options.environment, ...processEnvironment },
+          runtimePolicy,
+        ),
       }));
   return {
     driver: FX_DRIVER_KIND,

@@ -114,6 +114,7 @@ import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import * as SessionWorkspaces from "./workspace/SessionWorkspaces.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
@@ -478,6 +479,12 @@ const layerWorkspace = Layer.mergeAll(
   layerWorkspaceFileSystem,
 );
 
+const layerSessionWorkspaces = SessionWorkspaces.layer.pipe(
+  Layer.provide(GitVcsDriver.layer),
+  Layer.provide(layerServerSettings),
+  Layer.provide(ProcessRunner.layer),
+);
+
 const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(T3ProjectFileLoader.layer),
@@ -533,6 +540,7 @@ const layerUsageCapEnforcement = UsageCapEnforcement.layer.pipe(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(layerSessionWorkspaces),
   Layer.provide(UsageCapEnforcement.guardLayer),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),

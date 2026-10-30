@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -121,6 +122,93 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       assert.equal(yield* modeFor(grokInstanceId, "auto"), "auto");
       assert.equal(yield* modeFor(grokInstanceId, "full-access"), "full-access");
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
+    }),
+  );
+});
+
+const job: SessionWorkspaces.SessionWorkspace = {
+  version: 1,
+  jobId: "job-1",
+  threadId: "thread:runtime-policy",
+  reservationId: "reservation-1",
+  root: "/jobs/job-1",
+  sourceDirectory: "/project-root",
+  workspaceDirectory: "/jobs/job-1/repo",
+  tmpDirectory: "/jobs/job-1/tmp",
+  buildDirectory: "/jobs/job-1/build",
+  cacheDirectory: "/jobs/job-1/cache",
+  downloadsDirectory: "/jobs/job-1/downloads",
+  outputsDirectory: "/jobs/job-1/outputs",
+  evidenceDirectory: "/jobs/job-1/evidence",
+  revision: "HEAD",
+  branch: "session-1",
+  lifecycleCommand: null,
+};
+
+const layerWorkspaceTest = RuntimePolicy.layerFromProjectStore.pipe(
+  Layer.provide(
+    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+      getInstance: (instanceId) => Effect.succeed(providerInstanceFor(instanceId)),
+      listInstances: Effect.succeed([]),
+      listUnavailable: Effect.succeed([]),
+      streamChanges: Stream.empty,
+      subscribeChanges: Effect.never,
+    }),
+  ),
+  Layer.provide(
+    Layer.mock(ProjectStore.ProjectStoreV2)({
+      get: () =>
+        Effect.succeedSome({
+          projectId,
+          title: "Project",
+          workspaceRoot: "/project-root",
+          defaultModelSelection: null,
+          defaultThreadEnvMode: null,
+          autoPull: false,
+          faviconPath: null,
+          projectIcon: null,
+          scripts: [],
+          createdAt: "2026-06-21T00:00:00.000Z",
+          updatedAt: "2026-06-21T00:00:00.000Z",
+          deletedAt: null,
+        }),
+    }),
+  ),
+  Layer.provide(
+    Layer.succeed(
+      SessionWorkspaces.SessionWorkspaces,
+      SessionWorkspaces.SessionWorkspaces.of({
+        prepare: () => Effect.die("unused"),
+        inherit: () => Effect.die("unused"),
+        get: () => Effect.die("unused"),
+        list: () => Effect.die("unused"),
+        verify: () => Effect.succeed(job),
+        movePath: () => Effect.die("unused"),
+        registerMove: () => Effect.die("unused"),
+        reserveMove: () => Effect.die("unused"),
+        transferDirectory: () => Effect.die("unused"),
+        needsSetup: () => Effect.die("unused"),
+        completeSetup: () => Effect.die("unused"),
+      }),
+    ),
+  ),
+);
+
+it.layer(layerWorkspaceTest)("RuntimePolicyV2 workspace", (it) => {
+  it.effect("passes the registered job's build, cache and output paths to the provider", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const resolved = yield* policy.resolve({
+        thread: makeThread({ now, worktreePath: job.workspaceDirectory }),
+        modelSelection,
+      });
+      assert.equal(resolved.cwd, job.workspaceDirectory);
+      assert.equal(resolved.workspaceEnvironment?.T3_WORKSPACE_JOB_ID, "job-1");
+      assert.equal(resolved.workspaceEnvironment?.T3_WORKSPACE_BUILD_DIR, "/jobs/job-1/build");
+      assert.equal(resolved.workspaceEnvironment?.T3_WORKSPACE_CACHE_DIR, "/jobs/job-1/cache");
+      assert.equal(resolved.workspaceEnvironment?.T3_WORKSPACE_OUTPUTS_DIR, "/jobs/job-1/outputs");
+      assert.equal(resolved.workspaceEnvironment?.TMPDIR, "/jobs/job-1/tmp");
     }),
   );
 });

@@ -63,7 +63,10 @@ import {
   type ProviderDriver,
   type ProviderInstance,
 } from "@t3tools/provider-core/server/driver";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  mergeProviderInstanceEnvironment,
+  mergeWorkspaceEnvironment,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { discoverAntigravitySkills, resolveAntigravityUserHome } from "./AntigravitySkills.ts";
 
@@ -248,7 +251,13 @@ export const AntigravityDriver: ProviderDriver<
           installation: executable,
           profile,
           cwd: input.cwd,
-          baseEnv: processEnvironment,
+          baseEnv:
+            input.runtimePolicy === undefined
+              ? { ...processEnvironment, ...input.processEnvironment }
+              : mergeWorkspaceEnvironment(
+                  { ...processEnvironment, ...input.processEnvironment },
+                  input.runtimePolicy,
+                ),
           auth,
           runtimeTempDirectory,
         }),

@@ -1313,6 +1313,15 @@ export const ServerSettings = Schema.Struct({
   worktreeSubmodules: ForwardCompatibleNullable(WorktreeSubmodules).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  /** Host-local root for independent session jobs. Empty leaves the feature off. */
+  agentWorkRoot: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Optional absolute executable that registers a prepared job with its lifecycle owner. */
+  workspaceLifecycleCommand: Schema.NullOr(
+    Schema.Struct({
+      executable: TrimmedNonEmptyString,
+      args: Schema.Array(Schema.String),
+    }),
+  ).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
@@ -1657,6 +1666,15 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   worktreeSubmodules: Schema.optionalKey(Schema.NullOr(WorktreeSubmodules)),
+  agentWorkRoot: Schema.optionalKey(Schema.String),
+  workspaceLifecycleCommand: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        executable: TrimmedNonEmptyString,
+        args: Schema.Array(Schema.String),
+      }),
+    ),
+  ),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   threadTitleInstructions: Schema.optionalKey(TrimmedString),

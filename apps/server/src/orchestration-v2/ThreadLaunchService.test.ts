@@ -64,6 +64,7 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const projectId = ProjectId.make("project:launch-test");
@@ -129,6 +130,7 @@ interface HarnessOptions {
   readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  readonly sessionWorkspaces?: Layer.Layer<SessionWorkspaces.SessionWorkspaces>;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -222,6 +224,7 @@ function makeHarness(options: HarnessOptions = {}) {
         isScratchProject: () => Effect.succeed(false),
         folderForThread: () => Effect.succeedNone,
       }),
+    options.sessionWorkspaces ?? Layer.empty,
   );
   const layerLaunch = ThreadLaunch.layer.pipe(
     Layer.provide(
@@ -972,6 +975,61 @@ it.effect("launches a worktree request for Scratch at the root, in its own folde
     assert.equal(git.thread.worktreePath, "/other-repo-worktrees/feature");
     assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.cwd, "/other-repo");
     assert.deepEqual(harness.claimed, [launched.threadId]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("prepares a workenv job instead of a managed worktree", () => {
+  const job: SessionWorkspaces.SessionWorkspace = {
+    version: 1,
+    jobId: "job-1",
+    threadId: "thread:launch:workenv",
+    reservationId: "reservation-1",
+    root: "/jobs/job-1",
+    sourceDirectory: project.workspaceRoot,
+    workspaceDirectory: "/jobs/job-1/repo",
+    tmpDirectory: "/jobs/job-1/tmp",
+    buildDirectory: "/jobs/job-1/build",
+    cacheDirectory: "/jobs/job-1/cache",
+    downloadsDirectory: "/jobs/job-1/downloads",
+    outputsDirectory: "/jobs/job-1/outputs",
+    evidenceDirectory: "/jobs/job-1/evidence",
+    revision: "HEAD",
+    branch: "session-1",
+    lifecycleCommand: null,
+  };
+  const harness = makeHarness({
+    sessionWorkspaces: Layer.succeed(
+      SessionWorkspaces.SessionWorkspaces,
+      SessionWorkspaces.SessionWorkspaces.of({
+        prepare: () => Effect.succeed(job),
+        inherit: () => Effect.die("unused"),
+        get: () => Effect.die("unused"),
+        list: () => Effect.die("unused"),
+        verify: () => Effect.die("unused"),
+        movePath: () => Effect.die("unused"),
+        registerMove: () => Effect.die("unused"),
+        reserveMove: () => Effect.die("unused"),
+        transferDirectory: () => Effect.die("unused"),
+        needsSetup: () => Effect.die("unused"),
+        completeSetup: () => Effect.die("unused"),
+      }),
+    ),
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:workenv",
+        thread: "thread:launch:workenv",
+        message: "Build the feature",
+        workspace: worktreeStrategy,
+      }),
+    );
+    const prepared = yield* preparationSettled(launched.threadId);
+    assert.equal(prepared.runs[0]?.status, "starting");
+    assert.equal(prepared.thread.worktreePath, "/jobs/job-1/repo");
+    assert.equal(harness.createWorktree.mock.calls.length, 0);
+    assert.equal(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, "/jobs/job-1/repo");
   }).pipe(Effect.provide(harness.layer));
 });
 

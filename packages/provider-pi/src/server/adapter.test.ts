@@ -435,13 +435,14 @@ const openRuntime = Effect.fnUntraced(function* (
   providerSessionId = SESSION_ID,
   forkFake?: FakePi,
   continuationRequests?: PiAdapterV2Options["continuationRequests"],
+  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy = runtimePolicy,
 ) {
   const adapter = yield* makeAdapter(fake, "", forkFake, continuationRequests);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
     modelSelection: modelSelection(model),
-    runtimePolicy,
+    runtimePolicy: policy,
   });
   const emitted = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
   yield* runtime.events.pipe(
@@ -1570,6 +1571,31 @@ describe("PiAdapterV2", () => {
       assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
       assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-pi-token");
       assert.equal(spawn.env.T3_PI_RUNTIME_MODE, "full-access");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("passes the managed workspace build, cache and output paths to the process", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, undefined, {
+        ...runtimePolicy,
+        cwd: "/jobs/job-1/repo",
+        workspaceEnvironment: {
+          T3_WORKSPACE_JOB_ID: "job-1",
+          T3_WORKSPACE_JOB_ROOT: "/jobs/job-1",
+          T3_WORKSPACE_BUILD_DIR: "/jobs/job-1/build",
+          T3_WORKSPACE_CACHE_DIR: "/jobs/job-1/cache",
+          T3_WORKSPACE_OUTPUTS_DIR: "/jobs/job-1/outputs",
+          T3_WORKSPACE_DOWNLOADS_DIR: "/jobs/job-1/downloads",
+          T3_WORKSPACE_EVIDENCE_DIR: "/jobs/job-1/evidence",
+          TMPDIR: "/jobs/job-1/tmp",
+        },
+      });
+      const spawn = fake.lastSpawn();
+      assert.equal(spawn.env.T3_WORKSPACE_BUILD_DIR, "/jobs/job-1/build");
+      assert.equal(spawn.env.T3_WORKSPACE_CACHE_DIR, "/jobs/job-1/cache");
+      assert.equal(spawn.env.T3_WORKSPACE_OUTPUTS_DIR, "/jobs/job-1/outputs");
+      assert.equal(spawn.env.TMPDIR, "/jobs/job-1/tmp");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

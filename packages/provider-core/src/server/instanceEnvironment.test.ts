@@ -4,7 +4,11 @@ import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
+import { ProviderAdapterV2RuntimePolicy } from "./ProviderAdapter.ts";
+import {
+  mergeProviderInstanceEnvironment,
+  mergeWorkspaceEnvironment,
+} from "./instanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
   it.effect.each([
@@ -71,4 +75,34 @@ describe("mergeProviderInstanceEnvironment", () => {
       });
     }),
   );
+});
+
+describe("mergeWorkspaceEnvironment", () => {
+  it("keeps provider overrides while preserving workspace identity", () => {
+    const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      cwd: "/jobs/t3/repo",
+      workspaceEnvironment: {
+        T3_WORKSPACE_JOB_ID: "job-id",
+        T3_WORKSPACE_BUILD_DIR: "/jobs/t3/build",
+        TMPDIR: "/jobs/t3/tmp",
+        npm_config_cache: "/jobs/t3/cache/npm",
+      },
+    });
+
+    const environment = mergeWorkspaceEnvironment(
+      {
+        T3_WORKSPACE_JOB_ID: "ambient-job",
+        TMPDIR: "/configured/provider-tmp",
+        npm_config_cache: "/configured/provider-cache",
+      },
+      runtimePolicy,
+    );
+
+    expect(environment.T3_WORKSPACE_JOB_ID).toBe("job-id");
+    expect(environment.T3_WORKSPACE_BUILD_DIR).toBe("/jobs/t3/build");
+    expect(environment.TMPDIR).toBe("/configured/provider-tmp");
+    expect(environment.npm_config_cache).toBe("/configured/provider-cache");
+  });
 });

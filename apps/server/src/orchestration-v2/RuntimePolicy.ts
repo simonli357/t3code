@@ -3,6 +3,7 @@ import {
   OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -12,6 +13,8 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
+import { retainedWorkspaceEnvironment } from "../workspace/RetainedWorkspace.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectStore from "./ProjectStore.ts";
 
@@ -31,6 +34,18 @@ export class RuntimePolicyResolveError extends Schema.TaggedError<RuntimePolicyR
 export const RuntimePolicyV2Error = Schema.Union([RuntimePolicyResolveError]);
 export type RuntimePolicyV2Error = typeof RuntimePolicyV2Error.Type;
 
+export class RuntimePolicyWorkspaceError extends Schema.TaggedError<RuntimePolicyWorkspaceError>()(
+  "RuntimePolicyWorkspaceError",
+  {
+    threadId: ThreadId,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to resolve the managed workspace for thread ${this.threadId}.`;
+  }
+}
+
 export const RuntimePolicyV2Override = Schema.Struct({
   cwd: Schema.optional(Schema.String),
   approvalPolicy: Schema.optional(Schema.Unknown),
@@ -43,7 +58,10 @@ export interface RuntimePolicyV2Shape {
   readonly resolve: (input: {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
-  }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
+  }) => Effect.Effect<
+    ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+    RuntimePolicyV2Error | RuntimePolicyWorkspaceError
+  >;
 }
 
 export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePolicyV2Shape>()(
@@ -80,6 +98,7 @@ export const layerFromProjectStore: Layer.Layer<
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
@@ -112,10 +131,43 @@ export const layerFromProjectStore: Layer.Layer<
               }),
             ),
           ));
+        const workspace = Option.isSome(workspaces)
+          ? yield* workspaces.value.verify(input.thread.id).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new RuntimePolicyWorkspaceError({
+                    threadId: input.thread.id,
+                    cause,
+                  }),
+              ),
+            )
+          : null;
+        if (workspace && cwd !== workspace.workspaceDirectory) {
+          return yield* new RuntimePolicyWorkspaceError({
+            threadId: input.thread.id,
+            cause: "Requested cwd differs from the durable session workspace.",
+          });
+        }
+        const workspaceEnvironment = workspace
+          ? SessionWorkspaces.workspaceEnvironment(workspace)
+          : yield* Effect.try({
+              try: () =>
+                retainedWorkspaceEnvironment(
+                  input.thread.id,
+                  cwd,
+                  input.thread.worktreePath,
+                ),
+              catch: (cause) =>
+                new RuntimePolicyWorkspaceError({
+                  threadId: input.thread.id,
+                  cause,
+                }),
+            });
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
           cwd,
+          ...(workspaceEnvironment === undefined ? {} : { workspaceEnvironment }),
         });
       }),
     });

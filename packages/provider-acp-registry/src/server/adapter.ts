@@ -43,7 +43,10 @@ import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.
 import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  mergeProviderInstanceEnvironment,
+  mergeWorkspaceEnvironment,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
@@ -153,16 +156,23 @@ function makeAcpRegistryRuntime(
               }),
           ),
         );
+      const baseEnvironment =
+        processEnvironment === undefined
+          ? (resolved.spawn.env ?? options.environment)
+          : { ...(resolved.spawn.env ?? options.environment), ...processEnvironment };
+      const spawn =
+        input.runtimePolicy.workspaceEnvironment === undefined
+          ? processEnvironment === undefined
+            ? resolved.spawn
+            : { ...resolved.spawn, env: baseEnvironment }
+          : {
+              ...resolved.spawn,
+              env: mergeWorkspaceEnvironment(baseEnvironment, input.runtimePolicy),
+            };
       const context = yield* Layer.build(
         AcpSessionRuntime.layer({
           ...runtimeInput,
-          spawn:
-            processEnvironment === undefined
-              ? resolved.spawn
-              : {
-                  ...resolved.spawn,
-                  env: { ...resolved.spawn.env, ...processEnvironment },
-                },
+          spawn,
           ...(options.settings.authMethodId ? { authMethodId: options.settings.authMethodId } : {}),
           customModels: readCustomModelEntries(options.settings.customModels).map(
             (entry) => entry.slug,

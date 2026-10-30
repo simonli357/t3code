@@ -46,6 +46,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
@@ -215,6 +216,7 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+  const sessionWorkspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
@@ -229,6 +231,27 @@ const make = Effect.gen(function* () {
         ...(threadId === undefined ? {} : { threadId }),
         cause,
       });
+
+  const prepareManagedWorkspace = (
+    input: PreparationInput,
+    threadId: ThreadId,
+    workspace: {
+      readonly sourceDirectory: string;
+      readonly ref?: string | undefined;
+      readonly branch?: string | null | undefined;
+    },
+  ) =>
+    Option.isNone(sessionWorkspaces)
+      ? Effect.succeed(null)
+      : sessionWorkspaces.value
+          .prepare({
+            threadId,
+            projectId: input.projectId,
+            sourceDirectory: workspace.sourceDirectory,
+            ...(workspace.ref === undefined ? {} : { ref: workspace.ref }),
+            ...(workspace.branch == null ? {} : { branch: workspace.branch }),
+          })
+          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
 
   const readReceipt = (input: ThreadLaunchInput, commandId: CommandId) =>
     receipts
@@ -431,32 +454,56 @@ const make = Effect.gen(function* () {
           branch = flattenTemporaryWorktreeBranchName(branch);
         }
         yield* setupTracker.stageStatus(threadId, "checkout", "running");
-        const worktree = yield* git
-          .createWorktree(
-            {
-              cwd: project.workspaceRoot,
-              refName: startRef,
-              newRefName: branch!,
-              baseRefName,
-              path: null,
-            },
-            {
-              progress: {
-                onWorktreeClaimed: (path) =>
-                  Effect.sync(() => {
-                    createdWorktreePath = path;
-                  }),
-                onCheckoutProgress: (progress) =>
-                  setupTracker.stage(threadId, "checkout", { percent: progress.percent }),
+        const managed = yield* prepareManagedWorkspace(input, threadId, {
+          sourceDirectory: project.workspaceRoot,
+          ref: startRef,
+          branch,
+        });
+        if (managed !== null) {
+          worktreePath = managed.workspaceDirectory;
+          branch = managed.branch;
+        } else {
+          const worktree = yield* git
+            .createWorktree(
+              {
+                cwd: project.workspaceRoot,
+                refName: startRef,
+                newRefName: branch!,
+                baseRefName,
+                path: null,
               },
-            },
-          )
-          .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
-        worktreePath = worktree.worktree.path;
-        branch = worktree.worktree.refName;
-        createdWorktreePath = worktreePath;
+              {
+                progress: {
+                  onWorktreeClaimed: (path) =>
+                    Effect.sync(() => {
+                      createdWorktreePath = path;
+                    }),
+                  onCheckoutProgress: (progress) =>
+                    setupTracker.stage(threadId, "checkout", { percent: progress.percent }),
+                },
+              },
+            )
+            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
+          worktreePath = worktree.worktree.path;
+          branch = worktree.worktree.refName;
+          createdWorktreePath = worktreePath;
+        }
         yield* setupTracker.update(threadId, (snapshot) => ({ ...snapshot, worktreePath, branch }));
         yield* setupTracker.stageStatus(threadId, "checkout", "done");
+      }
+
+      if (input.workspaceStrategy.type !== "worktree") {
+        const managed = yield* prepareManagedWorkspace(input, threadId, {
+          sourceDirectory:
+            input.workspaceStrategy.type === "existing_worktree"
+              ? input.workspaceStrategy.worktreePath
+              : project.workspaceRoot,
+          branch,
+        });
+        if (managed !== null) {
+          worktreePath = managed.workspaceDirectory;
+          branch = managed.branch;
+        }
       }
 
       // Do not rewrite reused worktrees; that could undo the original branch rename.
