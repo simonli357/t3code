@@ -762,6 +762,46 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+/** Official DeepSeek Harness over its ACP profile. Credentials stay in the instance environment. */
+export const DeepseekHarnessSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("dsh").pipe(
+      Schema.annotateKey({
+        title: "Harness executable",
+        description: "Pinned DeepSeek Harness executable or launcher.",
+        providerSettingsForm: { placeholder: "dsh", clearWhenEmpty: "omit" },
+      }),
+    ),
+    profile: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("acp")),
+      Schema.annotateKey({
+        title: "DSH profile",
+        description: "Profile containing the DeepSeek Harness ACP bridge.",
+        providerSettingsForm: { placeholder: "acp", clearWhenEmpty: "omit" },
+      }),
+    ),
+    homePath: makeBinaryPathSetting("").pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Harness home",
+        description:
+          "Private directory for this instance's native sessions and attachments. Defaults to T3-managed state.",
+        providerSettingsForm: { placeholder: "Managed by T3", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(CustomModelSetting).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  { order: ["binaryPath", "profile", "homePath"] },
+);
+export type DeepseekHarnessSettings = typeof DeepseekHarnessSettings.Type;
+
 /**
  * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
  * in the browser. The API key and Agent Platform methods take credentials from
@@ -1359,6 +1399,9 @@ export const ServerSettings = Schema.Struct({
     claudeAgent: ClaudeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    deepseekHarness: DeepseekHarnessSettings.pipe(
+      Schema.withDecodingDefault(Effect.succeed({})),
+    ),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -1521,6 +1564,14 @@ const GrokSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
+const DeepseekHarnessSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  profile: Schema.optionalKey(TrimmedString),
+  homePath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+});
+
 const AntigravitySettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   authMethod: Schema.optionalKey(AntigravityAuthMethod),
@@ -1679,6 +1730,7 @@ export const ServerSettingsPatch = Schema.Struct({
       claudeAgent: Schema.optionalKey(ClaudeSettingsPatch),
       cursor: Schema.optionalKey(CursorSettingsPatch),
       grok: Schema.optionalKey(GrokSettingsPatch),
+      deepseekHarness: Schema.optionalKey(DeepseekHarnessSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
     }),

@@ -1148,6 +1148,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
 
         case "thread.message-sent": {
+          if (event.payload.discard === true) {
+            const deleteByMessageId =
+              projectionThreadMessageRepository.deleteByMessageId;
+            if (deleteByMessageId !== undefined) {
+              yield* deleteByMessageId({ messageId: event.payload.messageId });
+            }
+            return;
+          }
           if (event.payload.streaming) {
             const attachments =
               event.payload.attachments !== undefined

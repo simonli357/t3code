@@ -357,6 +357,27 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  it("recognizes a failed attempt retraction before streaming replacement text", () => {
+    const notification = {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "attempt-1",
+        content: { type: "text", text: "" },
+        _meta: { dshRetractAttemptId: "attempt-1" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification;
+
+    expect(parseSessionUpdateEvent(notification).events).toEqual([
+      {
+        _tag: "ContentDelta",
+        text: "",
+        retracted: true,
+        rawPayload: notification,
+      },
+    ]);
+  });
+
   it("preserves native command inputs and empty command lists", () => {
     const availableCommands = [
       { name: "plan", description: "Plan a task", input: { hint: "task" } },

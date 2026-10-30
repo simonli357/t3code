@@ -13,7 +13,7 @@ const MAX_MOVE_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_MOVE_FILES = 20_000;
 export interface MoveFile {
   readonly name: string;
-  readonly kind: "native" | "attachment" | "workspace" | "history";
+  readonly kind: "native" | "attachment" | "provider-asset" | "workspace" | "history";
   readonly bytes: number;
   readonly sha256: string;
   readonly executable: boolean;

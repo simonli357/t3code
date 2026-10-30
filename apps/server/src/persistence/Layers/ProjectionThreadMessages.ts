@@ -248,6 +248,15 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
       `,
   });
 
+  const deleteProjectionThreadMessageRow = SqlSchema.void({
+    Request: GetProjectionThreadMessageInput,
+    execute: ({ messageId }) =>
+      sql`
+        DELETE FROM projection_thread_messages
+        WHERE message_id = ${messageId}
+      `,
+  });
+
   const upsert: ProjectionThreadMessageRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadMessageRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadMessageRepository.upsert:query")),
@@ -266,6 +275,15 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
         toPersistenceSqlError("ProjectionThreadMessageRepository.getByMessageId:query"),
       ),
       Effect.map(Option.map(toProjectionThreadMessage)),
+    );
+
+  const deleteByMessageId: NonNullable<
+    ProjectionThreadMessageRepositoryShape["deleteByMessageId"]
+  > = (input) =>
+    deleteProjectionThreadMessageRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadMessageRepository.deleteByMessageId:query"),
+      ),
     );
 
   const hasAssistantMessageForTurn: ProjectionThreadMessageRepositoryShape["hasAssistantMessageForTurn"] =
@@ -308,6 +326,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
     upsert,
     appendStreaming,
     getByMessageId,
+    deleteByMessageId,
     hasAssistantMessageForTurn,
     listByThreadId,
     getLatestUserMessageAt,

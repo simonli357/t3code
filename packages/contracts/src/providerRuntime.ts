@@ -455,6 +455,8 @@ const ContentDeltaPayload = Schema.Struct({
   delta: Schema.String,
   contentIndex: Schema.optional(Schema.Int),
   summaryIndex: Schema.optional(Schema.Int),
+  /** Discard this turn's still-streaming assistant and reasoning rows. */
+  retracted: Schema.optional(Schema.Boolean),
 });
 export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 

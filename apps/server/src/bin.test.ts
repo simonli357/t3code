@@ -59,6 +59,8 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { environmentAuthenticatedAuthLayer } from "./auth/http.ts";
+import { ProviderService } from "./provider/Services/ProviderService.ts";
+import { ProviderSessionDirectory } from "./provider/Services/ProviderSessionDirectory.ts";
 
 import packageJson from "../package.json" with { type: "json" };
 
@@ -392,6 +394,8 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
             }),
           ),
           Layer.provide(Layer.mock(WorkerControls.WorkerControls)({})),
+          Layer.provide(Layer.mock(ProviderService)({})),
+          Layer.provide(Layer.mock(ProviderSessionDirectory)({})),
         ),
       ),
       Layer.provide(environmentAuthenticatedAuthLayer),
@@ -408,6 +412,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
         ),
       ),
       Layer.provideMerge(makeProjectPersistenceLayer(config)),
+      Layer.provideMerge(ServerSecretStore.layer),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, {
           host: "127.0.0.1",

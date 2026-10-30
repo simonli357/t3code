@@ -117,11 +117,18 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
       readonly text: string;
+      readonly retracted?: boolean;
       readonly rawPayload: unknown;
     }
   | {
       readonly _tag: "ThoughtDelta";
       readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "UsageUpdated";
+      readonly usedTokens: number;
+      readonly maxTokens: number;
       readonly rawPayload: unknown;
     };
 
@@ -740,6 +747,15 @@ export function sessionModelStateFromInitialize(
   return isSessionModelState(modelState) ? modelState : undefined;
 }
 
+/** Session options a provider advertises in `initialize._meta.configOptions`. */
+export function sessionConfigOptionsFromInitialize(
+  initializeResult: EffectAcpSchema.InitializeResponse,
+): ReadonlyArray<EffectAcpSchema.SessionConfigOption> | undefined {
+  const meta = initializeResult._meta;
+  const options = isRecord(meta) ? meta.configOptions : undefined;
+  return Array.isArray(options) ? (options as ReadonlyArray<EffectAcpSchema.SessionConfigOption>) : undefined;
+}
+
 export function syntheticLoadSessionResponseFromInitialize(
   initializeResult: EffectAcpSchema.InitializeResponse,
 ): EffectAcpSchema.LoadSessionResponse {
@@ -860,6 +876,20 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
       break;
     }
     case "agent_message_chunk": {
+      const meta = isRecord(upd._meta) ? upd._meta : undefined;
+      if (
+        upd.content.type === "text" &&
+        upd.content.text.length === 0 &&
+        typeof meta?.dshRetractAttemptId === "string"
+      ) {
+        events.push({
+          _tag: "ContentDelta",
+          text: "",
+          retracted: true,
+          rawPayload: params,
+        });
+        break;
+      }
       if (upd.content.type === "text" && upd.content.text.length > 0) {
         events.push({
           _tag: "ContentDelta",
@@ -874,6 +904,22 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         events.push({
           _tag: "ThoughtDelta",
           text: upd.content.text,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "usage_update": {
+      if (
+        Number.isSafeInteger(upd.used) &&
+        upd.used >= 0 &&
+        Number.isSafeInteger(upd.size) &&
+        upd.size > 0
+      ) {
+        events.push({
+          _tag: "UsageUpdated",
+          usedTokens: upd.used,
+          maxTokens: upd.size,
           rawPayload: params,
         });
       }

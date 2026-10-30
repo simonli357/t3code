@@ -148,6 +148,36 @@ it.layer(NodeServices.layer)("AgentTranscripts", (it) => {
       }),
     );
 
+    it.effect("returns only the matching DeepSeek Harness session directories", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dsh-home-" });
+        const projectA = path.join(home, "sessions", "--repo-a--");
+        const projectB = path.join(home, "sessions", "--repo-b--");
+        const current = path.join(projectA, SESSION);
+        yield* write(path.join(current, "session.v4.jsonl"), "1234");
+        yield* write(path.join(projectA, OTHER, "session.v4.jsonl"), "ignored");
+        yield* write(path.join(projectB, SESSION, "session.v4.jsonl"), "12");
+
+        const found = yield* findSessionTranscripts(
+          { driver: "deepseekHarness", homePath: home },
+          SESSION,
+        );
+
+        expect(found.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual([
+          { path: current, bytes: 4 },
+          { path: path.join(projectB, SESSION), bytes: 2 },
+        ]);
+        expect(
+          yield* findSessionTranscripts(
+            { driver: "deepseekHarness", homePath: home },
+            "../--repo-a--",
+          ),
+        ).toEqual([]);
+      }),
+    );
+
     it.effect.skipIf(!symlinksSupported)("never returns or follows symlinks", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;

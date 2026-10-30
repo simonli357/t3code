@@ -1575,6 +1575,56 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("discards a failed streamed attempt before finalizing retry text", async () => {
+    const harness = await createHarness({
+      serverSettings: { responseStreamingMode: "token" },
+    });
+    const now = "2026-01-01T00:00:00.000Z";
+    const base = {
+      provider: ProviderDriverKind.make("deepseekHarness"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-retry"),
+    } as const;
+
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-retry-partial"),
+      payload: { streamKind: "assistant_text", delta: "partial" },
+    });
+    await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some((message) => message.text === "partial" && message.streaming),
+    );
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-retry-discard"),
+      payload: { streamKind: "assistant_text", delta: "", retracted: true },
+    });
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-retry-recovered"),
+      payload: { streamKind: "assistant_text", delta: "recovered" },
+    });
+    harness.emit({
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("evt-retry-complete"),
+      payload: { itemType: "assistant_message", status: "completed" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some((message) => message.text === "recovered" && !message.streaming),
+    );
+    expect(
+      thread.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.text),
+    ).toEqual(["recovered"]);
+  });
+
   it("streams reasoning deltas into a finalized reasoning message", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

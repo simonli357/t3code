@@ -121,9 +121,13 @@ export const forkThread = Effect.fn("forkThread")(
         });
       }
       const native = sourceBinding.value;
-      if (native.provider !== "codex" && native.provider !== "claudeAgent") {
+      if (
+        native.provider !== "codex" &&
+        native.provider !== "claudeAgent" &&
+        native.provider !== "deepseekHarness"
+      ) {
         return yield* new AgentSessionForkError({
-          message: "Conversation forks are supported for Codex and Claude.",
+          message: "Conversation forks are not supported by this provider.",
         });
       }
       history = {

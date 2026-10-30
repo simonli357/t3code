@@ -32,7 +32,11 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerConfig } from "../config.ts";
 import { attachmentRelativePath } from "../attachmentStore.ts";
-import { resolveTranscriptHome, findSessionTranscripts } from "../project/AgentTranscripts.ts";
+import {
+  findSessionTranscripts,
+  resolveDeepseekHarnessTranscriptHome,
+  resolveTranscriptHome,
+} from "../project/AgentTranscripts.ts";
 import * as Files from "../project/SessionMoveFiles.ts";
 import * as CodexState from "../project/CodexMoveState.ts";
 import * as CodexHistory from "../project/CodexMoveHistory.ts";
@@ -54,16 +58,24 @@ import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 
 const MoveFile = Schema.Struct({
   name: Schema.String,
-  kind: Schema.Literals(["native", "attachment", "workspace", "history"]),
+  kind: Schema.Literals(["native", "attachment", "provider-asset", "workspace", "history"]),
   bytes: Schema.Number,
   sha256: Schema.String,
   executable: Schema.Boolean,
 });
+const MOVE_DRIVER = Schema.Literals(["codex", "claudeAgent", "deepseekHarness"]);
+type MoveDriver = "codex" | "claudeAgent" | "deepseekHarness";
+const moveDriver = (driver: ProviderDriverKind): MoveDriver | undefined => {
+  if (driver === "codex") return "codex";
+  if (driver === "claudeAgent") return "claudeAgent";
+  if (driver === "deepseekHarness") return "deepseekHarness";
+  return undefined;
+};
 const Manifest = Schema.Struct({
   input: SessionMoveInput,
   sourceEnvironmentId: Schema.String,
   targetEnvironmentId: Schema.String,
-  driver: Schema.Literals(["codex", "claudeAgent"]),
+  driver: MOVE_DRIVER,
   nativeId: Schema.String,
   nativeIds: Schema.optional(Schema.Array(Schema.String)),
   resumeCursor: Schema.Unknown,
@@ -96,7 +108,7 @@ const PeerInput = Schema.Struct({
   ]),
   requestId: CommandId,
   input: Schema.optional(SessionMoveInput),
-  driver: Schema.optional(Schema.String),
+  driver: Schema.optional(MOVE_DRIVER),
   modelSelection: Schema.optional(ModelSelection),
   head: Schema.optional(Schema.String),
   manifest: Schema.optional(Manifest),
@@ -130,13 +142,39 @@ const decodeEvents = Schema.decodeUnknownEffect(
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encode = (value: unknown) => JSON.stringify(value);
 const decodeCodexState = CodexState.decodeCodexMoveState;
-const cursorId = (driver: string, value: unknown) => {
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const cursorId = (driver: MoveDriver, value: unknown) => {
   if (!value || typeof value !== "object") return null;
-  const cursor = value as { resume?: unknown; threadId?: unknown };
-  const id = driver === "codex" ? cursor.threadId : cursor.resume;
-  return typeof id === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+  const cursor = value as { resume?: unknown; sessionId?: unknown; threadId?: unknown };
+  const id =
+    driver === "codex"
+      ? cursor.threadId
+      : driver === "deepseekHarness"
+        ? cursor.sessionId
+        : cursor.resume;
+  return typeof id === "string" && SESSION_ID_PATTERN.test(id)
     ? id
     : null;
+};
+const deepseekProjectKey = (cwd: string) => {
+  let readable = "";
+  let separatorRun = false;
+  for (let index = 0; index < cwd.length; index += 1) {
+    const code = cwd.charCodeAt(index);
+    const character = String.fromCharCode(code);
+    if (character === "/" || character === "\\" || character === ":") {
+      if (!separatorRun) readable += "-";
+      separatorRun = true;
+    } else if (character !== "~" && /^[A-Za-z0-9._-]$/.test(character)) {
+      readable += character;
+      separatorRun = false;
+    } else {
+      readable += `~${code.toString(16).toUpperCase().padStart(4, "0")}`;
+      separatorRun = false;
+    }
+  }
+  return `--${(readable.replace(/^-+/, "") || "root").slice(0, 251)}--`;
 };
 const failure = (cause: unknown) =>
   isMoveError(cause)
@@ -244,11 +282,11 @@ const make = Effect.gen(function* () {
     yield* sql`UPDATE custom_session_moves SET state = ${state}, error = ${error}, updated_at = ${yield* now} WHERE id = ${id}`;
   });
   const configuration = Effect.fn(
-    function* (instanceId: ProviderInstanceId, driver: string) {
+    function* (instanceId: ProviderInstanceId, driver: MoveDriver) {
       const current = yield* settings.getSettings;
       const instance: ProviderInstanceConfig | undefined =
         current.providerInstances[instanceId] ??
-        (instanceId === driver && (driver === "codex" || driver === "claudeAgent")
+        (instanceId === driver
           ? { driver: ProviderDriverKind.make(driver), config: current.providers[driver] }
           : undefined);
       if (!instance || instance.driver !== driver)
@@ -256,7 +294,15 @@ const make = Effect.gen(function* () {
           message:
             "The destination account must use the same provider. Configure a matching account before moving.",
         });
-      const home = yield* resolveTranscriptHome(instance, hostEnvironment);
+      const home =
+        driver === "deepseekHarness"
+          ? yield* resolveDeepseekHarnessTranscriptHome(
+              instance,
+              instanceId,
+              hostEnvironment,
+              config.stateDir,
+            )
+          : yield* resolveTranscriptHome(instance, hostEnvironment);
       if (!home)
         return yield* new SessionMoveError({
           message: "The provider session directory could not be resolved.",
@@ -264,8 +310,9 @@ const make = Effect.gen(function* () {
       return home;
     },
     Effect.provideService(Path.Path, path),
+    Effect.provideService(Crypto.Crypto, crypto),
   );
-  const profile = Effect.fn(function* (driver: string, selection: typeof ModelSelection.Type) {
+  const profile = Effect.fn(function* (driver: MoveDriver, selection: typeof ModelSelection.Type) {
     const choices = yield* registry.getProviders;
     const instance = choices.find((entry) => entry.instanceId === selection.instanceId);
     const model = instance?.models.find((entry) => entry.slug === selection.model);
@@ -297,7 +344,7 @@ const make = Effect.gen(function* () {
   const targetProbe = Effect.fn(function* (
     from: string,
     input: SessionMoveInput,
-    driver: string,
+    driver: MoveDriver,
     selection: typeof ModelSelection.Type,
     head: string,
   ) {
@@ -337,14 +384,16 @@ const make = Effect.gen(function* () {
       return yield* new SessionMoveError({ message: "The source session disappeared." });
     const thread = detail.value;
     const binding = yield* directory.getBinding(input.threadId);
+    const driver = Option.isSome(binding)
+      ? moveDriver(binding.value.provider)
+      : undefined;
     if (
       Option.isNone(binding) ||
-      (binding.value.provider !== "codex" && binding.value.provider !== "claudeAgent")
+      driver === undefined
     )
       return yield* new SessionMoveError({
-        message: "Native moves currently support Codex to Codex and Claude to Claude.",
+        message: "This provider does not support native session moves.",
       });
-    const driver = binding.value.provider === "codex" ? "codex" : "claudeAgent";
     const nativeId = cursorId(driver, binding.value.resumeCursor);
     if (!nativeId)
       return yield* new SessionMoveError({
@@ -384,7 +433,29 @@ const make = Effect.gen(function* () {
       driver === "codex"
         ? yield* io(() => CodexState.captureCodexMoveState(home.homePath, nativeId))
         : null;
-    const family = nativeState?.nativeIds ?? [nativeId];
+    const cursor = recordObject(binding.value.resumeCursor);
+    const ancestry =
+      driver === "deepseekHarness" && Array.isArray(cursor.ancestry)
+        ? cursor.ancestry.filter(
+            (entry): entry is string =>
+              typeof entry === "string" && SESSION_ID_PATTERN.test(entry),
+          )
+        : [];
+    const family =
+      nativeState?.nativeIds ??
+      (driver === "deepseekHarness" ? [...new Set([nativeId, ...ancestry])] : [nativeId]);
+    if (driver === "deepseekHarness") {
+      for (const id of family) {
+        const found = yield* findSessionTranscripts(home, id).pipe(
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(FileSystem.FileSystem, fs),
+        );
+        if (found.length === 0)
+          return yield* new SessionMoveError({
+            message: `The DeepSeek Harness fork ancestry is incomplete (${id}).`,
+          });
+      }
+    }
     let entries = nativeState?.rollouts
       ? nativeState.rollouts.map((entry) => ({ path: Files.contained(home.homePath, entry.name) }))
       : (yield* Effect.forEach(family, (id) =>
@@ -431,6 +502,16 @@ const make = Effect.gen(function* () {
         const name =
           driver === "codex"
             ? path.relative(home.homePath, source).replaceAll("\\", "/")
+            : driver === "deepseekHarness"
+              ? (() => {
+                  const relative = path.relative(home.homePath, source).split(path.sep);
+                  const sessionId = relative[2];
+                  const artifacts = relative.slice(3).join("/");
+                  if (!sessionId || !artifacts) {
+                    throw new Error("The DeepSeek Harness session artifact has no owner.");
+                  }
+                  return `sessions/${deepseekProjectKey(probe.cwd)}/${sessionId}/${artifacts}`;
+                })()
             : path
                 .relative(path.dirname(info.type === "Directory" ? entry.path : source), source)
                 .replaceAll("\\", "/");
@@ -448,6 +529,30 @@ const make = Effect.gen(function* () {
               kind: "native",
               name,
               ...(prefixBytes === undefined ? {} : { bytes: prefixBytes }),
+            }),
+          ),
+        );
+      }
+    }
+    if (driver === "deepseekHarness") {
+      const providerAttachments = path.join(home.homePath, "attachments", "v1");
+      const hasProviderAttachments = yield* fs.stat(providerAttachments).pipe(
+        Effect.map((info) => info.type === "Directory"),
+        Effect.orElseSucceed(() => false),
+      );
+      const attachmentFiles = hasProviderAttachments
+        ? yield* io(() => Files.listMoveFiles(providerAttachments))
+        : [];
+      for (const source of attachmentFiles) {
+        const relative = path.relative(providerAttachments, source).replaceAll("\\", "/");
+        files.push(
+          yield* io(() =>
+            Files.copyMoveFile({
+              source,
+              sourceRoot: home.homePath,
+              staging,
+              kind: "provider-asset",
+              name: `attachments/v1/${relative}`,
             }),
           ),
         );
@@ -546,7 +651,11 @@ const make = Effect.gen(function* () {
       targetEnvironmentId: value.peer_environment_id,
       driver,
       nativeId,
-      ...(nativeState ? { nativeIds: nativeState.nativeIds } : {}),
+      ...(nativeState
+        ? { nativeIds: nativeState.nativeIds }
+        : driver === "deepseekHarness"
+          ? { nativeIds: family }
+          : {}),
       resumeCursor: binding.value.resumeCursor,
       modelSelection: selection,
       title: thread.title,
@@ -643,6 +752,8 @@ const make = Effect.gen(function* () {
     const nativeRoot =
       manifest.driver === "codex"
         ? home.homePath
+        : manifest.driver === "deepseekHarness"
+          ? home.homePath
         : path.join(home.homePath, "projects", manifest.targetCwd.replace(/[^a-zA-Z0-9]/g, "-"));
     yield* fs.makeDirectory(nativeRoot, { recursive: true });
     if (nativeState) {
@@ -711,6 +822,8 @@ const make = Effect.gen(function* () {
     // Install attachments after historical deletions have been projected.
     for (const file of manifest.files.filter((entry) => entry.kind === "attachment"))
       yield* io(() => Files.installMoveFile(staging, file, config.attachmentsDir));
+    for (const file of manifest.files.filter((entry) => entry.kind === "provider-asset"))
+      yield* io(() => Files.installMoveFile(staging, file, home.homePath, file.name));
     const resumeCursor = {
       ...recordObject(manifest.resumeCursor),
       ...(manifest.driver === "codex"
@@ -718,7 +831,9 @@ const make = Effect.gen(function* () {
             requireNativeResume: true,
             ...(rolloutName ? { rolloutPath: Files.contained(nativeRoot, rolloutName) } : {}),
           }
-        : { threadId: manifest.input.threadId }),
+        : manifest.driver === "claudeAgent"
+          ? { threadId: manifest.input.threadId }
+          : {}),
     };
     yield* directory.upsert({
       threadId: manifest.input.threadId,
@@ -846,6 +961,17 @@ const make = Effect.gen(function* () {
               ? /^(sessions\/[0-9]{4}\/[0-9]{2}\/[0-9]{2}|archived_sessions)\/rollout-[^/]+-[0-9a-f-]{36}\.jsonl$/i.test(
                   file.name,
                 )
+              : manifest.driver === "deepseekHarness"
+                ? (() => {
+                    const parts = file.name.split("/");
+                    return (
+                      parts.length >= 4 &&
+                      parts[0] === "sessions" &&
+                      parts[1]!.length > 0 &&
+                      SESSION_ID_PATTERN.test(parts[2] ?? "") &&
+                      parts.slice(3).join("/").length > 0
+                    );
+                  })()
               : file.name === manifest.nativeId + ".jsonl" ||
                 file.name.startsWith(manifest.nativeId + "/");
           if (!valid)
@@ -855,11 +981,24 @@ const make = Effect.gen(function* () {
         }
         if (!nativeFiles.length)
           return yield* new SessionMoveError({ message: "The native transcript is missing." });
+        for (const file of manifest.files.filter((entry) => entry.kind === "provider-asset")) {
+          if (
+            manifest.driver !== "deepseekHarness" ||
+            !file.name.startsWith("attachments/v1/")
+          )
+            return yield* new SessionMoveError({
+              message: "A transfer entry is not a DeepSeek Harness provider asset.",
+            });
+        }
         const bindings = yield* directory.listBindings();
         const nativeIds = new Set(
           manifest.nativeIds ?? [
             manifest.nativeId,
             ...nativeFiles.flatMap((file) => {
+              if (manifest.driver === "deepseekHarness") {
+                const id = file.name.split("/")[2];
+                return id ? [id] : [];
+              }
               const id = /-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$/i.exec(
                 file.name,
               )?.[1];
@@ -1189,13 +1328,19 @@ const make = Effect.gen(function* () {
         message: "Finish or cancel the queued master handoff before moving this session.",
       });
     const binding = yield* directory.getBinding(input.threadId);
+    const driver = Option.isSome(binding)
+      ? moveDriver(binding.value.provider)
+      : undefined;
     if (
       Option.isNone(binding) ||
-      !cursorId(binding.value.provider, binding.value.resumeCursor) ||
-      !["codex", "claudeAgent"].includes(binding.value.provider)
+      driver === undefined
     )
       return yield* new SessionMoveError({
-        message: "This session needs saved Codex or Claude native state before it can move.",
+        message: "This session needs supported native state before it can move.",
+      });
+    if (!cursorId(driver, binding.value.resumeCursor))
+      return yield* new SessionMoveError({
+        message: "This session needs supported native state before it can move.",
       });
     const project = yield* snapshots.getProjectShellById(value.projectId);
     if (Option.isNone(project))
@@ -1209,7 +1354,7 @@ const make = Effect.gen(function* () {
       op: "probe",
       requestId: input.requestId,
       input,
-      driver: binding.value.provider,
+      driver,
       modelSelection: {
         ...value.modelSelection,
         instanceId: input.providerInstanceId ?? value.modelSelection.instanceId,

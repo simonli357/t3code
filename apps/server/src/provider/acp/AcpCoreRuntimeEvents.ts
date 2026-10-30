@@ -212,6 +212,7 @@ export function makeAcpContentDeltaEvent(input: {
   readonly itemId?: string;
   readonly streamKind?: "assistant_text" | "reasoning_text";
   readonly text: string;
+  readonly retracted?: boolean;
   readonly rawPayload: unknown;
 }): ProviderRuntimeEvent {
   return {
@@ -224,6 +225,7 @@ export function makeAcpContentDeltaEvent(input: {
     payload: {
       streamKind: input.streamKind ?? "assistant_text",
       delta: input.text,
+      ...(input.retracted === true ? { retracted: true } : {}),
     },
     raw: {
       source: "acp.jsonrpc",

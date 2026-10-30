@@ -1528,6 +1528,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   turnId: Schema.optional(TurnId),
+  discard: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -1547,6 +1548,7 @@ const ThreadMessageReasoningCompleteCommand = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   turnId: Schema.optional(TurnId),
+  discard: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -1935,6 +1937,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   // Events persisted before the field existed carry no key at all.
   turnId: Schema.NullOr(TurnId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   streaming: Schema.Boolean,
+  discard: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

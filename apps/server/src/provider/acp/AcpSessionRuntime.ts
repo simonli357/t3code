@@ -86,6 +86,8 @@ export interface AcpSessionRuntimeOptions {
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly resumeMethod?: "load" | "resume";
+  /** Extension metadata attached only to a resumed/loaded session request. */
+  readonly resumeMeta?: EffectAcpSchema.ResumeSessionRequest["_meta"];
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
@@ -777,6 +779,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.resumeMeta !== undefined ? { _meta: options.resumeMeta } : {}),
           ...(options.additionalDirectories && options.additionalDirectories.length > 0
             ? { additionalDirectories: options.additionalDirectories }
             : {}),
@@ -805,6 +808,7 @@ export const make = (
           sessionId: options.resumeSessionId,
           cwd: options.cwd,
           mcpServers: options.mcpServers ?? [],
+          ...(options.resumeMeta !== undefined ? { _meta: options.resumeMeta } : {}),
         } satisfies EffectAcpSchema.LoadSessionRequest;
         const sessionLoadTimeout = Duration.fromInputUnsafe(
           options.sessionLoadTimeout ?? defaultSessionLoadTimeout,
@@ -1260,6 +1264,13 @@ const handleSessionUpdate = ({
         continue;
       }
       if (event._tag === "ContentDelta") {
+        if (event.retracted === true) {
+          yield* Ref.update(assistantSegmentRef, (current) => ({
+            nextSegmentIndex: current.nextSegmentIndex,
+          }));
+          yield* Queue.offer(queue, event);
+          continue;
+        }
         if (event.text.trim().length === 0) {
           const assistantSegmentState = yield* Ref.get(assistantSegmentRef);
           if (!assistantSegmentState.activeItemId) {

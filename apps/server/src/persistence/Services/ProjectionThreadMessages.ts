@@ -91,6 +91,11 @@ export interface ProjectionThreadMessageRepositoryShape {
     input: GetProjectionThreadMessageInput,
   ) => Effect.Effect<Option.Option<ProjectionThreadMessage>, ProjectionRepositoryError>;
 
+  /** Delete one projected message, used to withdraw an abandoned stream attempt. */
+  readonly deleteByMessageId?: (
+    input: GetProjectionThreadMessageInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
   /**
    * Check for an assistant message in a turn without hydrating message text.
    */

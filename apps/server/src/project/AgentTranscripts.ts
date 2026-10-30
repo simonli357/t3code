@@ -1,6 +1,13 @@
 import * as NodeOS from "node:os";
 
-import { ClaudeSettings, CodexSettings, type ProviderInstanceConfig } from "@t3tools/contracts";
+import {
+  ClaudeSettings,
+  CodexSettings,
+  DeepseekHarnessSettings,
+  type ProviderInstanceId,
+  type ProviderInstanceConfig,
+} from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -8,18 +15,51 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { resolveDeepseekHarnessHome } from "../provider/Drivers/DeepseekHarnessHome.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+const decodeDeepseekHarnessSettings = Schema.decodeUnknownOption(DeepseekHarnessSettings);
 // Claude session ids and Codex thread ids are UUIDs. Anything else is refused
 // before it reaches a path, so a cursor can never name a sibling entry.
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface TranscriptHome {
-  readonly driver: "claudeAgent" | "codex";
+  readonly driver: "claudeAgent" | "codex" | "deepseekHarness";
   readonly homePath: string;
 }
+
+/**
+ * Resolve the private DSH home used by the T3 provider instance. Session moves
+ * pass the server state directory so they can locate the same durable home the
+ * spawned harness sees, including when no explicit home path is configured.
+ */
+export const resolveDeepseekHarnessTranscriptHome = Effect.fn(
+  "resolveDeepseekHarnessTranscriptHome",
+)(function* (
+  instance: ProviderInstanceConfig,
+  instanceId: ProviderInstanceId,
+  hostEnvironment: NodeJS.ProcessEnv,
+  stateDir: string,
+): Effect.fn.Return<TranscriptHome | null, never, Crypto.Crypto | Path.Path> {
+  if (instance.driver !== "deepseekHarness") return null;
+  const config = decodeDeepseekHarnessSettings(instance.config ?? {});
+  if (Option.isNone(config)) return null;
+  const instanceHome =
+    instance.environment?.findLast((variable) => variable.name === "DSH_HOME")?.value ??
+    hostEnvironment.DSH_HOME;
+  const homePath = yield* resolveDeepseekHarnessHome({
+    instanceId,
+    stateDir,
+    settings: config.value,
+    environment: {
+      ...hostEnvironment,
+      ...(instanceHome ? { DSH_HOME: instanceHome } : {}),
+    },
+  });
+  return { driver: "deepseekHarness", homePath };
+});
 
 /**
  * The directory holding an instance's native transcripts (`projects/` for
@@ -122,6 +162,19 @@ export const findSessionTranscripts = Effect.fn("findSessionTranscripts")(functi
       if ((yield* entryType(transcript)) === "File") {
         found.push({ path: transcript, bytes: yield* sizeOf(transcript) });
       }
+      const sessionDir = path.join(projectDir, sessionId);
+      if ((yield* entryType(sessionDir)) === "Directory") {
+        found.push({ path: sessionDir, bytes: yield* sizeOf(sessionDir) });
+      }
+    }
+    return found;
+  }
+
+  if (home.driver === "deepseekHarness") {
+    const sessionsDir = path.join(home.homePath, "sessions");
+    for (const project of yield* list(sessionsDir)) {
+      const projectDir = path.join(sessionsDir, project);
+      if ((yield* entryType(projectDir)) !== "Directory") continue;
       const sessionDir = path.join(projectDir, sessionId);
       if ((yield* entryType(sessionDir)) === "Directory") {
         found.push({ path: sessionDir, bytes: yield* sizeOf(sessionDir) });

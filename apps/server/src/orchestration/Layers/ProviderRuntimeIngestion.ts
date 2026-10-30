@@ -1842,6 +1842,52 @@ const make = Effect.gen(function* () {
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
 
+      if (
+        event.type === "content.delta" &&
+        event.payload.retracted === true &&
+        eventTurnId !== undefined
+      ) {
+        const messageIds = yield* getAssistantMessageIdsForTurn(
+          thread.id,
+          eventTurnId,
+        );
+        yield* Effect.forEach(
+          messageIds,
+          (messageId) =>
+            Effect.gen(function* () {
+              const message = yield* getThreadMessageById(thread.id, messageId);
+              if (message?.isStreaming === true) {
+                yield* orchestrationEngine.dispatch({
+                  type:
+                    message.role === "reasoning"
+                      ? "thread.message.reasoning.complete"
+                      : "thread.message.assistant.complete",
+                  commandId: yield* providerCommandId(event, "content-discard"),
+                  threadId: thread.id,
+                  messageId,
+                  turnId: eventTurnId,
+                  discard: true,
+                  createdAt: now,
+                });
+              }
+              yield* clearAssistantMessageState(messageId);
+            }),
+          { discard: true },
+        );
+        yield* clearAssistantMessageIdsForTurn(thread.id, eventTurnId);
+        yield* clearAssistantSegmentStateForTurn(
+          thread.id,
+          eventTurnId,
+          "assistant",
+        );
+        yield* clearAssistantSegmentStateForTurn(
+          thread.id,
+          eventTurnId,
+          "reasoning",
+        );
+        return;
+      }
+
       // A turn.started that conflicts with the active turn is legitimate when
       // the server itself has a turn start pending for this thread AND the
       // provider session already tracks the event's turn as its active turn:
@@ -2758,6 +2804,8 @@ const make = Effect.gen(function* () {
         previous.event.providerInstanceId === event.providerInstanceId &&
         previous.event.turnId === event.turnId &&
         previous.event.itemId === event.itemId &&
+        previous.event.payload.retracted !== true &&
+        event.payload.retracted !== true &&
         previous.event.payload.streamKind === event.payload.streamKind &&
         previous.event.payload.contentIndex === event.payload.contentIndex &&
         previous.event.payload.summaryIndex === event.payload.summaryIndex &&

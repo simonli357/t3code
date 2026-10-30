@@ -53,6 +53,24 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider === "deepseekHarness") {
+    return (
+      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path
+          d="M3 2h6.2a10 10 0 0 1 0 20H3V2Zm4 4v12h2.2a6 6 0 0 0 0-12H7Z"
+          fill="#4D6BFE"
+        />
+        <Path
+          d="m17 7 4 5-4 5"
+          stroke={mono}
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </Svg>
+    );
+  }
+
   if (props.provider === "cursor") {
     return (
       <Svg width={size} height={size} viewBox="0 0 466.73 532.09" fill="none">
