@@ -12,6 +12,7 @@ import { Tool, Toolkit } from "effect/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as Assignments from "../../../allocation/AllocationAssignments.ts";
 import * as WorkerSchemas from "../../../workers/workerSchemas.ts";
 import * as WorkerService from "../../../workers/WorkerService.ts";
 
@@ -30,9 +31,10 @@ const common = { failure, failureMode: "return" as const, dependencies };
 const spawn = Tool.make("t3_worker_spawn", {
   ...common,
   description:
-    "Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master's), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the same account, preserving its history, modes, branch and worktree. Pass a stable destination threadId across retries. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Retirement does not block new launches: the first successful action of a retired master returns one informational warning, remembered across restarts. Spawning starts the worker communication window (default 15 wall-clock minutes, an execution-computer setting; zero disables). During it only an explicit t3_worker_report outcome done for the entire assignment may pass; blockers cannot. Review the latest output and evidence when reports arrive.",
-  parameters: WorkerSchemas.SpawnInput,
-  success: WorkerSchemas.WorkerResult,
+    'Create a persistent worker owned by THIS master. Omit sourceThreadId for a fresh session with no inherited conversation; projectId selects its project (defaults to the master\'s), and permission/interaction modes come from the master. Supply sourceThreadId to fork an idle session on the same account, preserving its history, modes, branch and worktree. Pass a stable destination threadId across retries. The worker keeps its selected account/model/options on follow-ups. Acceptance means queued, not task completed. Retirement does not block new launches: the first successful action of a retired master returns one informational warning, remembered across restarts. Spawning starts the worker communication window (default 15 wall-clock minutes, an execution-computer setting; zero disables). During it only an explicit t3_worker_report outcome done for the entire assignment may pass; blockers cannot. Review the latest output and evidence when reports arrive. Every spawn needs your assessment ({ difficulty: 0-10, difficultyReason, stakes: 0-10, stakesReason }); the server records its model, account and computer recommendations next to what you chose, and a choice that differs needs overrides.model/account/computer with the reason, such as "user specified it".',
+  parameters: Assignments.ManagedSpawnInput,
+  success: Assignments.ManagedSpawnResult,
+  dependencies: [...common.dependencies, Assignments.AllocationAssignments],
 }).annotate(Tool.Title, "Spawn a worker");
 const list = Tool.make("t3_worker_list", {
   ...common,

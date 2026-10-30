@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 
+import * as Assignments from "../../../allocation/AllocationAssignments.ts";
 import * as WorkerService from "../../../workers/WorkerService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -15,8 +16,8 @@ const caller = (tool: string) =>
 export const layer = McpToolAccess.toLayer(WorkersToolkit, {
   t3_worker_spawn: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
-      const workers = yield* WorkerService.WorkerService;
-      return yield* workers.spawn(yield* caller("t3_worker_spawn"), input);
+      const assignments = yield* Assignments.AllocationAssignments;
+      return yield* assignments.spawn(yield* caller("t3_worker_spawn"), input);
     }),
   ),
   t3_worker_list: McpToolAccess.readsAsCaller(() =>

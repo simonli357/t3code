@@ -6,6 +6,10 @@ import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
+import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
+import * as AllocationStore from "./allocation/AllocationStore.ts";
+import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
+import * as UsageCapEnforcement from "./allocation/UsageCapEnforcement.ts";
 import * as WorkerService from "./workers/WorkerService.ts";
 // Effect wraps this raw Node HTTP server after its startup and write-error guards attach.
 // @effect-diagnostics nodeBuiltinImport:off
@@ -518,7 +522,18 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
   }),
 );
 
+// One instance of each, shared by the reactors, the MCP routes and the provider start guard.
+const layerProviderAllocation = ProviderAllocation.layer.pipe(Layer.provide(AllocationStore.layer));
+const layerWorkerService = WorkerService.layer.pipe(Layer.provide(layerProviderAllocation));
+const layerAllocationAssignments = AllocationAssignments.layer.pipe(
+  Layer.provide(Layer.merge(layerProviderAllocation, layerWorkerService)),
+);
+const layerUsageCapEnforcement = UsageCapEnforcement.layer.pipe(
+  Layer.provide(Layer.merge(layerProviderAllocation, layerWorkerService)),
+);
+
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(UsageCapEnforcement.guardLayer),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -627,7 +642,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       const workers = yield* WorkerService.WorkerService;
       yield* workers.start();
     }),
-  ).pipe(Layer.provide(WorkerService.layer)),
+  ).pipe(Layer.provide(layerWorkerService)),
+  // Saves hard account usage caps and stops the sessions they cover.
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const caps = yield* UsageCapEnforcement.UsageCapEnforcement;
+      yield* caps.start();
+    }),
+  ).pipe(Layer.provide(layerUsageCapEnforcement)),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
@@ -748,7 +770,9 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
-    Layer.provide(WorkerService.layer),
+    Layer.provide(layerWorkerService),
+    Layer.provide(layerProviderAllocation),
+    Layer.provide(layerAllocationAssignments),
   ),
   // Follows delegated tasks running in linked environments, including after a restart.
   Layer.effectDiscard(
