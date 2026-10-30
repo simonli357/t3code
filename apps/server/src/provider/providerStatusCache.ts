@@ -19,12 +19,18 @@ const mergeProviderModels = (
   fallbackModels: ReadonlyArray<ServerProvider["models"][number]>,
   cachedModels: ReadonlyArray<ServerProvider["models"][number]>,
 ): ReadonlyArray<ServerProvider["models"][number]> => {
-  const fallbackSlugs = new Set(fallbackModels.map((model) => model.slug));
+  // A cached canonical model supersedes a settings fallback that only exists
+  // under one of its aliases, such as Pi's `pi-default` startup placeholder.
+  const cachedAliases = new Set(
+    cachedModels.filter((model) => !model.isCustom).flatMap((model) => model.aliases ?? []),
+  );
+  const resolvedFallbackModels = fallbackModels.filter((model) => !cachedAliases.has(model.slug));
+  const fallbackSlugs = new Set(resolvedFallbackModels.map((model) => model.slug));
   // The fallback snapshot is built from current settings and already carries
   // every custom model, so cached custom rows that are not in it were removed
   // while the cache was stale and must not come back.
   return [
-    ...fallbackModels,
+    ...resolvedFallbackModels,
     ...cachedModels.filter((model) => !model.isCustom && !fallbackSlugs.has(model.slug)),
   ];
 };
