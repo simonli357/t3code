@@ -23,4 +23,32 @@ describe("buildDeepseekHarnessModels", () => {
       });
     }
   });
+
+  it("prefers the live catalog while keeping the retired Flash slug resolvable", () => {
+    const models = buildDeepseekHarnessModels({
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: '["deepseek-official","deepseek-flash"]',
+          options: [
+            { value: '["deepseek-official","deepseek-flash"]', name: "DeepSeek-V4.1-Flash" },
+            { value: '["deepseek-official","deepseek-v4-pro"]', name: "DeepSeek-V4-Pro" },
+          ],
+        },
+      ],
+    });
+
+    expect(models.map((model) => model.slug)).toEqual([
+      "deepseek-official/deepseek-flash",
+      "deepseek-official/deepseek-v4-pro",
+    ]);
+    expect(models[0]).toMatchObject({
+      name: "DeepSeek-V4.1-Flash",
+      isDefault: true,
+      aliases: expect.arrayContaining(["deepseek-v4-flash"]),
+    });
+  });
 });

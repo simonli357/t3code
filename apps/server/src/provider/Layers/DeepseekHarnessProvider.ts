@@ -126,18 +126,23 @@ export function buildDeepseekHarnessModels(input: {
   );
   const current = model?.type === "select" ? model.currentValue : undefined;
   const capabilities = reasoningCapabilities(input.configOptions);
-  const discovered: ServerProviderModel[] = modelEntries(model).map((entry) => ({
-    slug: deepseekHarnessModelSlug(entry.value),
-    name: entry.name.trim() || deepseekHarnessModelSlug(entry.value),
-    isCustom: false,
-    ...(entry.value === current
-      ? {
-          isDefault: true,
-          aliases: [DEEPSEEK_HARNESS_DEFAULT_MODEL],
-        }
-      : {}),
-    capabilities,
-  }));
+  const discovered: ServerProviderModel[] = modelEntries(model).map((entry) => {
+    const slug = deepseekHarnessModelSlug(entry.value);
+    const aliases = [
+      ...(entry.value === current ? [DEEPSEEK_HARNESS_DEFAULT_MODEL] : []),
+      // Threads saved before the API exposed `deepseek-flash` still carry the
+      // retired slug; destination catalogs must resolve it for native moves.
+      ...(slug.slice(slug.lastIndexOf("/") + 1) === "deepseek-flash" ? ["deepseek-v4-flash"] : []),
+    ];
+    return {
+      slug,
+      name: entry.name.trim() || slug,
+      isCustom: false,
+      ...(entry.value === current ? { isDefault: true } : {}),
+      ...(aliases.length > 0 ? { aliases } : {}),
+      capabilities,
+    };
+  });
   return providerModelsFromSettings(
     discovered.length > 0 ? discovered : FALLBACK_MODELS,
     input.customModels ?? [],
