@@ -148,6 +148,7 @@ const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const DEEPSEEK_HARNESS_DRIVER_KIND = ProviderDriverKind.make("deepseekHarness");
+const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
 export const DEFAULT_MODEL = "gpt-6-astra";
@@ -167,6 +168,8 @@ export const DEFAULT_TEXT_GENERATION_MODEL = "gpt-6-luna";
 export const ANTIGRAVITY_DEFAULT_MODEL = "antigravity-default";
 /** Product alias selecting the live DSH session's configured default model. */
 export const DEEPSEEK_HARNESS_DEFAULT_MODEL = "deepseek-harness-default";
+/** Product alias selecting the live Pi session's configured default model. */
+export const PI_DEFAULT_MODEL = "pi-default";
 export const DEFAULT_TEXT_GENERATION_REASONING_EFFORT = "low";
 
 export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
@@ -176,6 +179,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   // Product slug, not an ACP model id. The Grok adapter treats it as "the session's current model".
   [GROK_DRIVER_KIND]: "grok-build",
   [DEEPSEEK_HARNESS_DRIVER_KIND]: DEEPSEEK_HARNESS_DEFAULT_MODEL,
+  [PI_DRIVER_KIND]: PI_DEFAULT_MODEL,
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
 };

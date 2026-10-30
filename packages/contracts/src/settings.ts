@@ -762,6 +762,43 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+/**
+ * Pi coding agent, driven through the `pi-acp` bridge. Pi keeps its own auth,
+ * model configuration, sessions, and extensions; this schema only configures
+ * how T3 launches the ACP bridge.
+ */
+export const PiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("pi-acp").pipe(
+      Schema.annotateKey({
+        title: "ACP bridge executable",
+        description:
+          "Path to the pi-acp bridge. Pi itself must be installed and configured separately.",
+        providerSettingsForm: { placeholder: "pi-acp", clearWhenEmpty: "omit" },
+      }),
+    ),
+    launchArgs: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Bridge arguments",
+        description:
+          "Arguments passed to the ACP bridge. Set the executable to npx and use `-y pi-acp` to run the published bridge without installing it globally.",
+        providerSettingsForm: { clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(CustomModelSetting).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  { order: ["binaryPath", "launchArgs"] },
+);
+export type PiSettings = typeof PiSettings.Type;
+
 /** Official DeepSeek Harness over its ACP profile. Credentials stay in the instance environment. */
 export const DeepseekHarnessSettings = makeProviderSettingsSchema(
   {
@@ -1399,9 +1436,8 @@ export const ServerSettings = Schema.Struct({
     claudeAgent: ClaudeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
-    deepseekHarness: DeepseekHarnessSettings.pipe(
-      Schema.withDecodingDefault(Effect.succeed({})),
-    ),
+    pi: PiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    deepseekHarness: DeepseekHarnessSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
@@ -1561,6 +1597,13 @@ const CursorSettingsPatch = Schema.Struct({
 const GrokSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+});
+
+const PiSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  launchArgs: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
@@ -1730,6 +1773,7 @@ export const ServerSettingsPatch = Schema.Struct({
       claudeAgent: Schema.optionalKey(ClaudeSettingsPatch),
       cursor: Schema.optionalKey(CursorSettingsPatch),
       grok: Schema.optionalKey(GrokSettingsPatch),
+      pi: Schema.optionalKey(PiSettingsPatch),
       deepseekHarness: Schema.optionalKey(DeepseekHarnessSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),

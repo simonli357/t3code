@@ -276,6 +276,7 @@ const PersistedOptionalProviderSettings = Schema.Struct({
     Schema.Struct({
       cursor: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
       grok: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
+      pi: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
       deepseekHarness: Schema.optionalKey(
         Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) }),
       ),
@@ -307,6 +308,7 @@ function restoreUsedProviders(
       instance.enabled === undefined &&
       (instance.driver === "cursor" ||
         instance.driver === "grok" ||
+        instance.driver === "pi" ||
         instance.driver === "deepseekHarness" ||
         instance.driver === "opencode") &&
       usedProviderInstances.has(instanceId)
@@ -327,11 +329,14 @@ function restoreUsedProviders(
         ...settings.providers.grok,
         enabled: persisted.providers?.grok?.enabled ?? usedProviders.has("grok"),
       },
+      pi: {
+        ...settings.providers.pi,
+        enabled: persisted.providers?.pi?.enabled ?? usedProviders.has("pi"),
+      },
       deepseekHarness: {
         ...settings.providers.deepseekHarness,
         enabled:
-          persisted.providers?.deepseekHarness?.enabled ??
-          usedProviders.has("deepseekHarness"),
+          persisted.providers?.deepseekHarness?.enabled ?? usedProviders.has("deepseekHarness"),
       },
       opencode: {
         ...settings.providers.opencode,
@@ -390,6 +395,7 @@ const PERSISTED_SERVER_SETTINGS_DEFAULTS = {
     ...DEFAULT_SERVER_SETTINGS.providers,
     cursor: { ...DEFAULT_SERVER_SETTINGS.providers.cursor, enabled: undefined },
     grok: { ...DEFAULT_SERVER_SETTINGS.providers.grok, enabled: undefined },
+    pi: { ...DEFAULT_SERVER_SETTINGS.providers.pi, enabled: undefined },
     deepseekHarness: {
       ...DEFAULT_SERVER_SETTINGS.providers.deepseekHarness,
       enabled: undefined,

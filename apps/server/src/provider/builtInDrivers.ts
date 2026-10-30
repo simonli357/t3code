@@ -26,6 +26,7 @@ import { CursorDriver, type CursorDriverEnv } from "./Drivers/CursorDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import { AntigravityDriver, type AntigravityDriverEnv } from "./Drivers/AntigravityDriver.ts";
+import { PiDriver, type PiDriverEnv } from "./Drivers/PiDriver.ts";
 import {
   DeepseekHarnessDriver,
   type DeepseekHarnessDriverEnv,
@@ -44,6 +45,7 @@ export type BuiltInDriversEnv =
   | GrokDriverEnv
   | OpenCodeDriverEnv
   | AntigravityDriverEnv
+  | PiDriverEnv
   | DeepseekHarnessDriverEnv;
 
 /**
@@ -58,5 +60,6 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
   GrokDriver,
   OpenCodeDriver,
   AntigravityDriver,
+  PiDriver,
   DeepseekHarnessDriver,
 ];

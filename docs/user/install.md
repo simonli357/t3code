@@ -118,6 +118,7 @@ computer.
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
+| Pi          | Install [Pi](https://github.com/earendil-works/pi) and `pi-acp`, configure Pi's model provider, then enable Pi in T3 Code.                                  |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
 | DeepSeek Harness | Install the [T3-pinned ACP build](https://github.com/simonli357/deepseek-harness/tree/2ab60e149340fad75f884c7250ec9e93acbb3afb), then add a DeepSeek API key in T3 Code. |
 
@@ -146,8 +147,8 @@ base URL. Mark secret values as sensitive; after saving, T3 Code does not displa
 their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
-[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), and
-[Antigravity](./providers-antigravity.md).
+[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
+[Pi](./providers-pi.md), and [Antigravity](./providers-antigravity.md).
 
 ## Next steps
 
