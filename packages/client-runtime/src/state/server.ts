@@ -1262,6 +1262,19 @@ export function createServerEnvironmentAtoms<R, E>(
       execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetHostResources>) =>
         request(WS_METHODS.serverGetHostResources, input).pipe(Effect.timeout("5 seconds")),
     }),
+    computerInspection: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:computers:inspect",
+      tag: WS_METHODS.computersInspect,
+      staleTimeMs: 10_000,
+    }),
+    computerAction: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:computers:act",
+      tag: WS_METHODS.computersAct,
+    }),
+    computerRead: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:computers:read",
+      tag: WS_METHODS.computersInspect,
+    }),
     processResourceHistory: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:process-resource-history",
       tag: WS_METHODS.serverGetProcessResourceHistory,

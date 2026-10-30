@@ -17,6 +17,13 @@ import {
   McpAppUpdateModelContextInput,
 } from "./mcpApps.ts";
 import {
+  ComputerActionInput,
+  ComputerActionResult,
+  ComputerInspectInput,
+  ComputerInspection,
+  ComputerOperationError,
+} from "./computers.ts";
+import {
   PeerLink,
   PeerLinkCreateInput,
   PeerLinkError,
@@ -518,6 +525,8 @@ export const WS_METHODS = {
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
   serverGetHostResources: "server.getHostResources",
+  computersInspect: "computers.inspect",
+  computersAct: "computers.act",
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
@@ -903,6 +912,18 @@ const WsServerGetHostResourcesRpc = Rpc.make(WS_METHODS.serverGetHostResources, 
   payload: Schema.Struct({}),
   success: HostResourcesSnapshot,
   error: EnvironmentAuthorizationError,
+});
+
+const WsComputersInspectRpc = Rpc.make(WS_METHODS.computersInspect, {
+  payload: ComputerInspectInput,
+  success: ComputerInspection,
+  error: Schema.Union([ComputerOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsComputersActRpc = Rpc.make(WS_METHODS.computersAct, {
+  payload: ComputerActionInput,
+  success: ComputerActionResult,
+  error: Schema.Union([ComputerOperationError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetProcessResourceHistoryRpc = Rpc.make(WS_METHODS.serverGetProcessResourceHistory, {
@@ -1980,6 +2001,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
   WsServerGetHostResourcesRpc,
+  WsComputersInspectRpc,
+  WsComputersActRpc,
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,

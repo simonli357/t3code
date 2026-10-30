@@ -2,7 +2,15 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as NodeDns from "node:dns";
 import * as NodeOS from "node:os";
-import * as NodeSea from "node:sea";
+
+// Loaded lazily: browser-environment tests import this module through the server-ish test setup,
+// and a static `node:sea` import makes that bundle fail before the default is ever read.
+const nodeSea = () =>
+  (
+    globalThis as {
+      process?: { getBuiltinModule?: (specifier: string) => unknown };
+    }
+  ).process?.getBuiltinModule?.("node:sea") as { readonly isSea: () => boolean } | undefined;
 
 export const Platform = Context.Reference<NodeJS.Platform>("@t3tools/shared/HostProcess/Platform", {
   defaultValue: () => process.platform,
@@ -70,7 +78,7 @@ export const InvokedAs = Context.Reference<string>("@t3tools/shared/HostProcess/
 });
 
 export const IsExecutable = Context.Reference<boolean>("@t3tools/shared/HostProcess/IsExecutable", {
-  defaultValue: () => NodeSea.isSea(),
+  defaultValue: () => nodeSea()?.isSea() ?? false,
 });
 
 /** Includes hostname-resolved addresses absent from interfaces, such as Debian's 127.0.1.1 used by Firefox locks. */

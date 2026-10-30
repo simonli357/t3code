@@ -51,6 +51,7 @@ import {
 } from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
+  ArchiveIcon,
   ArrowLeftIcon,
   BugIcon,
   ChartNoAxesColumnIcon,
@@ -61,6 +62,7 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
+  HardDriveIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -1502,6 +1504,40 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:computers",
+    searchTerms: ["computers", "cpu", "memory", "files"],
+    title: "Open computers",
+    icon: <MonitorIcon className={ITEM_ICON_CLASS} />,
+    shortcutCommand: "computers.open",
+    run: async () => {
+      await navigate({ to: "/computers" });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:computers-disks",
+    searchTerms: ["disks", "storage", "volumes", "partitions", "space", "free", "reserve"],
+    title: "Open disks",
+    icon: <HardDriveIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/computers", search: { view: "disks" } });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:computers-workspaces",
+    searchTerms: ["workspaces", "archives", "backups", "storage", "jobs", "retention", "cleanup"],
+    title: "Open workspaces and archives",
+    icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/computers", search: { view: "workspaces" } });
     },
   });
 
