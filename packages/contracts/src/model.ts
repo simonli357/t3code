@@ -218,6 +218,10 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "opus-4.5-thinking": "claude-opus-4-5",
     "opus-4.5": "claude-opus-4-5",
   },
+  // The harness once advertised the API's legacy Flash slug; keep saved threads loadable.
+  [DEEPSEEK_HARNESS_DRIVER_KIND]: {
+    "deepseek-v4-flash": "deepseek-flash",
+  },
   [OPENCODE_DRIVER_KIND]: {},
 };
 

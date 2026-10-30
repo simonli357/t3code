@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
 
 import {
   applyClaudePromptEffortPrefix,
@@ -14,7 +14,16 @@ import {
   toCustomModelSetting,
   getProviderOptionBooleanSelectionValue,
   getProviderOptionStringSelectionValue,
+  normalizeModelSlug,
 } from "./model.ts";
+
+describe("normalizeModelSlug", () => {
+  it("maps the retired DeepSeek Flash slug onto the live model id", () => {
+    expect(
+      normalizeModelSlug("deepseek-v4-flash", ProviderDriverKind.make("deepseekHarness")),
+    ).toBe("deepseek-flash");
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

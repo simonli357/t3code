@@ -69,3 +69,38 @@ it.effect("maps the T3 model and Max reasoning selection into DSH config", () =>
     expect(selectedOptions).toEqual([["reasoning_effort", "max"]]);
   }),
 );
+
+it.effect("resumes a thread saved with the retired Flash slug on the live model id", () =>
+  Effect.gen(function* () {
+    const selectedModels: string[] = [];
+    const live: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: '["deepseek-official","deepseek-flash"]',
+        options: [
+          {
+            value: '["deepseek-official","deepseek-flash"]',
+            name: "deepseek-flash",
+          },
+        ],
+      },
+    ];
+    yield* applyDeepseekHarnessModelSelection({
+      runtime: {
+        getConfigOptions: Effect.succeed(live),
+        setModel: (value) =>
+          Effect.sync(() => {
+            selectedModels.push(value);
+          }),
+        setConfigOption: () => Effect.succeed({ configOptions: live }),
+      },
+      model: "deepseek-v4-flash",
+      mapError: (cause) => cause,
+    });
+
+    expect(selectedModels).toEqual(['["deepseek-official","deepseek-flash"]']);
+  }),
+);

@@ -63,11 +63,11 @@ const FALLBACK_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 const FALLBACK_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
-    slug: "deepseek-v4-flash",
-    name: "DeepSeek V4 Flash",
+    slug: "deepseek-flash",
+    name: "DeepSeek V4.1 Flash",
     isCustom: false,
     isDefault: true,
-    aliases: [DEEPSEEK_HARNESS_DEFAULT_MODEL],
+    aliases: [DEEPSEEK_HARNESS_DEFAULT_MODEL, "deepseek-v4-flash"],
     capabilities: FALLBACK_CAPABILITIES,
   },
   {
@@ -96,9 +96,7 @@ function reasoningCapabilities(
     (option) => option.id === "reasoning_effort" || option.id === "reasoningEffort",
   );
   if (reasoning?.type !== "select") return EMPTY_CAPABILITIES;
-  const values = reasoning.options.flatMap((entry) =>
-    "value" in entry ? [entry] : entry.options,
-  );
+  const values = reasoning.options.flatMap((entry) => ("value" in entry ? [entry] : entry.options));
   return createModelCapabilities({
     optionDescriptors: [
       {
@@ -189,10 +187,7 @@ export function buildInitialDeepseekHarnessProviderSnapshot(
   });
 }
 
-function runVersionProbe(
-  settings: DeepseekHarnessSettings,
-  environment: NodeJS.ProcessEnv,
-) {
+function runVersionProbe(settings: DeepseekHarnessSettings, environment: NodeJS.ProcessEnv) {
   return Effect.gen(function* () {
     const command = settings.binaryPath.trim() || "dsh";
     const args = ["--profile", settings.profile.trim() || "acp", "--version"];
@@ -233,125 +228,124 @@ function initializeProbe(input: {
   ).pipe(Effect.timeoutOption(INITIALIZE_TIMEOUT));
 }
 
-export const checkDeepseekHarnessProviderStatus = Effect.fn(
-  "checkDeepseekHarnessProviderStatus",
-)(function* (input: {
-  readonly settings: DeepseekHarnessSettings;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly dshHome: string;
-  readonly apiKey: string | undefined;
-}): Effect.fn.Return<
-  ServerProviderDraft,
-  never,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
-> {
-  const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const environment = {
-    ...input.environment,
-    DSH_HOME: input.dshHome,
-    DSH_TELEMETRY_DISABLED: "1",
-  };
-  const fallbackModels = buildDeepseekHarnessModels({
-    customModels: input.settings.customModels,
-  });
-
-  if (!input.settings.enabled) {
-    return buildServerProvider({
-      presentation: PRESENTATION,
-      enabled: false,
-      checkedAt,
-      models: fallbackModels,
-      slashCommands: [COMPACT_SLASH_COMMAND],
-      probe: {
-        installed: false,
-        version: null,
-        status: "warning",
-        auth: { status: "unknown", type: "api-key", label: "DeepSeek API key" },
-        message: "DeepSeek Harness is disabled in T3 Code settings.",
-      },
+export const checkDeepseekHarnessProviderStatus = Effect.fn("checkDeepseekHarnessProviderStatus")(
+  function* (input: {
+    readonly settings: DeepseekHarnessSettings;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly dshHome: string;
+    readonly apiKey: string | undefined;
+  }): Effect.fn.Return<
+    ServerProviderDraft,
+    never,
+    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+  > {
+    const checkedAt = DateTime.formatIso(yield* DateTime.now);
+    const environment = {
+      ...input.environment,
+      DSH_HOME: input.dshHome,
+      DSH_TELEMETRY_DISABLED: "1",
+    };
+    const fallbackModels = buildDeepseekHarnessModels({
+      customModels: input.settings.customModels,
     });
-  }
 
-  const versionResult = yield* runVersionProbe(input.settings, environment).pipe(
-    Effect.catch((cause) =>
-      isCommandMissingCause(cause)
-        ? Effect.succeed(Option.none())
-        : Effect.logWarning("DeepSeek Harness version probe failed.").pipe(
-            Effect.as(Option.none()),
-          ),
-    ),
-  );
-  const versionOutput = Option.flatMap(versionResult, (result) =>
-    result.code === 0 ? Option.some(result.stdout) : Option.none(),
-  );
-  if (Option.isNone(versionOutput)) {
+    if (!input.settings.enabled) {
+      return buildServerProvider({
+        presentation: PRESENTATION,
+        enabled: false,
+        checkedAt,
+        models: fallbackModels,
+        slashCommands: [COMPACT_SLASH_COMMAND],
+        probe: {
+          installed: false,
+          version: null,
+          status: "warning",
+          auth: { status: "unknown", type: "api-key", label: "DeepSeek API key" },
+          message: "DeepSeek Harness is disabled in T3 Code settings.",
+        },
+      });
+    }
+
+    const versionResult = yield* runVersionProbe(input.settings, environment).pipe(
+      Effect.catch((cause) =>
+        isCommandMissingCause(cause)
+          ? Effect.succeed(Option.none())
+          : Effect.logWarning("DeepSeek Harness version probe failed.").pipe(
+              Effect.as(Option.none()),
+            ),
+      ),
+    );
+    const versionOutput = Option.flatMap(versionResult, (result) =>
+      result.code === 0 ? Option.some(result.stdout) : Option.none(),
+    );
+    if (Option.isNone(versionOutput)) {
+      return buildServerProvider({
+        presentation: PRESENTATION,
+        enabled: true,
+        checkedAt,
+        models: fallbackModels,
+        slashCommands: [COMPACT_SLASH_COMMAND],
+        probe: {
+          installed: false,
+          version: null,
+          status: "error",
+          auth: { status: "unknown", type: "api-key", label: "DeepSeek API key" },
+          message:
+            "DeepSeek Harness executable was not found. Set the pinned launcher in provider settings.",
+        },
+      });
+    }
+
+    const initialized = yield* initializeProbe({
+      settings: input.settings,
+      dshHome: input.dshHome,
+      environment,
+      apiKey: input.apiKey,
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("DeepSeek Harness ACP initialize probe failed.", { cause }).pipe(
+          Effect.as(Option.none()),
+        ),
+      ),
+    );
+    const initializeResult = Option.getOrUndefined(initialized);
+    const supportsNativeT3Lifecycle =
+      initializeResult?.agentCapabilities?.loadSession === true &&
+      initializeResult.agentCapabilities.sessionCapabilities?.fork !== undefined;
+    const options = initializeResult
+      ? sessionConfigOptionsFromInitialize(initializeResult)
+      : undefined;
+    const models = buildDeepseekHarnessModels({
+      customModels: input.settings.customModels,
+      ...(options ? { configOptions: options } : {}),
+    });
+    const authenticated = input.apiKey !== undefined;
     return buildServerProvider({
       presentation: PRESENTATION,
       enabled: true,
       checkedAt,
-      models: fallbackModels,
-      slashCommands: [COMPACT_SLASH_COMMAND],
+      models,
+      slashCommands: slashCommands(options),
       probe: {
-        installed: false,
-        version: null,
-        status: "error",
-        auth: { status: "unknown", type: "api-key", label: "DeepSeek API key" },
-        message:
-          "DeepSeek Harness executable was not found. Set the pinned launcher in provider settings.",
+        installed: true,
+        version: parseGenericCliVersion(Option.getOrElse(versionOutput, () => "")),
+        status: authenticated && supportsNativeT3Lifecycle ? "ready" : "warning",
+        auth: authenticated
+          ? { status: "authenticated", type: "api-key", label: "DeepSeek API key" }
+          : { status: "unauthenticated", type: "api-key", label: "DeepSeek API key" },
+        ...(authenticated
+          ? !supportsNativeT3Lifecycle
+            ? {
+                message: `This Harness build lacks native load/fork. Install T3 build ${DEEPSEEK_HARNESS_T3_COMMIT.slice(0, 8)}.`,
+              }
+            : options
+              ? {}
+              : { message: "Harness is installed, but its ACP catalog probe did not complete." }
+          : { message: "Add a DeepSeek API key to start a session." }),
       },
     });
-  }
-
-  const initialized = yield* initializeProbe({
-    settings: input.settings,
-    dshHome: input.dshHome,
-    environment,
-    apiKey: input.apiKey,
-  }).pipe(
-    Effect.catch((cause) =>
-      Effect.logWarning("DeepSeek Harness ACP initialize probe failed.", { cause }).pipe(
-        Effect.as(Option.none()),
-      ),
-    ),
-  );
-  const initializeResult = Option.getOrUndefined(initialized);
-  const supportsNativeT3Lifecycle =
-    initializeResult?.agentCapabilities?.loadSession === true &&
-    initializeResult.agentCapabilities.sessionCapabilities?.fork !== undefined;
-  const options = initializeResult
-    ? sessionConfigOptionsFromInitialize(initializeResult)
-    : undefined;
-  const models = buildDeepseekHarnessModels({
-    customModels: input.settings.customModels,
-    ...(options ? { configOptions: options } : {}),
-  });
-  const authenticated = input.apiKey !== undefined;
-  return buildServerProvider({
-    presentation: PRESENTATION,
-    enabled: true,
-    checkedAt,
-    models,
-    slashCommands: slashCommands(options),
-    probe: {
-      installed: true,
-      version: parseGenericCliVersion(Option.getOrElse(versionOutput, () => "")),
-      status: authenticated && supportsNativeT3Lifecycle ? "ready" : "warning",
-      auth: authenticated
-        ? { status: "authenticated", type: "api-key", label: "DeepSeek API key" }
-        : { status: "unauthenticated", type: "api-key", label: "DeepSeek API key" },
-      ...(authenticated
-        ? !supportsNativeT3Lifecycle
-          ? {
-              message:
-                `This Harness build lacks native load/fork. Install T3 build ${DEEPSEEK_HARNESS_T3_COMMIT.slice(0, 8)}.`,
-            }
-          : options
-            ? {}
-            : { message: "Harness is installed, but its ACP catalog probe did not complete." }
-        : { message: "Add a DeepSeek API key to start a session." }),
-    },
-  });
-});
+  },
+);
 
 export const deepseekHarnessProviderChanges = (
   settings: DeepseekHarnessSettings,

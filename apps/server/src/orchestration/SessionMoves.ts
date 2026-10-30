@@ -142,8 +142,7 @@ const decodeEvents = Schema.decodeUnknownEffect(
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encode = (value: unknown) => JSON.stringify(value);
 const decodeCodexState = CodexState.decodeCodexMoveState;
-const SESSION_ID_PATTERN =
-  /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const cursorId = (driver: MoveDriver, value: unknown) => {
   if (!value || typeof value !== "object") return null;
   const cursor = value as { resume?: unknown; sessionId?: unknown; threadId?: unknown };
@@ -153,28 +152,7 @@ const cursorId = (driver: MoveDriver, value: unknown) => {
       : driver === "deepseekHarness"
         ? cursor.sessionId
         : cursor.resume;
-  return typeof id === "string" && SESSION_ID_PATTERN.test(id)
-    ? id
-    : null;
-};
-const deepseekProjectKey = (cwd: string) => {
-  let readable = "";
-  let separatorRun = false;
-  for (let index = 0; index < cwd.length; index += 1) {
-    const code = cwd.charCodeAt(index);
-    const character = String.fromCharCode(code);
-    if (character === "/" || character === "\\" || character === ":") {
-      if (!separatorRun) readable += "-";
-      separatorRun = true;
-    } else if (character !== "~" && /^[A-Za-z0-9._-]$/.test(character)) {
-      readable += character;
-      separatorRun = false;
-    } else {
-      readable += `~${code.toString(16).toUpperCase().padStart(4, "0")}`;
-      separatorRun = false;
-    }
-  }
-  return `--${(readable.replace(/^-+/, "") || "root").slice(0, 251)}--`;
+  return typeof id === "string" && SESSION_ID_PATTERN.test(id) ? id : null;
 };
 const failure = (cause: unknown) =>
   isMoveError(cause)
@@ -386,13 +364,8 @@ const make = Effect.gen(function* () {
       return yield* new SessionMoveError({ message: "The source session disappeared." });
     const thread = detail.value;
     const binding = yield* directory.getBinding(input.threadId);
-    const driver = Option.isSome(binding)
-      ? moveDriver(binding.value.provider)
-      : undefined;
-    if (
-      Option.isNone(binding) ||
-      driver === undefined
-    )
+    const driver = Option.isSome(binding) ? moveDriver(binding.value.provider) : undefined;
+    if (Option.isNone(binding) || driver === undefined)
       return yield* new SessionMoveError({
         message: "This provider does not support native session moves.",
       });
@@ -439,8 +412,7 @@ const make = Effect.gen(function* () {
     const ancestry =
       driver === "deepseekHarness" && Array.isArray(cursor.ancestry)
         ? cursor.ancestry.filter(
-            (entry): entry is string =>
-              typeof entry === "string" && SESSION_ID_PATTERN.test(entry),
+            (entry): entry is string => typeof entry === "string" && SESSION_ID_PATTERN.test(entry),
           )
         : [];
     const family =
@@ -506,17 +478,20 @@ const make = Effect.gen(function* () {
             ? path.relative(home.homePath, source).replaceAll("\\", "/")
             : driver === "deepseekHarness"
               ? (() => {
-                  const relative = path.relative(home.homePath, source).split(path.sep);
-                  const sessionId = relative[2];
-                  const artifacts = relative.slice(3).join("/");
-                  if (!sessionId || !artifacts) {
+                  const [root, bucket, sessionId, ...artifacts] = path
+                    .relative(home.homePath, source)
+                    .split(path.sep);
+                  if (root !== "sessions" || !bucket || !sessionId || artifacts.length === 0) {
                     throw new Error("The DeepSeek Harness session artifact has no owner.");
                   }
-                  return `sessions/${deepseekProjectKey(probe.cwd)}/${sessionId}/${artifacts}`;
+                  // DSH keys a session's directory by its immutable header cwd.
+                  // Renaming it to the destination cwd leaves the transcript
+                  // unreadable on the receiving host.
+                  return [root, bucket, sessionId, ...artifacts].join("/");
                 })()
-            : path
-                .relative(path.dirname(info.type === "Directory" ? entry.path : source), source)
-                .replaceAll("\\", "/");
+              : path
+                  .relative(path.dirname(info.type === "Directory" ? entry.path : source), source)
+                  .replaceAll("\\", "/");
         if (files.some((file) => file.kind === "native" && file.name === name))
           return yield* new SessionMoveError({
             message: "Multiple native transcript copies need disambiguation before moving.",
@@ -756,8 +731,41 @@ const make = Effect.gen(function* () {
         ? home.homePath
         : manifest.driver === "deepseekHarness"
           ? home.homePath
-        : path.join(home.homePath, "projects", manifest.targetCwd.replace(/[^a-zA-Z0-9]/g, "-"));
+          : path.join(home.homePath, "projects", manifest.targetCwd.replace(/[^a-zA-Z0-9]/g, "-"));
     yield* fs.makeDirectory(nativeRoot, { recursive: true });
+    if (manifest.driver === "deepseekHarness") {
+      // DSH resolves a session to exactly one project directory. A retried move
+      // must replace a copy left anywhere under sessions/ or session/load sees
+      // duplicate ids; keep the discarded copy in staging until it completes.
+      const sessionsRoot = path.join(home.homePath, "sessions");
+      const nativeIds = new Set(
+        manifest.files
+          .filter((entry) => entry.kind === "native")
+          .map((entry) => entry.name.split("/")[2])
+          .filter((id): id is string => id !== undefined && SESSION_ID_PATTERN.test(id)),
+      );
+      const buckets = yield* fs
+        .readDirectory(sessionsRoot)
+        .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+      for (const bucket of buckets) {
+        for (const id of nativeIds) {
+          const stale = path.join(sessionsRoot, bucket, id);
+          if ((yield* fs.exists(stale).pipe(Effect.orElseSucceed(() => false))) !== true) continue;
+          const discarded = path.join(staging, "replaced", bucket);
+          yield* fs.makeDirectory(discarded, { recursive: true });
+          let parkedName = `${id}.${value.id}`;
+          for (
+            let attempt = 1;
+            (yield* fs
+              .exists(path.join(discarded, parkedName))
+              .pipe(Effect.orElseSucceed(() => false))) === true;
+            attempt += 1
+          )
+            parkedName = `${id}.${value.id}-${attempt}`;
+          yield* fs.rename(stale, path.join(discarded, parkedName));
+        }
+      }
+    }
     if (nativeState) {
       if (
         !nativeState.nativeIds.includes(manifest.nativeId) ||
@@ -974,8 +982,8 @@ const make = Effect.gen(function* () {
                       parts.slice(3).join("/").length > 0
                     );
                   })()
-              : file.name === manifest.nativeId + ".jsonl" ||
-                file.name.startsWith(manifest.nativeId + "/");
+                : file.name === manifest.nativeId + ".jsonl" ||
+                  file.name.startsWith(manifest.nativeId + "/");
           if (!valid)
             return yield* new SessionMoveError({
               message: "A transfer entry is not native conversation state.",
@@ -984,10 +992,7 @@ const make = Effect.gen(function* () {
         if (!nativeFiles.length)
           return yield* new SessionMoveError({ message: "The native transcript is missing." });
         for (const file of manifest.files.filter((entry) => entry.kind === "provider-asset")) {
-          if (
-            manifest.driver !== "deepseekHarness" ||
-            !file.name.startsWith("attachments/v1/")
-          )
+          if (manifest.driver !== "deepseekHarness" || !file.name.startsWith("attachments/v1/"))
             return yield* new SessionMoveError({
               message: "A transfer entry is not a DeepSeek Harness provider asset.",
             });
@@ -1330,13 +1335,8 @@ const make = Effect.gen(function* () {
         message: "Finish or cancel the queued master handoff before moving this session.",
       });
     const binding = yield* directory.getBinding(input.threadId);
-    const driver = Option.isSome(binding)
-      ? moveDriver(binding.value.provider)
-      : undefined;
-    if (
-      Option.isNone(binding) ||
-      driver === undefined
-    )
+    const driver = Option.isSome(binding) ? moveDriver(binding.value.provider) : undefined;
+    if (Option.isNone(binding) || driver === undefined)
       return yield* new SessionMoveError({
         message: "This session needs supported native state before it can move.",
       });

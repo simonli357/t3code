@@ -1,7 +1,4 @@
-import {
-  type DeepseekHarnessSettings,
-  type RuntimeMode,
-} from "@t3tools/contracts";
+import { type DeepseekHarnessSettings, type RuntimeMode } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -12,9 +9,8 @@ import { buildAcpPrompt } from "./AcpPrompt.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 /** DSH fork commit containing the T3 ACP lifecycle used by this adapter. */
-export const DEEPSEEK_HARNESS_T3_COMMIT = "2ab60e149340fad75f884c7250ec9e93acbb3afb";
-export const DEEPSEEK_HARNESS_T3_SOURCE =
-  `https://github.com/simonli357/deepseek-harness/tree/${DEEPSEEK_HARNESS_T3_COMMIT}`;
+export const DEEPSEEK_HARNESS_T3_COMMIT = "0c8b364efa1c3308b9b4be8da99e60a12427f921";
+export const DEEPSEEK_HARNESS_T3_SOURCE = `https://github.com/simonli357/deepseek-harness/tree/${DEEPSEEK_HARNESS_T3_COMMIT}`;
 
 export interface DeepseekHarnessAcpRuntimeInput extends Omit<
   AcpSessionRuntime.AcpSessionRuntimeOptions,
@@ -29,44 +25,40 @@ export interface DeepseekHarnessAcpRuntimeInput extends Omit<
   readonly workspaceEnvironment?: Readonly<Record<string, string>>;
 }
 
-export const makeDeepseekHarnessAcpRuntime = Effect.fn("makeDeepseekHarnessAcpRuntime")(
-  function* (input: DeepseekHarnessAcpRuntimeInput) {
-    const context = yield* Layer.build(
-      AcpSessionRuntime
-        .layer({
-          ...input,
-          authMethodId: "deepseek-api-key",
-          resumeMethod: "load",
-          cancelBehavior: "wait-for-prompt",
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
-          },
-          spawn: {
-            command: input.settings.binaryPath.trim() || "dsh",
-            args: ["--profile", input.settings.profile.trim() || "acp"],
-            cwd: input.cwd,
-            env: {
-              ...(input.baseEnvironment ?? process.env),
-              ...input.agentDeviceEnvironment,
-              ...input.workspaceEnvironment,
-              DSH_HOME: input.dshHome,
-              DSH_TELEMETRY_DISABLED: "1",
-              ...(input.apiKey ? { DEEPSEEK_API_KEY: input.apiKey } : {}),
-            },
-          },
-        })
-        .pipe(
-          Layer.provide(
-            Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
-          ),
-        ),
-    );
-    return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(
-      Effect.provide(context),
-    );
-  },
-);
+export const makeDeepseekHarnessAcpRuntime = Effect.fn("makeDeepseekHarnessAcpRuntime")(function* (
+  input: DeepseekHarnessAcpRuntimeInput,
+) {
+  const context = yield* Layer.build(
+    AcpSessionRuntime.layer({
+      ...input,
+      authMethodId: "deepseek-api-key",
+      resumeMethod: "load",
+      cancelBehavior: "wait-for-prompt",
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+      },
+      spawn: {
+        command: input.settings.binaryPath.trim() || "dsh",
+        args: ["--profile", input.settings.profile.trim() || "acp"],
+        cwd: input.cwd,
+        env: {
+          ...(input.baseEnvironment ?? process.env),
+          ...input.agentDeviceEnvironment,
+          ...input.workspaceEnvironment,
+          DSH_HOME: input.dshHome,
+          DSH_TELEMETRY_DISABLED: "1",
+          ...(input.apiKey ? { DEEPSEEK_API_KEY: input.apiKey } : {}),
+        },
+      },
+    }).pipe(
+      Layer.provide(
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, input.childProcessSpawner),
+      ),
+    ),
+  );
+  return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
+});
 
 export const DEEPSEEK_HARNESS_CANCEL_TIMEOUT = "20 seconds";
 
@@ -96,41 +88,44 @@ export function deepseekHarnessModelOption(
   const model = configOptions.find((option) => option.id === "model");
   if (model?.type !== "select") return undefined;
   if (!slug) return model.currentValue;
+  // Threads saved before the API exposed `deepseek-flash` still select the
+  // retired slug; drive the live session with the model the catalog offers.
+  const wanted = slug === "deepseek-v4-flash" ? "deepseek-flash" : slug;
   const values = model.options.flatMap((entry) =>
     "value" in entry ? [entry.value] : entry.options.map((option) => option.value),
   );
   return values.find((value) => {
     const qualified = deepseekHarnessModelSlug(value);
     return (
-      value === slug ||
-      qualified === slug ||
-      qualified.slice(qualified.lastIndexOf("/") + 1) === slug
+      value === wanted ||
+      qualified === wanted ||
+      qualified.slice(qualified.lastIndexOf("/") + 1) === wanted
     );
   });
 }
 
-export const applyDeepseekHarnessModelSelection = Effect.fn(
-  "applyDeepseekHarnessModelSelection",
-)(function* <E>(input: {
-  readonly runtime: Pick<
-    AcpSessionRuntime.AcpSessionRuntime["Service"],
-    "getConfigOptions" | "setModel" | "setConfigOption"
-  >;
-  readonly model: string | null | undefined;
-  readonly reasoningEffort?: string | undefined;
-  readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
-}): Effect.fn.Return<string | undefined, E> {
-  const options = yield* input.runtime.getConfigOptions;
-  const option = deepseekHarnessModelOption(options, input.model);
-  if (option !== undefined) {
-    yield* input.runtime.setModel(option).pipe(Effect.mapError(input.mapError));
-  }
-  if (input.reasoningEffort !== undefined) {
-    yield* input.runtime
-      .setConfigOption("reasoning_effort", input.reasoningEffort)
-      .pipe(Effect.mapError(input.mapError));
-  }
-  return option === undefined ? undefined : deepseekHarnessModelSlug(option);
-});
+export const applyDeepseekHarnessModelSelection = Effect.fn("applyDeepseekHarnessModelSelection")(
+  function* <E>(input: {
+    readonly runtime: Pick<
+      AcpSessionRuntime.AcpSessionRuntime["Service"],
+      "getConfigOptions" | "setModel" | "setConfigOption"
+    >;
+    readonly model: string | null | undefined;
+    readonly reasoningEffort?: string | undefined;
+    readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
+  }): Effect.fn.Return<string | undefined, E> {
+    const options = yield* input.runtime.getConfigOptions;
+    const option = deepseekHarnessModelOption(options, input.model);
+    if (option !== undefined) {
+      yield* input.runtime.setModel(option).pipe(Effect.mapError(input.mapError));
+    }
+    if (input.reasoningEffort !== undefined) {
+      yield* input.runtime
+        .setConfigOption("reasoning_effort", input.reasoningEffort)
+        .pipe(Effect.mapError(input.mapError));
+    }
+    return option === undefined ? undefined : deepseekHarnessModelSlug(option);
+  },
+);
 
 export const buildDeepseekHarnessPrompt = buildAcpPrompt;

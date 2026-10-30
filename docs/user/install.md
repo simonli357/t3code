@@ -111,16 +111,16 @@ and enable the provider you want. Installation, login, and configuration belong
 to that environment's machine, even when you connect from a phone or another
 computer.
 
-| Provider    | Install and authenticate                                                                                                                                  |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex       | [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`. |
-| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                              |
-| Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
-| Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
-| OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
-| Pi          | Install [Pi](https://github.com/earendil-works/pi) and `pi-acp`, configure Pi's model provider, then enable Pi in T3 Code.                                  |
-| Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
-| DeepSeek Harness | Install the [T3-pinned ACP build](https://github.com/simonli357/deepseek-harness/tree/2ab60e149340fad75f884c7250ec9e93acbb3afb), then add a DeepSeek API key in T3 Code. |
+| Provider         | Install and authenticate                                                                                                                                                 |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Codex            | [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`.                |
+| Claude           | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                                             |
+| Cursor           | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                                    |
+| Grok Build       | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                                       |
+| OpenCode         | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                                 |
+| Pi               | Install [Pi](https://github.com/earendil-works/pi) and `pi-acp`, configure Pi's model provider, then enable Pi in T3 Code.                                               |
+| Antigravity      | Install and sign in with Google from T3 Code's provider settings.                                                                                                        |
+| DeepSeek Harness | Install the [T3-pinned ACP build](https://github.com/simonli357/deepseek-harness/tree/0c8b364efa1c3308b9b4be8da99e60a12427f921), then add a DeepSeek API key in T3 Code. |
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
 **Binary path** in provider settings, especially when using a version manager.
