@@ -54,6 +54,7 @@ import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
   accountWeightsSupported: true,
+  accountCapsSupported: true,
   policy: { ...defaultAllocationPolicy, version: 4, coordinatorEnvironmentId: "host" },
   authorityAvailable: true,
   reservations: [],
@@ -318,6 +319,195 @@ describe("Provider allocation editor", () => {
     await act(() => button("Save settings").click());
     const save = readCalls("policy").at(-1)![0].input.input.policy;
     expect(save.claude).toMatchObject({ preset: "custom", dailyPoints: 22 });
+  });
+  it("saves optional hard caps with independent worker and master stop actions", async () => {
+    let savedPolicy = snapshot.policy;
+    const previous = state.execute.getMockImplementation()!;
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+      if (arg.input._tag === "snapshot")
+        return { _tag: "Success", value: { snapshot: { ...snapshot, policy: savedPolicy } } };
+      if (arg.input._tag === "policy") {
+        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
+        return { _tag: "Success", value: { policy: savedPolicy } };
+      }
+      return previous(arg);
+    });
+
+    expect(savedPolicy.accountCaps).toEqual([]);
+    expect(input("SL weekly cap").value).toBe("");
+    expect(input("Stop workers").disabled).toBe(true);
+    await change("SL weekly cap", "101");
+    expect(input("SL weekly cap").getAttribute("aria-invalid")).toBe("true");
+    expect(button("Save settings").disabled).toBe(true);
+    await change("SL weekly cap", "80");
+    expect((input("Stop workers") as HTMLInputElement).checked).toBe(true);
+    expect((input("Stop masters") as HTMLInputElement).checked).toBe(false);
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.accountCaps).toHaveLength(1);
+    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
+      weeklyPercent: 80,
+      fiveHourPercent: null,
+      stopWorkers: true,
+      stopMasters: false,
+    });
+
+    await act(() => input("Stop workers").click());
+    expect(button("Save settings").disabled).toBe(false);
+    expect(container.textContent).toContain("saved but inactive");
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
+      stopWorkers: false,
+      stopMasters: false,
+    });
+    await act(() => input("Stop masters").click());
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
+      stopWorkers: false,
+      stopMasters: true,
+    });
+  });
+  it("shows the Claude 5-hour cap only for Claude and reports missing telemetry", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    const host = snapshot.inventories[0]!;
+    state.execute.mockImplementation(async (arg) => {
+      if (arg.input._tag !== "snapshot") return previous(arg);
+      return {
+        _tag: "Success",
+        value: {
+          snapshot: {
+            ...snapshot,
+            inventories: [
+              {
+                ...host,
+                accounts: host.accounts.map((account) => ({
+                  ...account,
+                  driver: ProviderDriverKind.make("claudeAgent"),
+                  windows: [
+                    {
+                      id: "seven_day",
+                      label: "Weekly",
+                      kind: "weekly" as const,
+                      usedPoints: 42,
+                      checkedAt: host.observedAt,
+                      resetsAt: "2099-10-30T12:00:00.000Z",
+                      cycleStartedAt: "2026-10-23T12:00:00.000Z",
+                      durationHours: 168,
+                      ratePointsPerHour: null,
+                      samples: 0,
+                      rateAgeMinutes: null,
+                    },
+                  ],
+                })),
+              },
+            ],
+          },
+        },
+      };
+    });
+    await act(() => button("Refresh").click());
+    expect(container.textContent).toContain("Claude 5-hour cap");
+    expect(container.textContent).toContain("Provider did not report this window.");
+    expect(container.textContent).toContain("Last read");
+    expect(input("SL Claude 5-hour cap").value).toBe("");
+  });
+  it("does not offer subscription caps for an API-key account with cached windows", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    state.execute.mockImplementation(async (arg) => {
+      if (arg.input._tag !== "snapshot") return previous(arg);
+      const host = snapshot.inventories[0]!;
+      return {
+        _tag: "Success",
+        value: {
+          snapshot: {
+            ...snapshot,
+            inventories: [
+              {
+                ...host,
+                accounts: host.accounts.map((account, index) =>
+                  index === 0
+                    ? {
+                        ...account,
+                        available: false,
+                        usageLimitsUnavailableReason: "unsupported" as const,
+                      }
+                    : account,
+                ),
+              },
+            ],
+          },
+        },
+      };
+    });
+    await act(() => button("Refresh").click());
+    expect(container.querySelector('[aria-label="SL weekly cap"]')).toBeNull();
+    expect(container.textContent).toContain("Subscription quota is unsupported for this account.");
+  });
+  it("does not offer subscription caps until quota provenance is verified", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    state.execute.mockImplementation(async (arg) => {
+      if (arg.input._tag !== "snapshot") return previous(arg);
+      const host = snapshot.inventories[0]!;
+      return {
+        _tag: "Success",
+        value: {
+          snapshot: {
+            ...snapshot,
+            inventories: [
+              {
+                ...host,
+                accounts: host.accounts.map((account, index) =>
+                  index === 0
+                    ? { ...account, usageLimitsUnavailableReason: "unverified" as const }
+                    : account,
+                ),
+              },
+            ],
+          },
+        },
+      };
+    });
+    await act(() => button("Refresh").click());
+    expect(container.querySelector('[aria-label="SL weekly cap"]')).toBeNull();
+    expect(container.textContent).toContain(
+      "The subscription quota source is not verified right now.",
+    );
+  });
+  it("keeps cap controls available through a transient probe failure", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    state.execute.mockImplementation(async (arg) => {
+      if (arg.input._tag !== "snapshot") return previous(arg);
+      const host = snapshot.inventories[0]!;
+      return {
+        _tag: "Success",
+        value: {
+          snapshot: {
+            ...snapshot,
+            inventories: [
+              {
+                ...host,
+                accounts: host.accounts.map((account, index) =>
+                  index === 0
+                    ? {
+                        ...account,
+                        available: false,
+                        windows: [],
+                        usageLimitsUnavailableReason: "probeFailed" as const,
+                      }
+                    : account,
+                ),
+              },
+            ],
+          },
+        },
+      };
+    });
+    await act(() => button("Refresh").click());
+    const weekly = input("SL weekly cap") as HTMLInputElement;
+    expect(weekly).not.toBeNull();
+    expect(weekly.disabled).toBe(false);
+    expect(container.textContent).toContain(
+      "An existing reached cap stays enforced until reset or a configuration change",
+    );
   });
   it("rejects empty or out-of-range numbers and retains offline last-known drafts", async () => {
     await change("Codex Daily usage budget", "");
@@ -599,4 +789,19 @@ it("keeps account weights read-only when the coordinator cannot persist them", a
   expect(container.textContent).toContain(
     "Update the coordinator to edit account preference weights",
   );
+});
+
+it("keeps hard caps read-only when the coordinator cannot persist them", async () => {
+  const previous = state.execute.getMockImplementation()!;
+  state.execute.mockImplementation(async (arg) =>
+    arg.input._tag === "snapshot"
+      ? {
+          _tag: "Success",
+          value: { snapshot: { ...snapshot, accountCapsSupported: undefined } },
+        }
+      : previous(arg),
+  );
+  await act(() => button("Refresh").click());
+  expect(input("SL weekly cap").disabled).toBe(true);
+  expect(container.textContent).toContain("Update the coordinator to edit hard caps.");
 });

@@ -2,6 +2,7 @@ import * as Computers from "./computers/Computers.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as WorkerControls from "./orchestration/WorkerControls.ts";
 import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
+import * as UsageCapEnforcement from "./allocation/UsageCapEnforcement.ts";
 import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
 import * as PeerLinks from "./orchestration/PeerLinks.ts";
 import * as SessionMoves from "./orchestration/SessionMoves.ts";
@@ -278,6 +279,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(SessionMoves.liveLayer),
   Layer.provideMerge(WorkerControls.liveLayer),
+  Layer.provideMerge(UsageCapEnforcement.liveLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),
   Layer.provideMerge(CheckpointReactorLive),

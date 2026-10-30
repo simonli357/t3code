@@ -69,6 +69,38 @@ const measurements: UsageMeasurementsReport = {
   limitations: [],
 };
 
+it("carries unavailable and unverified subscription-quota provenance into allocation", () => {
+  const unsupported = {
+    ...provider("api@example.test"),
+    usageLimits: {
+      checkedAt: at,
+      windows: [],
+      unavailable: { reason: "unsupported" as const },
+    },
+  };
+  expect(
+    allocationInventory({
+      environmentId: "host",
+      at,
+      providers: [unsupported],
+      measurements,
+      threads: [],
+    }).accounts[0],
+  ).toMatchObject({
+    available: false,
+    usageLimitsUnavailableReason: "unsupported",
+  });
+  expect(
+    allocationInventory({
+      environmentId: "host",
+      at,
+      providers: [{ ...provider("missing@example.test"), usageLimits: undefined }],
+      measurements,
+      threads: [],
+    }).accounts[0],
+  ).toMatchObject({ usageLimitsUnavailableReason: "unverified" });
+});
+
 it("counts running, starting and working background sessions, excluding completed, idle and monitoring sessions", () => {
   const decode = Schema.decodeUnknownSync(OrchestrationThreadShell);
   const thread = (id: string, status: string, backgroundLiveness?: string) =>

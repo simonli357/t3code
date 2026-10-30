@@ -3,6 +3,7 @@ import {
   allocationPreferenceKey,
   allocationPreferenceWeight,
   type AllocationAccount,
+  type AllocationAccountCap,
   type AllocationWindow,
   type AllocationPolicy,
   type AllocationSnapshot,
@@ -211,6 +212,39 @@ export const allocationEstimateFields = [
     help: "Maximum budget headroom points added by account weights (weight / 100). The previous account gets this many extra points. Changes apply immediately.",
   },
 ] as const;
+
+export function allocationAccountCap(
+  policy: AllocationPolicy,
+  key: string,
+): AllocationAccountCap | undefined {
+  return policy.accountCaps?.find((cap) => cap.key === key);
+}
+
+export function allocationSupportsFiveHourCap(driver: string): boolean {
+  return driver === "claudeAgent";
+}
+
+export function allocationSubscriptionCapSource(
+  accounts: readonly AllocationAccount[],
+): "available" | "probeFailed" | "unsupported" | "unverified" {
+  if (accounts.some((account) => account.usageLimitsUnavailableReason === undefined))
+    return "available";
+  if (accounts.some((account) => account.usageLimitsUnavailableReason === "unsupported"))
+    return "unsupported";
+  if (accounts.some((account) => account.usageLimitsUnavailableReason === "unverified"))
+    return "unverified";
+  return accounts.length > 0 &&
+    accounts.every((account) => account.usageLimitsUnavailableReason === "probeFailed")
+    ? "probeFailed"
+    : "unverified";
+}
+
+export function allocationSupportsSubscriptionCaps(
+  accounts: readonly AllocationAccount[],
+): boolean {
+  const source = allocationSubscriptionCapSource(accounts);
+  return source === "available" || source === "probeFailed";
+}
 
 export function allocationAccountGroups(
   snapshot: AllocationSnapshot | null,

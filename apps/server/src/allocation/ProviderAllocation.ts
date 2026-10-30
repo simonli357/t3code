@@ -498,6 +498,7 @@ const make = Effect.gen(function* () {
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
     const policy = yield* store.policy;
     const authorityAvailable = policy.coordinatorEnvironmentId === local.environmentId;
+    if (operation._tag === "caps") return { policy };
     if (
       operation._tag === "modelSnapshot" ||
       operation._tag === "modelPolicy" ||
@@ -664,6 +665,7 @@ const make = Effect.gen(function* () {
       return {
         snapshot: {
           accountWeightsSupported: true,
+          accountCapsSupported: true,
           policy,
           inventories,
           reservations: yield* store.reservations,

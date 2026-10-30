@@ -619,6 +619,9 @@ const make = Effect.gen(function* () {
               ...(input.policy.accountWeights === undefined && current.accountWeights !== undefined
                 ? { accountWeights: current.accountWeights }
                 : {}),
+              ...(input.policy.accountCaps === undefined && current.accountCaps !== undefined
+                ? { accountCaps: current.accountCaps }
+                : {}),
               version: current.version + 1,
             };
             const weights = next.accountWeights ?? [];
@@ -631,6 +634,27 @@ const make = Effect.gen(function* () {
               return yield* new AllocationError({
                 code: "invalid",
                 detail: "Account weights must be unique and between 0 and 100.",
+              });
+            const caps = next.accountCaps ?? [];
+            if (
+              new Set(caps.map((entry) => entry.key)).size !== caps.length ||
+              caps.some(
+                (entry) =>
+                  (entry.weeklyPercent === null && entry.fiveHourPercent === null) ||
+                  (entry.weeklyPercent !== null &&
+                    (!Number.isFinite(entry.weeklyPercent) ||
+                      entry.weeklyPercent < 0 ||
+                      entry.weeklyPercent > 100)) ||
+                  (entry.fiveHourPercent !== null &&
+                    (!Number.isFinite(entry.fiveHourPercent) ||
+                      entry.fiveHourPercent < 0 ||
+                      entry.fiveHourPercent > 100)),
+              )
+            )
+              return yield* new AllocationError({
+                code: "invalid",
+                detail:
+                  "Account caps need unique identities, at least one threshold, and percentages from 0 to 100.",
               });
             if (next.defaultHours > next.maxForecastHours)
               return yield* new AllocationError({

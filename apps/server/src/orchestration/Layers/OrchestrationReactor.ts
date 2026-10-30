@@ -2,6 +2,7 @@ import * as WorkerControls from "../WorkerControls.ts";
 import * as SessionMoves from "../SessionMoves.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import {
   OrchestrationReactor,
@@ -16,6 +17,7 @@ import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 import * as StorageCleanup from "../../storageCleanup.ts";
+import * as UsageCapEnforcement from "../../allocation/UsageCapEnforcement.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -29,6 +31,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const workers = yield* WorkerControls.WorkerControls;
   const moves = yield* SessionMoves.SessionMoves;
   const storageCleanup = yield* StorageCleanup.StorageCleanup;
+  const usageCaps = yield* Effect.serviceOption(UsageCapEnforcement.UsageCapEnforcement);
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
     yield* providerRuntimeIngestion.start();
@@ -40,6 +43,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* pullRequestSyncReactor.start();
     yield* agentAwarenessRelay.start();
     yield* storageCleanup.start();
+    if (Option.isSome(usageCaps)) yield* usageCaps.value.start().pipe(Effect.orDie);
     yield* workers.start().pipe(Effect.orDie);
     yield* moves.start().pipe(Effect.orDie);
   });

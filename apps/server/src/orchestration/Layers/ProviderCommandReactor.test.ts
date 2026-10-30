@@ -79,6 +79,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import * as UsageCapEnforcement from "../../allocation/UsageCapEnforcement.ts";
+import type { UsageCapReach } from "../../allocation/usageCaps.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -192,6 +194,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
+    readonly usageCap?: UsageCapReach;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -202,6 +205,9 @@ describe("ProviderCommandReactor", () => {
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     const tryHandlePromptCommand = vi.fn<ProviderAuthService["Service"]["tryHandlePromptCommand"]>(
       input?.tryHandlePromptCommandEffect ?? (() => Effect.succeed(false)),
+    );
+    const checkUsageCap = vi.fn((_threadId: ThreadId, _targetInstanceId?: ProviderInstanceId) =>
+      Effect.succeed(input?.usageCap ?? null),
     );
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
@@ -507,6 +513,13 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(
+        input?.usageCap
+          ? Layer.mock(UsageCapEnforcement.UsageCapEnforcement)({
+              check: checkUsageCap,
+            })
+          : Layer.empty,
+      ),
     );
     runtime = ManagedRuntime.make(layer);
 
@@ -624,6 +637,7 @@ describe("ProviderCommandReactor", () => {
           }),
         ),
       tryHandlePromptCommand,
+      checkUsageCap,
       startSession,
       sendTurn,
       compactThread,
@@ -952,6 +966,129 @@ describe("ProviderCommandReactor", () => {
         thread?.activities.some((activity) => activity.kind === "provider.auth.signed-out"),
       ).toBe(false);
       expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([]);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    }),
+  );
+
+  effectIt.effect("blocks every provider turn start while its account cap is active", () =>
+    Effect.gen(function* () {
+      const usageCap: UsageCapReach = {
+        accountKey: "capped-account",
+        driver: "codex",
+        windowId: "weekly",
+        windowLabel: "Weekly",
+        capPercent: 80,
+        usedPercent: 84,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        resetsAt: "2026-01-02T00:00:00.000Z",
+        cycleKey: "2026-01-02T00:00:00.000Z",
+        latchId: "cap-latch",
+        enforcedAt: "2026-01-01T00:00:00.000Z",
+        stopWorkers: true,
+        stopMasters: false,
+      };
+      const harness = yield* Effect.promise(() => createHarness({ usageCap }));
+      const threadId = ThreadId.make("thread-1");
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-usage-cap-blocked"),
+        threadId,
+        message: {
+          messageId: MessageId.make("message-usage-cap-blocked"),
+          role: "user",
+          text: "Automatic follow-up",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => harness.drain());
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+          return (
+            thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+            false
+          );
+        }),
+      );
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({
+        status: "error",
+        lastError: expect.stringContaining("Weekly usage is 84%"),
+      });
+      expect(thread?.activities).toContainEqual(
+        expect.objectContaining({
+          kind: "provider.turn.start.failed",
+          summary: "Account usage cap reached",
+          payload: expect.objectContaining({
+            detail: expect.stringContaining(
+              "stays active until the provider window resets or the cap is raised",
+            ),
+          }),
+        }),
+      );
+      expect(harness.checkUsageCap).toHaveBeenCalledWith(
+        threadId,
+        ProviderInstanceId.make("codex"),
+      );
+      expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([]);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    }),
+  );
+
+  effectIt.effect("checks the requested account before a provider alias switch", () =>
+    Effect.gen(function* () {
+      const usageCap: UsageCapReach = {
+        accountKey: "capped-account",
+        driver: "claudeAgent",
+        windowId: "weekly",
+        windowLabel: "Weekly",
+        capPercent: 80,
+        usedPercent: 84,
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        resetsAt: "2026-01-02T00:00:00.000Z",
+        cycleKey: "2026-01-02T00:00:00.000Z",
+        latchId: "cap-latch",
+        enforcedAt: "2026-01-01T00:00:00.000Z",
+        stopWorkers: true,
+        stopMasters: false,
+      };
+      const harness = yield* Effect.promise(() => createHarness({ usageCap }));
+      const threadId = ThreadId.make("thread-1");
+      const cappedInstanceId = ProviderInstanceId.make("claude-capped");
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-usage-cap-alias-switch"),
+        threadId,
+        message: {
+          messageId: MessageId.make("message-usage-cap-alias-switch"),
+          role: "user",
+          text: "Switch to the capped Claude account",
+          attachments: [],
+        },
+        modelSelection: { instanceId: cappedInstanceId, model: "claude" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => harness.drain());
+      yield* Effect.promise(() =>
+        waitFor(async () => {
+          const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+          return thread?.session?.lastError?.includes("Weekly usage is 84%") ?? false;
+        }),
+      );
+
+      expect(harness.checkUsageCap).toHaveBeenCalledWith(threadId, cappedInstanceId);
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.sendTurn).not.toHaveBeenCalled();
     }),

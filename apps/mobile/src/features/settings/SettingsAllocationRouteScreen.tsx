@@ -16,6 +16,9 @@ import {
   createAllocationCommands,
   allocationCurveFields,
   allocationAccountGroups,
+  allocationAccountCap,
+  allocationSubscriptionCapSource,
+  allocationSupportsSubscriptionCaps,
   allocationSummary,
   allocationAccountLabel,
 } from "@t3tools/client-runtime/state/provider-allocation";
@@ -197,6 +200,46 @@ export function SettingsAllocationRouteScreen() {
                 {account.hosts.join(", ")}
               </Text>
             ))}
+            <Text className="font-semibold">Hard usage caps</Text>
+            <Text>
+              Hard caps are enforced by the server for workers and masters on this account. Edit
+              thresholds and stop actions in the web settings page.
+            </Text>
+            {allocationAccountGroups(snapshot, snapshot.policy).map((account) => {
+              const cap = allocationAccountCap(snapshot.policy, account.key);
+              const capSource = allocationSubscriptionCapSource(account.members);
+              if (!allocationSupportsSubscriptionCaps(account.members))
+                return (
+                  <Text key={`cap:${account.key}`}>
+                    {account.label}:{" "}
+                    {capSource === "unsupported"
+                      ? "subscription quota is unsupported"
+                      : "subscription quota source is not verified"}
+                    ; hard caps are inactive.
+                  </Text>
+                );
+              return (
+                <Text key={`cap:${account.key}`}>
+                  {account.label}: weekly{" "}
+                  {cap?.weeklyPercent === null || cap?.weeklyPercent === undefined
+                    ? "disabled"
+                    : `${cap.weeklyPercent}%`}
+                  {account.driver === "claudeAgent"
+                    ? ` Â· Claude 5-hour ${
+                        cap?.fiveHourPercent === null || cap?.fiveHourPercent === undefined
+                          ? "disabled"
+                          : `${cap.fiveHourPercent}%`
+                      }`
+                    : ""}
+                  {cap
+                    ? ` Â· stop workers ${cap.stopWorkers ? "on" : "off"} Â· stop masters ${cap.stopMasters ? "on" : "off"}`
+                    : ""}
+                  {capSource === "probeFailed"
+                    ? " Â· quota read failed; reached caps stay enforced"
+                    : ""}
+                </Text>
+              );
+            })}
           </View>
         )}
         <Pressable

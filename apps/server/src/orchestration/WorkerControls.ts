@@ -68,6 +68,9 @@ const reportHeader = (title: string, createdAt?: string) =>
 // A peer message names its sender and time on its first line. A delivery repeated after a
 // lost reply may land in a later minute, so it matches on the rest.
 const afterFirstLine = (text: string) => text.slice(text.indexOf("\n"));
+const USAGE_CAP_NOTICE_HEADER = "[T3 worker stopped by account usage cap]";
+const isUsageCapNotice = (job: { readonly prompt: string }) =>
+  job.prompt.startsWith(USAGE_CAP_NOTICE_HEADER);
 
 export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError", {
   message: Schema.String,
@@ -550,6 +553,11 @@ export class WorkerControls extends Context.Service<
       owner: ThreadId,
       input: typeof ControlInput.Type,
     ) => Effect.Effect<typeof WorkerResult.Type, WorkerError>;
+    /** Durable, once-per-request notice that a hard account cap stopped a worker. */
+    readonly notifyUsageCap: (
+      workerId: ThreadId,
+      input: { readonly requestId: string; readonly detail: string },
+    ) => Effect.Effect<boolean, WorkerError>;
     readonly handoff: (
       owner: ThreadId,
       input: typeof HandoffInput.Type,
@@ -1536,9 +1544,14 @@ const make = Effect.gen(function* () {
       if (job.kind !== "message") {
         // A master's record of a peer worker receives that worker's forwarded reports.
         if (!worker || (worker.state !== "ready" && worker.state !== "remote")) continue;
-        if (job.kind !== "work" && (!worker.notify || worker.owner_id === null)) continue;
+        if (
+          job.kind !== "work" &&
+          !isUsageCapNotice(job) &&
+          (!worker.notify || worker.owner_id === null)
+        )
+          continue;
       }
-      if (worker && (job.kind === "notice" || job.kind === "blocked")) {
+      if (worker && (job.kind === "notice" || job.kind === "blocked") && !isUsageCapNotice(job)) {
         const status = yield* communicationStatus(worker.thread_id, job.id).pipe(
           Effect.catch((cause) =>
             sql`UPDATE custom_worker_jobs SET error = ${failure(cause).message} WHERE id = ${job.id}`.pipe(
@@ -1703,6 +1716,12 @@ const make = Effect.gen(function* () {
             },
             createdAt: yield* now,
           });
+        }
+        if (isReport && isUsageCapNotice(job)) {
+          // Keep the stop notice visible without waking a master that the same
+          // account cap may have stopped.
+          yield* sql`UPDATE custom_worker_jobs SET state = 'completed', error = NULL WHERE id = ${job.id}`;
+          return;
         }
         const sequence = yield* engine.latestSequence;
         const target = yield* thread(job.target_id);
@@ -2219,6 +2238,22 @@ const make = Effect.gen(function* () {
         input.prompt,
       ),
     );
+  }, Effect.mapError(failure));
+  const notifyUsageCap = Effect.fn("WorkerControls.notifyUsageCap")(function* (
+    workerId: ThreadId,
+    input: { readonly requestId: string; readonly detail: string },
+  ) {
+    const worker =
+      (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${workerId}`)[0];
+    if (!worker || worker.owner_id === null) return false;
+    const existing = yield* sql<{
+      id: string;
+    }>`SELECT id FROM custom_worker_jobs WHERE id = ${input.requestId}`;
+    if (existing.length) return false;
+    const prompt = `${USAGE_CAP_NOTICE_HEADER}\n\n${input.detail}\n\nRead the worker's saved state before deciding whether to raise the cap, switch accounts, or wait for the provider window to reset. The worker will not restart automatically.`;
+    yield* enqueue(input.requestId, worker, worker.owner_id, "blocked", prompt);
+    yield* drain();
+    return true;
   }, Effect.mapError(failure));
   const list = Effect.fn("WorkerControls.list")(function* (owner: ThreadId) {
     return yield* Effect.forEach(
@@ -4356,6 +4391,7 @@ const make = Effect.gen(function* () {
         warnIfRetired(owner),
         Effect.mapError(failure),
       ),
+    notifyUsageCap,
     start,
     drain,
   });

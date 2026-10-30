@@ -15,6 +15,7 @@ import { ProviderOptionSelection, ModelCapabilities } from "./model.ts";
 const Points = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
 const Hours = Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 }));
 const Names = Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(100));
+const OptionalCapPercent = Schema.NullOr(Points);
 export const WORKER_ACCOUNT_DISABLED_REASON =
   "Turned off for workers in Provider allocation settings";
 export const AllocationRequest = Schema.Struct({
@@ -57,6 +58,19 @@ const Override = Schema.Struct({
   // Informational only: neither a plan nor a banked credit replenishes quota.
   resetPlan: Schema.optional(Schema.Literals(["possible", "planned", "manual-confirmed"])),
 });
+/**
+ * Optional hard usage thresholds for one account identity. Weekly applies to
+ * an account-wide weekly window; Claude also reports a five-hour session.
+ * Missing thresholds are disabled. These are independent of advisory budgets.
+ */
+export const AllocationAccountCap = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  weeklyPercent: OptionalCapPercent,
+  fiveHourPercent: OptionalCapPercent,
+  stopWorkers: Schema.Boolean,
+  stopMasters: Schema.Boolean,
+});
+export type AllocationAccountCap = typeof AllocationAccountCap.Type;
 export const AllocationPolicy = Schema.Struct({
   version: NonNegativeInt,
   /** Legacy mode retained for saved policy compatibility; explicit Start always submits work. */
@@ -83,6 +97,8 @@ export const AllocationPolicy = Schema.Struct({
       }),
     ).check(Schema.isMaxLength(100)),
   ),
+  /** Hard stops keyed by `allocationPreferenceKey`; absent or null caps are disabled. */
+  accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
   overrides: Schema.Array(Override).check(Schema.isMaxLength(100)),
 });
 export type AllocationPolicy = typeof AllocationPolicy.Type;
@@ -123,6 +139,7 @@ export const defaultAllocationPolicy: AllocationPolicy = {
   minimumSamples: 5,
   reservationMinutes: 5,
   hysteresisPoints: 1,
+  accountCaps: [],
   overrides: [],
 };
 
@@ -171,6 +188,10 @@ export const AllocationAccount = Schema.Struct({
   label: Schema.String,
   available: Schema.Boolean,
   unavailableReason: Schema.NullOr(Schema.String),
+  /** Why this account has no currently verified subscription quota source. */
+  usageLimitsUnavailableReason: Schema.optional(
+    Schema.Literals(["unsupported", "unverified", "probeFailed"]),
+  ),
   limitedUntil: Schema.NullOr(IsoDateTime),
   models: Schema.Array(
     Schema.Struct({ slug: Schema.String, capabilities: Schema.NullOr(ModelCapabilities) }),
@@ -402,6 +423,7 @@ export const ModelRoutingSnapshot = Schema.Struct({
 export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AllocationSnapshot = Schema.Struct({
   accountWeightsSupported: Schema.optional(Schema.Boolean),
+  accountCapsSupported: Schema.optional(Schema.Boolean),
   policy: AllocationPolicy,
   inventories: Schema.Array(AllocationInventory),
   reservations: Schema.Array(AllocationReservation),
@@ -530,6 +552,8 @@ export const AllocationOperation = Schema.TaggedUnion({
   modelPreview: { request: ModelRoutingRequest, policy: Schema.optional(ModelRoutingPolicy) },
   modelAllocate: { request: ModelRoutingRequest },
   connections: {},
+  /** Policy-only read for background enforcement; it never collects quota or demand. */
+  caps: {},
   snapshot: {},
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
   allocate: { request: AllocationRequest },

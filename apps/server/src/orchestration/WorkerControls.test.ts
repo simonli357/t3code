@@ -1578,6 +1578,45 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(reports).toHaveLength(1);
     }).pipe(Effect.scoped),
   );
+  it.effect("shows one usage-cap notice without waking the stopped master", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("usage-cap-notice");
+      yield* service.spawn(owner, input);
+      yield* (yield* Settings.ServerSettingsService).updateSettings({
+        workerCommunicationWindowMinutes: 15,
+      });
+      yield* sql`UPDATE custom_workers SET notify = 0 WHERE thread_id = ${worker}`;
+      expect(
+        yield* service.notifyUsageCap(worker, {
+          requestId: "usage-cap:test:worker",
+          detail: "Weekly usage is 80% of the configured 80% cap.",
+        }),
+      ).toBe(true);
+      expect(
+        yield* service.notifyUsageCap(worker, {
+          requestId: "usage-cap:test:worker",
+          detail: "Weekly usage is 80% of the configured 80% cap.",
+        }),
+      ).toBe(false);
+      yield* service.drain();
+      const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(
+        messages.filter((message) => message.text.includes("stopped by account usage cap")),
+      ).toHaveLength(1);
+      expect(
+        yield* sql<{ count: number }>`SELECT COUNT(*) AS count FROM orchestration_events
+          WHERE stream_id = ${owner} AND event_type = 'thread.turn-start-requested'`,
+      ).toEqual([{ count: 0 }]);
+      expect(
+        (yield* sql<{ state: string }>`
+          SELECT state FROM custom_worker_jobs WHERE id = 'usage-cap:test:worker'
+        `)[0]?.state,
+      ).toBe("completed");
+    }),
+  );
   it.effect("delivers waiting reports after an outstanding master steer finishes", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;

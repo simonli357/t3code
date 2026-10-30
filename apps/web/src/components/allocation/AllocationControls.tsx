@@ -2,15 +2,21 @@ import { useId } from "react";
 import {
   defaultAllocationPolicy,
   PROVIDER_DISPLAY_NAMES,
+  type AllocationAccount,
+  type AllocationAccountCap,
   type AllocationPolicy,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
 import {
+  allocationAccountCap,
   allocationCurveFields,
   allocationEstimateFields,
   allocationAccountGroups,
   allocationModelRows,
   allocationRateEvidence,
+  allocationSubscriptionCapSource,
+  allocationSupportsFiveHourCap,
+  allocationSupportsSubscriptionCaps,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { Button } from "../ui/button";
 
@@ -86,6 +92,81 @@ function NumericControl({
       )}
     </label>
   );
+}
+
+function OptionalCapControl({
+  name,
+  value,
+  help,
+  disabled,
+  onChange,
+}: {
+  name: string;
+  value: number | null;
+  help: string;
+  disabled: boolean;
+  onChange: (value: number | null) => void;
+}) {
+  const id = useId();
+  const invalid = value !== null && (!Number.isFinite(value) || value < 0 || value > 100);
+  return (
+    <label className="grid min-w-0 gap-1">
+      <span className="font-medium">{name}</span>
+      <span id={`${id}-availability`} className="text-xs text-muted-foreground">
+        % of allowance Â· blank disables this cap
+      </span>
+      <input
+        className={field}
+        aria-label={`${name} current`}
+        aria-describedby={`${id}-availability ${id}-help`}
+        type="number"
+        min={0}
+        max={100}
+        step={0.1}
+        value={value ?? ""}
+        aria-invalid={invalid}
+        disabled={disabled}
+        placeholder="Disabled"
+        onChange={(event) =>
+          onChange(
+            event.currentTarget.value === "" || !Number.isFinite(event.currentTarget.valueAsNumber)
+              ? null
+              : event.currentTarget.valueAsNumber,
+          )
+        }
+      />
+      <span id={`${id}-help`} className="text-xs text-muted-foreground">
+        {help}
+      </span>
+      {invalid && <span className="text-xs text-destructive">Enter a cap from 0 to 100.</span>}
+    </label>
+  );
+}
+
+function latestCapReading(
+  members: readonly AllocationAccount[],
+  kind: "weekly" | "fiveHour",
+  maxAgeMinutes: number,
+) {
+  if (!allocationSupportsSubscriptionCaps(members))
+    return "This account has no verified subscription quota source, so this cap is inactive.";
+  if (allocationSubscriptionCapSource(members) === "probeFailed")
+    return "The provider quota refresh failed. An existing reached cap stays enforced until reset or a configuration change, but this failed reading cannot create a new stop.";
+  const windows = members
+    .filter((account) => account.usageLimitsUnavailableReason === undefined)
+    .flatMap((account) => account.windows)
+    .filter((window) =>
+      kind === "weekly"
+        ? window.kind === "weekly" && (window.models === undefined || window.models.length === 0)
+        : window.id === "five_hour",
+    )
+    .sort((left, right) => Date.parse(right.checkedAt) - Date.parse(left.checkedAt));
+  const window = windows[0];
+  if (!window) return "Provider did not report this window.";
+  if (window.resetsAt && Date.parse(window.resetsAt) <= Date.now())
+    return `Last read ${number(window.usedPoints)}%; the window has reset.`;
+  const stale = Date.now() - Date.parse(window.checkedAt) > maxAgeMinutes * 60_000;
+  return `Last read ${number(window.usedPoints)}% at ${time(window.checkedAt)}${stale ? ` (stale; this cannot create a new stop)` : ""}${window.resetsAt ? `; resets ${time(window.resetsAt)}` : "; reset time not reported"}.`;
 }
 
 export function AllocationControls({
@@ -164,6 +245,24 @@ export function AllocationControls({
     );
   };
   const groups = allocationAccountGroups(snapshot, policy);
+  const setCap = (key: string, patch: Partial<Omit<AllocationAccountCap, "key">>) => {
+    const current = allocationAccountCap(policy, key) ?? {
+      key,
+      weeklyPercent: null,
+      fiveHourPercent: null,
+      stopWorkers: true,
+      stopMasters: false,
+    };
+    const next = { ...current, ...patch };
+    const disabled = next.weeklyPercent === null && next.fiveHourPercent === null;
+    onChange({
+      ...policy,
+      accountCaps: [
+        ...(policy.accountCaps ?? []).filter((cap) => cap.key !== key),
+        ...(disabled ? [] : [next]),
+      ],
+    });
+  };
   return (
     <>
       <section aria-label="Usage budgets" className="grid min-w-0 gap-3">
@@ -176,6 +275,120 @@ export function AllocationControls({
         <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
           {curve("codex")}
           {curve("claude")}
+        </div>
+      </section>
+      <section aria-label="Hard usage caps" className="grid min-w-0 gap-3">
+        <h2 className="font-semibold">Hard usage caps</h2>
+        <p className="text-sm text-muted-foreground">
+          Optional per-account stops, independent of the advisory budgets above. Supported readings
+          are an account-wide weekly window and Claude&rsquo;s 5-hour session. A fresh provider
+          reading at or above a cap is checked immediately and at least every 15 seconds. Missing,
+          unsupported, stale, or failed readings never invent a reached cap.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          A reached cap stays enforced until the provider window resets, a newer reading is below
+          the cap, the cap is raised or removed, or both stop actions are disabled. A transient
+          provider read failure keeps an existing reached cap enforced without creating a new one.
+          Stopped work is not restarted automatically. Stopping a worker also leaves one durable
+          notice for its owning master; a stopped master still receives that notice without an
+          automatic wake-up.
+        </p>
+        {snapshot && snapshot.accountCapsSupported !== true && (
+          <p className="text-sm">
+            Update the coordinator to edit hard caps. Existing saved caps remain enforced.
+          </p>
+        )}
+        {!groups.length && (
+          <p className="text-sm">Hard caps appear when account information is available.</p>
+        )}
+        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+          {groups.map((group) => {
+            const cap = allocationAccountCap(policy, group.key);
+            const capSource = allocationSubscriptionCapSource(group.members);
+            const supportsSubscriptionCaps = allocationSupportsSubscriptionCaps(group.members);
+            const supportsFiveHour = allocationSupportsFiveHourCap(group.driver);
+            const capEnabled =
+              cap !== undefined &&
+              (cap.weeklyPercent !== null || (supportsFiveHour && cap.fiveHourPercent !== null));
+            const noAction = Boolean(capEnabled && cap && !cap.stopWorkers && !cap.stopMasters);
+            return (
+              <fieldset key={group.key} className="min-w-0 rounded-lg border p-3">
+                <legend className="px-1 font-semibold">
+                  {group.label} Â· {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
+                </legend>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  {group.hosts.join(", ")} Â·{" "}
+                  {group.members[0]?.accountKey === null
+                    ? "unknown identity; isolated to this computer account"
+                    : "known identity shared across linked computers"}
+                </p>
+                {!supportsSubscriptionCaps ? (
+                  <p className="text-sm text-muted-foreground">
+                    {capSource === "unsupported"
+                      ? "Subscription quota is unsupported for this account."
+                      : "The subscription quota source is not verified right now."}{" "}
+                    Weekly and session caps are unavailable, and any saved cap remains inactive.
+                  </p>
+                ) : (
+                  <div className="grid min-w-0 gap-4">
+                    <OptionalCapControl
+                      name={`${group.label} weekly cap`}
+                      value={cap?.weeklyPercent ?? null}
+                      help={latestCapReading(group.members, "weekly", policy.maxReadingAgeMinutes)}
+                      disabled={disabled || snapshot?.accountCapsSupported !== true}
+                      onChange={(weeklyPercent) => setCap(group.key, { weeklyPercent })}
+                    />
+                    {supportsFiveHour && (
+                      <OptionalCapControl
+                        name={`${group.label} Claude 5-hour cap`}
+                        value={cap?.fiveHourPercent ?? null}
+                        help={latestCapReading(
+                          group.members,
+                          "fiveHour",
+                          policy.maxReadingAgeMinutes,
+                        )}
+                        disabled={disabled || snapshot?.accountCapsSupported !== true}
+                        onChange={(fiveHourPercent) => setCap(group.key, { fiveHourPercent })}
+                      />
+                    )}
+                    <div className="grid gap-2">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={cap?.stopWorkers ?? true}
+                          disabled={
+                            disabled || snapshot?.accountCapsSupported !== true || !capEnabled
+                          }
+                          onChange={(event) =>
+                            setCap(group.key, { stopWorkers: event.currentTarget.checked })
+                          }
+                        />
+                        Stop workers owned by any master
+                      </label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={cap?.stopMasters ?? false}
+                          disabled={
+                            disabled || snapshot?.accountCapsSupported !== true || !capEnabled
+                          }
+                          onChange={(event) =>
+                            setCap(group.key, { stopMasters: event.currentTarget.checked })
+                          }
+                        />
+                        Stop masters using this account
+                      </label>
+                    </div>
+                    {noAction && (
+                      <p className="text-xs text-muted-foreground">
+                        No stop actions selected; this cap is saved but inactive.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </fieldset>
+            );
+          })}
         </div>
       </section>
       <section aria-label="Account preferences" className="grid min-w-0 gap-3">

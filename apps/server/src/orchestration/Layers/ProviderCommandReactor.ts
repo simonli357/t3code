@@ -70,6 +70,8 @@ import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 import * as SessionWorkspaces from "../../workspace/SessionWorkspaces.ts";
 import * as ProjectSetupScriptRunner from "../../project/ProjectSetupScriptRunner.ts";
+import * as UsageCapEnforcement from "../../allocation/UsageCapEnforcement.ts";
+import { usageCapDetail } from "../../allocation/usageCaps.ts";
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
@@ -229,6 +231,7 @@ const make = Effect.gen(function* () {
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const usageCaps = yield* Effect.serviceOption(UsageCapEnforcement.UsageCapEnforcement);
   const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
   const setupRunner = yield* Effect.serviceOption(
     ProjectSetupScriptRunner.ProjectSetupScriptRunner,
@@ -1435,6 +1438,30 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.catchCause((cause) => recoverTurnStartFailure(cause).pipe(Effect.as(true))));
     if (authCommandHandled) {
       return;
+    }
+    if (Option.isSome(usageCaps)) {
+      const targetInstanceId =
+        event.payload.modelSelection?.instanceId ??
+        threadModelSelections.get(thread.id)?.instanceId ??
+        thread.modelSelection.instanceId;
+      const cap = yield* usageCaps.value.check(thread.id, targetInstanceId).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("provider turn start could not check account usage caps", {
+            threadId: thread.id,
+            detail: cause.message,
+          }).pipe(Effect.as(null)),
+        ),
+      );
+      if (cap) {
+        const detail = usageCapDetail(cap);
+        yield* setThreadSessionErrorOnTurnStartFailure({
+          threadId: thread.id,
+          detail,
+          createdAt: event.payload.createdAt,
+        });
+        yield* appendTurnStartFailure("Account usage cap reached", detail);
+        return;
+      }
     }
 
     yield* ensureThreadWorktree(thread);

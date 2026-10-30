@@ -225,8 +225,21 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   let canSave = false;
   try {
     previewCurrent = previewKey === allocationPreviewKey(draft(), request);
+    const capsValid = (policy.accountCaps ?? []).every(
+      (cap) =>
+        (cap.weeklyPercent === null ||
+          (Number.isFinite(cap.weeklyPercent) &&
+            cap.weeklyPercent >= 0 &&
+            cap.weeklyPercent <= 100)) &&
+        (cap.fiveHourPercent === null ||
+          (Number.isFinite(cap.fiveHourPercent) &&
+            cap.fiveHourPercent >= 0 &&
+            cap.fiveHourPercent <= 100)),
+    );
     canSave =
-      policy.version === snapshot?.policy.version && policy.defaultHours <= policy.maxForecastHours;
+      policy.version === snapshot?.policy.version &&
+      policy.defaultHours <= policy.maxForecastHours &&
+      capsValid;
   } catch {
     /* Validation appears when preview is requested. */
   }
@@ -293,8 +306,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          Tune usage budgets and account preferences. All estimates are advisory; your explicit
-          valid account choice always wins.
+          Tune advisory budgets and account preferences, plus optional hard caps that stop work.
+          Advisory estimates never veto a valid explicit account choice; an active hard cap does.
         </p>
       </header>
       {error && (

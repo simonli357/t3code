@@ -425,6 +425,7 @@ it.effect(
         const a = inventory("a").accounts[0]!;
         const b = { ...a, instanceId: ProviderInstanceId.make("b"), accountKey: "other-login" };
         const hosts = [{ ...inventory("a"), accounts: [a, b] }];
+        const capKey = allocationPreferenceKey(a);
         const saved = yield* store.savePolicy({
           expectedVersion: 7,
           policy: {
@@ -433,6 +434,15 @@ it.effect(
             accountWeights: [
               { key: allocationPreferenceKey(a), weight: 0 },
               { key: allocationPreferenceKey(b), weight: 100 },
+            ],
+            accountCaps: [
+              {
+                key: capKey,
+                weeklyPercent: 80,
+                fiveHourPercent: null,
+                stopWorkers: true,
+                stopMasters: true,
+              },
             ],
           },
         });
@@ -457,18 +467,58 @@ it.effect(
         const stale = yield* Effect.exit(store.savePolicy({ expectedVersion: 7, policy: legacy }));
         expect(Exit.isFailure(stale)).toBe(true);
         expect(yield* store.policy).toEqual(saved);
-        const { accountWeights: _weights, ...oldEditor } = saved;
+        const { accountWeights: _weights, accountCaps: _caps, ...oldEditor } = saved;
         const legacySaved = yield* store.savePolicy({
           expectedVersion: saved.version,
           policy: oldEditor,
         });
         expect(legacySaved.accountWeights).toEqual(saved.accountWeights);
-        const reset = yield* store.savePolicy({
+        expect(legacySaved.accountCaps).toEqual(saved.accountCaps);
+        const inactive = yield* store.savePolicy({
           expectedVersion: legacySaved.version,
+          policy: {
+            ...legacySaved,
+            accountCaps: [
+              {
+                key: capKey,
+                weeklyPercent: 80,
+                fiveHourPercent: null,
+                stopWorkers: false,
+                stopMasters: false,
+              },
+            ],
+          },
+        });
+        expect(inactive.accountCaps?.[0]).toMatchObject({
+          stopWorkers: false,
+          stopMasters: false,
+        });
+        const emptyThreshold = yield* Effect.exit(
+          store.savePolicy({
+            expectedVersion: inactive.version,
+            policy: {
+              ...inactive,
+              accountCaps: [
+                {
+                  key: capKey,
+                  weeklyPercent: null,
+                  fiveHourPercent: null,
+                  stopWorkers: true,
+                  stopMasters: false,
+                },
+              ],
+            },
+          }),
+        );
+        expect(Exit.isFailure(emptyThreshold)).toBe(true);
+        expect(yield* store.policy).toEqual(inactive);
+        const reset = yield* store.savePolicy({
+          expectedVersion: inactive.version,
           policy: { ...defaultAllocationPolicy, accountWeights: [] },
         });
         expect(reset.claude.dailyPoints).toBe(17);
         expect(reset.codex.burstPoints).toBe(30);
+        expect(reset.accountCaps).toEqual([]);
         expect(yield* store.policy).toEqual(reset);
         const explicitAfterReset = yield* store.allocate({
           at,

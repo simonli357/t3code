@@ -122,6 +122,11 @@ export function allocationInventory(input: {
         : failed
           ? "Provider rejected a prior session for quota/auth; the next attempt may still fail."
           : "Provider is not authenticated, healthy, or reporting quota.",
+      ...(limits === undefined
+        ? { usageLimitsUnavailableReason: "unverified" as const }
+        : limits.unavailable?.reason
+          ? { usageLimitsUnavailableReason: limits.unavailable.reason }
+          : {}),
       limitedUntil,
       models: p.models.map(({ slug, capabilities }) => ({ slug, capabilities })),
       shortWindow: limits?.windows.some(

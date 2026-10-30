@@ -63,8 +63,29 @@ rate can use a weekly allowance before seven days. Existing saved policies keep 
 including cycle-based pacing, until you edit or reset them.
 
 Use **Save settings** to apply changes; no assignment preview is required. **Reset to defaults**
-changes the draft, then Save applies it. Neither restores enforcement. Reconnecting keeps unsaved
-edits. If someone saved a newer version, **Reload saved settings** discards your old draft explicitly.
+changes the draft, then Save applies it. Reconnecting keeps unsaved edits. If someone saved a newer
+version, **Reload saved settings** discards your old draft explicitly.
+
+Optional **Hard usage caps** apply per account identity. Weekly caps use the provider's
+account-wide weekly window; Claude accounts also support its 5-hour session. Enter a percentage
+and choose whether reaching it stops workers, masters, or both. Blank fields are disabled. A fresh
+reading at or above the cap stops matching provider sessions through T3's normal session-stop path
+and blocks queued, scheduled, renewal, and notification-triggered turns on that account. A stopped
+worker leaves one durable notice for its master. Turning both stop actions off keeps the threshold
+saved but inactive. The cap remains latched until the provider window resets, a newer reading is
+below the cap, the cap is raised or removed, or both stop actions are disabled. Missing,
+unsupported, or stale readings are shown honestly and cannot create a new hard stop; they also do
+not imply zero usage. Raising a cap or waiting for a reset makes the account eligible again, but
+does not restart stopped work.
+
+A transient provider quota read failure keeps an already reached cap enforced until its reported
+reset, a below-cap verified reading, or a configuration change. A failed read cannot create a new
+crossing on its own.
+
+Accounts whose provider proves that subscription quota does not apply, such as an API-key-backed
+or custom model provider, do not offer these controls. Cached subscription windows from another
+login are ignored rather than borrowed by that account. Caps also stay inactive while the quota
+source cannot be verified, rather than assuming a subscription applies.
 
 Recommendations subtract forecast running, queued, reserved and incoming work from the available
 budget, comparing the tightest short or weekly window. Account weights default equally to 50 and
@@ -85,8 +106,9 @@ unchanged if a response is lost; this reconciles its durable receipt without dup
 A confirmed failed start remains recorded as an error. Stop or cancel running work before releasing
 its accounting; unused reservations expire.
 
-History charts remain limited to accounts opted into usage retention. Native mobile supports
-saved numeric budgets, weights, usage inspection and assignment preview; use the web page for editing settings and human-session startup.
+History charts remain limited to accounts opted into usage retention. Native mobile displays saved
+numeric budgets, hard caps, weights, usage inspection and assignment preview; server enforcement is
+shared, but use the web page to edit settings and start human sessions.
 
 ## Set custom model prices
 
