@@ -1,4 +1,11 @@
 import {
+  AllocationError,
+  AllocationOperation,
+  AllocationResponse,
+  AllocationStart,
+  AllocationStartResult,
+} from "./providerAllocation.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -510,6 +517,8 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  providerAllocation: "providerAllocation.execute",
+  providerAllocationStart: "providerAllocation.start",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -807,6 +816,18 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsProviderAllocationRpc = Rpc.make(WS_METHODS.providerAllocation, {
+  payload: AllocationOperation,
+  success: AllocationResponse,
+  error: Schema.Union([AllocationError, EnvironmentAuthorizationError]),
+});
+
+const WsProviderAllocationStartRpc = Rpc.make(WS_METHODS.providerAllocationStart, {
+  payload: AllocationStart,
+  success: AllocationStartResult,
+  error: Schema.Union([AllocationError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1982,6 +2003,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerUpdateSettingsRpc,
+  WsProviderAllocationRpc,
+  WsProviderAllocationStartRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

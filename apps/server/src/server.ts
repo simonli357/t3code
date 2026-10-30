@@ -1120,6 +1120,8 @@ const layerMakeServer = Layer.unwrap(
       disableLogger: !config.logWebSocketEvents,
       routerConfig: HTTP_ROUTER_CONFIG,
     }).pipe(
+      Layer.provide(layerAllocationAssignments),
+      Layer.provide(layerProviderAllocation),
       withUntracedRequests,
       Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)),
     );

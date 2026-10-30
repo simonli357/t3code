@@ -1,3 +1,5 @@
+import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
+import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1336,6 +1338,8 @@ export const layerWsRpc = (
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const allocation = yield* ProviderAllocation.ProviderAllocation;
+      const allocationAssignments = yield* AllocationAssignments.AllocationAssignments;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2500,6 +2504,8 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
+        [WS_METHODS.providerAllocation]: (input) => allocation.execute(input),
+        [WS_METHODS.providerAllocationStart]: (input) => allocationAssignments.start(input),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
