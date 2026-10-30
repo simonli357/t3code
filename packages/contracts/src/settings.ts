@@ -1145,23 +1145,56 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/**
+ * Working time after which worker reports suggest renewing a session. Working time
+ * leaves out tool calls longer than `toolWaitSeconds`; Codex sessions get
+ * `codexScale` times longer.
+ */
+const RenewalHours = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1000 }));
+const RenewalScale = Schema.Number.check(Schema.isBetween({ minimum: 0.1, maximum: 10 }));
+const RenewalWaitSeconds = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 86400 }));
+const RenewalHardHours = Schema.NullOr(
+  Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 1000 })),
+);
+export const WorkerRenewalSettings = Schema.Struct({
+  /** Soft limits. Zero disables the warning. */
+  workerHours: RenewalHours.pipe(Schema.withDecodingDefault(Effect.succeed(3.5))),
+  masterHours: RenewalHours.pipe(Schema.withDecodingDefault(Effect.succeed(5))),
+  /** Null preserves the existing warning-only behavior. */
+  workerHardHours: RenewalHardHours.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  masterHardHours: RenewalHardHours.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  codexScale: RenewalScale.pipe(Schema.withDecodingDefault(Effect.succeed(1.5))),
+  toolWaitSeconds: RenewalWaitSeconds.pipe(Schema.withDecodingDefault(Effect.succeed(60))),
+});
+export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
+
 const WorkerCommunicationWindowMinutes = Schema.Number.check(
   Schema.isFinite(),
   Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER / 60_000 }),
 );
-
-/** Why a provider instance cannot take a worker while `workerDisabledInstanceIds` lists it. */
-export const WORKER_ACCOUNT_DISABLED_REASON =
-  "Turned off for workers in Provider allocation settings";
 
 export const ServerSettings = Schema.Struct({
   /** Environment-local provider instances excluded from new worker placement. */
   workerDisabledInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
+  usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   /** Execution-computer scope. Live elapsed wall-clock window; zero disables. */
   workerCommunicationWindowMinutes: WorkerCommunicationWindowMinutes.pipe(
     Schema.withDecodingDefault(Effect.succeed(15)),
+  ),
+  workerAutoSwitchOnUsageLimit: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(true)),
+  ),
+  /** Advisory active-session cap for this computer; never blocks a start. */
+  maxActiveAgentSessions: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(6)),
+  ),
+  workerRenewal: WorkerRenewalSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorkerRenewalSettings)({}))),
   ),
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1499,7 +1532,20 @@ const ModelSelectionPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   workerDisabledInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+  usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+  workerAutoSwitchOnUsageLimit: Schema.optionalKey(Schema.Boolean),
+  maxActiveAgentSessions: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
   workerCommunicationWindowMinutes: Schema.optionalKey(WorkerCommunicationWindowMinutes),
+  workerRenewal: Schema.optionalKey(
+    Schema.Struct({
+      workerHours: Schema.optionalKey(RenewalHours),
+      masterHours: Schema.optionalKey(RenewalHours),
+      workerHardHours: Schema.optionalKey(RenewalHardHours),
+      masterHardHours: Schema.optionalKey(RenewalHardHours),
+      codexScale: Schema.optionalKey(RenewalScale),
+      toolWaitSeconds: Schema.optionalKey(RenewalWaitSeconds),
+    }),
+  ),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),
