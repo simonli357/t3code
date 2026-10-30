@@ -80,6 +80,12 @@ describe("subscription widget snapshots", () => {
         usageLimits: { checkedAt, windows: [], unavailable: { reason: "unsupported" } },
       },
     },
+    {
+      name: "unverified",
+      overrides: {
+        usageLimits: { checkedAt, windows: [], unavailable: { reason: "unverified" } },
+      },
+    },
   ])("hides $name providers", ({ overrides }) => {
     expect(
       buildSubscriptionUsageSnapshot(presentations([provider(overrides)]), deepLink).providers,

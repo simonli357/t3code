@@ -3,6 +3,7 @@ import {
   collectLimitPools,
   type LimitAccount,
   type LimitPresentations,
+  mayReportSubscriptionLimits,
 } from "@t3tools/shared/usageLimits";
 
 export interface SubscriptionUsageSnapshot {
@@ -135,7 +136,7 @@ export function buildSubscriptionUsageSnapshot(
           (provider) =>
             provider.enabled &&
             provider.installed &&
-            provider.usageLimits?.unavailable?.reason !== "unsupported",
+            (provider.usageLimits === undefined || mayReportSubscriptionLimits(provider)),
         )
         .map((provider) => provider.driver),
     ),

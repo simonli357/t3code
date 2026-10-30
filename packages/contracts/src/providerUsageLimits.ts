@@ -54,8 +54,9 @@ export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
  * Subscription usage the provider knows about the signed-in account.
  *
  * `unavailable` distinguishes an account that can never report windows (API
- * key, Bedrock) from a probe that failed this time, so clients can keep the
- * last good bars for the latter and clear them for the former.
+ * key, Bedrock), an unverified quota source, and a probe that failed this
+ * time, so clients clear authoritative exclusions and may retain the last
+ * good bars across a transient read failure.
  */
 export const ServerProviderUsageLimits = Schema.Struct({
   /** No short window in a complete provider read; sparse updates cannot renew this evidence. */
@@ -75,7 +76,7 @@ export const ServerProviderUsageLimits = Schema.Struct({
   ),
   unavailable: Schema.optional(
     Schema.Struct({
-      reason: Schema.Literals(["unsupported", "probeFailed"]),
+      reason: Schema.Literals(["unsupported", "unverified", "probeFailed"]),
       message: Schema.optional(TrimmedNonEmptyString),
     }),
   ),

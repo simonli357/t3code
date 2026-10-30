@@ -709,7 +709,71 @@ describe("makeManagedServerProvider", () => {
           checkedAt: "2026-04-10T00:00:04.000Z",
           windows: [{ ...staleWindow, usedPercent: 60 }],
         });
-        assert.deepStrictEqual((yield* provider.getSnapshot).usageLimits?.windows, []);
+        assert.deepStrictEqual((yield* provider.getSnapshot).usageLimits, refreshed.usageLimits);
+      }),
+    ).pipe(Effect.provide(AlwaysRunTestLayer)),
+  );
+
+  it.effect("clears and ignores stale windows while quota provenance is unverified", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const refreshCount = yield* Ref.make(0);
+        const staleWindow = {
+          id: "secondary",
+          kind: "weekly" as const,
+          label: "Weekly",
+          usedPercent: 35,
+          resetsAt: "2026-04-17T00:00:00.000Z",
+        };
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(refreshCount, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              count === 1
+                ? {
+                    ...refreshedSnapshot,
+                    usageLimits: {
+                      checkedAt: "2026-04-10T00:00:01.000Z",
+                      windows: [staleWindow],
+                    },
+                  }
+                : {
+                    ...refreshedSnapshotSecond,
+                    usageLimits: {
+                      checkedAt: "2026-04-10T00:00:03.000Z",
+                      windows: [],
+                      unavailable: {
+                        reason: "unverified" as const,
+                        message: "Could not verify which model provider Codex is using.",
+                      },
+                    },
+                  },
+            ),
+          ),
+          refreshInterval: "1 hour",
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+        assert.deepStrictEqual((yield* provider.getSnapshot).usageLimits?.windows, [staleWindow]);
+
+        const refreshed = yield* provider.refresh;
+        assert.deepStrictEqual(refreshed.usageLimits, {
+          checkedAt: "2026-04-10T00:00:03.000Z",
+          windows: [],
+          unavailable: {
+            reason: "unverified",
+            message: "Could not verify which model provider Codex is using.",
+          },
+        });
+
+        yield* provider.applyUsageLimits({
+          checkedAt: "2026-04-10T00:00:04.000Z",
+          windows: [{ ...staleWindow, usedPercent: 60 }],
+        });
+        assert.deepStrictEqual((yield* provider.getSnapshot).usageLimits, refreshed.usageLimits);
       }),
     ).pipe(Effect.provide(AlwaysRunTestLayer)),
   );

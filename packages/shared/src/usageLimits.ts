@@ -101,12 +101,14 @@ export function providersWithLimits(
 /**
  * Some Codex-style instances share a driver but not an allowance: a custom
  * model provider backed by an API key can never use the signed-in OpenAI
- * subscription's windows. `unsupported` is the authoritative capability
- * signal, so do not infer quota access from the driver alone.
+ * subscription's windows. `unsupported` and `unverified` are authoritative
+ * capability signals, so do not infer quota access from the driver alone.
  */
 export function mayReportSubscriptionLimits(provider: ServerProvider): boolean {
   return (
-    provider.usageLimits !== undefined && provider.usageLimits.unavailable?.reason !== "unsupported"
+    provider.usageLimits !== undefined &&
+    provider.usageLimits.unavailable?.reason !== "unsupported" &&
+    provider.usageLimits.unavailable?.reason !== "unverified"
   );
 }
 
@@ -515,6 +517,9 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   if (limits.unavailable?.reason === "unsupported") {
     return limits.unavailable.message ?? "This account has no subscription limits.";
   }
+  if (limits.unavailable?.reason === "unverified") {
+    return limits.unavailable.message ?? "Could not verify subscription usage source.";
+  }
   if (limits.unavailable?.reason === "probeFailed") {
     return limits.unavailable.message ?? "Could not read limits.";
   }
@@ -605,7 +610,8 @@ export function hasProviderUsageLimits(
     !selected.enabled ||
     !selected.installed ||
     !isProviderAvailable(selected) ||
-    selected.usageLimits?.unavailable?.reason === "unsupported"
+    selected.usageLimits?.unavailable?.reason === "unsupported" ||
+    selected.usageLimits?.unavailable?.reason === "unverified"
   ) {
     return false;
   }

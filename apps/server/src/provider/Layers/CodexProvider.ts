@@ -75,7 +75,7 @@ const CODEX_PRESENTATION = {
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
-  readonly config?: CodexConfigSnapshot;
+  readonly config: CodexConfigProbe;
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
@@ -88,9 +88,14 @@ export interface CodexConfigSnapshot {
   readonly model_providers?: Readonly<Record<string, unknown>> | null;
 }
 
+export type CodexConfigProbe =
+  | { readonly kind: "available"; readonly config: CodexConfigSnapshot }
+  | { readonly kind: "unavailable" };
+
 export type CodexUsageSource =
   | { readonly kind: "subscription" }
-  | { readonly kind: "apiKey"; readonly label: string };
+  | { readonly kind: "apiKey"; readonly label: string }
+  | { readonly kind: "unverified"; readonly message: string };
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
@@ -183,17 +188,32 @@ function isOpenAiModelProvider(providerId: string): boolean {
  * Codex's native quota endpoint belongs to the active OpenAI subscription,
  * not merely to the Codex executable. A custom `model_provider` can still see
  * an unrelated ChatGPT login in the shared CLI, so account type alone is not
- * enough to decide whether its rate-limit readings apply.
+ * enough to decide whether its rate-limit readings apply. When the effective
+ * config cannot be read, only auth types that cannot represent a ChatGPT
+ * subscription remain safe to classify as API-key sources.
  */
 export function resolveCodexUsageSource(input: {
   readonly account: CodexSchema.V2GetAccountResponse["account"];
-  readonly config?: CodexConfigSnapshot | undefined;
+  readonly config: CodexConfigProbe;
 }): CodexUsageSource {
-  const modelProvider = input.config?.model_provider?.trim();
+  if (input.config.kind === "unavailable") {
+    if (input.account?.type === "apiKey") {
+      return { kind: "apiKey", label: "OpenAI API Key" };
+    }
+    if (input.account?.type === "amazonBedrock") {
+      return { kind: "apiKey", label: "Amazon Bedrock" };
+    }
+    return {
+      kind: "unverified",
+      message: "Could not verify which model provider Codex is using.",
+    };
+  }
+  const config = input.config.config;
+  const modelProvider = config.model_provider?.trim();
   if (modelProvider && !isOpenAiModelProvider(modelProvider)) {
     return {
       kind: "apiKey",
-      label: `${providerConfigName(input.config, modelProvider) ?? modelProvider} API key`,
+      label: `${providerConfigName(config, modelProvider) ?? modelProvider} API key`,
     };
   }
   if (input.account?.type === "apiKey") {
@@ -494,17 +514,21 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
     return {
       account: accountResponse,
+      config: { kind: "unavailable" },
       version,
       models: appendCustomCodexModels([], input.customModels ?? []),
       skills: [],
     } satisfies CodexAppServerProviderSnapshot;
   }
   const config = yield* client.request("config/read", { cwd: input.cwd }).pipe(
-    Effect.map((response): CodexConfigSnapshot => response.config),
+    Effect.map((response): CodexConfigProbe => ({
+      kind: "available",
+      config: response.config,
+    })),
     Effect.catch((error) =>
-      Effect.logDebug("Codex config read failed; quota provenance will use account auth.", {
+      Effect.logDebug("Codex config read failed; quota provenance is unverified.", {
         cause: error,
-      }).pipe(Effect.as(undefined)),
+      }).pipe(Effect.as<CodexConfigProbe>({ kind: "unavailable" })),
     ),
   );
   const usageSource = resolveCodexUsageSource({
@@ -546,7 +570,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   return {
     account: accountResponse,
-    ...(config ? { config } : {}),
+    config,
     ...(rateLimits ? { rateLimits } : {}),
     version,
     models: applyPreferredCodexDefaultModel(
@@ -620,7 +644,11 @@ function accountProbeStatus(
   readonly message?: string;
 } {
   const authLabel =
-    usageSource.kind === "apiKey" ? usageSource.label : codexAccountAuthLabel(account.account);
+    usageSource.kind === "unverified"
+      ? "Model provider unverified"
+      : usageSource.kind === "apiKey"
+        ? usageSource.label
+        : codexAccountAuthLabel(account.account);
   const authEmail =
     usageSource.kind === "subscription" ? codexAccountEmail(account.account) : undefined;
   const auth = {
@@ -761,29 +789,35 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }
 
   const snapshot = probeResult.success.value;
+  const usageSource = resolveCodexUsageSource({
+    account: snapshot.account.account,
+    config: snapshot.config,
+  });
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
-    : accountProbeStatus(
-        snapshot.account,
-        resolveCodexUsageSource({ account: snapshot.account.account, config: snapshot.config }),
-      );
+    : accountProbeStatus(snapshot.account, usageSource);
   const usageLimits =
-    resolveCodexUsageSource({ account: snapshot.account.account, config: snapshot.config }).kind ===
-    "apiKey"
+    usageSource.kind === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
-      : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
+      : usageSource.kind === "unverified"
         ? makeUnavailableUsageLimits({
             checkedAt,
-            reason: "probeFailed",
-            ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
+            reason: "unverified",
+            message: usageSource.message,
           })
-        : codexRateLimitsToLimits({
-            completeRead: true,
-            snapshot: snapshot.rateLimits.snapshot,
-            rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
-            resetCredits: snapshot.rateLimits.resetCredits,
-            checkedAt,
-          });
+        : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
+          ? makeUnavailableUsageLimits({
+              checkedAt,
+              reason: "probeFailed",
+              ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
+            })
+          : codexRateLimitsToLimits({
+              completeRead: true,
+              snapshot: snapshot.rateLimits.snapshot,
+              rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
+              resetCredits: snapshot.rateLimits.resetCredits,
+              checkedAt,
+            });
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,

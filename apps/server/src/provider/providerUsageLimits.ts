@@ -34,7 +34,7 @@ export function makeUsageLimits(input: {
 
 export function makeUnavailableUsageLimits(input: {
   readonly checkedAt: string;
-  readonly reason: "unsupported" | "probeFailed";
+  readonly reason: "unsupported" | "unverified" | "probeFailed";
   readonly message?: string;
 }): ServerProviderUsageLimits {
   return {
@@ -54,8 +54,9 @@ export function makeUnavailableUsageLimits(input: {
  * `windowDurationMins` keeps whatever the last probe resolved for it. An
  * update with no windows leaves `previous` untouched.
  *
- * An `unsupported` snapshot stays unsupported: an account that cannot have
- * subscription windows will not start reporting them mid-turn.
+ * An `unsupported` or `unverified` snapshot stays authoritative: an account
+ * that cannot have subscription windows, or whose source could not be
+ * verified, will not start reporting them mid-turn.
  */
 export function applyUsageLimitsUpdate(input: {
   readonly previous: ServerProviderUsageLimits | undefined;
@@ -63,7 +64,11 @@ export function applyUsageLimitsUpdate(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
-  if (update.windows.length === 0 || previous?.unavailable?.reason === "unsupported") {
+  if (
+    update.windows.length === 0 ||
+    previous?.unavailable?.reason === "unsupported" ||
+    previous?.unavailable?.reason === "unverified"
+  ) {
     return previous;
   }
   const merged = new Map<string, ServerProviderUsageWindow>(
@@ -139,8 +144,8 @@ function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageW
 /**
  * Choose what to publish after a status probe finishes. A probe that failed
  * this time must not wipe bars a previous probe or a turn already
- * established, so the last good snapshot stays; `unsupported` is
- * authoritative and replaces them.
+ * established, so the last good snapshot stays. `unsupported` and
+ * `unverified` are authoritative and replace them.
  *
  * A successful probe replaces the published windows outright, including any
  * runtime update that landed while it was running. That is a deliberate
@@ -155,7 +160,7 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
-  if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
+  if (probed?.unavailable?.reason === "probeFailed" && published) {
     return published;
   }
   return probed;

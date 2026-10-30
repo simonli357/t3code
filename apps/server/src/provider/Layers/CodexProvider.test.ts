@@ -15,9 +15,12 @@ it("keeps custom Codex model providers outside the OpenAI subscription allowance
         planType: "pro",
       },
       config: {
-        model_provider: "deepseek",
-        model_providers: {
-          deepseek: { name: "DeepSeek" },
+        kind: "available",
+        config: {
+          model_provider: "deepseek",
+          model_providers: {
+            deepseek: { name: "DeepSeek" },
+          },
         },
       },
     }),
@@ -29,23 +32,53 @@ it("recognizes native ChatGPT, API-key, and Bedrock Codex auth sources", () => {
   assert.deepStrictEqual(
     resolveCodexUsageSource({
       account: { type: "chatgpt", email: "user@example.com", planType: "plus" },
-      config: { model_provider: "openai" },
+      config: { kind: "available", config: { model_provider: "openai" } },
     }),
     { kind: "subscription" },
   );
   assert.deepStrictEqual(
     resolveCodexUsageSource({
       account: { type: "apiKey" },
-      config: { model_provider: "openai" },
+      config: { kind: "available", config: { model_provider: "openai" } },
     }),
     { kind: "apiKey", label: "OpenAI API Key" },
   );
   assert.deepStrictEqual(
     resolveCodexUsageSource({
       account: { type: "amazonBedrock" },
-      config: { model_provider: "openai" },
+      config: { kind: "available", config: { model_provider: "openai" } },
     }),
     { kind: "apiKey", label: "Amazon Bedrock" },
+  );
+});
+
+it("does not infer subscription quota when the effective config cannot be read", () => {
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "chatgpt", email: "unrelated@example.com", planType: "pro" },
+      config: { kind: "unavailable" },
+    }),
+    {
+      kind: "unverified",
+      message: "Could not verify which model provider Codex is using.",
+    },
+  );
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "apiKey" },
+      config: { kind: "unavailable" },
+    }),
+    { kind: "apiKey", label: "OpenAI API Key" },
+  );
+});
+
+it("accepts the default OpenAI model provider as a subscription source", () => {
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "chatgpt", email: "user@example.com", planType: "plus" },
+      config: { kind: "available", config: {} },
+    }),
+    { kind: "subscription" },
   );
 });
 

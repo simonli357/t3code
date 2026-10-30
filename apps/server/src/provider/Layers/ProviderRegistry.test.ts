@@ -305,6 +305,7 @@ function makeCodexProbeSnapshot(
 ): CodexAppServerProviderSnapshot {
   return {
     version: "1.0.0",
+    config: { kind: "available", config: {} },
     account: {
       account: {
         type: "chatgpt",
@@ -511,6 +512,34 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "apiKey");
           assert.strictEqual(status.auth.label, "OpenAI API Key");
+        }),
+      );
+
+      it.effect("does not publish subscription windows when quota provenance is unverified", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                config: { kind: "unavailable" },
+                rateLimits: {
+                  snapshot: {
+                    primary: { usedPercent: 25, windowDurationMins: 10_080 },
+                  },
+                  resetCredits: null,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.auth.label, "Model provider unverified");
+          assert.strictEqual(status.auth.email, undefined);
+          assert.deepStrictEqual(status.usageLimits?.windows, []);
+          assert.strictEqual(status.usageLimits?.unavailable?.reason, "unverified");
+          assert.strictEqual(
+            status.usageLimits?.unavailable?.message,
+            "Could not verify which model provider Codex is using.",
+          );
         }),
       );
 

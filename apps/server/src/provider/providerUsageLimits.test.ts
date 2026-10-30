@@ -72,11 +72,15 @@ describe("applyUsageLimitsUpdate", () => {
     });
   });
 
-  it("leaves an unsupported account and an empty update alone", () => {
+  it("leaves unsupported and unverified accounts and empty updates alone", () => {
     const unsupported = { checkedAt, windows: [], unavailable: { reason: "unsupported" as const } };
+    const unverified = { checkedAt, windows: [], unavailable: { reason: "unverified" as const } };
     expect(
       applyUsageLimitsUpdate({ previous: unsupported, checkedAt, update: { windows: [session] } }),
     ).toBe(unsupported);
+    expect(
+      applyUsageLimitsUpdate({ previous: unverified, checkedAt, update: { windows: [session] } }),
+    ).toBe(unverified);
     expect(
       applyUsageLimitsUpdate({ previous: published, checkedAt, update: { windows: [] } }),
     ).toBe(published);
@@ -131,11 +135,16 @@ describe("resolveUsageLimitsAfterProbe", () => {
         ?.shortWindowAbsent,
     ).toBeUndefined();
   });
-  it("keeps the last good windows through a failed probe but not an unsupported one", () => {
+  it("keeps the last good windows through a failed probe but not an authoritative exclusion", () => {
     const failed = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
     const unsupported = { checkedAt, windows: [], unavailable: { reason: "unsupported" as const } };
+    const unverified = { checkedAt, windows: [], unavailable: { reason: "unverified" as const } };
     expect(resolveUsageLimitsAfterProbe({ published, probed: failed })).toBe(published);
     expect(resolveUsageLimitsAfterProbe({ published, probed: unsupported })).toBe(unsupported);
+    expect(resolveUsageLimitsAfterProbe({ published, probed: unverified })).toBe(unverified);
+    expect(resolveUsageLimitsAfterProbe({ published: unverified, probed: failed })).toBe(
+      unverified,
+    );
     expect(resolveUsageLimitsAfterProbe({ published: undefined, probed: failed })).toBe(failed);
   });
 });

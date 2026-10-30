@@ -97,6 +97,16 @@ describe("limitsNotice", () => {
       limitsNotice({
         checkedAt,
         windows: [],
+        unavailable: { reason: "unverified", message: "Could not verify the provider." },
+      }),
+    ).toBe("Could not verify the provider.");
+    expect(limitsNotice({ checkedAt, windows: [], unavailable: { reason: "unverified" } })).toBe(
+      "Could not verify subscription usage source.",
+    );
+    expect(
+      limitsNotice({
+        checkedAt,
+        windows: [],
         unavailable: { reason: "probeFailed", message: "Codex timed out." },
       }),
     ).toBe("Codex timed out.");
@@ -277,7 +287,7 @@ describe("pools", () => {
     expect(collectLimitAccounts(input)).toHaveLength(1);
   });
 
-  it("keeps real subscriptions independent and ignores an API-key custom instance", () => {
+  it("keeps real subscriptions independent and ignores non-subscription custom instances", () => {
     const subscription = (instanceId: string, email: string, usedPercent: number) =>
       provider({
         instanceId: ProviderInstanceId.make(instanceId),
@@ -305,6 +315,19 @@ describe("pools", () => {
                   checkedAt,
                   windows: [],
                   unavailable: { reason: "unsupported" },
+                },
+              }),
+              provider({
+                instanceId: ProviderInstanceId.make("unverified_codex"),
+                displayName: "Unverified",
+                auth: { status: "authenticated", email: "unrelated@example.com" },
+                usageLimits: {
+                  checkedAt,
+                  windows: [{ ...window, usedPercent: 99 }],
+                  unavailable: {
+                    reason: "unverified",
+                    message: "Could not verify which model provider Codex is using.",
+                  },
                 },
               }),
             ],
@@ -869,7 +892,7 @@ describe("collectLimitNotices", () => {
     accounts: [],
   };
 
-  it("names failures and silence, skips unsupported accounts, and labels environments only when several", () => {
+  it("names failures, unverified sources, and silence, skips unsupported accounts, and labels environments only when several", () => {
     const failed = provider({
       instanceId: ProviderInstanceId.make("claude"),
       driver: claude,
@@ -881,6 +904,15 @@ describe("collectLimitNotices", () => {
       driver: claude,
       usageLimits: { checkedAt, windows: [], unavailable: { reason: "unsupported" } },
     });
+    const unverified = provider({
+      instanceId: ProviderInstanceId.make("unverified"),
+      displayName: "DS",
+      usageLimits: {
+        checkedAt,
+        windows: [],
+        unavailable: { reason: "unverified", message: "Could not verify the provider." },
+      },
+    });
     const silent = provider({ usageLimits: { checkedAt, windows: [] } });
     const one = new Map([
       [
@@ -888,7 +920,7 @@ describe("collectLimitNotices", () => {
         {
           ...laptop,
           serverConfig: {
-            providers: [failed, apiKey, silent],
+            providers: [failed, apiKey, unverified, silent],
             usageLimitSources: [
               hub,
               { ...hub, id: UsageLimitSourceId.make("down"), label: "down", error: "ECONNREFUSED" },
@@ -899,6 +931,7 @@ describe("collectLimitNotices", () => {
     ]);
     expect(collectLimitNotices(one)).toEqual([
       "Claude Max: Could not read limits.",
+      "DS: Could not verify the provider.",
       "codex: No limits reported.",
       "hub: No accounts reported.",
       "down: ECONNREFUSED",
@@ -1068,6 +1101,23 @@ describe("/usage-limits", () => {
     expect(mayReportSubscriptionLimits(deepseek)).toBe(false);
     expect(hasProviderUsageLimits(deepseek.instanceId, providers, [])).toBe(false);
     expect(collectProviderUsageLimits(deepseek.instanceId, providers, [], now)).toBeNull();
+
+    const unverified = provider({
+      instanceId: ProviderInstanceId.make("unverified_codex"),
+      displayName: "Unverified DS",
+      usageLimits: {
+        checkedAt: limits.checkedAt,
+        windows: [],
+        unavailable: {
+          reason: "unverified",
+          message: "Could not verify which model provider Codex is using.",
+        },
+      },
+    });
+    const withUnverified = [unverified, subscription];
+    expect(mayReportSubscriptionLimits(unverified)).toBe(false);
+    expect(hasProviderUsageLimits(unverified.instanceId, withUnverified, [])).toBe(false);
+    expect(collectProviderUsageLimits(unverified.instanceId, withUnverified, [], now)).toBeNull();
     expect(
       withUsageLimitsCommands(providers, [])[0]?.slashCommands.some(
         (command) => command.name === "usage-limits",
