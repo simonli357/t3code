@@ -26,7 +26,10 @@ import {
 import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { DatabaseStorageNotice } from "./components/DatabaseStorageNotice";
 import { ListChoiceRow as SettingsChoiceRow } from "../../components/ui/ListChoiceRow";
+import { SessionRenewalSettings } from "./components/SessionRenewalSettings";
 import { SettingsSection } from "./components/SettingsSection";
+import { WorkerAccountSettings } from "./components/WorkerAccountSettings";
+import { WorkerCommunicationSettings } from "./components/WorkerCommunicationSettings";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SourceControlSignInSection } from "./components/SourceControlSignInSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
@@ -378,6 +381,53 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                     />
                   </SettingsSection>
                   <AutoSettleSettingsRows write={write} pending={pendingWrites > 0} />
+                  {!projectSelected && (
+                    <WorkerCommunicationSettings
+                      key={`communication:${targets.map((target) => target.environment.environmentId).join(",")}`}
+                      value={reference.settings.workerCommunicationWindowMinutes}
+                      autoSwitch={reference.settings.workerAutoSwitchOnUsageLimit}
+                      switchMixed={displayTargets.some(
+                        (target) =>
+                          target.settings.workerAutoSwitchOnUsageLimit !==
+                          reference.settings.workerAutoSwitchOnUsageLimit,
+                      )}
+                      maxActiveAgentSessions={reference.settings.maxActiveAgentSessions}
+                      capMixed={displayTargets.some(
+                        (target) =>
+                          target.settings.maxActiveAgentSessions !==
+                          reference.settings.maxActiveAgentSessions,
+                      )}
+                      disabled={disabledFor("workerCommunicationWindowMinutes")}
+                      mixed={displayTargets.some(
+                        (target) =>
+                          target.settings.workerCommunicationWindowMinutes !==
+                          reference.settings.workerCommunicationWindowMinutes,
+                      )}
+                      onChange={write}
+                    />
+                  )}
+                  {!projectSelected && targets.length === 1 && (
+                    <WorkerAccountSettings
+                      key={`accounts:${reference.environment.environmentId}`}
+                      environmentId={reference.environment.environmentId}
+                      disabledIds={reference.settings.workerDisabledInstanceIds}
+                      disabled={disabledFor("workerDisabledInstanceIds")}
+                      onChange={write}
+                    />
+                  )}
+                  {!projectSelected && (
+                    <SessionRenewalSettings
+                      key={targets.map((target) => target.environment.environmentId).join(",")}
+                      value={reference.settings.workerRenewal}
+                      disabled={disabledFor("workerRenewal")}
+                      mixed={displayTargets.some(
+                        (target) =>
+                          JSON.stringify(target.settings.workerRenewal) !==
+                          JSON.stringify(reference.settings.workerRenewal),
+                      )}
+                      onChange={write}
+                    />
+                  )}
                 </>
               ) : null}
 
