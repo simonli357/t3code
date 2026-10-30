@@ -98,6 +98,18 @@ export function providersWithLimits(
   );
 }
 
+/**
+ * Some Codex-style instances share a driver but not an allowance: a custom
+ * model provider backed by an API key can never use the signed-in OpenAI
+ * subscription's windows. `unsupported` is the authoritative capability
+ * signal, so do not infer quota access from the driver alone.
+ */
+export function mayReportSubscriptionLimits(provider: ServerProvider): boolean {
+  return (
+    provider.usageLimits !== undefined && provider.usageLimits.unavailable?.reason !== "unsupported"
+  );
+}
+
 export type LimitPresentations = ReadonlyMap<
   EnvironmentId,
   {
@@ -583,17 +595,25 @@ export function isUsageLimitsCommand(prompt: string): boolean {
  * disappearing until the next successful refresh.
  */
 export function hasProviderUsageLimits(
-  driver: ServerProvider["driver"],
+  instanceId: ProviderInstanceId,
   providers: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
 ): boolean {
-  return (
-    providersWithLimits(providers).some((provider) => provider.driver === driver) ||
-    sources.some(
-      (source) =>
-        source.accounts.some((account) => account.driver === driver) ||
-        (source.error !== undefined && source.accounts.length === 0),
-    )
+  const selected = providers.find((provider) => provider.instanceId === instanceId);
+  if (
+    !selected ||
+    !selected.enabled ||
+    !selected.installed ||
+    !isProviderAvailable(selected) ||
+    selected.usageLimits?.unavailable?.reason === "unsupported"
+  ) {
+    return false;
+  }
+  if (selected.usageLimits !== undefined) return true;
+  return sources.some(
+    (source) =>
+      source.accounts.some((account) => account.driver === selected.driver) ||
+      (source.error !== undefined && source.accounts.length === 0),
   );
 }
 
@@ -625,7 +645,7 @@ export function withUsageLimitsCommands(
   sources: UsageLimitSourceSnapshots,
 ): ServerProvider[] {
   return providers.map((provider) => {
-    if (!hasProviderUsageLimits(provider.driver, providers, sources)) return provider;
+    if (!hasProviderUsageLimits(provider.instanceId, providers, sources)) return provider;
     const commands = (items: readonly ServerProviderSlashCommand[]) => [
       ...items.filter((command) => command.name !== USAGE_LIMITS_COMMAND.name),
       USAGE_LIMITS_COMMAND,
@@ -653,9 +673,9 @@ export function collectProviderUsageLimits(
   now: number,
 ): UsageLimitsReport | null {
   const selected = providers.find((provider) => provider.instanceId === instanceId);
-  if (!selected || !hasProviderUsageLimits(selected.driver, providers, sources)) return null;
+  if (!selected || !hasProviderUsageLimits(instanceId, providers, sources)) return null;
   const native = providersWithLimits(providers).filter(
-    (provider) => provider.driver === selected.driver,
+    (provider) => provider.driver === selected.driver && mayReportSubscriptionLimits(provider),
   );
   const nativeAccounts = new Set(
     native.flatMap((provider) => {

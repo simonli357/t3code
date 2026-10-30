@@ -22,7 +22,9 @@ import {
   displayLimitWindows,
   elapsedShare,
   formatResetsIn,
+  hasProviderUsageLimits,
   limitsNotice,
+  mayReportSubscriptionLimits,
   paceOf,
   providersWithLimits,
   remainingPercent,
@@ -273,6 +275,53 @@ describe("pools", () => {
       },
     });
     expect(collectLimitAccounts(input)).toHaveLength(1);
+  });
+
+  it("keeps real subscriptions independent and ignores an API-key custom instance", () => {
+    const subscription = (instanceId: string, email: string, usedPercent: number) =>
+      provider({
+        instanceId: ProviderInstanceId.make(instanceId),
+        displayName: instanceId,
+        auth: { status: "authenticated", email },
+        usageLimits: {
+          checkedAt,
+          windows: [{ ...window, id: "secondary", kind: "weekly", label: "Weekly", usedPercent }],
+        },
+      });
+    const input = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        {
+          ...laptop,
+          serverConfig: {
+            providers: [
+              subscription("codex-sl", "sl@example.com", 20),
+              subscription("codex-ad", "ad@example.com", 70),
+              provider({
+                instanceId: ProviderInstanceId.make("deepseek_codex"),
+                displayName: "DS",
+                auth: { status: "unknown", type: "apiKey", label: "DeepSeek API key" },
+                usageLimits: {
+                  checkedAt,
+                  windows: [],
+                  unavailable: { reason: "unsupported" },
+                },
+              }),
+            ],
+          },
+        },
+      ],
+    ]);
+
+    expect(
+      collectLimitAccounts(input).map((account) => [
+        account.displayName,
+        account.limits.windows[0]?.usedPercent,
+      ]),
+    ).toEqual([
+      ["codex-sl", 20],
+      ["codex-ad", 70],
+    ]);
   });
 
   it("takes windows from a fresher hub read but credits and redeem from the native instance", () => {
@@ -992,6 +1041,43 @@ describe("/usage-limits", () => {
       plan: "Codex OSS",
     });
     expect(report?.notices).toEqual([]);
+  });
+
+  it("does not let a custom API-key instance borrow another Codex subscription", () => {
+    const deepseek = provider({
+      instanceId: ProviderInstanceId.make("deepseek_codex"),
+      displayName: "DS",
+      auth: { status: "unknown", type: "apiKey", label: "DeepSeek API key" },
+      usageLimits: {
+        checkedAt: limits.checkedAt,
+        windows: [],
+        unavailable: { reason: "unsupported" },
+      },
+    });
+    const subscription = provider({
+      instanceId: ProviderInstanceId.make("codex-sl"),
+      displayName: "SL",
+      auth: { status: "authenticated", email: "owner@example.com" },
+      usageLimits: {
+        ...limits,
+        windows: [{ ...window, id: "secondary", kind: "weekly", label: "Weekly" }],
+      },
+    });
+    const providers = [deepseek, subscription];
+
+    expect(mayReportSubscriptionLimits(deepseek)).toBe(false);
+    expect(hasProviderUsageLimits(deepseek.instanceId, providers, [])).toBe(false);
+    expect(collectProviderUsageLimits(deepseek.instanceId, providers, [], now)).toBeNull();
+    expect(
+      withUsageLimitsCommands(providers, [])[0]?.slashCommands.some(
+        (command) => command.name === "usage-limits",
+      ),
+    ).toBe(false);
+    expect(
+      withUsageLimitsCommands(providers, [])[1]?.slashCommands.some(
+        (command) => command.name === "usage-limits",
+      ),
+    ).toBe(true);
   });
 
   it("supports a source-only provider and keeps duplicates when the native probe failed", () => {

@@ -75,11 +75,22 @@ const CODEX_PRESENTATION = {
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
+  readonly config?: CodexConfigSnapshot;
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
 }
+
+/** The subset of Codex's effective config that determines quota provenance. */
+export interface CodexConfigSnapshot {
+  readonly model_provider?: string | null;
+  readonly model_providers?: Readonly<Record<string, unknown>> | null;
+}
+
+export type CodexUsageSource =
+  | { readonly kind: "subscription" }
+  | { readonly kind: "apiKey"; readonly label: string };
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
@@ -151,6 +162,47 @@ export function codexPlanLabel(planType: string | null | undefined): string | un
 function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"]) {
   if (!account || account.type !== "chatgpt") return undefined;
   return account.email;
+}
+
+function providerConfigName(
+  config: CodexConfigSnapshot | undefined,
+  providerId: string,
+): string | undefined {
+  const provider = config?.model_providers?.[providerId];
+  if (typeof provider !== "object" || provider === null || !("name" in provider)) return undefined;
+  return typeof provider.name === "string" && provider.name.trim().length > 0
+    ? provider.name.trim()
+    : undefined;
+}
+
+function isOpenAiModelProvider(providerId: string): boolean {
+  return providerId === "openai" || providerId === "openai_token_sharing";
+}
+
+/**
+ * Codex's native quota endpoint belongs to the active OpenAI subscription,
+ * not merely to the Codex executable. A custom `model_provider` can still see
+ * an unrelated ChatGPT login in the shared CLI, so account type alone is not
+ * enough to decide whether its rate-limit readings apply.
+ */
+export function resolveCodexUsageSource(input: {
+  readonly account: CodexSchema.V2GetAccountResponse["account"];
+  readonly config?: CodexConfigSnapshot | undefined;
+}): CodexUsageSource {
+  const modelProvider = input.config?.model_provider?.trim();
+  if (modelProvider && !isOpenAiModelProvider(modelProvider)) {
+    return {
+      kind: "apiKey",
+      label: `${providerConfigName(input.config, modelProvider) ?? modelProvider} API key`,
+    };
+  }
+  if (input.account?.type === "apiKey") {
+    return { kind: "apiKey", label: "OpenAI API Key" };
+  }
+  if (input.account?.type === "amazonBedrock") {
+    return { kind: "apiKey", label: "Amazon Bedrock" };
+  }
+  return { kind: "subscription" };
 }
 
 export function mapCodexModelCapabilities(
@@ -447,6 +499,18 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       skills: [],
     } satisfies CodexAppServerProviderSnapshot;
   }
+  const config = yield* client.request("config/read", { cwd: input.cwd }).pipe(
+    Effect.map((response): CodexConfigSnapshot => response.config),
+    Effect.catch((error) =>
+      Effect.logDebug("Codex config read failed; quota provenance will use account auth.", {
+        cause: error,
+      }).pipe(Effect.as(undefined)),
+    ),
+  );
+  const usageSource = resolveCodexUsageSource({
+    account: accountResponse.account,
+    config,
+  });
 
   const [skillsResponse, models, rateLimits] = yield* Effect.all(
     [
@@ -456,7 +520,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       requestAllCodexModels(client),
       // Usage is an enrichment: a failure or a slow answer degrades to "no
       // usage this probe" rather than costing the account and models.
-      input.skipNativeUsage
+      input.skipNativeUsage || usageSource.kind !== "subscription"
         ? Effect.succeed(undefined)
         : client.request("account/rateLimits/read", null).pipe(
             Effect.map((response): CodexRateLimitsProbe => ({
@@ -482,6 +546,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   return {
     account: accountResponse,
+    ...(config ? { config } : {}),
     ...(rateLimits ? { rateLimits } : {}),
     version,
     models: applyPreferredCodexDefaultModel(
@@ -546,16 +611,25 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+  usageSource: CodexUsageSource,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
 } {
-  const authLabel = codexAccountAuthLabel(account.account);
-  const authEmail = codexAccountEmail(account.account);
+  const authLabel =
+    usageSource.kind === "apiKey" ? usageSource.label : codexAccountAuthLabel(account.account);
+  const authEmail =
+    usageSource.kind === "subscription" ? codexAccountEmail(account.account) : undefined;
   const auth = {
     status: account.account ? ("authenticated" as const) : ("unknown" as const),
-    ...(account.account?.type ? { type: account.account?.type } : {}),
+    ...(usageSource.kind === "apiKey"
+      ? { type: "apiKey" }
+      : account.account?.type
+        ? { type: account.account.type }
+        : {}),
     ...(authLabel ? { label: authLabel } : {}),
     ...(authEmail ? { email: authEmail } : {}),
   } satisfies ServerProvider["auth"];
@@ -689,9 +763,13 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const snapshot = probeResult.success.value;
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
-    : accountProbeStatus(snapshot.account);
+    : accountProbeStatus(
+        snapshot.account,
+        resolveCodexUsageSource({ account: snapshot.account.account, config: snapshot.config }),
+      );
   const usageLimits =
-    snapshot.account.account?.type === "apiKey"
+    resolveCodexUsageSource({ account: snapshot.account.account, config: snapshot.config }).kind ===
+    "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
       : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
         ? makeUnavailableUsageLimits({

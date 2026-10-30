@@ -1,6 +1,53 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  mapCodexModelCapabilities,
+  resolveCodexUsageSource,
+} from "./CodexProvider.ts";
+
+it("keeps custom Codex model providers outside the OpenAI subscription allowance", () => {
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: {
+        type: "chatgpt",
+        email: "shared@example.com",
+        planType: "pro",
+      },
+      config: {
+        model_provider: "deepseek",
+        model_providers: {
+          deepseek: { name: "DeepSeek" },
+        },
+      },
+    }),
+    { kind: "apiKey", label: "DeepSeek API key" },
+  );
+});
+
+it("recognizes native ChatGPT, API-key, and Bedrock Codex auth sources", () => {
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "chatgpt", email: "user@example.com", planType: "plus" },
+      config: { model_provider: "openai" },
+    }),
+    { kind: "subscription" },
+  );
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "apiKey" },
+      config: { model_provider: "openai" },
+    }),
+    { kind: "apiKey", label: "OpenAI API Key" },
+  );
+  assert.deepStrictEqual(
+    resolveCodexUsageSource({
+      account: { type: "amazonBedrock" },
+      config: { model_provider: "openai" },
+    }),
+    { kind: "apiKey", label: "Amazon Bedrock" },
+  );
+});
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
