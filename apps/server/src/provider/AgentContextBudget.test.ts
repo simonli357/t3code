@@ -38,6 +38,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
 import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
+import { WorkerService } from "../workers/WorkerService.ts";
 import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
 import { DocumentText } from "./DocumentText.ts";
 import { ProviderRegistry } from "./ProviderRegistry.ts";
@@ -65,6 +66,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(PullRequestReviewGuideService)({}),
   Layer.mock(RemoteDelegation)({}),
   Layer.mock(ScheduledTaskService)({}),
+  Layer.mock(WorkerService)({}),
   Layer.mock(SecretRequests)({}),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-context-budget-" }),
   Layer.mock(ServerEnvironment)({}),

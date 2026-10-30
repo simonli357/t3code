@@ -53,6 +53,8 @@ import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
+import { WorkersToolkit } from "./toolkits/workers/tools.ts";
+import * as WorkersHandlers from "./toolkits/workers/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1094,6 +1096,8 @@ export const layerOrchestratorToolkit = toolkitRegistration(
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
+const layerWorkersToolkit = toolkitRegistration(WorkersToolkit, WorkersHandlers.layer);
+
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
   WorktreeHandlers.layer,
@@ -1149,6 +1153,7 @@ export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,
+  layerWorkersToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,
