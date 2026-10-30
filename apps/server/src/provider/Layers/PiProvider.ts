@@ -60,10 +60,12 @@ interface PiRpcModel {
   readonly id: string;
   readonly name: string;
   readonly provider: string;
+  readonly thinkingLevels: ReadonlyArray<string>;
 }
 
 interface PiRpcModelCatalog {
   readonly currentModel: string | undefined;
+  readonly currentThinkingLevel: string | undefined;
   readonly models: ReadonlyArray<PiRpcModel>;
 }
 
@@ -115,6 +117,7 @@ function parsePiRpcModelCatalog(responses: ReadonlyArray<PiRpcResponse>): PiRpcM
   const selectedModel = state && isRecord(state.model) ? state.model : undefined;
   const provider = nonEmptyString(selectedModel?.provider);
   const id = nonEmptyString(selectedModel?.id);
+  const currentThinkingLevel = nonEmptyString(state?.thinkingLevel);
   const modelRows = isRecord(modelsResponse.data) ? modelsResponse.data.models : undefined;
   const models = Array.isArray(modelRows)
     ? modelRows.flatMap((row) => {
@@ -122,11 +125,22 @@ function parsePiRpcModelCatalog(responses: ReadonlyArray<PiRpcResponse>): PiRpcM
         const modelId = nonEmptyString(row.id);
         const modelProvider = nonEmptyString(row.provider);
         if (!modelId || !modelProvider) return [];
+        const thinkingLevelMap = isRecord(row.thinkingLevelMap) ? row.thinkingLevelMap : undefined;
+        const thinkingLevels =
+          row.reasoning === true
+            ? [
+                "off",
+                ...Object.entries(thinkingLevelMap ?? {}).flatMap(([level, mappedValue]) =>
+                  nonEmptyString(mappedValue) ? [level] : [],
+                ),
+              ]
+            : [];
         return [
           {
             id: modelId,
             name: nonEmptyString(row.name) ?? modelId,
             provider: modelProvider,
+            thinkingLevels,
           },
         ];
       })
@@ -134,6 +148,7 @@ function parsePiRpcModelCatalog(responses: ReadonlyArray<PiRpcResponse>): PiRpcM
 
   return {
     currentModel: provider && id ? `${provider}/${id}` : undefined,
+    currentThinkingLevel,
     models,
   };
 }
@@ -157,6 +172,41 @@ function piDisplayName(value: string, name: string): string {
 }
 
 function reasoningCapabilities(
+  levels: ReadonlyArray<string>,
+  currentValue: string | undefined,
+): ModelCapabilities {
+  if (levels.length === 0) return EMPTY_CAPABILITIES;
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Thinking",
+        type: "select",
+        options: levels.map((level) => ({
+          id: level,
+          label: thinkingLevelLabel(level),
+          ...(level === currentValue ? { isDefault: true } : {}),
+        })),
+        ...(currentValue ? { currentValue } : {}),
+      },
+    ],
+  });
+}
+
+function thinkingLevelLabel(level: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    off: "Off",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra high",
+    max: "Max",
+  };
+  return labels[level] ?? level;
+}
+
+function reasoningCapabilitiesFromConfigOptions(
   options: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | undefined,
 ): ModelCapabilities {
   const reasoning = options?.find(
@@ -191,6 +241,7 @@ export function buildPiModels(input: {
   readonly configOptions?: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
   readonly rpcModels?: ReadonlyArray<PiRpcModel>;
   readonly currentModel?: string;
+  readonly currentThinkingLevel?: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
 }): ReadonlyArray<ServerProviderModel> {
   const model = input.configOptions?.find(
@@ -205,23 +256,43 @@ export function buildPiModels(input: {
           name: entry.name,
         }));
   const current = (model?.type === "select" ? model.currentValue : undefined) ?? input.currentModel;
-  const capabilities = reasoningCapabilities(input.configOptions);
-  const discovered: ServerProviderModel[] = discoveredEntries.map((entry) => ({
-    slug: piModelSlug(entry.value),
-    name: piDisplayName(entry.value, entry.name),
-    isCustom: false,
-    ...(entry.value === current
-      ? {
-          isDefault: true,
-          aliases: [PI_DEFAULT_MODEL],
-        }
-      : {}),
-    capabilities,
-  }));
+  const configCapabilities = reasoningCapabilitiesFromConfigOptions(input.configOptions);
+  const configThinking = input.configOptions?.find(
+    (option) =>
+      option.id === "thought_level" ||
+      option.id === "reasoning_effort" ||
+      option.id === "reasoningEffort",
+  );
+  const configThinkingLevel =
+    configThinking?.type === "select" && typeof configThinking.currentValue === "string"
+      ? configThinking.currentValue
+      : undefined;
+  const defaultThinkingLevel = input.currentThinkingLevel ?? configThinkingLevel;
+  const rpcModelsBySlug = new Map(
+    (input.rpcModels ?? []).map((entry) => [`${entry.provider}/${entry.id}`, entry]),
+  );
+  const discovered: ServerProviderModel[] = discoveredEntries.map((entry) => {
+    const rpcModel = rpcModelsBySlug.get(entry.value);
+    return {
+      slug: piModelSlug(entry.value),
+      name: piDisplayName(entry.value, entry.name),
+      isCustom: false,
+      ...(entry.value === current
+        ? {
+            isDefault: true,
+            aliases: [PI_DEFAULT_MODEL],
+          }
+        : {}),
+      capabilities:
+        rpcModel && rpcModel.thinkingLevels.length > 0
+          ? reasoningCapabilities(rpcModel.thinkingLevels, defaultThinkingLevel)
+          : configCapabilities,
+    };
+  });
   return providerModelsFromSettings(
     discovered.length > 0 ? discovered : [MODEL_PLACEHOLDER],
     input.customModels ?? [],
-    capabilities,
+    configCapabilities,
   );
 }
 
@@ -450,19 +521,13 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const configOptions = initializeResult
     ? sessionConfigOptionsFromInitialize(initializeResult)
     : undefined;
-  const hasAcpModels =
-    modelEntries(
-      configOptions?.find((option) => option.id === "model" || option.category === "model"),
-    ).length > 0;
-  const modelCatalog = hasAcpModels
-    ? Option.none<PiRpcModelCatalog>()
-    : yield* runModelListProbe(input.environment).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("Pi model list probe failed.", { cause }).pipe(
-            Effect.as(Option.none<PiRpcModelCatalog>()),
-          ),
-        ),
-      );
+  const modelCatalog = yield* runModelListProbe(input.environment).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("Pi model list probe failed.", { cause }).pipe(
+        Effect.as(Option.none<PiRpcModelCatalog>()),
+      ),
+    ),
+  );
   const models = buildPiModels({
     customModels: input.settings.customModels,
     ...(configOptions ? { configOptions } : {}),
@@ -471,6 +536,9 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       onSome: (catalog) => ({
         rpcModels: catalog.models,
         ...(catalog.currentModel ? { currentModel: catalog.currentModel } : {}),
+        ...(catalog.currentThinkingLevel
+          ? { currentThinkingLevel: catalog.currentThinkingLevel }
+          : {}),
       }),
     }),
   });

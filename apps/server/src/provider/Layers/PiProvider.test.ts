@@ -25,11 +25,27 @@ const deepSeekModels = [
     id: "deepseek-flash",
     name: "DeepSeek V4.1 Flash",
     provider: "deepseek",
+    thinkingLevels: ["off", "low", "high", "max"],
+    thinkingLevelMap: {
+      minimal: null,
+      low: "low",
+      medium: null,
+      high: "high",
+      max: "max",
+    },
   },
   {
     id: "deepseek-v4-pro",
     name: "DeepSeek V4 Pro",
     provider: "deepseek",
+    thinkingLevels: ["off", "high", "max"],
+    thinkingLevelMap: {
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      max: "max",
+    },
   },
 ] as const;
 
@@ -39,13 +55,22 @@ import readline from "node:readline";
 if (process.argv.includes("--version")) {
   process.stdout.write("0.81.0\\n");
 } else {
-  const models = ${JSON.stringify(deepSeekModels)};
+  const models = ${JSON.stringify(
+    deepSeekModels.map((model) => ({
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      reasoning: true,
+      thinkingLevelMap: model.thinkingLevelMap,
+    })),
+  )};
   const input = readline.createInterface({ input: process.stdin });
   input.on("line", (line) => {
     const request = JSON.parse(line);
     const data = request.type === "get_state"
       ? {
           model: { provider: "deepseek", id: "deepseek-v4-pro" },
+          thinkingLevel: "high",
           sessionFile: null,
         }
       : request.type === "get_available_models"
@@ -76,6 +101,7 @@ it("uses Pi's readable model names and configured default", () => {
   const models = buildPiModels({
     rpcModels: deepSeekModels,
     currentModel: "deepseek/deepseek-v4-pro",
+    currentThinkingLevel: "high",
     customModels: [],
   });
 
@@ -92,6 +118,29 @@ it("uses Pi's readable model names and configured default", () => {
     }),
   ]);
   expect(models[0]?.isDefault).toBeUndefined();
+  expect(models[0]?.capabilities?.optionDescriptors?.[0]).toEqual(
+    expect.objectContaining({
+      id: "reasoningEffort",
+      currentValue: "high",
+      options: [
+        { id: "off", label: "Off" },
+        { id: "low", label: "Low" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "max", label: "Max" },
+      ],
+    }),
+  );
+  expect(models[1]?.capabilities?.optionDescriptors?.[0]).toEqual(
+    expect.objectContaining({
+      id: "reasoningEffort",
+      currentValue: "high",
+      options: [
+        { id: "off", label: "Off" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "max", label: "Max" },
+      ],
+    }),
+  );
 });
 
 it.effect("reports ready when Pi and its ACP bridge both respond", () =>
@@ -121,6 +170,17 @@ it.effect("reports ready when Pi and its ACP bridge both respond", () =>
     expect(snapshot.models.map((model) => [model.slug, model.name, model.isDefault])).toEqual([
       ["deepseek/deepseek-flash", "DeepSeek V4.1 Flash", undefined],
       ["deepseek/deepseek-v4-pro", "DeepSeek V4 Pro", true],
+    ]);
+    expect(
+      snapshot.models.map((model) => [
+        model.slug,
+        model.capabilities?.optionDescriptors?.[0]?.type === "select"
+          ? model.capabilities.optionDescriptors[0].options.map((option) => option.id)
+          : [],
+      ]),
+    ).toEqual([
+      ["deepseek/deepseek-flash", ["off", "low", "high", "max"]],
+      ["deepseek/deepseek-v4-pro", ["off", "high", "max"]],
     ]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
