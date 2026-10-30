@@ -139,6 +139,18 @@
       "types": "./src/relay/index.ts",
       "default": "./src/relay/index.ts"
     },
+    "./state/provider-allocation": {
+      "types": "./src/state/providerAllocation.ts",
+      "default": "./src/state/providerAllocation.ts"
+    },
+    "./state/worker-communication": {
+      "types": "./src/state/workerCommunication.ts",
+      "default": "./src/state/workerCommunication.ts"
+    },
+    "./state/session-renewal": {
+      "types": "./src/state/sessionRenewal.ts",
+      "default": "./src/state/sessionRenewal.ts"
+    },
     "./state/auth": {
       "types": "./src/state/auth.ts",
       "default": "./src/state/auth.ts"

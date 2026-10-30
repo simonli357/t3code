@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { NotificationSettings } from "./NotificationSettings";
+import { SessionRenewalSettings } from "./SessionRenewalSettings";
+import { WorkerAccountSettings } from "./WorkerAccountSettings";
+import { WorkerCommunicationSettings } from "./WorkerCommunicationSettings";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { CheckIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -1870,6 +1873,9 @@ export function ThreadsSettingsPanel() {
           />
         </AdvancedSettings>
       </SettingsSection>
+      <WorkerCommunicationSettings />
+      <SessionRenewalSettings key={`renewal:${scope.environmentIds.join(",")}`} />
+      <WorkerAccountSettings />
     </SettingsPageContainer>
   );
 }
