@@ -319,7 +319,7 @@ export const layerFor = (world: World) =>
     ),
   );
 
-function provider(instanceId: string, model: string) {
+export function provider(instanceId: string, model: string) {
   return {
     instanceId,
     driver: instanceId,

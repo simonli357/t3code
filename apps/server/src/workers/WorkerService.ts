@@ -97,10 +97,17 @@ const decodeOwnershipResult = Schema.decodeUnknownSync(
 );
 
 const isWorkerError = Schema.is(WorkerError);
+/** The failing command's own reason when it carries one, so a refused dispatch says why. */
+const describeCause = (cause: unknown): string => {
+  if (!(cause instanceof Error)) return String(cause);
+  const inner = (cause as { readonly cause?: unknown }).cause;
+  const reason = typeof inner === "string" ? inner : inner instanceof Error ? inner.message : "";
+  return reason === "" || cause.message.includes(reason)
+    ? cause.message
+    : `${cause.message} ${reason}`;
+};
 const failure = (cause: unknown): WorkerError =>
-  isWorkerError(cause)
-    ? cause
-    : new WorkerError({ message: cause instanceof Error ? cause.message : String(cause) });
+  isWorkerError(cause) ? cause : new WorkerError({ message: describeCause(cause) });
 
 /** Job kinds a worker sends back to its master. */
 const REPORT_KINDS = ["done", "blocked", "notice"] as const;
@@ -765,13 +772,8 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const createThread = Effect.fn("WorkerService.createThread")(function* (
-    owner: ThreadId,
-    parent: OrchestrationV2ThreadShell,
-    worker: WorkerRow,
-  ) {
+  const createThread = Effect.fn("WorkerService.createThread")(function* (worker: WorkerRow) {
     const plan = decodePlan(worker.plan_json);
-    const at = yield* now;
     if (plan.sourceThreadId) {
       yield* threads
         .dispatch({
@@ -818,9 +820,6 @@ const make = Effect.gen(function* () {
       .getThreadEventSequence(plan.threadId)
       .pipe(Effect.mapError(failure));
     yield* sql`UPDATE custom_workers SET state = 'ready', error = NULL, baseline = ${baseline}, read_seq = MAX(read_seq, ${baseline}) WHERE thread_id = ${plan.threadId}`;
-    void owner;
-    void parent;
-    void at;
   });
 
   const spawnWorker = Effect.fn("WorkerService.spawnWorker")(function* (
@@ -887,7 +886,7 @@ const make = Effect.gen(function* () {
     }
     watch(owner, input.threadId);
     if (worker.state !== "ready") {
-      yield* createThread(owner, parent, worker).pipe(
+      yield* createThread(worker).pipe(
         Effect.tapError(
           (cause) =>
             sql`UPDATE custom_workers SET state = 'error', error = ${failure(cause).message} WHERE thread_id = ${input.threadId}`,
@@ -940,6 +939,26 @@ const make = Effect.gen(function* () {
     return yield* Effect.forEach(rows, describe);
   }, Effect.mapError(failure));
 
+  /**
+   * Stored events of a thread after a sequence. The store's stream keeps following new events, so
+   * this stops at the thread's latest sequence as of now.
+   */
+  const storedEvents = Effect.fn("WorkerService.storedEvents")(function* (
+    threadId: ThreadId,
+    afterSequence: number,
+    limit = Number.POSITIVE_INFINITY,
+  ) {
+    const latest = yield* threads.getThreadEventSequence(threadId);
+    if (latest <= afterSequence) return [];
+    return Array.from(
+      yield* threads.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
+        Stream.takeUntil((stored) => stored.sequence >= latest),
+        Stream.take(limit),
+        Stream.runCollect,
+      ),
+    );
+  }, Effect.mapError(failure));
+
   const read = Effect.fn("WorkerService.read")(function* (
     owner: ThreadId,
     input: typeof ReadInput.Type,
@@ -949,11 +968,7 @@ const make = Effect.gen(function* () {
     let nextTextOffset =
       input.textOffset ?? (input.afterSequence === undefined ? worker.read_offset : 0);
     const limit = 100;
-    const page = Array.from(
-      yield* threads
-        .streamStoredEventsFrom({ threadId: input.threadId, afterSequence: nextSequence })
-        .pipe(Stream.take(limit + 1), Stream.runCollect, Effect.mapError(failure)),
-    );
+    const page = yield* storedEvents(input.threadId, nextSequence, limit + 1);
     const batch = page.slice(0, limit);
     const items: Array<(typeof ReadResult.Type)["items"][number]> = [];
     let budget = 12000;
@@ -1232,11 +1247,7 @@ const make = Effect.gen(function* () {
 
   /** The newest message the user typed into this thread, never one an agent or the server sent. */
   const latestUserInstruction = Effect.fn(function* (threadId: ThreadId, afterSequence: number) {
-    const page = Array.from(
-      yield* threads
-        .streamStoredEventsFrom({ threadId, afterSequence, eventType: "message.updated" })
-        .pipe(Stream.runCollect, Effect.mapError(failure)),
-    );
+    const page = yield* storedEvents(threadId, afterSequence);
     let latest: { readonly id: string; readonly text: string } | undefined;
     for (const stored of page) {
       const event = stored.event;
