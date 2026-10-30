@@ -2,6 +2,10 @@
 
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
 
+T3 maintenance workflows live in the separate private repository at `~/t3-workflows`; inspect it there when maintaining or updating this fork.
+
+Never leave this repository or `~/t3-workflows` out of sync: before finishing, either discard or commit and push every local change and branch, and bring each host's checkout to the pushed commit without overwriting active work.
+
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
 
 ## What makes T3 Code special?
