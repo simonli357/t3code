@@ -1,3 +1,4 @@
+// @effect-diagnostics preferSchemaOverJson:off - Pi's RPC mode uses raw NDJSON messages.
 import {
   type CustomModelSetting,
   type ModelCapabilities,
@@ -11,6 +12,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import { ChildProcess } from "effect/unstable/process";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -39,6 +41,7 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
 const VERSION_TIMEOUT = "8 seconds";
+const MODEL_LIST_TIMEOUT = "12 seconds";
 const INITIALIZE_TIMEOUT = "12 seconds";
 const AUTH = {
   status: "unknown",
@@ -53,6 +56,88 @@ const MODEL_PLACEHOLDER: ServerProviderModel = {
   capabilities: EMPTY_CAPABILITIES,
 };
 
+interface PiRpcModel {
+  readonly id: string;
+  readonly name: string;
+  readonly provider: string;
+}
+
+interface PiRpcModelCatalog {
+  readonly currentModel: string | undefined;
+  readonly models: ReadonlyArray<PiRpcModel>;
+}
+
+interface PiRpcResponse {
+  readonly id: string;
+  readonly success: boolean;
+  readonly data?: unknown;
+  readonly error?: unknown;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function parsePiRpcResponse(line: string): Option.Option<PiRpcResponse> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return Option.none();
+  }
+  if (!isRecord(parsed) || parsed.type !== "response") return Option.none();
+  const id = nonEmptyString(parsed.id);
+  if (!id || typeof parsed.success !== "boolean") return Option.none();
+  return Option.some({
+    id,
+    success: parsed.success,
+    ...(parsed.data !== undefined ? { data: parsed.data } : {}),
+    ...(parsed.error !== undefined ? { error: parsed.error } : {}),
+  });
+}
+
+function parsePiRpcModelCatalog(responses: ReadonlyArray<PiRpcResponse>): PiRpcModelCatalog {
+  const stateResponse = responses.find((response) => response.id === "state");
+  const modelsResponse = responses.find((response) => response.id === "models");
+  if (!stateResponse?.success || !modelsResponse?.success) {
+    throw new Error(
+      `Pi did not return its model catalog (responses: ${responses
+        .map((response) => `${response.id}:${response.success}`)
+        .join(", ")}).`,
+    );
+  }
+
+  const state = isRecord(stateResponse.data) ? stateResponse.data : undefined;
+  const selectedModel = state && isRecord(state.model) ? state.model : undefined;
+  const provider = nonEmptyString(selectedModel?.provider);
+  const id = nonEmptyString(selectedModel?.id);
+  const modelRows = isRecord(modelsResponse.data) ? modelsResponse.data.models : undefined;
+  const models = Array.isArray(modelRows)
+    ? modelRows.flatMap((row) => {
+        if (!isRecord(row)) return [];
+        const modelId = nonEmptyString(row.id);
+        const modelProvider = nonEmptyString(row.provider);
+        if (!modelId || !modelProvider) return [];
+        return [
+          {
+            id: modelId,
+            name: nonEmptyString(row.name) ?? modelId,
+            provider: modelProvider,
+          },
+        ];
+      })
+    : [];
+
+  return {
+    currentModel: provider && id ? `${provider}/${id}` : undefined,
+    models,
+  };
+}
+
 function modelEntries(
   option: EffectAcpSchema.SessionConfigOption | undefined,
 ): ReadonlyArray<{ readonly value: string; readonly name: string }> {
@@ -62,6 +147,13 @@ function modelEntries(
       ? [{ value: entry.value, name: entry.name }]
       : entry.options.map((nested) => ({ value: nested.value, name: nested.name })),
   );
+}
+
+function piDisplayName(value: string, name: string): string {
+  const provider = value.includes("/") ? value.slice(0, value.indexOf("/")) : undefined;
+  const prefix = provider ? `${provider}/` : undefined;
+  const trimmed = name.trim();
+  return (prefix && trimmed.startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed) || value;
 }
 
 function reasoningCapabilities(
@@ -97,16 +189,26 @@ function reasoningCapabilities(
 
 export function buildPiModels(input: {
   readonly configOptions?: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+  readonly rpcModels?: ReadonlyArray<PiRpcModel>;
+  readonly currentModel?: string;
   readonly customModels?: ReadonlyArray<CustomModelSetting>;
 }): ReadonlyArray<ServerProviderModel> {
   const model = input.configOptions?.find(
     (option) => option.id === "model" || option.category === "model",
   );
-  const current = model?.type === "select" ? model.currentValue : undefined;
+  const acpModels = modelEntries(model);
+  const discoveredEntries =
+    acpModels.length > 0
+      ? acpModels
+      : (input.rpcModels ?? []).map((entry) => ({
+          value: `${entry.provider}/${entry.id}`,
+          name: entry.name,
+        }));
+  const current = (model?.type === "select" ? model.currentValue : undefined) ?? input.currentModel;
   const capabilities = reasoningCapabilities(input.configOptions);
-  const discovered: ServerProviderModel[] = modelEntries(model).map((entry) => ({
+  const discovered: ServerProviderModel[] = discoveredEntries.map((entry) => ({
     slug: piModelSlug(entry.value),
-    name: entry.name.trim() || piModelSlug(entry.value),
+    name: piDisplayName(entry.value, entry.name),
     isCustom: false,
     ...(entry.value === current
       ? {
@@ -175,6 +277,50 @@ function runVersionProbe(environment: NodeJS.ProcessEnv) {
       }),
     ).pipe(Effect.timeoutOption(VERSION_TIMEOUT));
   });
+}
+
+function runModelListProbe(environment: NodeJS.ProcessEnv) {
+  return Effect.gen(function* () {
+    const command = piVersionCommand(environment);
+    const args = ["--mode", "rpc", "--no-themes", "--no-session"];
+    const spawn = yield* resolveSpawnCommand(command, args, { env: environment });
+    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const input = [
+      JSON.stringify({ id: "state", type: "get_state" }),
+      JSON.stringify({ id: "models", type: "get_available_models" }),
+      "",
+    ].join("\n");
+    const responses = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const child = yield* childProcessSpawner.spawn(
+          ChildProcess.make(spawn.command, spawn.args, {
+            cwd: process.cwd(),
+            env: environment,
+            extendEnv: false,
+            shell: spawn.shell,
+            stdin: Stream.encodeText(Stream.make(input)),
+          }),
+        );
+        const [responseChunk] = yield* Effect.all(
+          [
+            child.stdout.pipe(
+              Stream.decodeText(),
+              Stream.splitLines,
+              Stream.map(parsePiRpcResponse),
+              Stream.filter(Option.isSome),
+              Stream.map(Option.getOrThrow),
+              Stream.take(2),
+              Stream.runCollect,
+            ),
+            Stream.runDrain(child.stderr),
+          ],
+          { concurrency: "unbounded" },
+        );
+        return responseChunk;
+      }),
+    );
+    return parsePiRpcModelCatalog(responses);
+  }).pipe(Effect.timeoutOption(MODEL_LIST_TIMEOUT));
 }
 
 function initializeProbe(input: {
@@ -304,9 +450,29 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const configOptions = initializeResult
     ? sessionConfigOptionsFromInitialize(initializeResult)
     : undefined;
+  const hasAcpModels =
+    modelEntries(
+      configOptions?.find((option) => option.id === "model" || option.category === "model"),
+    ).length > 0;
+  const modelCatalog = hasAcpModels
+    ? Option.none<PiRpcModelCatalog>()
+    : yield* runModelListProbe(input.environment).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Pi model list probe failed.", { cause }).pipe(
+            Effect.as(Option.none<PiRpcModelCatalog>()),
+          ),
+        ),
+      );
   const models = buildPiModels({
     customModels: input.settings.customModels,
     ...(configOptions ? { configOptions } : {}),
+    ...Option.match(modelCatalog, {
+      onNone: () => ({}),
+      onSome: (catalog) => ({
+        rpcModels: catalog.models,
+        ...(catalog.currentModel ? { currentModel: catalog.currentModel } : {}),
+      }),
+    }),
   });
   const version = parseGenericCliVersion(Option.getOrElse(versionOutput, () => ""));
   return buildServerProvider({
