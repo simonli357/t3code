@@ -289,7 +289,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     }
   };
   return (
-    <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-6 p-4 [overflow-wrap:anywhere] sm:p-8 [&>*]:min-w-0 [&_label]:grid [&_label]:min-w-0 [&_label]:grid-cols-1 [&_label]:gap-1 [&_fieldset]:min-w-0">
+    <div className="flex w-full min-w-0 flex-col gap-6 [overflow-wrap:anywhere] [&>*]:min-w-0 [&_label]:grid [&_label]:min-w-0 [&_label]:grid-cols-1 [&_label]:gap-1 [&_fieldset]:min-w-0">
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
