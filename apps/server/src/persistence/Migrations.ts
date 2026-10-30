@@ -2,6 +2,11 @@ import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+import {
+  archiveCustomForkLedger,
+  hasCustomForkLedger,
+  runSiteMigrations,
+} from "./siteMigrations.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -207,22 +212,34 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  const sql = yield* SqlClient.SqlClient;
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
-  if (includesV2) {
-    yield* assertV2MigrationsCanRun(toMigrationInclusive);
-  }
-  const executedMigrations = [
-    ...previewMigrations,
-    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
-  ];
+  // A copy of the custom fork's database converts and migrates in one transaction, so a
+  // rejection or a failed migration leaves it exactly as it was.
+  const migrate = Effect.gen(function* () {
+    if (includesV2) {
+      if (yield* hasCustomForkLedger()) {
+        yield* archiveCustomForkLedger(migrationEntries.map(([id, name]) => [id, name] as const));
+      }
+      yield* assertV2MigrationsCanRun(toMigrationInclusive);
+    }
+    const executed = [
+      ...previewMigrations,
+      ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
+    ];
+    if (toMigrationInclusive === undefined) yield* runSiteMigrations();
+    return executed;
+  });
+  const executedMigrations = (yield* hasCustomForkLedger())
+    ? yield* sql.withTransaction(migrate)
+    : yield* migrate;
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
 
-  const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
     readonly migration_id: number;
     readonly name: string;

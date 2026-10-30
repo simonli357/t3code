@@ -3,7 +3,12 @@ import * as NodeSqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+
+import { makeV1ImportReceipt } from "./importReceipts.ts";
+
+const encodeReceipt = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 export class V2DatabaseImportError extends Schema.TaggedError<V2DatabaseImportError>()(
   "V2DatabaseImportError",
@@ -14,7 +19,10 @@ export class V2DatabaseImportError extends Schema.TaggedError<V2DatabaseImportEr
   }
 }
 
-/** Its copied legacy tables remain the source for lazy transcript import. */
+/**
+ * Its copied legacy tables remain the source for lazy transcript import. A receipt beside the
+ * V1 file records the snapshot's hash and counts before the copy is published.
+ */
 export const initializeV2Database = Effect.fn("initializeV2Database")(function* (
   destinationPath: string,
 ) {
@@ -38,6 +46,19 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
         database.close();
       }
     });
+    // Record the backup reference and counts/hashes before the copy can be used.
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const receipt = yield* Effect.tryPromise(() =>
+      makeV1ImportReceipt({ sourcePath, snapshotPath, destinationPath, createdAt }),
+    );
+    const receiptDirectory = path.join(directory, "v2-import-receipts");
+    yield* fs.makeDirectory(receiptDirectory, { recursive: true });
+    const receiptPath = path.join(
+      receiptDirectory,
+      `v1-import-${receipt.createdAt.replaceAll(":", "-")}.json`,
+    );
+    yield* fs.writeFileString(`${receiptPath}.tmp`, `${encodeReceipt(receipt)}\n`);
+    yield* fs.rename(`${receiptPath}.tmp`, receiptPath);
     // Publish only a complete snapshot, without replacing an existing V2 database.
     yield* fs.link(snapshotPath, destinationPath).pipe(
       Effect.catchIf(
