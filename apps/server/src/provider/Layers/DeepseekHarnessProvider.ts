@@ -44,13 +44,39 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
 });
 const VERSION_TIMEOUT = "8 seconds";
 const INITIALIZE_TIMEOUT = "12 seconds";
-const MODEL_PLACEHOLDER: ServerProviderModel = {
-  slug: DEEPSEEK_HARNESS_DEFAULT_MODEL,
-  name: "DeepSeek Harness default",
-  isCustom: false,
-  isDefault: true,
-  capabilities: EMPTY_CAPABILITIES,
-};
+// ACP only exposes its session config after starting a session, but session
+// moves validate saved options against the destination catalog first.
+const FALLBACK_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  optionDescriptors: [
+    {
+      id: "reasoning_effort",
+      label: "Reasoning",
+      type: "select",
+      options: [
+        { id: "off", label: "Off" },
+        { id: "low", label: "Low" },
+        { id: "high", label: "High" },
+        { id: "max", label: "Max" },
+      ],
+    },
+  ],
+});
+const FALLBACK_MODELS: ReadonlyArray<ServerProviderModel> = [
+  {
+    slug: "deepseek-v4-flash",
+    name: "DeepSeek V4 Flash",
+    isCustom: false,
+    isDefault: true,
+    aliases: [DEEPSEEK_HARNESS_DEFAULT_MODEL],
+    capabilities: FALLBACK_CAPABILITIES,
+  },
+  {
+    slug: "deepseek-v4-pro",
+    name: "DeepSeek V4 Pro",
+    isCustom: false,
+    capabilities: FALLBACK_CAPABILITIES,
+  },
+];
 
 function modelEntries(
   option: EffectAcpSchema.SessionConfigOption | undefined,
@@ -115,7 +141,7 @@ export function buildDeepseekHarnessModels(input: {
     capabilities,
   }));
   return providerModelsFromSettings(
-    discovered.length > 0 ? discovered : [MODEL_PLACEHOLDER],
+    discovered.length > 0 ? discovered : FALLBACK_MODELS,
     input.customModels ?? [],
     capabilities,
   );
