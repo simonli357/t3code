@@ -1,0 +1,270 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+import { unresolvedQuotaRejections, type QuotaEvidence } from "./quotaEvidence.ts";
+import * as DateTime from "effect/DateTime";
+import type {
+  AllocationAccount,
+  AllocationInventory,
+  AllocationRequest,
+  ServerProvider,
+  UsageMeasurementsReport,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
+
+/**
+ * What allocation needs to know of a thread: which account it runs on, whether it is using it, and
+ * how its last provider failure reads. The server derives it from thread shells.
+ */
+export interface AllocationThread {
+  readonly id: string;
+  readonly instanceId: string;
+  readonly model: string;
+  readonly options: AllocationRequest["options"];
+  readonly state: "idle" | "starting" | "running" | "failed";
+  readonly lastError: string | null;
+  readonly lastErrorClass: string | null;
+  /** When the thread last changed; a quota rejection counts from here. */
+  readonly updatedAt: string;
+  /** When the provider said a usage limit lifts. */
+  readonly usageLimitResetAt: string | null;
+}
+
+/** Login identity is shared across aliases and computers; credential bytes never leave the registry. */
+export function allocationIdentity(provider: ServerProvider): string | null {
+  const identity = provider.auth.email?.trim().toLowerCase();
+  return identity
+    ? NodeCrypto.createHash("sha256")
+        .update(JSON.stringify([provider.driver, identity]))
+        .digest("hex")
+    : null;
+}
+const contextBand = (tokens: number | undefined) =>
+  tokens === undefined
+    ? "unknown"
+    : tokens < 32_000
+      ? "under32k"
+      : tokens < 128_000
+        ? "32k-128k"
+        : tokens < 256_000
+          ? "128k-256k"
+          : "256k+";
+const profileUncertainty = (profile: UsageMeasurementsReport["profiles"][number]) =>
+  profile.turns >= 5 && profile.medianOutputTokensPerTurnHour > 0
+    ? Math.max(
+        1,
+        Math.min(2, profile.p90OutputTokensPerTurnHour / profile.medianOutputTokensPerTurnHour),
+      )
+    : 1;
+
+export function allocationInventory(input: {
+  environmentId: string;
+  at: string;
+  providers: readonly ServerProvider[];
+  threads: readonly AllocationThread[];
+  measurements: UsageMeasurementsReport;
+  quotaEvidence?: readonly QuotaEvidence[];
+  maxReadingAgeMinutes?: number;
+  request?: AllocationRequest;
+  workerDisabledInstanceIds?: readonly string[];
+}): AllocationInventory {
+  const { environmentId, at, providers, threads, measurements, request } = input;
+  const accounts: AllocationAccount[] = providers.map((p) => {
+    const measured = measurements.accounts.find((a) => a.instanceIds.includes(p.instanceId));
+    const effort =
+      request?.options.find((o) => o.id === "reasoningEffort" || o.id === "effort")?.value ?? null;
+    const profile = request
+      ? measurements.profiles.find(
+          (v) =>
+            v.instanceId === p.instanceId &&
+            v.model === request.model &&
+            v.effort === effort &&
+            v.contextBand === contextBand(request.contextTokens),
+        )
+      : undefined;
+    const limits = p.usageLimits;
+    const evidence = (input.quotaEvidence ?? []).filter((e) => e.instanceId === p.instanceId);
+    // A usage-limit failure is the provider rejecting the account. It stays in force until a later
+    // reading shows the window restarted, the provider's reset time passes, or (without one) six hours.
+    const recent = Date.parse(at) - 6 * 3_600_000;
+    for (const t of threads) {
+      if (
+        t.instanceId === p.instanceId &&
+        t.state === "failed" &&
+        t.lastErrorClass === "usage_limit" &&
+        (t.usageLimitResetAt ? t.usageLimitResetAt > at : Date.parse(t.updatedAt) > recent)
+      )
+        evidence.push({
+          instanceId: p.instanceId,
+          windowId: "unknown",
+          status: "rejected",
+          at: t.updatedAt,
+          threadId: t.id,
+          ...(t.usageLimitResetAt ? { resetsAt: t.usageLimitResetAt } : {}),
+        });
+    }
+    const rejected = unresolvedQuotaRejections(
+      evidence,
+      limits,
+      at,
+      input.maxReadingAgeMinutes ?? 15,
+    );
+    const limitedUntil =
+      rejected
+        .map((e) => e.resetsAt)
+        .filter((v): v is string => !!v)
+        .sort()
+        .at(-1) ?? null;
+    const failed =
+      rejected.length > 0 ||
+      threads.some(
+        (t) =>
+          t.instanceId === p.instanceId &&
+          t.state === "failed" &&
+          /unauthori[sz]ed|authentication/i.test(t.lastError ?? ""),
+      );
+    const available =
+      p.enabled &&
+      p.installed &&
+      p.availability !== "unavailable" &&
+      p.status !== "error" &&
+      p.status !== "disabled" &&
+      p.auth.status === "authenticated" &&
+      !failed &&
+      !limits?.unavailable;
+    return {
+      availableForWorkers: !input.workerDisabledInstanceIds?.includes(p.instanceId),
+      retainHistory: measurements.monitoredInstanceIds.includes(p.instanceId),
+      environmentId,
+      instanceId: p.instanceId,
+      driver: p.driver,
+      accountKey: allocationIdentity(p),
+      label: p.displayName ?? p.instanceId,
+      available,
+      unavailableReason: available
+        ? null
+        : failed
+          ? "Provider rejected a prior session for quota/auth; the next attempt may still fail."
+          : "Provider is not authenticated, healthy, or reporting quota.",
+      ...(limits === undefined
+        ? { usageLimitsUnavailableReason: "unverified" as const }
+        : limits.unavailable?.reason
+          ? { usageLimitsUnavailableReason: limits.unavailable.reason }
+          : {}),
+      limitedUntil,
+      models: p.models.map(({ slug, capabilities }) => ({ slug, capabilities })),
+      shortWindow: limits?.windows.some(
+        (w) =>
+          w.kind === "session" ||
+          (w.windowDurationMins !== undefined && w.windowDurationMins <= 1440),
+      )
+        ? "reported"
+        : limits?.shortWindowAbsent === true && limits.shortWindowAbsentCheckedAt !== undefined
+          ? "known-absent"
+          : "unknown",
+      ...(limits?.shortWindowAbsentCheckedAt
+        ? { shortWindowAbsentCheckedAt: limits.shortWindowAbsentCheckedAt }
+        : {}),
+      windows: (limits?.windows ?? []).map((w) => {
+        const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const scope = w.modelScope ? normalize(w.modelScope) : null;
+        const scopedModels = scope
+          ? p.models
+              .filter((m) => `-${normalize(m.slug)}-`.includes(`-${scope}-`))
+              .map((m) => m.slug)
+          : [];
+        const rate = measured?.windows.find(
+          (v) =>
+            v.window.id === w.id &&
+            w.resetsAt !== undefined &&
+            v.window.resetsAt === w.resetsAt &&
+            v.window.windowDurationMins === w.windowDurationMins,
+        );
+        const duration =
+          w.windowDurationMins !== undefined && w.windowDurationMins > 0
+            ? w.windowDurationMins / 60
+            : null;
+        return {
+          id: w.id,
+          label: w.label,
+          kind: w.kind,
+          usedPoints: w.usedPercent,
+          checkedAt: w.checkedAt ?? limits!.checkedAt,
+          resetsAt: w.resetsAt ?? null,
+          cycleStartedAt:
+            w.resetsAt && duration
+              ? DateTime.formatIso(
+                  DateTime.makeUnsafe(Date.parse(w.resetsAt) - duration * 3_600_000),
+                )
+              : null,
+          durationHours: duration,
+          ...(w.applicableModels
+            ? { models: w.applicableModels }
+            : scopedModels.length
+              ? { models: scopedModels }
+              : {}),
+          ratePointsPerHour: rate?.rate.percentagePointsPerHour ?? null,
+          samples: rate?.rate.sampleCount ?? 0,
+          predictionErrorPointsPerHour: rate?.rate.predictionErrorPointsPerHour ?? null,
+          rateAgeMinutes: rate ? rate.ageSeconds / 60 : null,
+        };
+      }),
+      resetCredits: limits?.resetCredits
+        ? {
+            count: limits.resetCredits.availableCount,
+            expiresAt: limits.resetCredits.nextExpiresAt ?? null,
+            scope: "Provider-reported credit; scope not reported. No automatic redemption.",
+          }
+        : null,
+      usageProfiles: measurements.profiles
+        .filter((item) => item.instanceId === p.instanceId)
+        .slice(0, 40)
+        .map((item) => ({
+          model: item.model,
+          effort: item.effort,
+          contextBand: item.contextBand,
+          samples: item.turns,
+          outputTokensPerHour: item.medianOutputTokensPerTurnHour,
+          uncertainty: profileUncertainty(item),
+          observedAt:
+            measurements.turns
+              .filter(
+                (turn) =>
+                  turn.instanceId === p.instanceId &&
+                  turn.model === item.model &&
+                  turn.effort === item.effort &&
+                  contextBand(turn.peakContextTokens ?? undefined) === item.contextBand &&
+                  !turn.mixedModels,
+              )
+              .map((turn) => turn.lastObservedAt)
+              .sort()
+              .at(-1) ?? null,
+        })),
+      profileSamples: profile?.turns ?? 0,
+      // Token rates never become quota. Comparable variability can only increase
+      // the cold-start margin, bounded to 2x; absent context remains unknown.
+      profileUncertainty: profile ? profileUncertainty(profile) : 1,
+    };
+  });
+  return {
+    environmentId,
+    observedAt: at,
+    complete: true,
+    accounts,
+    demand: threads
+      .filter((t) => t.state === "running" || t.state === "starting")
+      .map((t) => ({
+        environmentId,
+        threadId: t.id as ThreadId,
+        instanceId: t.instanceId as ProviderInstanceId,
+        accountKey: accounts.find((a) => a.instanceId === t.instanceId)?.accountKey ?? null,
+        model: t.model,
+        options: t.options,
+        state: t.state === "starting" ? ("pending" as const) : ("running" as const),
+      })),
+    notices: [
+      "Quota deltas include external and shared use. Token variability only increases uncertainty; it is not converted to subscription percentages.",
+      "Normal cycle starts use the provider-reported duration and reset schedule; manual reset plans do not advance that schedule.",
+    ],
+  };
+}

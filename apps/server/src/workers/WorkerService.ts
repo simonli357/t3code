@@ -30,6 +30,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { ProviderAllocation } from "../allocation/ProviderAllocation.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -108,6 +109,10 @@ const describeCause = (cause: unknown): string => {
 };
 const failure = (cause: unknown): WorkerError =>
   isWorkerError(cause) ? cause : new WorkerError({ message: describeCause(cause) });
+
+const USAGE_CAP_NOTICE_HEADER = "[T3 worker stopped by account usage cap]";
+const isUsageCapNotice = (job: { readonly prompt: string }) =>
+  job.prompt.startsWith(USAGE_CAP_NOTICE_HEADER);
 
 /** Job kinds a worker sends back to its master. */
 const REPORT_KINDS = ["done", "blocked", "notice"] as const;
@@ -188,6 +193,14 @@ export class WorkerService extends Context.Service<
       actor?: { readonly threadId: ThreadId; readonly userRequest: string },
     ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
     /** Starts reconciling worker state from run events; `drain` runs one pass on demand. */
+    /**
+     * Tells a worker's master the worker was stopped by its account's hard usage cap. Delivered
+     * once per request ID, even with notifications off or inside the communication window.
+     */
+    readonly notifyUsageCap: (
+      workerId: ThreadId,
+      input: { readonly requestId: string; readonly detail: string },
+    ) => Effect.Effect<boolean, WorkerError>;
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     readonly drain: () => Effect.Effect<void, WorkerError>;
   }
@@ -201,6 +214,8 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projects = yield* ProjectService.ProjectService;
   const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
+  // Allocation is optional here: without it a usage-limited worker is reported, never switched.
+  const allocation = yield* Effect.serviceOption(ProviderAllocation);
   const scope = yield* Effect.scope;
   const lock = yield* Semaphore.make(1);
   // Holds at most one pending pass, so a burst of events costs one drain.
@@ -387,6 +402,68 @@ const make = Effect.gen(function* () {
   });
 
   /**
+   * Retries a usage-limited assignment once on a recommended account, the same family first, and
+   * tells the master. The failed assignment is claimed first, so a restart or a second limit on the
+   * retry never repeats the attempt.
+   */
+  const autoSwitch = Effect.fn("WorkerService.autoSwitch")(function* (
+    worker: WorkerRow,
+    job: JobRow,
+    target: OrchestrationV2ThreadShell,
+    error: string,
+  ) {
+    if (
+      Option.isNone(allocation) ||
+      worker.state !== "ready" ||
+      worker.owner_id === null ||
+      job.id.startsWith("usage-retry:") ||
+      !job.prompt.trim() ||
+      !(yield* settings.getSettings).workerAutoSwitchOnUsageLimit ||
+      target.archivedAt !== null ||
+      target.snoozedUntil != null ||
+      busy(target) ||
+      (yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${worker.thread_id} LIMIT 1`).length
+    )
+      return false;
+    const retryId = `usage-retry:${job.id}`;
+    if ((yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${retryId}`).length) return false;
+    const selection = yield* allocation.value
+      .replacement(target.id, target.modelSelection)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (!selection) return false;
+    yield* checkWorkerAccount(selection);
+    yield* checkSelection(selection);
+    yield* sql`UPDATE custom_worker_jobs SET state = 'error', error = ${error}, reported = 1 WHERE id = ${job.id}`;
+    yield* threads
+      .dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make(`usage-switch:${job.id}`),
+        threadId: target.id,
+        modelSelection: selection,
+      })
+      .pipe(Effect.mapError(failure));
+    const providers = yield* catalog.getProviders;
+    const label = (id: string) => providers.find((p) => p.instanceId === id)?.displayName ?? id;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE custom_workers SET plan_json = ${encodeJson({
+          ...decodePlanRecord(worker.plan_json),
+          modelSelection: selection,
+        })} WHERE thread_id = ${worker.thread_id}`;
+        yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+          VALUES (${retryId}, ${worker.thread_id}, ${worker.thread_id}, 'work', ${job.prompt}, ${yield* now})`;
+        yield* notice(
+          worker,
+          { ...job, id: retryId },
+          "usage-switch",
+          `Usage-limit switch: moved ${target.title} from ${label(target.modelSelection.instanceId)} to ${label(selection.instanceId)} and retried its assignment once.`,
+        );
+      }),
+    );
+    return true;
+  });
+
+  /**
    * Resolves a submitted assignment from its run. State is derived from the run each time, so a
    * missed event or a restart never leaves it stale.
    */
@@ -426,6 +503,17 @@ const make = Effect.gen(function* () {
     const shell = yield* threads.getThreadShell(target).pipe(Effect.orElseSucceed(() => null));
     const error =
       state === "error" ? (shell?.lastError ?? job.error ?? "The run failed.") : job.error;
+    if (
+      state === "error" &&
+      shell !== null &&
+      shell.lastErrorClass === "usage_limit" &&
+      (yield* autoSwitch(worker, job, shell, error ?? "Usage limit reached.").pipe(
+        Effect.orElseSucceed(() => false),
+      ))
+    ) {
+      watch(worker.thread_id);
+      return (yield* jobById(job.id))!;
+    }
     const at = yield* now;
     yield* sql.withTransaction(
       Effect.gen(function* () {
@@ -733,9 +821,15 @@ const make = Effect.gen(function* () {
           return;
         }
         if (!REPORT_KINDS.includes(job.kind as (typeof REPORT_KINDS)[number])) return;
-        if (!worker || worker.state !== "ready" || !worker.notify || worker.owner_id === null)
+        const capStop = isUsageCapNotice(job);
+        if (
+          !worker ||
+          worker.state !== "ready" ||
+          (!capStop && !worker.notify) ||
+          worker.owner_id === null
+        )
           return;
-        if (job.kind === "notice" || job.kind === "blocked") {
+        if (!capStop && (job.kind === "notice" || job.kind === "blocked")) {
           const status = yield* communicationStatus(worker.thread_id, job.id);
           if (!status.relevant) {
             yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${job.id}`;
@@ -1710,6 +1804,24 @@ const make = Effect.gen(function* () {
     yield* deliverQueued();
   }, Effect.mapError(failure));
 
+  const notifyUsageCap = Effect.fn("WorkerService.notifyUsageCap")(function* (
+    workerId: ThreadId,
+    input: { readonly requestId: string; readonly detail: string },
+  ) {
+    const worker = yield* workerOf(workerId);
+    if (!worker || worker.owner_id === null) return false;
+    if ((yield* jobById(input.requestId)) !== undefined) return false;
+    yield* enqueue(
+      input.requestId,
+      worker.thread_id,
+      worker.owner_id,
+      "blocked",
+      `${USAGE_CAP_NOTICE_HEADER}\n\n${input.detail}\n\nRead the worker's saved state before deciding whether to raise the cap, switch accounts, or wait for the provider window to reset. The worker will not restart automatically.`,
+    );
+    yield* kick();
+    return true;
+  }, Effect.mapError(failure));
+
   const handleEvent = Effect.fn(function* (event: OrchestrationV2DomainEvent) {
     if (!watched.has(event.threadId)) return;
     if (event.type === "run.updated") {
@@ -1774,6 +1886,7 @@ const make = Effect.gen(function* () {
     reclaim,
     readOwnership,
     changeOwnership,
+    notifyUsageCap,
     start,
     drain,
   });

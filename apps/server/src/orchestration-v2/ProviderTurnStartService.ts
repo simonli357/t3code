@@ -33,6 +33,8 @@ import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import * as EventSink from "./EventSink.ts";
+import { UsageCapGuard } from "../allocation/UsageCapEnforcement.ts";
+import { usageCapDetail } from "../allocation/usageCaps.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -156,6 +158,8 @@ export const layer: Layer.Layer<
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+    // Account usage caps stop a start before the provider sees it; absent where allocation is off.
+    const usageCaps = yield* Effect.serviceOption(UsageCapGuard);
 
     const recreateMissingWorktree = Effect.fn("ProviderTurnStartService.recreateMissingWorktree")(
       function* (input: {
@@ -487,6 +491,21 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (Option.isSome(usageCaps)) {
+        const reach = yield* usageCaps.value
+          .check(input.threadId, run.providerInstanceId)
+          .pipe(Effect.orElseSucceed(() => null));
+        if (reach !== null) {
+          const detail = `Account usage cap reached. ${usageCapDetail(reach)}`;
+          yield* settleStartFailure({
+            signal: "usage-cap",
+            title: "Account usage cap reached",
+            error: new Error(detail),
+            message: detail,
+          });
+          return;
+        }
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
