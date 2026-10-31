@@ -63,6 +63,8 @@ import { PeerToolkit } from "./toolkits/peer/tools.ts";
 import * as AllocationHandlers from "./toolkits/allocation/handlers.ts";
 import { WorkersToolkit } from "./toolkits/workers/tools.ts";
 import * as WorkersHandlers from "./toolkits/workers/handlers.ts";
+import { UsageToolkit } from "./toolkits/usage/tools.ts";
+import * as UsageHandlers from "./toolkits/usage/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1105,6 +1107,7 @@ export const layerOrchestratorToolkit = toolkitRegistration(
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorkersToolkit = toolkitRegistration(WorkersToolkit, WorkersHandlers.layer);
+const layerUsageToolkit = toolkitRegistration(UsageToolkit, UsageHandlers.layer);
 const layerAllocationToolkit = toolkitRegistration(AllocationToolkit, AllocationHandlers.layer);
 const layerPeerToolkit = toolkitRegistration(PeerToolkit, PeerHandlers.layer);
 const layerSessionMovesToolkit = toolkitRegistration(
@@ -1169,6 +1172,7 @@ export const layerTools = Layer.mergeAll(
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerWorkersToolkit,
+  layerUsageToolkit,
   layerAllocationToolkit,
   layerPeerToolkit,
   layerSessionMovesToolkit,

@@ -33,6 +33,7 @@ import * as PeerRequests from "../peer/PeerRequests.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
+import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import * as Store from "./AllocationStore.ts";
 import { decideAllocation } from "./decision.ts";
 import { allocationInventory, type AllocationThread } from "./inventory.ts";
@@ -138,6 +139,12 @@ const make = Effect.gen(function* () {
   ) {
     const shell = yield* threads.getShellSnapshot();
     const current = yield* settings.getSettings;
+    // Look this up at call time. The measurement collector also reads this service's environment,
+    // so making it a layer dependency here would create a needless initialization cycle.
+    const measurements = yield* Effect.serviceOption(UsageMeasurements);
+    const measurementReport = Option.isSome(measurements)
+      ? yield* measurements.value.read({}).pipe(Effect.orElseSucceed(() => NO_MEASUREMENTS))
+      : NO_MEASUREMENTS;
     const snapshot = allocationInventory({
       environmentId: local.environmentId,
       at: yield* now,
@@ -145,7 +152,7 @@ const make = Effect.gen(function* () {
       workerDisabledInstanceIds: current.workerDisabledInstanceIds,
       threads: shell.threads.map(allocationThread),
       maxReadingAgeMinutes: (yield* store.policy).maxReadingAgeMinutes,
-      measurements: NO_MEASUREMENTS,
+      measurements: measurementReport,
       ...(request ? { request } : {}),
     });
     // A worker that was assigned but has not started yet still holds its account.

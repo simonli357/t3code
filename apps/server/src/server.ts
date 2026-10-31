@@ -198,6 +198,7 @@ import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain"
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
+import * as UsageMeasurements from "./usage/UsageMeasurements.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
@@ -559,6 +560,7 @@ const layerSettledThreadPurge = SettledThreadPurge.layer.pipe(
 );
 
 // One instance of each, shared by the reactors, the MCP routes and the provider start guard.
+const layerUsageMeasurements = UsageMeasurements.layer;
 const layerProviderAllocation = ProviderAllocation.layer.pipe(
   Layer.provide(AllocationStore.layer),
   Layer.provide(layerPeers),
@@ -764,7 +766,10 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
-const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
+const layerRuntimeDependencies = Layer.merge(
+  layerRuntimeCoreDependencies,
+  layerUsageMeasurements.pipe(Layer.provide(layerRuntimeCoreDependencies)),
+).pipe(
   Layer.provideMerge(layerSessionWorkspaces),
   Layer.provideMerge(Computers.liveLayer),
   Layer.provideMerge(layerUsage),
@@ -813,6 +818,7 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+    Layer.provide(layerUsageMeasurements),
     Layer.provide(layerSessionMoves),
     Layer.provide(layerSettledThreadPurge),
     Layer.provide(layerWorkerService),
