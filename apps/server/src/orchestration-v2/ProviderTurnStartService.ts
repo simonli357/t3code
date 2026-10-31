@@ -23,10 +23,17 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import {
+  appendGlobalInstructionContext,
+  buildGlobalInstructionContext,
+  formatGlobalInstructionContext,
+} from "../provider/GlobalInstructions.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -125,6 +132,48 @@ export class ProviderTurnStartServiceV2 extends Context.Service<
   ProviderTurnStartServiceV2Shape
 >()("t3/orchestration-v2/ProviderTurnStartService/ProviderTurnStartServiceV2") {}
 
+const GLOBAL_INSTRUCTIONS_CONTEXT_KEY = "t3_global_instructions";
+
+export const shouldDeliverGlobalInstructions = (
+  currentRevision: string | undefined,
+  previousRevision: string | undefined,
+): boolean => currentRevision !== undefined && currentRevision !== previousRevision;
+
+/** Add one accepted snapshot to the provider turn and advance delivery state only after acceptance. */
+export const makeGlobalInstructionsDeliverySession = (
+  session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  revision: string,
+  context: { readonly instructions: string; readonly runtimeFacts: string },
+  recordDelivered: (revision: string) => Effect.Effect<void>,
+): ProviderAdapter.ProviderAdapterV2SessionRuntime => ({
+  ...session,
+  startTurn: (input) =>
+    session
+      .startTurn(
+        session.driver === "codex"
+          ? {
+              ...input,
+              appContext: [
+                ...(input.appContext ?? []).filter(
+                  (entry) => entry.key !== GLOBAL_INSTRUCTIONS_CONTEXT_KEY,
+                ),
+                {
+                  key: GLOBAL_INSTRUCTIONS_CONTEXT_KEY,
+                  text: formatGlobalInstructionContext(context),
+                },
+              ],
+            }
+          : {
+              ...input,
+              message: {
+                ...input.message,
+                text: appendGlobalInstructionContext(input.message.text, context),
+              },
+            },
+      )
+      .pipe(Effect.tap(() => recordDelivered(revision))),
+});
+
 export const layer: Layer.Layer<
   ProviderTurnStartServiceV2,
   never,
@@ -157,7 +206,12 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const sessionWorkspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
+    const globalInstructionRevisionByProviderSession = yield* Ref.make(
+      new Map<ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSession"]["id"], string>(),
+    );
     // Account usage caps stop a start before the provider sees it; absent where allocation is off.
     const usageCaps = yield* Effect.serviceOption(UsageCapGuard);
 
@@ -661,6 +715,20 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection: run.modelSelection,
       });
+      const settings = yield* serverSettings.getSettings;
+      const sessionWorkspace = Option.isSome(sessionWorkspaces)
+        ? yield* sessionWorkspaces.value.get(projection.thread.id)
+        : null;
+      const previousGlobalInstructionRevision = (yield* Ref.get(
+        globalInstructionRevisionByProviderSession,
+      )).get(providerSessionId);
+      const globalInstructions = buildGlobalInstructionContext(
+        settings,
+        resolvedRuntimePolicy.cwd ?? undefined,
+        previousGlobalInstructionRevision !== undefined,
+        sessionWorkspace,
+        resolvedRuntimePolicy.workspaceEnvironment,
+      );
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
@@ -760,6 +828,7 @@ export const layer: Layer.Layer<
         return;
       }
       const session = sessionResult.success;
+      let providerTurnSession = session;
       if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const loadFromProvider = Effect.fn("ProviderTurnStartService.loadFromProvider")(function* (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
@@ -1429,7 +1498,9 @@ export const layer: Layer.Layer<
             }),
           });
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
-          const start = compact ? session.compactThread! : session.startTurn;
+          const start = compact
+            ? providerTurnSession.compactThread!
+            : providerTurnSession.startTurn;
           const context = [delivery.context, restartNote]
             .filter((part) => part !== "")
             .join("\n\n");
@@ -1479,13 +1550,31 @@ export const layer: Layer.Layer<
               }),
         ),
       );
+      providerTurnSession =
+        globalInstructions === undefined ||
+        !shouldDeliverGlobalInstructions(
+          globalInstructions.revision,
+          previousGlobalInstructionRevision,
+        )
+          ? session
+          : makeGlobalInstructionsDeliverySession(
+              session,
+              globalInstructions.revision,
+              globalInstructions.context,
+              (deliveredRevision) =>
+                Ref.update(globalInstructionRevisionByProviderSession, (current) => {
+                  const next = new Map(current);
+                  next.set(providerSessionId, deliveredRevision);
+                  return next;
+                }),
+            );
       const deliverySession =
         effectiveHandoffs.length === 0 &&
         retryHandoff.length === 0 &&
         restartNote === "" &&
         !noteContinuation
-          ? session
-          : makeDeliverySession(session, startWithHandoffs);
+          ? providerTurnSession
+          : makeDeliverySession(providerTurnSession, startWithHandoffs);
       return runExecution.startRootRun({
         commandId: CommandId.make(`command:effect:provider-turn.start:${run.id}`),
         appThread: projection.thread,

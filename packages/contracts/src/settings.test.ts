@@ -101,6 +101,24 @@ describe("storage cleanup settings", () => {
   });
 });
 
+describe("global instruction settings", () => {
+  it("defaults inactive and accepts the nullable guide path written by the custom build", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      globalInstructions: { enabled: false, text: "" },
+      globalInstructionsGuidePath: "",
+    });
+    expect(
+      decodeServerSettings({
+        globalInstructions: { enabled: true, text: "Keep replies short." },
+        globalInstructionsGuidePath: null,
+      }),
+    ).toMatchObject({
+      globalInstructions: { enabled: true, text: "Keep replies short." },
+      globalInstructionsGuidePath: null,
+    });
+  });
+});
+
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 

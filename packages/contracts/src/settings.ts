@@ -1313,6 +1313,16 @@ export const ServerSettings = Schema.Struct({
   worktreeSubmodules: ForwardCompatibleNullable(WorktreeSubmodules).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  globalInstructions: Schema.Struct({
+    enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+    text: Schema.String.check(Schema.isMaxLength(8000)).pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+    ),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed({ enabled: false, text: "" }))),
+  /** User-configured environment-local guide path; separate from instruction text. */
+  globalInstructionsGuidePath: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
   /** Host-local root for independent session jobs. Empty leaves the feature off. */
   agentWorkRoot: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Optional absolute executable that registers a prepared job with its lifecycle owner. */
@@ -1666,6 +1676,13 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   worktreeSubmodules: Schema.optionalKey(Schema.NullOr(WorktreeSubmodules)),
+  globalInstructions: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      text: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(8000))),
+    }),
+  ),
+  globalInstructionsGuidePath: Schema.optionalKey(Schema.NullOr(Schema.String)),
   agentWorkRoot: Schema.optionalKey(Schema.String),
   workspaceLifecycleCommand: Schema.optionalKey(
     Schema.NullOr(
