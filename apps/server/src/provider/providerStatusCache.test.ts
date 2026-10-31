@@ -12,6 +12,7 @@ import { hydrateCachedProvider, isCachedProviderCorrelated } from "./providerSta
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
+const PI_DRIVER = ProviderDriverKind.make("pi");
 
 const makeProvider = (
   provider: ProviderDriverKind,
@@ -90,6 +91,40 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
         skills: cachedCodex.skills,
         message: cachedCodex.message,
       },
+    );
+  });
+
+  it("lets cached canonical models supersede and discard fallback aliases", () => {
+    const placeholder = {
+      slug: "default",
+      name: "Pi default",
+      isCustom: false,
+      isDefault: true,
+      capabilities: emptyCapabilities,
+    } as const;
+    const flash = {
+      slug: "deepseek/deepseek-flash",
+      name: "DeepSeek V4.1 Flash",
+      isCustom: false,
+      capabilities: emptyCapabilities,
+    } as const;
+    const pro = {
+      slug: "deepseek/deepseek-v4-pro",
+      name: "DeepSeek V4 Pro",
+      isCustom: false,
+      isDefault: true,
+      aliases: ["default"],
+      capabilities: emptyCapabilities,
+    } as const;
+    const cachedPi = makeProvider(PI_DRIVER, { models: [placeholder, flash, pro] });
+    const fallbackPi = makeProvider(PI_DRIVER, { models: [placeholder] });
+
+    assert.deepStrictEqual(
+      hydrateCachedProvider({
+        cachedProvider: cachedPi,
+        fallbackProvider: fallbackPi,
+      }).models,
+      [flash, pro],
     );
   });
 

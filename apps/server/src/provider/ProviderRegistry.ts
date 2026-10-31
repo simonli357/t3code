@@ -212,9 +212,16 @@ const mergeProviderModels = (
   const retainablePreviousModels = previousModels.filter(
     (model) => !model.isCustom && !updateRequiredSlugs.has(model.slug),
   );
+  const catalogAliasSlugs = new Set(
+    [...nextModels, ...retainablePreviousModels]
+      .filter((model) => !model.isCustom)
+      .flatMap((model) => model.aliases ?? []),
+  );
+  const withoutShadowedCatalogAliases = (models: ReadonlyArray<ServerProvider["models"][number]>) =>
+    models.filter((model) => model.isCustom || !catalogAliasSlugs.has(model.slug));
 
   if (shouldRetainMissingModels && nextModels.length === 0 && retainablePreviousModels.length > 0) {
-    return retainablePreviousModels;
+    return withoutShadowedCatalogAliases(retainablePreviousModels);
   }
 
   const previousBySlug = new Map(previousModels.map((model) => [model.slug, model] as const));
@@ -229,9 +236,10 @@ const mergeProviderModels = (
     };
   });
   const nextSlugs = new Set(nextModels.map((model) => model.slug));
-  return shouldRetainMissingModels
+  const merged = shouldRetainMissingModels
     ? [...mergedModels, ...retainablePreviousModels.filter((model) => !nextSlugs.has(model.slug))]
     : mergedModels;
+  return withoutShadowedCatalogAliases(merged);
 };
 
 /** Antigravity health checks only initialize; preserve previously verified Google auth across restarts. */

@@ -67,6 +67,7 @@ const PI_DEFAULT_MODEL: ServerProviderModel = {
   slug: "default",
   name: "Pi default",
   isCustom: false,
+  isDefault: true,
   capabilities: EMPTY_PI_MODEL_CAPABILITIES,
 };
 
@@ -80,7 +81,7 @@ function piModelsFromSettings(
   discovered: ReadonlyArray<ServerProviderModel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
-    [PI_DEFAULT_MODEL, ...discovered],
+    discovered.length > 0 ? discovered : [PI_DEFAULT_MODEL],
     customModels ?? [],
     EMPTY_PI_MODEL_CAPABILITIES,
   );
@@ -112,16 +113,16 @@ function parseDiscoveredModels(
     const slug = `${provider}/${id}`;
     if (seen.has(slug)) continue;
     seen.add(slug);
+    const active = provider === activeProvider && id === activeModelId;
     parsed.push({
       slug,
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
+      ...(active ? { isDefault: true, aliases: [PI_DEFAULT_MODEL.slug] } : {}),
       capabilities: thinkingCapabilitiesForPiModel(
         model,
-        provider === activeProvider && id === activeModelId
-          ? recordString(state, "thinkingLevel")
-          : undefined,
+        active ? recordString(state, "thinkingLevel") : undefined,
       ),
     });
   }

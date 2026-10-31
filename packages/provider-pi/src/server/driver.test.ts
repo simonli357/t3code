@@ -217,7 +217,6 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
             ),
           ]),
           [
-            ["default", []],
             ["test/model", known ? ["high"] : []],
             ["other/model", []],
             ["test/other", []],

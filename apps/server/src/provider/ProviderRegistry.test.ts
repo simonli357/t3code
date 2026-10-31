@@ -871,6 +871,29 @@ it.layer(
         );
       });
 
+      it("does not resurrect Pi's placeholder beside its canonical active model", () => {
+        const activeModel = {
+          ...currentModel,
+          isDefault: true,
+          aliases: [defaultModel.slug],
+        };
+        const canonical = {
+          ...cachedProvider,
+          models: [activeModel, removedModel],
+        } satisfies ServerProvider;
+        const startupPlaceholder = {
+          ...canonical,
+          status: "warning",
+          auth: { status: "unknown" },
+          models: [defaultModel],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(canonical, startupPlaceholder).models,
+          [activeModel, removedModel],
+        );
+      });
+
       it.effect(
         "persists Pi inventory removals across failed refreshes and registry restarts",
         () =>

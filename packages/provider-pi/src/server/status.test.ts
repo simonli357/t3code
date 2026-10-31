@@ -52,7 +52,7 @@ function piProbeSpawner(version: string) {
   });
 }
 
-const piDiscoverySpawner = (inventory: unknown) =>
+const piDiscoverySpawner = (inventory: unknown, state: unknown = {}) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
     let stdinBuffer = "";
@@ -71,7 +71,7 @@ const piDiscoverySpawner = (inventory: unknown) =>
               ? inventory
               : request.type === "get_commands"
                 ? { commands: [] }
-                : {};
+                : state;
           yield* Queue.offer(
             stdout,
             encoder.encode(
@@ -142,6 +142,61 @@ describe("PiProvider", () => {
       assert.deepEqual(
         snapshot.models.map((model) => model.slug),
         ["default"],
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("uses Pi's live catalog and marks only its active model as the default", () =>
+    Effect.gen(function* () {
+      const spawner = yield* piDiscoverySpawner(
+        {
+          models: [
+            { provider: "deepseek", id: "deepseek-flash", name: "DeepSeek V4.1 Flash" },
+            {
+              provider: "deepseek",
+              id: "deepseek-v4-pro",
+              name: "DeepSeek V4 Pro",
+              reasoning: true,
+            },
+          ],
+        },
+        {
+          model: { provider: "deepseek", id: "deepseek-v4-pro" },
+          thinkingLevel: "high",
+        },
+      );
+      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      assert.deepEqual(
+        snapshot.models.map((model) => ({
+          slug: model.slug,
+          name: model.name,
+          isDefault: model.isDefault,
+          aliases: model.aliases,
+          defaultThinking: (model.capabilities?.optionDescriptors ?? []).flatMap((descriptor) =>
+            descriptor.type === "select"
+              ? descriptor.options.filter((option) => option.isDefault).map((option) => option.id)
+              : [],
+          ),
+        })),
+        [
+          {
+            slug: "deepseek/deepseek-flash",
+            name: "DeepSeek V4.1 Flash",
+            isDefault: undefined,
+            aliases: undefined,
+            defaultThinking: [],
+          },
+          {
+            slug: "deepseek/deepseek-v4-pro",
+            name: "DeepSeek V4 Pro",
+            isDefault: true,
+            aliases: ["default"],
+            defaultThinking: ["high"],
+          },
+        ],
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
