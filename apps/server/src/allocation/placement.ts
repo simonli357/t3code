@@ -6,6 +6,7 @@ import type {
   ComputerPlacementRequest,
 } from "@t3tools/contracts";
 import { WORKER_ACCOUNT_DISABLED_REASON } from "@t3tools/contracts";
+import { findCatalogModel } from "@t3tools/shared/model";
 
 const GIB = 2 ** 30;
 const gib = (bytes: number) => `${(bytes / GIB).toFixed(1)} GiB`;
@@ -235,7 +236,7 @@ export function recommendPlacement(input: {
           (account) =>
             (request.driver === undefined || account.driver === request.driver) &&
             (request.model === undefined ||
-              account.models.some((model) => model.slug === request.model)) &&
+              findCatalogModel(account.models, request.model) !== undefined) &&
             (request.instanceId === undefined ||
               account.instanceId === request.instanceId ||
               (account.accountKey !== null && wantedLogins.has(account.accountKey))),
