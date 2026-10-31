@@ -234,6 +234,11 @@ export interface AcpAdapterV2Flavor {
   ) => Effect.Effect<string, never, ChildProcessSpawner.ChildProcessSpawner>;
   readonly driver: ProviderDriverKind;
   readonly capabilities: OrchestrationV2ProviderCapabilities;
+  /** `_meta` this harness needs on session/load and session/fork, such as a relocation request. */
+  readonly activationMeta?: {
+    readonly load?: { readonly [x: string]: Schema.Json };
+    readonly fork?: { readonly [x: string]: Schema.Json };
+  };
   readonly clientCapabilitiesMeta?: NonNullable<
     EffectAcpSchema.InitializeRequest["clientCapabilities"]
   >["_meta"];
@@ -629,8 +634,12 @@ function acpMcpContext(
   };
 }
 
-function acpMcpActivation(context: AcpMcpContext) {
-  return { mcpServers: context.servers, acpMcpServers: context.acpServers };
+function acpMcpActivation(context: AcpMcpContext, meta?: { readonly [x: string]: Schema.Json }) {
+  return {
+    mcpServers: context.servers,
+    acpMcpServers: context.acpServers,
+    ...(meta === undefined ? {} : { meta }),
+  };
 }
 
 function nativeThreadId(
@@ -6649,7 +6658,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             return yield* initialFailure;
           }
           const mcpContext = yield* readMcpContext(threadId);
-          const activationOptions = acpMcpActivation(mcpContext);
+          const activationOptions = acpMcpActivation(mcpContext, flavor.activationMeta?.load);
           prepareTerminalEnvironment(mcpContext, sessionId);
           const activated = canLoadSession
             ? yield* runtime.loadSession(sessionId, activationOptions)
@@ -8368,7 +8377,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     prepareTerminalEnvironment(mcpContext, sessionId);
                     const activated = yield* runtime.loadSession(
                       sessionId,
-                      acpMcpActivation(mcpContext),
+                      acpMcpActivation(mcpContext, flavor.activationMeta?.load),
                     );
                     rememberTerminalEnvironment(
                       activated.sessionId,
@@ -8495,7 +8504,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   prepareTerminalEnvironment(mcpContext);
                   const forked = yield* runtime.forkSession(
                     sourceSessionId,
-                    acpMcpActivation(mcpContext),
+                    acpMcpActivation(mcpContext, flavor.activationMeta?.fork),
                   );
                   rememberTerminalEnvironment(
                     forked.sessionId,

@@ -1084,6 +1084,8 @@ export interface AcpSessionRuntimeStartResult {
 export interface AcpSessionActivationOptions {
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
+  /** Sent as `_meta` on the load, resume or fork request, for harness-specific session handling. */
+  readonly meta?: { readonly [x: string]: Schema.Json };
 }
 
 export class AcpSessionRuntime extends Context.Service<
@@ -2394,6 +2396,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             sessionId,
             cwd: options.cwd,
             mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
+            ...(activationOptions?.meta === undefined ? {} : { _meta: activationOptions.meta }),
           } satisfies EffectAcpSchema.LoadSessionRequest;
           return runLoadSessionWithReplayIdle(requestPayload, started.initializeResult);
         }),
@@ -2406,6 +2409,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             sessionId,
             cwd: options.cwd,
             mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
+            ...(activationOptions?.meta === undefined ? {} : { _meta: activationOptions.meta }),
           } satisfies EffectAcpSchema.ResumeSessionRequest;
           return runLoggedRequest(
             "session/resume",
@@ -2422,6 +2426,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             sessionId,
             cwd: options.cwd,
             mcpServers: sessionMcpServers(started.initializeResult, activationOptions),
+            ...(activationOptions?.meta === undefined ? {} : { _meta: activationOptions.meta }),
           } satisfies EffectAcpSchema.ForkSessionRequest;
           return runLoggedRequest(
             "session/fork",

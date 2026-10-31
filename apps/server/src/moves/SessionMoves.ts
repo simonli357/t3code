@@ -17,6 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -41,7 +42,11 @@ import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionMana
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerRequests from "../peer/PeerRequests.ts";
-import { findSessionTranscripts, resolveTranscriptHome } from "../project/AgentTranscripts.ts";
+import {
+  findSessionTranscripts,
+  resolveDeepseekHarnessTranscriptHome,
+  resolveTranscriptHome,
+} from "../project/AgentTranscripts.ts";
 import { parsePeerRef, peerRef } from "../workers/workerSchemas.ts";
 import * as CodexHistory from "../project/CodexMoveHistory.ts";
 import * as CodexState from "../project/CodexMoveState.ts";
@@ -161,6 +166,17 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 /** The native session's own ID, when it is one a path can safely carry. */
 const safeNativeId = (value: string | null | undefined) =>
   typeof value === "string" && SESSION_ID_PATTERN.test(value) ? value : null;
+/** A DeepSeek Harness session file: `sessions/<project bucket>/<session id>/<artifact>`. */
+const isDshNativeName = (name: string) => {
+  const parts = name.split("/");
+  return (
+    parts.length >= 4 &&
+    parts[0] === "sessions" &&
+    parts[1]!.length > 0 &&
+    safeNativeId(parts[2]) !== null &&
+    parts.slice(3).join("/").length > 0
+  );
+};
 const failure = (cause: unknown) =>
   isMoveError(cause)
     ? cause
@@ -224,6 +240,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const crypto = yield* Crypto.Crypto;
   const hostEnvironment = yield* HostProcess.Environment;
   const isExecutable = yield* HostProcess.IsExecutable;
   const settings = yield* ServerSettingsService;
@@ -305,11 +322,15 @@ const make = Effect.gen(function* () {
           message:
             "The destination account must use the same provider. Configure a matching account before moving.",
         });
-      if (driver === "deepseekHarness")
-        return yield* new SessionMoveError({
-          message: "DeepSeek Harness sessions cannot move until that provider is available here.",
-        });
-      const home = yield* resolveTranscriptHome(instance, hostEnvironment);
+      const home =
+        driver === "deepseekHarness"
+          ? yield* resolveDeepseekHarnessTranscriptHome(
+              instance,
+              instanceId,
+              hostEnvironment,
+              config.stateDir,
+            ).pipe(Effect.provideService(Crypto.Crypto, crypto))
+          : yield* resolveTranscriptHome(instance, hostEnvironment);
       if (!home)
         return yield* new SessionMoveError({
           message: "The provider session directory could not be resolved.",
@@ -424,6 +445,82 @@ const make = Effect.gen(function* () {
       });
     }
   }, Effect.mapError(failure));
+
+  /**
+   * A DeepSeek Harness fork reads its parents' transcripts, so the move carries the whole ancestry:
+   * the session itself, then each provider thread it was forked from.
+   */
+  const dshFamily = Effect.fn("SessionMoves.dshFamily")(function* (
+    nativeId: string,
+    thread: OrchestrationV2ProviderThread,
+  ) {
+    const ids = [nativeId];
+    let parent = thread.forkedFrom?.providerThreadId as string | undefined;
+    for (let depth = 0; parent !== undefined && depth < 64; depth += 1) {
+      const rows = yield* sql<{ native: string | null; parent: string | null }>`SELECT
+        json_extract(payload_json, '$.nativeThreadRef.nativeId') AS native,
+        json_extract(payload_json, '$.forkedFrom.providerThreadId') AS parent
+        FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${parent}`.pipe(
+        Effect.mapError(failure),
+      );
+      const row = rows[0];
+      const id = safeNativeId(row?.native);
+      if (id !== null && !ids.includes(id)) ids.push(id);
+      parent = row?.parent ?? undefined;
+    }
+    return ids;
+  });
+
+  /** DSH keys a session's directory by the cwd in its header, so its files keep their names. */
+  const dshNativeName = Effect.fn("SessionMoves.dshNativeName")(function* (
+    parts: ReadonlyArray<string>,
+  ) {
+    const [root, bucket, sessionId, ...artifacts] = parts;
+    if (root !== "sessions" || !bucket || !sessionId || artifacts.length === 0)
+      return yield* new SessionMoveError({
+        message: "The DeepSeek Harness session artifact has no owner.",
+      });
+    return [root, bucket, sessionId, ...artifacts].join("/");
+  });
+
+  /**
+   * DSH resolves a session to one project directory, so a retried or returning move replaces a copy
+   * left anywhere under sessions/; the copy it displaces stays in staging until the move completes.
+   */
+  const parkStaleDshCopies = Effect.fn("SessionMoves.parkStaleDshCopies")(function* (
+    home: string,
+    staging: string,
+    requestId: string,
+    files: ReadonlyArray<Files.MoveFile>,
+  ) {
+    const sessionsRoot = path.join(home, "sessions");
+    const ids = new Set(
+      files
+        .filter((entry) => entry.kind === "native")
+        .map((entry) => entry.name.split("/")[2])
+        .filter((id): id is string => id !== undefined && safeNativeId(id) !== null),
+    );
+    const buckets = yield* fs
+      .readDirectory(sessionsRoot)
+      .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+    for (const bucket of buckets)
+      for (const id of ids) {
+        const stale = path.join(sessionsRoot, bucket, id);
+        if ((yield* fs.exists(stale).pipe(Effect.orElseSucceed(() => false))) !== true) continue;
+        const discarded = path.join(staging, "replaced", bucket);
+        yield* fs.makeDirectory(discarded, { recursive: true }).pipe(Effect.mapError(failure));
+        let parked = `${id}.${requestId}`;
+        for (
+          let attempt = 1;
+          (yield* fs
+            .exists(path.join(discarded, parked))
+            .pipe(Effect.orElseSucceed(() => false))) === true;
+          attempt += 1
+        )
+          parked = `${id}.${requestId}-${attempt}`;
+        yield* fs.rename(stale, path.join(discarded, parked)).pipe(Effect.mapError(failure));
+      }
+  });
 
   const replan = (planJson: string, change: (plan: Record<string, unknown>) => void) => {
     const plan = recordObject(parseJson(planJson));
@@ -656,7 +753,20 @@ const make = Effect.gen(function* () {
       driver === "codex"
         ? yield* io(() => CodexState.captureCodexMoveState(home.homePath, nativeId))
         : null;
-    const family = nativeState?.nativeIds ?? [nativeId];
+    const family =
+      nativeState?.nativeIds ??
+      (driver === "deepseekHarness" ? yield* dshFamily(nativeId, providerThread) : [nativeId]);
+    if (driver === "deepseekHarness")
+      for (const id of family) {
+        const found = yield* findSessionTranscripts(home, id).pipe(
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(FileSystem.FileSystem, fs),
+        );
+        if (found.length === 0)
+          return yield* new SessionMoveError({
+            message: `The DeepSeek Harness fork ancestry is incomplete (${id}).`,
+          });
+      }
     let entries = nativeState?.rollouts
       ? nativeState.rollouts.map((entry) => ({ path: Files.contained(home.homePath, entry.name) }))
       : (yield* Effect.forEach(family, (id) =>
@@ -703,9 +813,11 @@ const make = Effect.gen(function* () {
         const name =
           driver === "codex"
             ? path.relative(home.homePath, source).replaceAll("\\", "/")
-            : path
-                .relative(path.dirname(info.type === "Directory" ? entry.path : source), source)
-                .replaceAll("\\", "/");
+            : driver === "deepseekHarness"
+              ? yield* dshNativeName(path.relative(home.homePath, source).split(path.sep))
+              : path
+                  .relative(path.dirname(info.type === "Directory" ? entry.path : source), source)
+                  .replaceAll("\\", "/");
         if (files.some((file) => file.kind === "native" && file.name === name))
           return yield* new SessionMoveError({
             message: "Multiple native transcript copies need disambiguation before moving.",
@@ -720,6 +832,29 @@ const make = Effect.gen(function* () {
               kind: "native",
               name,
               ...(prefixBytes === undefined ? {} : { bytes: prefixBytes }),
+            }),
+          ),
+        );
+      }
+    }
+    if (driver === "deepseekHarness") {
+      // The harness keeps the files a session was given under its own home, apart from T3's.
+      const providerAttachments = path.join(home.homePath, "attachments", "v1");
+      const present = yield* fs.stat(providerAttachments).pipe(
+        Effect.map((info) => info.type === "Directory"),
+        Effect.orElseSucceed(() => false),
+      );
+      for (const source of present
+        ? yield* io(() => Files.listMoveFiles(providerAttachments))
+        : []) {
+        files.push(
+          yield* io(() =>
+            Files.copyMoveFile({
+              source,
+              sourceRoot: home.homePath,
+              staging,
+              kind: "provider-asset",
+              name: `attachments/v1/${path.relative(providerAttachments, source).replaceAll("\\", "/")}`,
             }),
           ),
         );
@@ -793,7 +928,11 @@ const make = Effect.gen(function* () {
       targetEnvironmentId: value.peer_environment_id,
       driver,
       nativeId,
-      ...(nativeState ? { nativeIds: nativeState.nativeIds } : {}),
+      ...(nativeState
+        ? { nativeIds: nativeState.nativeIds }
+        : driver === "deepseekHarness"
+          ? { nativeIds: family }
+          : {}),
       modelSelection: selection,
       title: thread.title,
       runtimeMode: thread.runtimeMode,
@@ -885,6 +1024,8 @@ const make = Effect.gen(function* () {
         ? path.join(home.homePath, "projects", manifest.targetCwd.replace(/[^a-zA-Z0-9]/g, "-"))
         : home.homePath;
     yield* fs.makeDirectory(nativeRoot, { recursive: true }).pipe(Effect.mapError(failure));
+    if (manifest.driver === "deepseekHarness")
+      yield* parkStaleDshCopies(home.homePath, staging, value.id, manifest.files);
     if (nativeState) {
       if (
         !nativeState.nativeIds.includes(manifest.nativeId) ||
@@ -905,6 +1046,8 @@ const make = Effect.gen(function* () {
     } else
       for (const file of manifest.files.filter((entry) => entry.kind === "native"))
         yield* io(() => Files.installMoveFile(staging, file, nativeRoot, file.name, replace));
+    for (const file of manifest.files.filter((entry) => entry.kind === "provider-asset"))
+      yield* io(() => Files.installMoveFile(staging, file, home.homePath, file.name, replace));
     if (manifest.driver === "claudeAgent") {
       const workerArgs = isExecutable
         ? ["__claude-history"]
@@ -1030,8 +1173,10 @@ const make = Effect.gen(function* () {
               ? /^(sessions\/[0-9]{4}\/[0-9]{2}\/[0-9]{2}|archived_sessions)\/rollout-[^/]+-[0-9a-f-]{36}\.jsonl$/i.test(
                   file.name,
                 )
-              : file.name === manifest.nativeId + ".jsonl" ||
-                file.name.startsWith(manifest.nativeId + "/");
+              : manifest.driver === "deepseekHarness"
+                ? isDshNativeName(file.name)
+                : file.name === manifest.nativeId + ".jsonl" ||
+                  file.name.startsWith(manifest.nativeId + "/");
           if (!valid)
             return yield* new SessionMoveError({
               message: "A transfer entry is not native conversation state.",
@@ -1039,14 +1184,20 @@ const make = Effect.gen(function* () {
         }
         if (!nativeFiles.length)
           return yield* new SessionMoveError({ message: "The native transcript is missing." });
-        if (manifest.files.some((entry) => entry.kind === "provider-asset"))
+        if (
+          manifest.files.some(
+            (entry) =>
+              entry.kind === "provider-asset" &&
+              (manifest.driver !== "deepseekHarness" || !entry.name.startsWith("attachments/v1/")),
+          )
+        )
           return yield* new SessionMoveError({
             message: "A transfer entry is not a provider asset this build accepts.",
           });
         const owned = yield* sql<{
           thread_id: string;
         }>`SELECT thread_id FROM orchestration_v2_projection_provider_threads
-          WHERE json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${manifest.nativeId}
+          WHERE json_extract(payload_json, '$.nativeThreadRef.nativeId') IN (${sql.csv(manifest.nativeIds ?? [manifest.nativeId])})
             AND json_extract(payload_json, '$.providerInstanceId') = ${manifest.modelSelection.instanceId}
             AND thread_id != ${manifest.input.threadId} LIMIT 1`.pipe(
           Effect.orElseSucceed(() => []),

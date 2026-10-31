@@ -74,22 +74,26 @@ export type DeepseekHarnessDriverEnv =
  * A configured `$DSH_HOME` wins, then the environment's, then a per-instance
  * directory so two instances never share saved sessions or profiles.
  */
-const resolveDeepseekHarnessHome = Effect.fn("resolveDeepseekHarnessHome")(function* (input: {
-  readonly instanceId: ProviderInstanceId;
-  readonly stateDir: string;
-  readonly settings: Pick<DeepseekHarnessSettings, "homePath">;
-  readonly environment: NodeJS.ProcessEnv;
-  readonly home: string;
-}): Effect.fn.Return<string, never, Crypto.Crypto | Path.Path> {
-  const path = yield* Path.Path;
-  const configured = input.settings.homePath.trim() || input.environment.DSH_HOME?.trim() || "";
-  if (configured) return path.resolve(expandHomePath(configured, input.home));
-  const crypto = yield* Crypto.Crypto;
-  const key = Hex.encode(
-    yield* crypto.digest("SHA-256", new TextEncoder().encode(input.instanceId)).pipe(Effect.orDie),
-  );
-  return path.join(input.stateDir, "providers", "deepseek-harness", key);
-});
+export const resolveDeepseekHarnessHome = Effect.fn("resolveDeepseekHarnessHome")(
+  function* (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly stateDir: string;
+    readonly settings: Pick<DeepseekHarnessSettings, "homePath">;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly home: string;
+  }): Effect.fn.Return<string, never, Crypto.Crypto | Path.Path> {
+    const path = yield* Path.Path;
+    const configured = input.settings.homePath.trim() || input.environment.DSH_HOME?.trim() || "";
+    if (configured) return path.resolve(expandHomePath(configured, input.home));
+    const crypto = yield* Crypto.Crypto;
+    const key = Hex.encode(
+      yield* crypto
+        .digest("SHA-256", new TextEncoder().encode(input.instanceId))
+        .pipe(Effect.orDie),
+    );
+    return path.join(input.stateDir, "providers", "deepseek-harness", key);
+  },
+);
 
 export const DeepseekHarnessDriver: ProviderDriver<
   DeepseekHarnessSettings,

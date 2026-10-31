@@ -114,6 +114,7 @@ export interface WorldOptions {
   readonly label?: string;
   readonly workspaceRoot?: string;
   readonly codexHome?: string;
+  readonly dshHome?: string;
   /** Peer services of this computer, for tests that link it to another. */
   readonly peers?: Layer.Layer<PeerLinks.PeerLinks | PeerRequests.PeerRequests>;
 }
@@ -123,14 +124,19 @@ const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = 
   return Layer.mergeAll(
     ServerSettings.layerTest({
       providerInstances: Object.fromEntries(
-        providers.map((candidate) => [
-          (candidate as { instanceId: string }).instanceId,
-          {
-            driver: ProviderDriverKind.make("codex"),
-            enabled: true,
-            ...(options.codexHome === undefined ? {} : { config: { homePath: options.codexHome } }),
-          },
-        ]),
+        providers.map((candidate) => {
+          const instanceId = (candidate as { instanceId: string }).instanceId;
+          const deepseek = instanceId === "deepseekHarness";
+          const home = deepseek ? options.dshHome : options.codexHome;
+          return [
+            instanceId,
+            {
+              driver: ProviderDriverKind.make(deepseek ? "deepseekHarness" : "codex"),
+              enabled: true,
+              ...(home === undefined ? {} : { config: { homePath: home } }),
+            },
+          ];
+        }),
       ),
     }),
     ProviderRegistryMock.layer(providers as ReadonlyArray<ServerProvider>),

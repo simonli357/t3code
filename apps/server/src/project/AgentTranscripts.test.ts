@@ -1,12 +1,16 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { findSessionTranscripts, resolveTranscriptHome } from "./AgentTranscripts.ts";
+import {
+  findSessionTranscripts,
+  resolveDeepseekHarnessTranscriptHome,
+  resolveTranscriptHome,
+} from "./AgentTranscripts.ts";
 
 const SESSION = "0248b7d6-1ead-447d-894b-5edbafe089df";
 const OTHER = "3eb759e7-b92c-43aa-9344-c277e5ca72aa";
@@ -19,6 +23,56 @@ const write = Effect.fn(function* (filePath: string, contents = "{}\n") {
 });
 
 it.layer(NodeServices.layer)("AgentTranscripts", (it) => {
+  describe("resolveDeepseekHarnessTranscriptHome", () => {
+    it.effect(
+      "uses the configured home, then the environment's, then a per-instance directory",
+      () =>
+        Effect.gen(function* () {
+          const dsh = ProviderDriverKind.make("deepseekHarness");
+          const state = "/state";
+          const instanceId = ProviderInstanceId.make("deepseekHarness");
+          expect(
+            yield* resolveDeepseekHarnessTranscriptHome(
+              { driver: dsh, config: { homePath: "/homes/dsh" } },
+              instanceId,
+              { DSH_HOME: "/homes/host" },
+              state,
+            ),
+          ).toEqual({ driver: "deepseekHarness", homePath: "/homes/dsh" });
+          expect(
+            yield* resolveDeepseekHarnessTranscriptHome(
+              { driver: dsh, config: {} },
+              instanceId,
+              { DSH_HOME: "/homes/host" },
+              state,
+            ),
+          ).toEqual({ driver: "deepseekHarness", homePath: "/homes/host" });
+          const own = yield* resolveDeepseekHarnessTranscriptHome(
+            { driver: dsh, config: {} },
+            instanceId,
+            {},
+            state,
+          );
+          const other = yield* resolveDeepseekHarnessTranscriptHome(
+            { driver: dsh, config: {} },
+            ProviderInstanceId.make("deepseekHarness_2"),
+            {},
+            state,
+          );
+          expect(own?.homePath.startsWith("/state/providers/deepseek-harness/")).toBe(true);
+          expect(own?.homePath).not.toBe(other?.homePath);
+          expect(
+            yield* resolveDeepseekHarnessTranscriptHome(
+              { driver: ProviderDriverKind.make("codex"), config: {} },
+              instanceId,
+              {},
+              state,
+            ),
+          ).toBeNull();
+        }),
+    );
+  });
+
   describe("resolveTranscriptHome", () => {
     it.effect("follows homePath, then the instance or host environment, per driver", () =>
       Effect.gen(function* () {

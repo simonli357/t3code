@@ -17,6 +17,7 @@ import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerRequests from "../peer/PeerRequests.ts";
 import { defaultProviders, layerWorld } from "./integration.testkit.ts";
+import { provider } from "./WorkerService.testkit.ts";
 
 type Handler = PeerRequests.PeerRequests["Service"]["handle"];
 
@@ -92,6 +93,7 @@ const layerComputer = (
   network: Network,
   root: string,
   codexHome: string,
+  dshHome: string,
 ) => {
   const peers = layerPeers(self, other, network);
   return SessionMoves.layer.pipe(
@@ -103,11 +105,12 @@ const layerComputer = (
     Layer.provideMerge(ServerConfig.layerTest(root, { prefix: `t3-peer-${self}-` })),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(
-      layerWorld(defaultProviders, {
+      layerWorld(providers, {
         environmentId: self,
         label: `Peer ${self}`,
         workspaceRoot: root,
         codexHome,
+        dshHome,
         peers,
       }),
     ),
@@ -115,12 +118,28 @@ const layerComputer = (
   );
 };
 
+/** DeepSeek Harness lists its models under the live name and keeps the retired name as an alias. */
+const deepseek = {
+  ...provider("deepseekHarness", "deepseek-v4.1-flash"),
+  models: [
+    {
+      slug: "deepseek-v4.1-flash",
+      name: "V4.1 Flash",
+      aliases: ["deepseek-v4-flash"],
+      isCustom: false,
+      capabilities: null,
+    },
+  ],
+};
+const providers = [...defaultProviders, deepseek];
+
 export interface Computer {
   readonly context: import("effect/Context").Context<
     Layer.Success<ReturnType<typeof layerComputer>>
   >;
   readonly root: string;
   readonly codexHome: string;
+  readonly dshHome: string;
 }
 
 /** A whole T3 server in memory, linked to `other` through `network`, with a git checkout and a Codex home. */
@@ -136,16 +155,18 @@ export const makeComputer = Effect.fn("makeComputer")(function* (
   git(root, "add", ".");
   git(root, "commit", "-q", "-m", "initial");
   const codexHome = tmp(`${slug}-codex`);
+  const dshHome = tmp(`${slug}-dsh`);
   const scope = yield* Effect.scope;
   yield* Scope.addFinalizer(
     scope,
     Effect.sync(() => {
       NodeFS.rmSync(root, { recursive: true, force: true });
       NodeFS.rmSync(codexHome, { recursive: true, force: true });
+      NodeFS.rmSync(dshHome, { recursive: true, force: true });
     }),
   );
-  const context = yield* Layer.build(layerComputer(self, other, network, root, codexHome));
-  return { context, root, codexHome } satisfies Computer;
+  const context = yield* Layer.build(layerComputer(self, other, network, root, codexHome, dshHome));
+  return { context, root, codexHome, dshHome } satisfies Computer;
 });
 
 /** Runs an effect on one computer of a test. */

@@ -1,6 +1,14 @@
-import { ClaudeSettings, CodexSettings, type ProviderInstanceConfig } from "@t3tools/contracts";
+import {
+  ClaudeSettings,
+  CodexSettings,
+  type ProviderInstanceConfig,
+  type ProviderInstanceId,
+} from "@t3tools/contracts";
+import { DeepseekHarnessSettings } from "@t3tools/provider-deepseek-harness/settings";
+import { resolveDeepseekHarnessHome } from "@t3tools/provider-deepseek-harness/server";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -11,6 +19,7 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+const decodeDeepseekHarnessSettings = Schema.decodeUnknownOption(DeepseekHarnessSettings);
 // Claude session ids and Codex thread ids are UUIDs. Anything else is refused
 // before it reaches a path, so a cursor can never name a sibling entry.
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -19,6 +28,35 @@ export interface TranscriptHome {
   readonly driver: "claudeAgent" | "codex" | "deepseekHarness";
   readonly homePath: string;
 }
+
+/**
+ * The private home of a DeepSeek Harness instance, where the harness the server spawns keeps its
+ * sessions. Without a configured home each instance has its own directory under the state directory.
+ */
+export const resolveDeepseekHarnessTranscriptHome = Effect.fn(
+  "resolveDeepseekHarnessTranscriptHome",
+)(function* (
+  instance: ProviderInstanceConfig,
+  instanceId: ProviderInstanceId,
+  hostEnvironment: NodeJS.ProcessEnv,
+  stateDir: string,
+): Effect.fn.Return<TranscriptHome | null, never, Crypto.Crypto | Path.Path> {
+  if (instance.driver !== "deepseekHarness") return null;
+  const config = decodeDeepseekHarnessSettings(instance.config ?? {});
+  if (Option.isNone(config)) return null;
+  const home = yield* HostProcess.HomeDirectory;
+  const instanceHome = instance.environment?.findLast(
+    (variable) => variable.name === "DSH_HOME",
+  )?.value;
+  const homePath = yield* resolveDeepseekHarnessHome({
+    instanceId,
+    stateDir,
+    settings: config.value,
+    environment: { ...hostEnvironment, ...(instanceHome ? { DSH_HOME: instanceHome } : {}) },
+    home,
+  });
+  return { driver: "deepseekHarness", homePath };
+});
 
 /**
  * An instance's native transcript home, resolved as the spawned CLI sees it: `homePath`, then

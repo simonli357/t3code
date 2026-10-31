@@ -445,3 +445,131 @@ it.effect("holds ownership changes while a session is parked, but not for a canc
     assert.include(refused.message, "moving between computers");
   }).pipe(Effect.scoped),
 );
+
+const DSH_PARENT = "11111111-1111-4111-8111-111111111111";
+const DSH_CHILD = "22222222-2222-4222-8222-222222222222";
+const dshSessionFiles = {
+  [`sessions/work-bucket/${DSH_PARENT}/transcript.jsonl`]: "parent turn\n",
+  [`sessions/work-bucket/${DSH_CHILD}/transcript.jsonl`]: "child turn\n",
+  [`sessions/work-bucket/${DSH_CHILD}/artifacts/note.txt`]: "a note\n",
+  "attachments/v1/ab/cd.bin": "provider attachment",
+};
+
+/** A DeepSeek Harness session that was forked from another, with the files the harness keeps for both. */
+const seedDshFork = Effect.fn("seedDshFork")(function* (world: World) {
+  yield* seed(master, world.root).pipe(Effect.provideContext(world.context));
+  const parent = ThreadId.make("thread:dsh-parent");
+  yield* seed(parent, world.root).pipe(Effect.provideContext(world.context));
+  const sink = yield* EventSink.EventSinkV2.pipe(Effect.provideContext(world.context));
+  const at = yield* DateTime.now;
+  const providerThread = (threadId: ThreadId, nativeId: string, forkedFrom?: string) => ({
+    id: EventId.make(`seed:dsh-provider-thread:${threadId}`),
+    type: "provider-thread.updated" as const,
+    threadId,
+    occurredAt: at,
+    payload: {
+      id: ProviderThreadId.make(`provider-thread:${threadId}`),
+      driver: "deepseekHarness" as never,
+      providerInstanceId: "deepseekHarness" as never,
+      providerSessionId: null,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: {
+        driver: "deepseekHarness" as never,
+        nativeId,
+        strength: "strong" as const,
+      },
+      nativeConversationHeadRef: null,
+      status: "idle" as const,
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      handoffIds: [],
+      forkedFrom:
+        forkedFrom === undefined ? null : { providerThreadId: ProviderThreadId.make(forkedFrom) },
+      createdAt: at,
+      updatedAt: at,
+    },
+  });
+  yield* sink.write({
+    events: [
+      providerThread(parent, DSH_PARENT),
+      providerThread(master, DSH_CHILD, `provider-thread:${parent}`),
+    ],
+  });
+  // The thread runs on the harness under the retired model name, which the catalog keeps as an alias.
+  yield* Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.model-selection.set",
+      commandId: CommandId.make("select-dsh"),
+      threadId: master,
+      modelSelection: { instanceId: "deepseekHarness" as never, model: "deepseek-v4-flash" },
+    });
+  }).pipe(Effect.provideContext(world.context));
+  for (const [name, text] of Object.entries(dshSessionFiles)) {
+    const file = NodePath.join(world.dshHome, name);
+    NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true });
+    NodeFS.writeFileSync(file, text);
+  }
+});
+
+it.effect(
+  "moves a DeepSeek Harness session with its fork ancestry, assets and alias, and back",
+  () =>
+    Effect.gen(function* () {
+      const network = newNetwork();
+      const a = yield* makeWorld(idA, idB, network);
+      const b = yield* makeWorld(idB, idA, network);
+      yield* seedDshFork(a);
+      const movesA = yield* startMoves(a);
+      const movesB = yield* startMoves(b);
+
+      yield* inWorld(a, movesA.request(moveInput("dsh-out", idB)));
+      yield* inWorld(a, movesA.drain());
+      assert.deepEqual(
+        (yield* rowsOf(a)).map((row) => [row.state, row.error]),
+        [["complete", null]],
+      );
+      // The same native IDs, the same files under the same names, the provider's own assets with them.
+      for (const name of Object.keys(dshSessionFiles))
+        assert.equal(sha(NodePath.join(b.dshHome, name)), sha(NodePath.join(a.dshHome, name)));
+      assert.isNull((yield* shellOf(b))!.archivedAt);
+
+      // Coming back replaces the copy left on this computer with the newer one.
+      NodeFS.appendFileSync(
+        NodePath.join(b.dshHome, `sessions/work-bucket/${DSH_CHILD}/transcript.jsonl`),
+        "second turn on the other computer\n",
+      );
+      yield* inWorld(b, movesB.request(moveInput("dsh-back", idA)));
+      yield* inWorld(b, movesB.drain());
+      for (const name of Object.keys(dshSessionFiles))
+        assert.equal(sha(NodePath.join(a.dshHome, name)), sha(NodePath.join(b.dshHome, name)));
+      assert.include(
+        NodeFS.readFileSync(
+          NodePath.join(a.dshHome, `sessions/work-bucket/${DSH_CHILD}/transcript.jsonl`),
+          "utf8",
+        ),
+        "second turn",
+      );
+      assert.isNull((yield* shellOf(a))!.archivedAt);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("refuses a DeepSeek Harness fork whose ancestry is missing on disk", () =>
+  Effect.gen(function* () {
+    const network = newNetwork();
+    const a = yield* makeWorld(idA, idB, network);
+    const b = yield* makeWorld(idB, idA, network);
+    yield* seedDshFork(a);
+    NodeFS.rmSync(NodePath.join(a.dshHome, `sessions/work-bucket/${DSH_PARENT}`), {
+      recursive: true,
+    });
+    const movesA = yield* startMoves(a);
+    yield* startMoves(b);
+    yield* inWorld(a, movesA.request(moveInput("dsh-incomplete", idB)));
+    yield* inWorld(a, movesA.drain());
+    const [row] = yield* rowsOf(a);
+    assert.include(row!.error ?? "", "ancestry is incomplete");
+    assert.isNull(yield* shellOf(b));
+  }).pipe(Effect.scoped),
+);

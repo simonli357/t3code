@@ -95,6 +95,9 @@ function makeDeepseekHarnessAcpAdapterFlavor(
     driver: DEEPSEEK_HARNESS_DRIVER_KIND,
     runtimeHarness: "deepseek-harness",
     capabilities: DeepseekHarnessProviderCapabilitiesV2,
+    // DSH keys a session's directory by the cwd in its header; relocation lets a moved or forked
+    // session open under the workspace of the computer it now runs on.
+    activationMeta: { load: { dshRelocate: true }, fork: { dshRelocate: true, dshAncestry: [] } },
     makeRuntime:
       options.makeRuntime ??
       (({ runtimePolicy, processEnvironment, ...input }: AcpAdapterV2RuntimeInput) =>
