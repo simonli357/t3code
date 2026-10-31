@@ -152,11 +152,7 @@ export const layerFromProjectStore: Layer.Layer<
           ? SessionWorkspaces.workspaceEnvironment(workspace)
           : yield* Effect.try({
               try: () =>
-                retainedWorkspaceEnvironment(
-                  input.thread.id,
-                  cwd,
-                  input.thread.worktreePath,
-                ),
+                retainedWorkspaceEnvironment(input.thread.id, cwd, input.thread.worktreePath),
               catch: (cause) =>
                 new RuntimePolicyWorkspaceError({
                   threadId: input.thread.id,
