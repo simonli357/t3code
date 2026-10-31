@@ -384,26 +384,23 @@ export function SettingsAllocationRouteScreen() {
                     disabled={busy}
                     onValueChange={async (checked) => {
                       setBusy(true);
-                      try {
-                        const result = await updateSettings({
-                          environmentId: EnvironmentId.make(host.environmentId),
-                          input: {
-                            patch: {
-                              workerDisabledInstanceIds: host.accounts
-                                .filter((account) =>
-                                  account.instanceId === a.instanceId
-                                    ? !checked
-                                    : account.availableForWorkers === false,
-                                )
-                                .map((account) => account.instanceId),
-                            },
+                      const result = await updateSettings({
+                        environmentId: EnvironmentId.make(host.environmentId),
+                        input: {
+                          patch: {
+                            workerDisabledInstanceIds: host.accounts
+                              .filter((account) =>
+                                account.instanceId === a.instanceId
+                                  ? !checked
+                                  : account.availableForWorkers === false,
+                              )
+                              .map((account) => account.instanceId),
                           },
-                        });
-                        if (result._tag === "Success") await refresh();
-                        else setMessage("Could not save worker availability. Reconnect and retry.");
-                      } finally {
-                        setBusy(false);
-                      }
+                        },
+                      }).catch(() => null);
+                      setBusy(false);
+                      if (result?._tag === "Success") await refresh();
+                      else setMessage("Could not save worker availability. Reconnect and retry.");
                     }}
                   />
                 </View>

@@ -160,20 +160,19 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const epoch = generation.current;
     setBusy(true);
     if (!keepMessage) setMessage("");
-    try {
-      const response = await execute({ environmentId, input: operation });
-      if (!mounted.current || epoch !== generation.current) return null;
-      if (response._tag !== "Success") {
-        setPreview(null);
-        setMessage(
-          `${modelFailureMessage(response.cause)} Your changes are kept. Reconnect, refresh the saved version and try again.`,
-        );
-        return null;
-      }
-      return response.value;
-    } finally {
-      if (mounted.current && epoch === generation.current) setBusy(false);
+    const response = await execute({ environmentId, input: operation }).catch(() => null);
+    if (!mounted.current || epoch !== generation.current) return null;
+    setBusy(false);
+    if (response?._tag !== "Success") {
+      setPreview(null);
+      setMessage(
+        response
+          ? `${modelFailureMessage(response.cause)} Your changes are kept. Reconnect, refresh the saved version and try again.`
+          : "The request failed unexpectedly. Your changes are kept. Reconnect and try again.",
+      );
+      return null;
     }
+    return response.value;
   };
   const refresh = async (keepMessage = false) => {
     const epoch = ++generation.current;

@@ -93,19 +93,16 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const epoch = generation.current;
     setBusy(true);
     setError("");
-    try {
-      const result = await execute({ environmentId, input: operation });
-      if (!mounted.current || epoch !== generation.current) return null;
-      if (result._tag !== "Success") {
-        setError(
-          "Request failed. The coordinator may be unavailable, or a newer policy was saved. Reload before retrying.",
-        );
-        return null;
-      }
-      return result.value;
-    } finally {
-      if (mounted.current && epoch === generation.current) setBusy(false);
+    const result = await execute({ environmentId, input: operation }).catch(() => null);
+    if (!mounted.current || epoch !== generation.current) return null;
+    setBusy(false);
+    if (result?._tag !== "Success") {
+      setError(
+        "Request failed. The coordinator may be unavailable, or a newer policy was saved. Reload before retrying.",
+      );
+      return null;
     }
+    return result.value;
   };
   const load = async (replaceDraft = false) => {
     const epoch = ++generation.current;
@@ -199,9 +196,12 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     .flatMap((i) => i.accounts)
     .find((a) => a.accountKey === overrideAccount);
   const addOverride = () => {
+    const source = overrideSource?.windows.find((w) => w.id === overrideWindow);
+    if (!source || !expires) {
+      setError("Choose an account, window and valid expiry before adding a temporary target.");
+      return;
+    }
     try {
-      const source = overrideSource?.windows.find((w) => w.id === overrideWindow);
-      if (!source || !expires) throw new Error("Missing window or expiry");
       const value = decodePolicy({
         ...policy,
         overrides: [
@@ -277,32 +277,29 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const startSession = async () => {
     setBusy(true);
     setError("");
-    try {
-      const result = await start({
-        environmentId,
-        input: { request, kind: "session", projectId: ProjectId.make(projectId), title, prompt },
-      });
-      if (result._tag !== "Success") {
-        setError(
-          "Startup did not confirm success. Keep these IDs and retry to reconcile; inspect the allocation history.",
-        );
-        return;
-      }
-      setDecision(result.value.allocation?.decision ?? null);
-      if (result.value.state === "submitted")
-        void navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId, threadId: result.value.threadId },
-        });
-      else
-        setNotice(
-          result.value.state === "observation"
-            ? "Observation recorded. No session was started."
-            : "No account matches the requested profile and constraints.",
-        );
-    } finally {
-      setBusy(false);
+    const result = await start({
+      environmentId,
+      input: { request, kind: "session", projectId: ProjectId.make(projectId), title, prompt },
+    }).catch(() => null);
+    setBusy(false);
+    if (result?._tag !== "Success") {
+      setError(
+        "Startup did not confirm success. Keep these IDs and retry to reconcile; inspect the allocation history.",
+      );
+      return;
     }
+    setDecision(result.value.allocation?.decision ?? null);
+    if (result.value.state === "submitted")
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId, threadId: result.value.threadId },
+      });
+    else
+      setNotice(
+        result.value.state === "observation"
+          ? "Observation recorded. No session was started."
+          : "No account matches the requested profile and constraints.",
+      );
   };
   return (
     <div className="flex w-full min-w-0 flex-col gap-6 [overflow-wrap:anywhere] [&>*]:min-w-0 [&_label]:grid [&_label]:min-w-0 [&_label]:grid-cols-1 [&_label]:gap-1 [&_fieldset]:min-w-0">
@@ -793,27 +790,23 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                         onCheckedChange={async (checked) => {
                           setBusy(true);
                           setError("");
-                          try {
-                            const result = await updateSettings({
-                              environmentId: EnvironmentId.make(host.environmentId),
-                              input: {
-                                patch: {
-                                  workerDisabledInstanceIds: host.accounts
-                                    .filter((account) =>
-                                      account.instanceId === a.instanceId
-                                        ? !checked
-                                        : account.availableForWorkers === false,
-                                    )
-                                    .map((account) => account.instanceId),
-                                },
+                          const result = await updateSettings({
+                            environmentId: EnvironmentId.make(host.environmentId),
+                            input: {
+                              patch: {
+                                workerDisabledInstanceIds: host.accounts
+                                  .filter((account) =>
+                                    account.instanceId === a.instanceId
+                                      ? !checked
+                                      : account.availableForWorkers === false,
+                                  )
+                                  .map((account) => account.instanceId),
                               },
-                            });
-                            if (result._tag === "Success") await load();
-                            else
-                              setError("Could not save worker availability. Reconnect and retry.");
-                          } finally {
-                            setBusy(false);
-                          }
+                            },
+                          }).catch(() => null);
+                          setBusy(false);
+                          if (result?._tag === "Success") await load();
+                          else setError("Could not save worker availability. Reconnect and retry.");
                         }}
                       />
                     </label>

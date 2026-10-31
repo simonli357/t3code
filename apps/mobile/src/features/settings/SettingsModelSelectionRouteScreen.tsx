@@ -188,20 +188,19 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const epoch = generation.current;
     setBusy(true);
     if (!keepMessage) setMessage("");
-    try {
-      const result = await execute({ environmentId, input });
-      if (epoch !== generation.current) return null;
-      if (result._tag !== "Success") {
-        setPreview(null);
-        setMessage(
-          `${modelFailureMessage(result.cause)} Your changes are kept; reconnect, refresh the saved version and try again.`,
-        );
-        return null;
-      }
-      return result.value;
-    } finally {
-      if (epoch === generation.current) setBusy(false);
+    const result = await execute({ environmentId, input }).catch(() => null);
+    if (epoch !== generation.current) return null;
+    setBusy(false);
+    if (result?._tag !== "Success") {
+      setPreview(null);
+      setMessage(
+        result
+          ? `${modelFailureMessage(result.cause)} Your changes are kept; reconnect, refresh the saved version and try again.`
+          : "The request failed unexpectedly. Your changes are kept. Reconnect and try again.",
+      );
+      return null;
     }
+    return result.value;
   };
   const refresh = async (keepMessage = false) => {
     const epoch = ++generation.current;
@@ -396,8 +395,14 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 className={field}
                 multiline
                 maxLength={500}
-                value={assessment[`${axis}Reason`]}
-                onChangeText={(value) => setAssessment({ ...assessment, [`${axis}Reason`]: value })}
+                value={
+                  axis === "difficulty" ? assessment.difficultyReason : assessment.stakesReason
+                }
+                onChangeText={(value) => {
+                  if (axis === "difficulty")
+                    setAssessment({ ...assessment, difficultyReason: value });
+                  else setAssessment({ ...assessment, stakesReason: value });
+                }}
               />
             </View>
           ))}
