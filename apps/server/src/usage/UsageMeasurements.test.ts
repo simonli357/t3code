@@ -23,7 +23,7 @@ import * as UsageMeasurements from "./UsageMeasurements.ts";
 
 const at = DateTime.makeUnsafe("2026-10-30T12:00:00.000Z");
 const later = DateTime.makeUnsafe("2026-10-30T13:00:00.000Z");
-const provider = Schema.decodeUnknownSync(ServerProvider)({
+const provider = Schema.decodeSync(ServerProvider)({
   instanceId: "codex",
   driver: "codex",
   enabled: true,
@@ -126,7 +126,7 @@ it.effect("retains an opted-in V2 run and feeds its context into the report", ()
       } as never);
       yield* TestClock.adjust(Duration.millis(20));
 
-      const report = yield* measurements.read({ instanceId: "codex" });
+      const report = yield* measurements.read({ instanceId: ProviderInstanceId.make("codex") });
       assert.deepEqual(report.monitoredInstanceIds, ["codex"]);
       assert.lengthOf(report.turns, 1);
       assert.equal(report.turns[0]?.state, "completed");

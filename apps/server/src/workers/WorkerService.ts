@@ -255,11 +255,11 @@ export class WorkerService extends Context.Service<
     ) => Effect.Effect<typeof ReclaimResult.Type, WorkerError>;
     readonly readOwnership: (
       threadId: ThreadId,
-    ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
+    ) => Effect.Effect<SessionOwnershipResult, SessionOwnershipError>;
     readonly changeOwnership: (
-      input: typeof SessionOwnershipInput.Type,
+      input: SessionOwnershipInput,
       actor?: { readonly threadId: ThreadId; readonly userRequest: string },
-    ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
+    ) => Effect.Effect<SessionOwnershipResult, SessionOwnershipError>;
     /** Starts reconciling worker state from run events; `drain` runs one pass on demand. */
     /**
      * Tells a worker's master the worker was stopped by its account's hard usage cap. Delivered
@@ -1570,7 +1570,7 @@ const make = Effect.gen(function* () {
 
   const changeOwnership = Effect.fn("WorkerService.changeOwnership")(
     function* (
-      input: typeof SessionOwnershipInput.Type,
+      input: SessionOwnershipInput,
       actor?: { readonly threadId: ThreadId; readonly userRequest: string },
     ) {
       yield* assertLocal(

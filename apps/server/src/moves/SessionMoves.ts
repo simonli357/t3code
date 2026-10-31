@@ -574,7 +574,7 @@ const make = Effect.gen(function* () {
         ownerThreadId,
         ownerRuntimeMode:
           ownerShell?.runtimeMode ??
-          (recordObject(parseJson(record.plan_json)).ownerRuntimeMode as typeof RuntimeMode.Type) ??
+          (recordObject(parseJson(record.plan_json)).ownerRuntimeMode as RuntimeMode) ??
           "approval-required",
       };
     }

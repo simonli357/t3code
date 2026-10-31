@@ -1,6 +1,6 @@
 import type { ProviderQuotaState, ServerProviderUsageLimits } from "@t3tools/contracts";
 
-export type QuotaEvidence = typeof ProviderQuotaState.Type & {
+export type QuotaEvidence = ProviderQuotaState & {
   instanceId: string;
   at: string;
   ordinal?: number;

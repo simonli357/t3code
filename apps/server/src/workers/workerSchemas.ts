@@ -276,7 +276,7 @@ export interface HandoffRow {
   ownership_started?: number;
 }
 
-export const selectionKey = (value: typeof ModelSelection.Type) =>
+export const selectionKey = (value: ModelSelection) =>
   JSON.stringify({
     ...value,
     options: [...(value.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
