@@ -73,6 +73,18 @@ Antigravity sign-out closes admission to new processes and stops existing proces
 metadata. Otherwise a helper or resumed session could retain the old account. Cached model lists
 do not establish current access, and an authoritative empty catalog must clear the old list.
 
+## DeepSeek Harness publishes its catalog per session
+
+The harness's ACP `initialize` reports capabilities only; its model and `reasoning_effort` options
+arrive with each session, so the
+[status probe](../../packages/provider-deepseek-harness/src/server/status.ts) opens one throwaway
+session with no MCP servers and closes it. Keep it that way: MCP servers, hooks, or sign-in must not
+start because someone opened provider settings.
+
+The default model routing table has no DeepSeek Harness row, matching the fork it came from, so
+managed workers reach it only through an exact `modelSelection`. That keeps the harness's API
+billing out of automatic allocation.
+
 Antigravity text-generation helpers deny tool requests, but native hooks and MCP configuration can
 run before the prompt. They reject profiles with such configuration before launch. Prompt
 instructions and tool denial do not create a native sandbox.
