@@ -89,6 +89,11 @@ it.effect("forwards T3 MCP and filters DeepSeek Harness load replay", () => {
       input: "hello",
       attachments: [],
     });
+    // A settled turn must not block switching accounts or providers.
+    expect(
+      (yield* adapter.listSessions()).find((session) => session.threadId === threadId)
+        ?.activeTurnId,
+    ).toBeUndefined();
     yield* adapter.stopSession(threadId);
 
     const replayStart = events.length;
@@ -104,9 +109,7 @@ it.effect("forwards T3 MCP and filters DeepSeek Harness load replay", () => {
     yield* adapter.stopSession(threadId);
     yield* Fiber.interrupt(eventFiber);
 
-    const requests = (yield* Effect.promise(() =>
-      NodeFSP.readFile(requestLogPath, "utf8"),
-    ))
+    const requests = (yield* Effect.promise(() => NodeFSP.readFile(requestLogPath, "utf8")))
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
@@ -123,8 +126,7 @@ it.effect("forwards T3 MCP and filters DeepSeek Harness load replay", () => {
         .filter(
           (event) =>
             event.type === "content.delta" &&
-            (event.payload.delta === "replayed assistant text" ||
-              event.payload.delta === "replay"),
+            (event.payload.delta === "replayed assistant text" || event.payload.delta === "replay"),
         ),
     ).toEqual([]);
   }).pipe(

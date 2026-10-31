@@ -860,6 +860,11 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
           Effect.ensuring(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
+              // A settled turn must not keep blocking account or provider switches.
+              if (ctx.promptsInFlight === 0) {
+                const { activeTurnId: _settled, ...session } = ctx.session;
+                ctx.session = session;
+              }
             }),
           ),
         );

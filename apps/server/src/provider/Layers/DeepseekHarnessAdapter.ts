@@ -382,9 +382,7 @@ export function makeDeepseekHarnessAdapter(
         ...(input.mcpSession?.agentDeviceEnvironment
           ? { agentDeviceEnvironment: input.mcpSession.agentDeviceEnvironment }
           : {}),
-        ...(input.workspaceEnvironment
-          ? { workspaceEnvironment: input.workspaceEnvironment }
-          : {}),
+        ...(input.workspaceEnvironment ? { workspaceEnvironment: input.workspaceEnvironment } : {}),
         childProcessSpawner,
         cwd: input.cwd,
         ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
@@ -478,83 +476,83 @@ export function makeDeepseekHarnessAdapter(
           const started = yield* Effect.gen(function* () {
             yield* acp.handleRequestPermission((params) =>
               Effect.gen(function* () {
-                  const autoApprovedOptionId = selectAutoApprovedPermissionOption(
-                    params,
-                    input.runtimeMode,
-                  );
-                  if (autoApprovedOptionId !== undefined) {
-                    return {
-                      outcome: {
-                        outcome: "selected" as const,
-                        optionId: autoApprovedOptionId,
-                      },
-                    };
-                  }
-                  const permissionRequest = parsePermissionRequest(params);
-                  const requestId = ApprovalRequestId.make(
-                    yield* randomUUIDv4.pipe(
-                      Effect.mapError(
-                        (cause) =>
-                          new EffectAcpErrors.AcpTransportError({
-                            detail: "Could not allocate a permission request id.",
-                            cause,
-                          }),
-                      ),
+                const autoApprovedOptionId = selectAutoApprovedPermissionOption(
+                  params,
+                  input.runtimeMode,
+                );
+                if (autoApprovedOptionId !== undefined) {
+                  return {
+                    outcome: {
+                      outcome: "selected" as const,
+                      optionId: autoApprovedOptionId,
+                    },
+                  };
+                }
+                const permissionRequest = parsePermissionRequest(params);
+                const requestId = ApprovalRequestId.make(
+                  yield* randomUUIDv4.pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new EffectAcpErrors.AcpTransportError({
+                          detail: "Could not allocate a permission request id.",
+                          cause,
+                        }),
                     ),
-                  );
-                  const runtimeRequestId = RuntimeRequestId.make(requestId);
-                  const decision = yield* Deferred.make<ProviderApprovalDecision>();
-                  pendingApprovals.set(requestId, {
-                    decision,
-                    kind: permissionRequest.kind,
-                  });
-                  yield* offerRuntimeEvent(
-                    makeAcpRequestOpenedEvent({
-                      stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      turnId: ctx?.activeTurnId,
-                      requestId: runtimeRequestId,
-                      permissionRequest,
-                      detail:
-                        permissionRequest.detail ??
-                        encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
-                        "[unserializable params]",
-                      args: params,
-                      source: "acp.jsonrpc",
-                      method: "session/request_permission",
-                      rawPayload: params,
-                    }),
-                  );
-                  const resolved = yield* Deferred.await(decision);
-                  pendingApprovals.delete(requestId);
-                  yield* offerRuntimeEvent(
-                    makeAcpRequestResolvedEvent({
-                      stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      turnId: ctx?.activeTurnId,
-                      requestId: runtimeRequestId,
-                      permissionRequest,
-                      decision: resolved,
-                    }),
-                  );
-                  if (resolved === "cancel") {
-                    return { outcome: { outcome: "cancelled" as const } };
-                  }
-                  const optionId = deepseekHarnessPermissionOptionId(params, resolved);
-                  return optionId === undefined
-                    ? { outcome: { outcome: "cancelled" as const } }
-                    : { outcome: { outcome: "selected" as const, optionId } };
-                }).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new EffectAcpErrors.AcpTransportError({
-                        detail: "DeepSeek Harness permission handling failed.",
-                        cause,
-                      }),
                   ),
+                );
+                const runtimeRequestId = RuntimeRequestId.make(requestId);
+                const decision = yield* Deferred.make<ProviderApprovalDecision>();
+                pendingApprovals.set(requestId, {
+                  decision,
+                  kind: permissionRequest.kind,
+                });
+                yield* offerRuntimeEvent(
+                  makeAcpRequestOpenedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    detail:
+                      permissionRequest.detail ??
+                      encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
+                      "[unserializable params]",
+                    args: params,
+                    source: "acp.jsonrpc",
+                    method: "session/request_permission",
+                    rawPayload: params,
+                  }),
+                );
+                const resolved = yield* Deferred.await(decision);
+                pendingApprovals.delete(requestId);
+                yield* offerRuntimeEvent(
+                  makeAcpRequestResolvedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    decision: resolved,
+                  }),
+                );
+                if (resolved === "cancel") {
+                  return { outcome: { outcome: "cancelled" as const } };
+                }
+                const optionId = deepseekHarnessPermissionOptionId(params, resolved);
+                return optionId === undefined
+                  ? { outcome: { outcome: "cancelled" as const } }
+                  : { outcome: { outcome: "selected" as const, optionId } };
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EffectAcpErrors.AcpTransportError({
+                      detail: "DeepSeek Harness permission handling failed.",
+                      cause,
+                    }),
                 ),
+              ),
             );
             return yield* acp.start();
           }).pipe(
@@ -566,17 +564,11 @@ export function makeDeepseekHarnessAdapter(
           const resolvedModel = yield* applyDeepseekHarnessModelSelection({
             runtime: acp,
             model: modelSelection?.model,
-            reasoningEffort: getModelSelectionStringOptionValue(
-              modelSelection,
-              "reasoning_effort",
-            ) ?? getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
+            reasoningEffort:
+              getModelSelectionStringOptionValue(modelSelection, "reasoning_effort") ??
+              getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
             mapError: (cause) =>
-              mapAcpToAdapterError(
-                PROVIDER,
-                input.threadId,
-                "session/set_config_option",
-                cause,
-              ),
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
           });
 
           const now = yield* nowIso;
@@ -816,12 +808,7 @@ export function makeDeepseekHarnessAdapter(
               getModelSelectionStringOptionValue(turnModelSelection, "reasoning_effort") ??
               getModelSelectionStringOptionValue(turnModelSelection, "reasoningEffort"),
             mapError: (cause) =>
-              mapAcpToAdapterError(
-                PROVIDER,
-                input.threadId,
-                "session/set_config_option",
-                cause,
-              ),
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
           });
           ctx.activeTurnId = turnId;
           if (steeringTurnId === undefined) {
@@ -930,76 +917,78 @@ export function makeDeepseekHarnessAdapter(
           Effect.ensuring(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
+              // A settled turn must not keep blocking account or provider switches.
+              if (ctx.promptsInFlight === 0) {
+                const { activeTurnId: _settled, ...session } = ctx.session;
+                ctx.session = session;
+              }
             }),
           ),
         );
       });
 
-    const forkConversation: NonNullable<
-      DeepseekHarnessAdapterShape["forkConversation"]
-    > = Effect.fn("DeepseekHarnessAdapter.forkConversation")(function* (threadId, target) {
-      const existing = sessions.get(threadId);
-      const cursor = existing
-        ? parseDeepseekHarnessResume(existing.session.resumeCursor)
-        : undefined;
-      if (existing && existing.promptsInFlight > 0) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "session/fork",
-          detail: "Wait for the current DeepSeek Harness turn to finish before forking.",
-        });
-      }
-
-      const requestFork = (
-        acp: AcpSessionRuntime.AcpSessionRuntime["Service"],
-        sessionId: string,
-        ancestry: ReadonlyArray<string> = [],
-      ) => {
-        const cwd = target?.cwd ?? existing?.session.cwd;
-        if (!cwd) {
-          return Effect.fail(
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "session/fork",
-              detail: "The source DeepSeek Harness session has no workspace.",
-            }),
-          );
+    const forkConversation: NonNullable<DeepseekHarnessAdapterShape["forkConversation"]> =
+      Effect.fn("DeepseekHarnessAdapter.forkConversation")(function* (threadId, target) {
+        const existing = sessions.get(threadId);
+        const cursor = existing
+          ? parseDeepseekHarnessResume(existing.session.resumeCursor)
+          : undefined;
+        if (existing && existing.promptsInFlight > 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork",
+            detail: "Wait for the current DeepSeek Harness turn to finish before forking.",
+          });
         }
-        return acp
-          .request("session/fork", {
-            sessionId,
-            cwd,
-            mcpServers: [],
-            _meta: { dshRelocate: true, dshAncestry: ancestry },
-          })
-          .pipe(
-            Effect.mapError((cause) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "session/fork", cause),
-            ),
-            Effect.flatMap((response) => {
-              if (!isRecord(response) || typeof response.sessionId !== "string") {
-                return Effect.fail(
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session/fork",
-                    detail: "DeepSeek Harness returned no forked session identity.",
-                  }),
-                );
-              }
-              const meta = isRecord(response._meta) ? response._meta : {};
-              const returnedAncestry = Array.isArray(meta.dshAncestry)
-                ? meta.dshAncestry.filter(
-                    (entry): entry is string =>
-                      typeof entry === "string" && entry.trim().length > 0,
-                  )
-                : [];
-              const childSessionId = response.sessionId;
-              // The fork is activated on the source connection. Release that
-              // activation before T3 starts the child in its own thread; two
-              // live processes must never write the same native session.
-              return acp
-                .request("session/close", { sessionId: childSessionId })
-                .pipe(
+
+        const requestFork = (
+          acp: AcpSessionRuntime.AcpSessionRuntime["Service"],
+          sessionId: string,
+          ancestry: ReadonlyArray<string> = [],
+        ) => {
+          const cwd = target?.cwd ?? existing?.session.cwd;
+          if (!cwd) {
+            return Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/fork",
+                detail: "The source DeepSeek Harness session has no workspace.",
+              }),
+            );
+          }
+          return acp
+            .request("session/fork", {
+              sessionId,
+              cwd,
+              mcpServers: [],
+              _meta: { dshRelocate: true, dshAncestry: ancestry },
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                mapAcpToAdapterError(PROVIDER, threadId, "session/fork", cause),
+              ),
+              Effect.flatMap((response) => {
+                if (!isRecord(response) || typeof response.sessionId !== "string") {
+                  return Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/fork",
+                      detail: "DeepSeek Harness returned no forked session identity.",
+                    }),
+                  );
+                }
+                const meta = isRecord(response._meta) ? response._meta : {};
+                const returnedAncestry = Array.isArray(meta.dshAncestry)
+                  ? meta.dshAncestry.filter(
+                      (entry): entry is string =>
+                        typeof entry === "string" && entry.trim().length > 0,
+                    )
+                  : [];
+                const childSessionId = response.sessionId;
+                // The fork is activated on the source connection. Release that
+                // activation before T3 starts the child in its own thread; two
+                // live processes must never write the same native session.
+                return acp.request("session/close", { sessionId: childSessionId }).pipe(
                   Effect.mapError((cause) =>
                     mapAcpToAdapterError(PROVIDER, threadId, "session/close", cause),
                   ),
@@ -1012,49 +1001,49 @@ export function makeDeepseekHarnessAdapter(
                         : [...new Set([sessionId, ...ancestry])],
                   }),
                 );
-            }),
-          );
-      };
+              }),
+            );
+        };
 
-      if (existing && cursor)
-        return yield* requestFork(existing.acp, cursor.sessionId, cursor.ancestry);
-      const source = parseDeepseekHarnessResume(
-        existing?.session.resumeCursor ?? undefined,
-      );
-      if (!source && existing) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "session/fork",
-          detail: "The active DeepSeek Harness session has no resumable native identity.",
-        });
-      }
-      if (!source) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "session/fork",
-          detail: "The source DeepSeek Harness session is not active.",
-        });
-      }
-      return yield* Effect.scoped(
-        Effect.gen(function* () {
-          const acp = yield* makeRuntime({
-            threadId,
-            cwd: target?.cwd ?? process.cwd(),
-            clientName: "t3-code-fork",
-            resumeSessionId: source.sessionId,
-            ...(target?.workspaceEnvironment
-              ? { workspaceEnvironment: target.workspaceEnvironment }
-              : {}),
+        if (existing && cursor)
+          return yield* requestFork(existing.acp, cursor.sessionId, cursor.ancestry);
+        const source = parseDeepseekHarnessResume(existing?.session.resumeCursor ?? undefined);
+        if (!source && existing) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork",
+            detail: "The active DeepSeek Harness session has no resumable native identity.",
           });
-          yield* acp.initialize().pipe(
-            Effect.mapError((cause) =>
-              mapAcpToAdapterError(PROVIDER, threadId, "initialize", cause),
-            ),
-          );
-          return yield* requestFork(acp, source.sessionId, source.ancestry);
-        }),
-      );
-    });
+        }
+        if (!source) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/fork",
+            detail: "The source DeepSeek Harness session is not active.",
+          });
+        }
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const acp = yield* makeRuntime({
+              threadId,
+              cwd: target?.cwd ?? process.cwd(),
+              clientName: "t3-code-fork",
+              resumeSessionId: source.sessionId,
+              ...(target?.workspaceEnvironment
+                ? { workspaceEnvironment: target.workspaceEnvironment }
+                : {}),
+            });
+            yield* acp
+              .initialize()
+              .pipe(
+                Effect.mapError((cause) =>
+                  mapAcpToAdapterError(PROVIDER, threadId, "initialize", cause),
+                ),
+              );
+            return yield* requestFork(acp, source.sessionId, source.ancestry);
+          }),
+        );
+      });
 
     const compaction: NonNullable<DeepseekHarnessAdapterShape["compaction"]> = {
       type: "native",
@@ -1073,12 +1062,7 @@ export function makeDeepseekHarnessAdapter(
             .request("deepseek-harness/compact", { sessionId: cursor.sessionId })
             .pipe(
               Effect.mapError((cause) =>
-                mapAcpToAdapterError(
-                  PROVIDER,
-                  threadId,
-                  "deepseek-harness/compact",
-                  cause,
-                ),
+                mapAcpToAdapterError(PROVIDER, threadId, "deepseek-harness/compact", cause),
               ),
             );
           yield* offerRuntimeEvent({

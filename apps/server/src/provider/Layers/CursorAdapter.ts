@@ -1159,6 +1159,11 @@ export function makeCursorAdapter(
           Effect.ensuring(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
+              // A settled turn must not keep blocking account or provider switches.
+              if (ctx.promptsInFlight === 0) {
+                const { activeTurnId: _settled, ...session } = ctx.session;
+                ctx.session = session;
+              }
             }),
           ),
         );

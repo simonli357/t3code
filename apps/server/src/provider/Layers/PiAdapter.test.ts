@@ -76,6 +76,11 @@ it.effect("drives Pi through its ACP bridge and resumes by native session id", (
       input: "hello",
       attachments: [],
     });
+    // A settled turn must not block switching accounts or providers.
+    expect(
+      (yield* adapter.listSessions()).find((session) => session.threadId === threadId)
+        ?.activeTurnId,
+    ).toBeUndefined();
     yield* adapter.stopSession(threadId);
 
     yield* adapter.startSession({
@@ -92,14 +97,11 @@ it.effect("drives Pi through its ACP bridge and resumes by native session id", (
     const requests = (yield* Effect.promise(() => NodeFSP.readFile(requestLogPath, "utf8")))
       .trim()
       .split("\n")
-      .map(
-        (line) =>
-          JSON.parse(line) as { method?: string; params?: Record<string, unknown> },
-      );
+      .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
 
-    expect(
-      requests.find((request) => request.method === "authenticate")?.params?.methodId,
-    ).toBe("pi_terminal_login");
+    expect(requests.find((request) => request.method === "authenticate")?.params?.methodId).toBe(
+      "pi_terminal_login",
+    );
     expect(requests.find((request) => request.method === "session/new")?.params?.cwd).toBe(
       directory,
     );
@@ -112,8 +114,7 @@ it.effect("drives Pi through its ACP bridge and resumes by native session id", (
 
     expect(
       events.some(
-        (event) =>
-          event.type === "content.delta" && event.payload.delta === "hello from mock",
+        (event) => event.type === "content.delta" && event.payload.delta === "hello from mock",
       ),
     ).toBe(true);
     expect(
