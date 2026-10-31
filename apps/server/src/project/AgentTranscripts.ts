@@ -25,7 +25,7 @@ const decodeDeepseekHarnessSettings = Schema.decodeUnknownOption(DeepseekHarness
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface TranscriptHome {
-  readonly driver: "claudeAgent" | "codex" | "deepseekHarness";
+  readonly driver: "claudeAgent" | "codex" | "deepseekHarness" | "pi";
   readonly homePath: string;
 }
 
@@ -69,6 +69,17 @@ export const resolveTranscriptHome = Effect.fn("resolveTranscriptHome")(function
 ): Effect.fn.Return<TranscriptHome | null, never, Path.Path> {
   const path = yield* Path.Path;
   const home = yield* HostProcess.HomeDirectory;
+  if (instance.driver === "pi") {
+    const agentDirectory =
+      instance.environment?.findLast((variable) => variable.name === "PI_CODING_AGENT_DIR")
+        ?.value ?? hostEnvironment.PI_CODING_AGENT_DIR;
+    return {
+      driver: "pi",
+      homePath: agentDirectory?.trim()
+        ? path.resolve(expandHomePath(agentDirectory.trim(), home))
+        : path.join(home, ".pi", "agent"),
+    };
+  }
   if (instance.driver !== "claudeAgent" && instance.driver !== "codex") return null;
   const driver = instance.driver === "claudeAgent" ? "claudeAgent" : "codex";
   const homeVariable = driver === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
@@ -106,15 +117,15 @@ export interface TranscriptEntry {
 }
 
 /**
- * The native transcript entries of one session and nothing else: Claude's `<sessionId>.jsonl` plus
- * its sibling directory, or Codex's `rollout-*-<threadId>.jsonl` files. Symlinks are never
- * followed, and a session id that is not a UUID yields nothing.
+ * The native transcript entries of one session and nothing else, never following symlinks. Pi names
+ * a session by its file path, which must be a `.jsonl` file under `sessions`; other ids must be
+ * UUIDs.
  */
 export const findSessionTranscripts = Effect.fn("findSessionTranscripts")(function* (
   home: TranscriptHome,
   sessionId: string,
 ): Effect.fn.Return<ReadonlyArray<TranscriptEntry>, never, FileSystem.FileSystem | Path.Path> {
-  if (!SESSION_ID.test(sessionId)) return [];
+  if (home.driver !== "pi" && !SESSION_ID.test(sessionId)) return [];
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const list = (directory: string) =>
@@ -146,6 +157,25 @@ export const findSessionTranscripts = Effect.fn("findSessionTranscripts")(functi
     return total;
   });
   const found: Array<TranscriptEntry> = [];
+
+  if (home.driver === "pi") {
+    const sessionsDir = path.join(home.homePath, "sessions");
+    const file = path.resolve(sessionId);
+    const relative = path.relative(sessionsDir, file);
+    const inside =
+      relative !== "" &&
+      relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative);
+    if (!inside || !file.endsWith(".jsonl") || (yield* entryType(file)) !== "File") return [];
+    // A symlinked directory on the way would carry the delete outside the sessions directory.
+    const real = yield* fs.realPath(file).pipe(Effect.orElseSucceed(() => null));
+    const realSessions = yield* fs.realPath(sessionsDir).pipe(Effect.orElseSucceed(() => null));
+    if (real === null || realSessions === null || real !== path.join(realSessions, relative)) {
+      return [];
+    }
+    return [{ path: file, bytes: yield* sizeOf(file) }];
+  }
 
   if (home.driver === "claudeAgent") {
     const projectsDir = path.join(home.homePath, "projects");

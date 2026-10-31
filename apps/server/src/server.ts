@@ -80,6 +80,9 @@ import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as SessionMoves from "./moves/SessionMoves.ts";
+import * as EffectOutbox from "./orchestration-v2/EffectOutbox.ts";
+import * as SettledThreadPurge from "./orchestration-v2/SettledThreadPurge.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadMoveGuard from "./moves/ThreadMoveGuard.ts";
 import * as PeerRequests from "./peer/PeerRequests.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
@@ -549,6 +552,12 @@ const layerSessionMoves = SessionMoves.layer.pipe(
   ),
 );
 
+// Shares the runtime's effect outbox and per-thread locks, which memoize by layer identity.
+const layerSettledThreadPurge = SettledThreadPurge.layer.pipe(
+  Layer.provide(EffectOutbox.layer),
+  Layer.provide(ThreadCommandExecutor.layer),
+);
+
 // One instance of each, shared by the reactors, the MCP routes and the provider start guard.
 const layerProviderAllocation = ProviderAllocation.layer.pipe(
   Layer.provide(AllocationStore.layer),
@@ -805,6 +814,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
     Layer.provide(layerSessionMoves),
+    Layer.provide(layerSettledThreadPurge),
     Layer.provide(layerWorkerService),
     Layer.provide(layerProviderAllocation),
     Layer.provide(layerAllocationAssignments),

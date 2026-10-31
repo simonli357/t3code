@@ -69,12 +69,19 @@ export const layer: Layer.Layer<
 
     const verify = Effect.gen(function* () {
       const expectedThreadRows = yield* sql<{ readonly thread_id: string }>`
-        SELECT DISTINCT stream_id AS thread_id
+        SELECT stream_id AS thread_id
         FROM orchestration_events INDEXED BY orchestration_events_v2_created_threads_idx
         WHERE application_event_version = 2
           AND aggregate_kind = 'thread'
           AND event_type = 'thread.created'
-        ORDER BY stream_id ASC
+        UNION
+        -- A purged thread keeps only its thread.deleted event, which replays into its deleted row.
+        SELECT stream_id AS thread_id
+        FROM orchestration_events
+        WHERE application_event_version = 2
+          AND aggregate_kind = 'thread'
+          AND event_type = 'thread.deleted'
+        ORDER BY thread_id ASC
       `;
       const projectionRows = yield* sql<{ readonly thread_id: string }>`
         SELECT thread_id

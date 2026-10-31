@@ -63,7 +63,7 @@ export const master = ThreadId.make("thread:master");
 
 const layerPlatform = NodeServices.layer;
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-worker-integration-" });
-const layerCheckpoints = CheckpointStore.layer.pipe(
+export const layerCheckpoints = CheckpointStore.layer.pipe(
   Layer.provide(
     VcsDriverRegistry.layer.pipe(
       Layer.provide(VcsProcess.layer),
@@ -116,6 +116,7 @@ export interface WorldOptions {
   readonly codexHome?: string;
   readonly dshHome?: string;
   readonly claudeHome?: string;
+  readonly piHome?: string;
   /** Peer services of this computer, for tests that link it to another. */
   readonly peers?: Layer.Layer<PeerLinks.PeerLinks | PeerRequests.PeerRequests>;
 }
@@ -129,6 +130,18 @@ const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = 
           const instanceId = (candidate as { instanceId: string }).instanceId;
           const deepseek = instanceId === "deepseekHarness";
           const claude = instanceId === "claudeAgent";
+          if (instanceId === "pi") {
+            return [
+              instanceId,
+              {
+                driver: ProviderDriverKind.make("pi"),
+                enabled: true,
+                ...(options.piHome === undefined
+                  ? {}
+                  : { environment: [{ name: "PI_CODING_AGENT_DIR", value: options.piHome }] }),
+              },
+            ];
+          }
           const home = deepseek ? options.dshHome : claude ? options.claudeHome : options.codexHome;
           return [
             instanceId,

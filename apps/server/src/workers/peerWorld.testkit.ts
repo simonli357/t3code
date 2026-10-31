@@ -12,11 +12,15 @@ import * as Scope from "effect/Scope";
 
 import * as ServerConfig from "../config.ts";
 import * as SessionMoves from "../moves/SessionMoves.ts";
+import * as SettledThreadPurge from "../orchestration-v2/SettledThreadPurge.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerRequests from "../peer/PeerRequests.ts";
-import { defaultProviders, layerWorld } from "./integration.testkit.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import { defaultProviders, layerCheckpoints, layerWorld } from "./integration.testkit.ts";
 import { provider } from "./WorkerService.testkit.ts";
 
 type Handler = PeerRequests.PeerRequests["Service"]["handle"];
@@ -95,9 +99,17 @@ const layerComputer = (
   codexHome: string,
   dshHome: string,
   claudeHome: string,
+  piHome: string,
 ) => {
   const peers = layerPeers(self, other, network);
-  return SessionMoves.layer.pipe(
+  // Built here too, these share the instances the runtime made: layers memoize within one build.
+  const layerPurge = SettledThreadPurge.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(EffectOutbox.layer, ThreadCommandExecutor.layer, layerCheckpoints),
+    ),
+  );
+  return Layer.mergeAll(SessionMoves.layer, layerPurge).pipe(
+    Layer.provideMerge(GitVcsDriver.layer),
     Layer.provideMerge(
       EventStore.layerFromOrchestrationEventStore.pipe(
         Layer.provide(RuntimeLayer.layerEventInfrastructure),
@@ -113,6 +125,7 @@ const layerComputer = (
         codexHome,
         dshHome,
         claudeHome,
+        piHome,
         peers,
       }),
     ),
@@ -133,7 +146,12 @@ const deepseek = {
     },
   ],
 };
-const providers = [...defaultProviders, deepseek, provider("claudeAgent", "claude-sonnet")];
+const providers = [
+  ...defaultProviders,
+  deepseek,
+  provider("claudeAgent", "claude-sonnet"),
+  provider("pi", "pi-model"),
+];
 
 export interface Computer {
   readonly context: import("effect/Context").Context<
@@ -143,6 +161,7 @@ export interface Computer {
   readonly codexHome: string;
   readonly dshHome: string;
   readonly claudeHome: string;
+  readonly piHome: string;
 }
 
 /** A whole T3 server in memory, linked to `other` through `network`, with a git checkout and a Codex home. */
@@ -160,6 +179,7 @@ export const makeComputer = Effect.fn("makeComputer")(function* (
   const codexHome = tmp(`${slug}-codex`);
   const dshHome = tmp(`${slug}-dsh`);
   const claudeHome = tmp(`${slug}-claude`);
+  const piHome = tmp(`${slug}-pi`);
   const scope = yield* Effect.scope;
   yield* Scope.addFinalizer(
     scope,
@@ -168,12 +188,13 @@ export const makeComputer = Effect.fn("makeComputer")(function* (
       NodeFS.rmSync(codexHome, { recursive: true, force: true });
       NodeFS.rmSync(dshHome, { recursive: true, force: true });
       NodeFS.rmSync(claudeHome, { recursive: true, force: true });
+      NodeFS.rmSync(piHome, { recursive: true, force: true });
     }),
   );
   const context = yield* Layer.build(
-    layerComputer(self, other, network, root, codexHome, dshHome, claudeHome),
+    layerComputer(self, other, network, root, codexHome, dshHome, claudeHome, piHome),
   );
-  return { context, root, codexHome, dshHome, claudeHome } satisfies Computer;
+  return { context, root, codexHome, dshHome, claudeHome, piHome } satisfies Computer;
 });
 
 /** Runs an effect on one computer of a test. */

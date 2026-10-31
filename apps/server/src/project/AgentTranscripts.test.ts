@@ -232,6 +232,61 @@ it.layer(NodeServices.layer)("AgentTranscripts", (it) => {
       }),
     );
 
+    it.effect("names a Pi session by its file and only under the sessions directory", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+        const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-outside-" });
+        const session = path.join(home, "sessions", "--repo--", "2026-01-01_a.jsonl");
+        const sibling = path.join(home, "sessions", "--repo--", "2026-01-01_b.jsonl");
+        const settings = path.join(home, "settings.json");
+        const elsewhere = path.join(outside, "2026-01-01_c.jsonl");
+        yield* write(session, "0123");
+        yield* write(sibling);
+        yield* write(settings);
+        yield* write(elsewhere);
+        const pi = { driver: "pi", homePath: home } as const;
+
+        expect(yield* findSessionTranscripts(pi, session)).toEqual([{ path: session, bytes: 4 }]);
+        // A path outside the sessions directory, a non-session file, a directory and a
+        // traversal never match, however the cursor spells them.
+        for (const unsafe of [
+          settings,
+          elsewhere,
+          path.join(home, "sessions", "--repo--"),
+          path.join(home, "sessions", "..", "settings.json"),
+          path.join(home, "sessions", "--repo--", "..", "..", "settings.json"),
+          path.join(home, "sessions", "--repo--", "missing.jsonl"),
+          "2026-01-01_a.jsonl",
+          "",
+        ]) {
+          expect(yield* findSessionTranscripts(pi, unsafe)).toEqual([]);
+        }
+      }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "does not follow a Pi project directory link out of the sessions directory",
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-home-" });
+          const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-outside-" });
+          yield* write(path.join(outside, "2026-01-01_a.jsonl"));
+          yield* fs.makeDirectory(path.join(home, "sessions"), { recursive: true });
+          yield* fs.symlink(outside, path.join(home, "sessions", "--linked--"));
+
+          expect(
+            yield* findSessionTranscripts(
+              { driver: "pi", homePath: home },
+              path.join(home, "sessions", "--linked--", "2026-01-01_a.jsonl"),
+            ),
+          ).toEqual([]);
+        }),
+    );
+
     it.effect.skipIf(!symlinksSupported)("never returns or follows symlinks", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
