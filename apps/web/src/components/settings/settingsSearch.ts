@@ -25,6 +25,8 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
+  | "/settings/allocation"
+  | "/settings/model-selection"
   | "/settings/threads"
   | "/settings/browser"
   | "/settings/devices"
@@ -93,6 +95,8 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/allocation": "Provider allocation",
+  "/settings/model-selection": "Model selection",
   "/settings/threads": "Threads",
   "/settings/browser": "Browser",
   "/settings/devices": "Devices",
@@ -127,6 +131,8 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: "Agents",
     paths: [
       "/settings/providers",
+      "/settings/allocation",
+      "/settings/model-selection",
       "/settings/threads",
       "/settings/browser",
       "/settings/devices",
@@ -1164,6 +1170,8 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/snap-shot": null,
   "/settings/keybindings": null,
   "/settings/providers": null,
+  "/settings/allocation": null,
+  "/settings/model-selection": null,
   "/settings/threads": null,
   "/settings/browser": null,
   "/settings/devices": null,

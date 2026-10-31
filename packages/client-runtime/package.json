@@ -143,6 +143,10 @@
       "types": "./src/state/providerAllocation.ts",
       "default": "./src/state/providerAllocation.ts"
     },
+    "./state/model-routing": {
+      "types": "./src/state/modelRouting.ts",
+      "default": "./src/state/modelRouting.ts"
+    },
     "./state/worker-communication": {
       "types": "./src/state/workerCommunication.ts",
       "default": "./src/state/workerCommunication.ts"
