@@ -1,7 +1,10 @@
 import {
   CommandId,
+  type EnvironmentId,
   MessageId,
+  OrchestratorMcpFailure,
   type ModelSelection,
+  type ProjectId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
@@ -18,11 +21,13 @@ import {
 } from "@t3tools/shared/workerMessages";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -34,36 +39,42 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { ProviderAllocation } from "../allocation/ProviderAllocation.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as PeerRequests from "../peer/PeerRequests.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   type AuthorityRow,
-  type ControlInput,
+  ControlInput,
   HandoffInput,
   type HandoffRow,
   type HandoffStatusInput,
   type HandoffResult,
   type JobRow,
-  type JobResult,
+  JobResult,
   Plan,
-  type ReadInput,
-  type ReadResult,
+  type PeerOwner,
+  ReadInput,
+  ReadResult,
   type ReclaimInput,
   type ReclaimResult,
   type ReportInput,
   type ReportResult,
-  type SendInput,
+  SendInput,
   type SpawnInput,
-  type WaitInput,
-  type WaitResult,
+  WaitInput,
+  WaitResult,
   WorkerError,
-  type WorkerResult,
+  WorkerPeerRequest,
+  WorkerResult,
   type WorkerRow,
   communicationRefusal,
   isTerminalJobState,
   jobResult,
+  parsePeerRef,
+  peerRef,
   reportHeader,
   retirementWarning,
   selectionKey,
@@ -77,6 +88,15 @@ const decodePlanRecord = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 const decodeHandoffInput = Schema.decodeUnknownSync(Schema.fromJsonString(HandoffInput));
+const decodeWorkerPeerRequest = Schema.decodeUnknownSync(WorkerPeerRequest);
+const decodeWorkerResult = Schema.decodeUnknownSync(WorkerResult);
+const decodeReadResult = Schema.decodeUnknownSync(ReadResult);
+const decodeJobResult = Schema.decodeUnknownSync(JobResult);
+const decodeWaitResult = Schema.decodeUnknownSync(WaitResult);
+const peerInput = <S extends Schema.Decoder<unknown>>(schema: S, value: unknown) =>
+  Schema.decodeUnknownEffect(schema)(value).pipe(
+    Effect.mapError(() => new WorkerError({ message: "This worker request is malformed." })),
+  );
 const decodeIds = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(ThreadId)));
 const decodeStrings = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const encodeIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -146,6 +166,17 @@ const followRestarts = (runs: ReadonlyArray<OrchestrationV2Run>, run: Orchestrat
   }
 };
 
+/** What a new worker inherits from its master, which may live on another computer. */
+interface ParentLimits {
+  readonly projectId?: ProjectId | undefined;
+  readonly runtimeMode: OrchestrationV2ThreadShell["runtimeMode"];
+  readonly interactionMode: OrchestrationV2ThreadShell["interactionMode"];
+  readonly peerOwner?: boolean;
+}
+
+const PEER_WAIT_TIMEOUT = Duration.seconds(70);
+const PEER_SPAWN_TIMEOUT = Duration.seconds(120);
+
 export class WorkerService extends Context.Service<
   WorkerService,
   {
@@ -153,6 +184,18 @@ export class WorkerService extends Context.Service<
       owner: ThreadId,
       input: typeof SpawnInput.Type,
     ) => Effect.Effect<typeof WorkerResult.Type, WorkerError>;
+    /**
+     * Starts the worker on a linked computer; its master stays here and its reports come back over the link.
+     */
+    readonly spawnRemote: (
+      owner: ThreadId,
+      environmentId: EnvironmentId,
+      input: typeof SpawnInput.Type,
+    ) => Effect.Effect<typeof WorkerResult.Type, WorkerError>;
+    /** The linked computer a label or ID names; undefined for this computer or no name. */
+    readonly peerFor: (
+      environment: string | undefined,
+    ) => Effect.Effect<EnvironmentId | undefined, WorkerError>;
     readonly list: (
       owner: ThreadId,
     ) => Effect.Effect<ReadonlyArray<typeof WorkerResult.Type>, WorkerError>;
@@ -219,6 +262,9 @@ const make = Effect.gen(function* () {
   const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   // Allocation is optional here: without it a usage-limited worker is reported, never switched.
   const allocation = yield* Effect.serviceOption(ProviderAllocation);
+  // Linked computers are optional: without peers every worker is local.
+  const peers = yield* Effect.serviceOption(PeerRequests.PeerRequests);
+  const links = yield* Effect.serviceOption(PeerLinks.PeerLinks);
   const scope = yield* Effect.scope;
   const lock = yield* Semaphore.make(1);
   // Holds at most one pending pass, so a burst of events costs one drain.
@@ -325,11 +371,18 @@ const make = Effect.gen(function* () {
     // A successor of an independent master is not a worker; only workers are account-limited.
     if ((yield* workerOf(owner))?.owner_id) yield* checkWorkerAccount(selection);
   });
+  /** The permission mode a remote master had when it last spoke for this worker. */
+  const peerOwnerMode = Effect.fn(function* (workerId: string) {
+    const record = yield* workerOf(workerId);
+    return (record && decodePlan(record.plan_json).ownerRuntimeMode) || "approval-required";
+  });
   const checkPermissions = Effect.fn(function* (
     ownerId: string,
     target: OrchestrationV2ThreadShell,
   ) {
-    const ownerMode = (yield* thread(ownerId)).runtimeMode;
+    const ownerMode = parsePeerRef(ownerId)
+      ? yield* peerOwnerMode(target.id)
+      : (yield* thread(ownerId)).runtimeMode;
     if (target.runtimeMode === "full-access" && ownerMode !== "full-access")
       return yield* new WorkerError({
         message: "The worker has broader permissions than the master.",
@@ -729,6 +782,8 @@ const make = Effect.gen(function* () {
   });
 
   const deliverToMaster = Effect.fn("WorkerService.deliverToMaster")(function* (job: JobRow) {
+    const remote = parsePeerRef(job.target_id);
+    if (remote) return yield* deliverRemote(job, remote);
     const master = yield* threads
       .getThreadShell(ThreadId.make(job.target_id))
       .pipe(Effect.mapError(failure));
@@ -827,7 +882,7 @@ const make = Effect.gen(function* () {
         const capStop = isUsageCapNotice(job);
         if (
           !worker ||
-          worker.state !== "ready" ||
+          (worker.state !== "ready" && worker.state !== "remote") ||
           (!capStop && !worker.notify) ||
           worker.owner_id === null
         )
@@ -921,7 +976,7 @@ const make = Effect.gen(function* () {
 
   const spawnWorker = Effect.fn("WorkerService.spawnWorker")(function* (
     owner: ThreadId,
-    parent: OrchestrationV2ThreadShell,
+    parent: ParentLimits,
     input: typeof SpawnInput.Type,
     options: { readonly forHandoff: boolean },
   ) {
@@ -966,6 +1021,11 @@ const make = Effect.gen(function* () {
           message: "The base is busy. Wait before forking; it will not be interrupted.",
         });
       const projectId = source?.projectId ?? input.projectId ?? parent.projectId;
+      if (projectId === undefined)
+        return yield* new WorkerError({
+          message:
+            "Choose the worker's projectId in this environment, or a sourceThreadId to fork.",
+        });
       if (input.projectId !== undefined && input.projectId !== projectId)
         return yield* new WorkerError({ message: "The fork source belongs to another project." });
       const project = yield* projects.getById(projectId).pipe(Effect.mapError(failure));
@@ -976,6 +1036,7 @@ const make = Effect.gen(function* () {
         projectId,
         runtimeMode: source?.runtimeMode ?? parent.runtimeMode,
         interactionMode: source?.interactionMode ?? parent.interactionMode,
+        ...(parent.peerOwner ? { ownerRuntimeMode: parent.runtimeMode } : {}),
       });
       yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json)
         VALUES (${input.threadId}, ${owner}, ${input.sourceThreadId ?? null}, ${plan})`;
@@ -993,21 +1054,27 @@ const make = Effect.gen(function* () {
     return yield* owned(owner, input.threadId);
   });
 
+  const spawnFrom = Effect.fn("WorkerService.spawnFrom")(function* (
+    owner: ThreadId,
+    parent: ParentLimits,
+    input: typeof SpawnInput.Type,
+  ) {
+    const worker = yield* spawnWorker(owner, parent, input, { forHandoff: false }).pipe(
+      lock.withPermit,
+    );
+    const job = yield* enqueue(
+      `spawn:${input.threadId}`,
+      worker.thread_id,
+      worker.thread_id,
+      "work",
+      input.prompt,
+    );
+    yield* dispatchWork(job);
+    return yield* describe(yield* owned(owner, input.threadId));
+  });
   const spawn = Effect.fn("WorkerService.spawn")(
     function* (owner: ThreadId, input: typeof SpawnInput.Type) {
-      const parent = yield* thread(owner);
-      const worker = yield* spawnWorker(owner, parent, input, { forHandoff: false }).pipe(
-        lock.withPermit,
-      );
-      const job = yield* enqueue(
-        `spawn:${input.threadId}`,
-        worker.thread_id,
-        worker.thread_id,
-        "work",
-        input.prompt,
-      );
-      yield* dispatchWork(job);
-      return yield* describe(yield* owned(owner, input.threadId));
+      return yield* spawnFrom(owner, yield* thread(owner), input);
     },
     (effect, owner) => warnIfRetired(owner)(effect),
   );
@@ -1033,7 +1100,9 @@ const make = Effect.gen(function* () {
   const list = Effect.fn("WorkerService.list")(function* (owner: ThreadId) {
     const rows =
       yield* sql<WorkerRow>`SELECT * FROM custom_workers WHERE owner_id = ${owner} ORDER BY rowid`;
-    return yield* Effect.forEach(rows, describe);
+    return yield* Effect.forEach(rows, (worker) =>
+      worker.state === "remote" ? describeRemote(owner, worker) : describe(worker),
+    );
   }, Effect.mapError(failure));
 
   /**
@@ -1767,7 +1836,10 @@ const make = Effect.gen(function* () {
           WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
         if (successorMode !== "full-access") {
           for (const child of children)
-            if ((yield* thread(child.thread_id)).runtimeMode === "full-access")
+            if (
+              child.state !== "remote" &&
+              (yield* thread(child.thread_id)).runtimeMode === "full-access"
+            )
               return yield* new WorkerError({
                 message:
                   "The successor would have less permission than an existing worker. Choose a compatible source.",
@@ -1828,6 +1900,304 @@ const make = Effect.gen(function* () {
       ON CONFLICT(id) DO NOTHING`;
   });
 
+  const peerFailure = (error: PeerRequests.PeerUnavailable | PeerRequests.PeerRejected) =>
+    new WorkerError({
+      message: error.message,
+      ...(error._tag === "PeerUnavailable" ? { code: "peer_unavailable" } : {}),
+    });
+  const callPeer = Effect.fn("WorkerService.callPeer")(function* (
+    environmentId: string,
+    body: unknown,
+    timeout?: Duration.Duration,
+  ) {
+    if (Option.isNone(peers))
+      return yield* new WorkerError({
+        code: "unsupported",
+        message: "Linked computers are not available on this server.",
+      });
+    return yield* peers.value
+      .call(environmentId as EnvironmentId, "worker", body, timeout)
+      .pipe(Effect.mapError(peerFailure));
+  });
+  const linked = Effect.fn("WorkerService.linked")(function* () {
+    return Option.isNone(links) ? [] : yield* links.value.list.pipe(Effect.orElseSucceed(() => []));
+  });
+  const peerLabel = Effect.fn("WorkerService.peerLabel")(function* (environmentId: string) {
+    return (
+      (yield* linked()).find((entry) => entry.environmentId === environmentId)?.label ??
+      environmentId
+    );
+  });
+  const peerFor = Effect.fn("WorkerService.peerFor")(function* (environment: string | undefined) {
+    const wanted = environment?.trim();
+    if (wanted === undefined || wanted === "") return undefined;
+    if (wanted === (yield* localId)) return undefined;
+    const peer = (yield* linked()).find(
+      (entry) =>
+        entry.environmentId === wanted || entry.label.toLowerCase() === wanted.toLowerCase(),
+    );
+    if (peer) return peer.environmentId;
+    return yield* new WorkerError({
+      message: `${wanted} is not a linked computer. Use t3_recommend_computer to see the linked computers.`,
+    });
+  });
+
+  /** A master's record of a worker it owns on a linked computer. */
+  const remoteWorker = Effect.fn(function* (owner: string, id: string) {
+    return (yield* sql<WorkerRow>`SELECT * FROM custom_workers
+      WHERE thread_id = ${id} AND owner_id = ${owner} AND state = 'remote'`)[0];
+  });
+  const ownerPayload = Effect.fn(function* (owner: ThreadId) {
+    const master = yield* thread(owner);
+    return {
+      threadId: owner,
+      runtimeMode: master.runtimeMode,
+      interactionMode: master.interactionMode,
+    } satisfies typeof PeerOwner.Type;
+  });
+  const forward = Effect.fn("WorkerService.forward")(function* (
+    owner: ThreadId,
+    worker: WorkerRow,
+    action: "describe" | "read" | "send" | "wait" | "control",
+    input: unknown,
+    timeout?: Duration.Duration,
+  ) {
+    return yield* callPeer(
+      decodePlan(worker.plan_json).environmentId ?? "",
+      {
+        _tag: "worker",
+        owner: yield* ownerPayload(owner),
+        workerThreadId: worker.thread_id,
+        action,
+        input,
+      },
+      timeout,
+    );
+  });
+  const asLocal = Effect.fn(function* (
+    owner: ThreadId,
+    worker: WorkerRow,
+    result: typeof WorkerResult.Type,
+  ) {
+    yield* sql`UPDATE custom_workers SET notify = ${result.notifications ? 1 : 0} WHERE thread_id = ${worker.thread_id}`;
+    const environment = yield* peerLabel(decodePlan(worker.plan_json).environmentId ?? "");
+    return { ...result, ownerThreadId: owner, environment };
+  });
+  const describeRemote = Effect.fn("WorkerService.describeRemote")(function* (
+    owner: ThreadId,
+    worker: WorkerRow,
+  ) {
+    const plan = decodePlan(worker.plan_json);
+    return yield* forward(owner, worker, "describe", {}).pipe(
+      Effect.map(decodeWorkerResult),
+      Effect.flatMap((result) => asLocal(owner, worker, result)),
+      Effect.catch((error) =>
+        peerLabel(plan.environmentId ?? "").pipe(
+          Effect.map((environment): typeof WorkerResult.Type => ({
+            threadId: plan.threadId,
+            ownerThreadId: owner,
+            sourceThreadId: plan.sourceThreadId ?? null,
+            title: plan.title,
+            modelSelection: plan.modelSelection,
+            state: "unreachable",
+            error: failure(error).message,
+            notifications: worker.notify === 1,
+            latestRequest: null,
+            pendingReports: 0,
+            deliveryError: null,
+            environment,
+          })),
+        ),
+      ),
+    );
+  });
+
+  const spawnRemote = Effect.fn("WorkerService.spawnRemote")(
+    function* (owner: ThreadId, environmentId: EnvironmentId, input: typeof SpawnInput.Type) {
+      const master = yield* thread(owner);
+      if (input.threadId === owner || input.threadId === input.sourceThreadId)
+        return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
+      const existing = yield* workerOf(input.threadId);
+      if (existing) {
+        const plan = decodePlan(existing.plan_json);
+        if (
+          existing.owner_id !== owner ||
+          existing.state !== "remote" ||
+          plan.environmentId !== environmentId ||
+          plan.sourceThreadId !== input.sourceThreadId ||
+          plan.projectId !== input.projectId ||
+          plan.title !== input.title ||
+          plan.prompt !== input.prompt ||
+          selectionKey(plan.modelSelection) !== selectionKey(input.modelSelection)
+        )
+          return yield* new WorkerError({
+            message:
+              "This worker ID is already reserved with different ownership or task settings.",
+          });
+      } else {
+        if ((yield* threads.getThreadShell(input.threadId).pipe(Effect.mapError(failure))) !== null)
+          return yield* new WorkerError({ message: "That destination thread already exists." });
+        const plan = encodeJson({
+          ...input,
+          runtimeMode: master.runtimeMode,
+          interactionMode: master.interactionMode,
+          environmentId,
+          syncedOwnerId: owner,
+        });
+        yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json, state)
+          VALUES (${input.threadId}, ${owner}, ${input.sourceThreadId ?? null}, ${plan}, 'remote')`;
+      }
+      watch(owner);
+      const worker = (yield* remoteWorker(owner, input.threadId))!;
+      // The computer there creates the worker idempotently, so a failed call is retried unchanged.
+      const result = yield* callPeer(
+        environmentId,
+        { _tag: "spawn", owner: yield* ownerPayload(owner), input },
+        PEER_SPAWN_TIMEOUT,
+      );
+      return yield* asLocal(owner, worker, decodeWorkerResult(result));
+    },
+    (effect, owner) => warnIfRetired(owner)(effect),
+  );
+
+  /** Pushes a report or message to the master on the linked computer; it stays queued while that computer is away. */
+  const deliverRemote = Effect.fn("WorkerService.deliverRemote")(function* (
+    job: JobRow,
+    remote: NonNullable<ReturnType<typeof parsePeerRef>>,
+  ) {
+    const outcome = yield* callPeer(remote.environmentId, {
+      _tag: "deliver",
+      jobId: job.id,
+      kind: job.kind,
+      senderThreadId: job.worker_id,
+      recipientThreadId: remote.threadId,
+      prompt: job.prompt,
+    }).pipe(Effect.result);
+    if (Result.isSuccess(outcome))
+      yield* sql`UPDATE custom_worker_jobs SET state = 'completed', error = NULL WHERE id = ${job.id}`;
+    else if (outcome.failure.code === "peer_unavailable")
+      yield* sql`UPDATE custom_worker_jobs SET error = ${outcome.failure.message} WHERE id = ${job.id}`;
+    else
+      yield* sql`UPDATE custom_worker_jobs SET state = 'error', error = ${outcome.failure.message} WHERE id = ${job.id}`;
+  });
+
+  const receive = Effect.fn("WorkerService.receive")(function* (from: EnvironmentId, raw: unknown) {
+    const request = yield* Effect.try({
+      try: () => decodeWorkerPeerRequest(raw),
+      catch: () => new WorkerError({ message: "This worker request is not understood." }),
+    });
+    switch (request._tag) {
+      case "spawn": {
+        const owner = ThreadId.make(peerRef(from, request.owner.threadId));
+        return yield* spawnFrom(owner, { ...request.owner, peerOwner: true }, request.input);
+      }
+      case "worker": {
+        const owner = ThreadId.make(peerRef(from, request.owner.threadId));
+        const worker = yield* owned(owner, request.workerThreadId);
+        const plan = decodePlan(worker.plan_json);
+        if (plan.ownerRuntimeMode !== request.owner.runtimeMode)
+          yield* sql`UPDATE custom_workers SET plan_json = ${encodeJson({ ...plan, ownerRuntimeMode: request.owner.runtimeMode })} WHERE thread_id = ${worker.thread_id}`;
+        switch (request.action) {
+          case "describe":
+            return yield* describe(worker);
+          case "read":
+            return yield* peerInput(ReadInput, request.input).pipe(
+              Effect.flatMap((input) => read(owner, input)),
+            );
+          case "send":
+            return yield* peerInput(SendInput, request.input).pipe(
+              Effect.flatMap((input) => send(owner, input)),
+              Effect.tap(() => kick()),
+            );
+          case "wait":
+            return yield* peerInput(WaitInput, request.input).pipe(
+              Effect.flatMap((input) => wait(owner, input)),
+            );
+          case "control":
+            return yield* peerInput(ControlInput, request.input).pipe(
+              Effect.flatMap((input) => control(owner, input)),
+              Effect.tap(() => kick()),
+            );
+        }
+        return undefined;
+      }
+      case "owner": {
+        const owner = peerRef(from, request.owner.threadId);
+        yield* Effect.gen(function* () {
+          const record = yield* workerOf(request.workerThreadId);
+          if (!record || parsePeerRef(record.owner_id)?.environmentId !== from)
+            return yield* new WorkerError({
+              message: "This worker does not belong to the calling computer.",
+            });
+          const plan = decodePlan(record.plan_json);
+          yield* retargetReports([record.thread_id], [record.owner_id ?? ""], owner);
+          yield* sql`UPDATE custom_workers SET owner_id = ${owner}, plan_json = ${encodeJson({ ...plan, ownerRuntimeMode: request.owner.runtimeMode })} WHERE thread_id = ${record.thread_id}`;
+        }).pipe(sql.withTransaction, lock.withPermit);
+        yield* kick();
+        return { accepted: true };
+      }
+      case "deliver": {
+        // Reports follow the worker's current master here, even when the sender still names the one
+        // before a handoff.
+        const record =
+          request.kind === "message"
+            ? undefined
+            : yield* workerOf(request.senderThreadId).pipe(
+                Effect.map((row) =>
+                  row?.state === "remote" &&
+                  decodePlan(row.plan_json).environmentId === from &&
+                  row.owner_id !== null
+                    ? row
+                    : undefined,
+                ),
+              );
+        if (request.kind !== "message" && record === undefined)
+          return yield* new WorkerError({
+            message: "This computer does not own a worker with that report.",
+          });
+        const target = record?.owner_id ?? request.recipientThreadId;
+        const recipient = yield* threads
+          .getThreadShell(ThreadId.make(target))
+          .pipe(Effect.mapError(failure));
+        if (recipient === null || recipient.deletedAt !== null)
+          return yield* new WorkerError({ message: "The recipient session no longer exists." });
+        // Notices and blockers already passed the communication window on the worker's computer.
+        const kind = request.kind === "done" ? "done" : "message";
+        yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+          VALUES (${`peer:${from}:${request.jobId}`}, ${request.senderThreadId}, ${target}, ${kind}, ${request.prompt}, ${yield* now})
+          ON CONFLICT(id) DO NOTHING`;
+        yield* kick();
+        return { accepted: true };
+      }
+    }
+  });
+
+  /** Tells each linked computer which master owns its workers now, such as after a handoff. */
+  const syncRemoteOwners = Effect.fn("WorkerService.syncRemoteOwners")(function* () {
+    const rows =
+      yield* sql<WorkerRow>`SELECT * FROM custom_workers WHERE state = 'remote' AND owner_id IS NOT NULL`;
+    for (const row of rows) {
+      const plan = decodePlan(row.plan_json);
+      if (plan.syncedOwnerId === row.owner_id) continue;
+      yield* Effect.gen(function* () {
+        const owner = yield* ownerPayload(ThreadId.make(row.owner_id!));
+        yield* callPeer(plan.environmentId ?? "", {
+          _tag: "owner",
+          owner,
+          workerThreadId: row.thread_id,
+        });
+        yield* sql`UPDATE custom_workers SET plan_json = ${encodeJson({ ...plan, syncedOwnerId: row.owner_id })} WHERE thread_id = ${row.thread_id}`;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Remote worker owner sync will retry", {
+            workerId: row.thread_id,
+            message: failure(cause).message,
+          }),
+        ),
+      );
+    }
+  });
+
   const drain = Effect.fn("WorkerService.drain")(function* () {
     const workers = yield* sql<WorkerRow>`SELECT * FROM custom_workers WHERE state = 'ready'`;
     for (const worker of workers) {
@@ -1836,6 +2206,7 @@ const make = Effect.gen(function* () {
       yield* noticePendingRequests(worker);
     }
     yield* processHandoffs();
+    yield* syncRemoteOwners();
     yield* deliverQueued();
   }, Effect.mapError(failure));
 
@@ -1893,7 +2264,8 @@ const make = Effect.gen(function* () {
     );
     // Held reports and deliveries that failed once are retried even when no event arrives.
     yield* forkParked(
-      sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' LIMIT 1`.pipe(
+      sql`SELECT 1 WHERE EXISTS (SELECT 1 FROM custom_worker_jobs WHERE state = 'queued')
+        OR EXISTS (SELECT 1 FROM custom_workers WHERE state = 'remote')`.pipe(
         Effect.flatMap((rows) => (rows.length ? kick() : Effect.void)),
         Effect.ignore,
         Effect.repeat(Schedule.spaced("30 seconds")),
@@ -1902,17 +2274,58 @@ const make = Effect.gen(function* () {
     yield* kick();
   });
 
+  if (Option.isSome(peers))
+    yield* peers.value.register("worker", (from, body) =>
+      receive(from, body).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: failure(cause).message,
+            }),
+        ),
+      ),
+    );
+
   return WorkerService.of({
     spawn: Effect.fn("WorkerService.spawn.kick")(function* (owner, input) {
       return yield* spawn(owner, input).pipe(Effect.tap(() => kick()));
     }),
+    spawnRemote,
+    peerFor,
     list,
-    read,
-    send: Effect.fn("WorkerService.send.kick")(function* (owner, input) {
-      return yield* send(owner, input).pipe(Effect.tap(() => kick()));
+    read: Effect.fn("WorkerService.read.route")(function* (owner, input) {
+      const remote = yield* remoteWorker(owner, input.threadId).pipe(Effect.mapError(failure));
+      if (!remote) return yield* read(owner, input);
+      const result = decodeReadResult(yield* forward(owner, remote, "read", input));
+      return {
+        ...result,
+        items: [...result.items],
+        worker: yield* asLocal(owner, remote, result.worker).pipe(Effect.mapError(failure)),
+      };
     }),
-    wait,
-    control,
+    send: Effect.fn("WorkerService.send.kick")(function* (owner, input) {
+      const remote = yield* remoteWorker(owner, input.threadId).pipe(Effect.mapError(failure));
+      if (!remote) return yield* send(owner, input).pipe(Effect.tap(() => kick()));
+      return yield* warnIfRetired(owner)(
+        forward(owner, remote, "send", input).pipe(Effect.map(decodeJobResult)),
+      );
+    }),
+    wait: Effect.fn("WorkerService.wait.route")(function* (owner, input) {
+      const remote = yield* remoteWorker(owner, input.threadId).pipe(Effect.mapError(failure));
+      if (!remote) return yield* wait(owner, input);
+      return decodeWaitResult(yield* forward(owner, remote, "wait", input, PEER_WAIT_TIMEOUT));
+    }),
+    control: Effect.fn("WorkerService.control.route")(function* (owner, input) {
+      const remote = yield* remoteWorker(owner, input.threadId).pipe(Effect.mapError(failure));
+      if (!remote) return yield* control(owner, input).pipe(Effect.tap(() => kick()));
+      return yield* warnIfRetired(owner)(
+        forward(owner, remote, "control", input).pipe(
+          Effect.map(decodeWorkerResult),
+          Effect.flatMap((result) => asLocal(owner, remote, result)),
+        ),
+      );
+    }),
     report,
     handoff: Effect.fn("WorkerService.handoff.kick")(function* (owner, input) {
       return yield* handoff(owner, input).pipe(Effect.tap(() => kick()));

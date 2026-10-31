@@ -1,6 +1,8 @@
 import {
   AllocationError,
+  AllocationInventory as AllocationInventorySchema,
   AssignmentAssessment,
+  OrchestratorMcpFailure,
   ProviderDriverKind,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
@@ -17,13 +19,17 @@ import {
   type UsageMeasurementsReport,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as PeerRequests from "../peer/PeerRequests.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -53,6 +59,10 @@ const NO_MEASUREMENTS: UsageMeasurementsReport = {
   profiles: [],
   limitations: [],
 };
+
+const decodeInventory = Schema.decodeUnknownEffect(AllocationInventorySchema);
+/** Each linked computer gets this long to describe itself before advice goes on without it. */
+const PEER_INVENTORY_TIMEOUT = Duration.seconds(15);
 
 const decodeAssessment = Schema.decodeUnknownEffect(Schema.fromJsonString(AssignmentAssessment));
 const decodeSelection = Schema.decodeUnknownEffect(
@@ -96,7 +106,7 @@ export class ProviderAllocation extends Context.Service<
       threadId: ThreadId,
       current: ModelSelection,
     ) => Effect.Effect<ModelSelection | null, AllocationError>;
-    /** Computer advice and the inventories it ranked. This server is the only computer it reads. */
+    /** Computer advice and the inventories it ranked: this server's and each linked computer's. */
     readonly place: (request: ComputerPlacementRequest) => Effect.Effect<
       {
         readonly placement: ComputerPlacement;
@@ -114,6 +124,8 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettingsService;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const sql = yield* SqlClient.SqlClient;
+  const peers = yield* Effect.serviceOption(PeerRequests.PeerRequests);
+  const links = yield* Effect.serviceOption(PeerLinks.PeerLinks);
   const localEnvironmentId = yield* environment.getEnvironmentId;
   const local = {
     environmentId: localEnvironmentId,
@@ -164,6 +176,44 @@ const make = Effect.gen(function* () {
       coordinatorEnvironmentId: local.environmentId,
     } satisfies AllocationInventory;
   }, Effect.mapError(unavailable));
+
+  /**
+   * What each linked computer reports about its accounts and load. One that does not answer is an
+   * offline entry, so advice ranks it last instead of waiting on it or dropping it silently.
+   */
+  const peerInventories = Effect.fn("ProviderAllocation.peerInventories")(function* () {
+    if (Option.isNone(peers) || Option.isNone(links)) return [] as AllocationInventory[];
+    const linked = yield* links.value.list.pipe(Effect.orElseSucceed(() => []));
+    const at = yield* now;
+    return yield* Effect.forEach(
+      linked,
+      (peer) =>
+        peers.value
+          .call(peer.environmentId, "allocationInventory", {}, PEER_INVENTORY_TIMEOUT)
+          .pipe(
+            Effect.flatMap((raw) => decodeInventory(raw)),
+            Effect.flatMap((reported) =>
+              reported.environmentId === peer.environmentId
+                ? Effect.succeed({ ...reported, environmentLabel: peer.label })
+                : Effect.fail(unavailable("The computer answered as a different environment.")),
+            ),
+            Effect.catch((cause): Effect.Effect<AllocationInventory> =>
+              Effect.succeed({
+                environmentId: peer.environmentId,
+                environmentLabel: peer.label,
+                observedAt: at,
+                accounts: [],
+                demand: [],
+                complete: false,
+                notices: [
+                  `Could not read ${peer.label}: ${"detail" in cause ? cause.detail : cause.message}.`,
+                ],
+              }),
+            ),
+          ),
+      { concurrency: "unbounded" },
+    );
+  });
 
   const replacement = Effect.fn("ProviderAllocation.replacement")(function* (
     threadId: ThreadId,
@@ -296,7 +346,7 @@ const make = Effect.gen(function* () {
     request: ComputerPlacementRequest,
   ) {
     const policy = yield* store.policy;
-    const inventories = [yield* inventory(undefined)];
+    const inventories = [yield* inventory(undefined), ...(yield* peerInventories())];
     return {
       placement: recommendPlacement({ at: yield* now, policy, request, inventories }),
       inventories,
@@ -314,7 +364,13 @@ const make = Effect.gen(function* () {
       return {
         connections: {
           coordinatorEnvironmentId: local.environmentId,
-          environments: [local],
+          environments: [
+            local,
+            ...(Option.isSome(links)
+              ? yield* links.value.list.pipe(Effect.orElseSucceed(() => []))
+              : []
+            ).map((peer) => ({ environmentId: peer.environmentId, label: peer.label })),
+          ],
         },
       };
     if (operation._tag === "connect")
@@ -339,7 +395,9 @@ const make = Effect.gen(function* () {
       const modelPolicy = yield* store.modelPolicy;
       const selecting = operation._tag === "modelPreview" || operation._tag === "modelAllocate";
       yield* reconcile(selecting ? operation.request.assignmentId : undefined);
-      let inventories = [yield* inventory(undefined)];
+      let inventories: AllocationInventory[] = [yield* inventory(undefined)];
+      // A preview may rank accounts on linked computers; a reservation is only ever made here.
+      if (operation._tag === "modelPreview") inventories.push(...(yield* peerInventories()));
       if (operation._tag === "modelSnapshot")
         return {
           modelSnapshot: {
@@ -483,6 +541,15 @@ const make = Effect.gen(function* () {
     };
   });
 
+  if (Option.isSome(peers))
+    yield* peers.value.register("allocationInventory", () =>
+      inventory(undefined).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.detail }),
+        ),
+      ),
+    );
   return ProviderAllocation.of({ execute, replacement, place });
 });
 

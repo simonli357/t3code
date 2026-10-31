@@ -26,6 +26,8 @@ import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as PeerRequests from "../peer/PeerRequests.ts";
 import * as ThreadMoveGuard from "../moves/ThreadMoveGuard.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -111,6 +113,8 @@ export interface WorldOptions {
   readonly label?: string;
   readonly workspaceRoot?: string;
   readonly codexHome?: string;
+  /** Peer services of this computer, for tests that link it to another. */
+  readonly peers?: Layer.Layer<PeerLinks.PeerLinks | PeerRequests.PeerRequests>;
 }
 
 const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = {}) => {
@@ -146,7 +150,7 @@ const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = 
   );
 };
 
-export const layerRuntime = (providers: ReadonlyArray<unknown>, options: WorldOptions = {}) =>
+const layerRuntime = (providers: ReadonlyArray<unknown>, options: WorldOptions = {}) =>
   Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink, ProjectStore.layer).pipe(
     Layer.provide(UsageCapEnforcement.guardLayer),
     Layer.provide(ThreadMoveGuard.layer),
@@ -201,15 +205,24 @@ const layerLauncher = Layer.effect(
 const layerAllocation = ProviderAllocation.layer.pipe(Layer.provideMerge(AllocationStore.layer));
 
 /** Everything the integration tests drive, over one in-memory database. */
-export const layerWorld = (providers: ReadonlyArray<unknown> = defaultProviders) => {
-  const workers = WorkerService.layer.pipe(Layer.provide(layerAllocation));
-  const both = Layer.merge(layerAllocation, workers);
+export const layerWorld = (
+  providers: ReadonlyArray<unknown> = defaultProviders,
+  options: WorldOptions = {},
+) => {
+  const peers = options.peers ?? Layer.empty;
+  const allocation = layerAllocation.pipe(Layer.provide(peers));
+  const workers = WorkerService.layer.pipe(Layer.provide(allocation), Layer.provide(peers));
+  const both = Layer.merge(allocation, workers);
   return Layer.mergeAll(
     workers,
-    layerAllocation,
+    allocation,
     AllocationAssignments.layer.pipe(Layer.provide(both)),
     UsageCapEnforcement.layer.pipe(Layer.provide(both)),
-  ).pipe(Layer.provideMerge(layerLauncher), Layer.provideMerge(layerRuntime(providers)));
+  ).pipe(
+    Layer.provideMerge(layerLauncher),
+    Layer.provideMerge(layerRuntime(providers, options)),
+    Layer.provideMerge(peers),
+  );
 };
 
 export const seed = Effect.fn("seed")(function* (

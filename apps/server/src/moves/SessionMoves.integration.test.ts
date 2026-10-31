@@ -1,17 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   type EnvironmentId,
   EventId,
-  OrchestratorMcpFailure,
   ProviderThreadId,
   type SessionMoveInput,
 } from "@t3tools/contracts";
@@ -19,137 +15,29 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import * as ServerConfig from "../config.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
-import * as PeerLinks from "../peer/PeerLinks.ts";
-import * as PeerRequests from "../peer/PeerRequests.ts";
+import { master, model, project, seed } from "../workers/integration.testkit.ts";
 import {
-  defaultProviders,
-  layerRuntime,
-  master,
-  model,
-  project,
-  seed,
-} from "../workers/integration.testkit.ts";
+  type Computer,
+  makeComputer,
+  newNetwork,
+  on as inWorld,
+} from "../workers/peerWorld.testkit.ts";
 import * as SessionMoves from "./SessionMoves.ts";
 
 const NATIVE_ID = "0248b7d6-1ead-447d-894b-5edbafe089df";
 const ROLLOUT = `sessions/2026/01/01/rollout-2026-01-01T00-00-00-${NATIVE_ID}.jsonl`;
-const idA = "environment:a" as EnvironmentId;
-const idB = "environment:b" as EnvironmentId;
+const idA = "environment-a" as EnvironmentId;
+const idB = "environment-b" as EnvironmentId;
+type World = Computer;
+const makeWorld = makeComputer;
 
-const tmp = (name: string) =>
-  NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), `t3-moves-${name}-`));
 const sha = (file: string) =>
   NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(file)).digest("hex");
-const git = (cwd: string, ...args: ReadonlyArray<string>) =>
-  NodeChildProcess.execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@t", ...args], {
-    cwd,
-    encoding: "utf8",
-  }).trim();
-
-type Handler = PeerRequests.PeerRequests["Service"]["handle"];
-interface Network {
-  readonly handlers: Map<string, Handler>;
-  /** Peer operations that fail once as an outage, keyed by the operation name. */
-  readonly outages: Set<string>;
-}
-
-const layerPeers = (self: EnvironmentId, other: EnvironmentId, network: Network) =>
-  Layer.mergeAll(
-    Layer.mock(PeerLinks.PeerLinks)({
-      list: Effect.succeed([{ environmentId: other, label: `Peer ${other}` } as never]),
-    }),
-    Layer.effect(
-      PeerRequests.PeerRequests,
-      Effect.sync(() => {
-        const topics = new Map<string, PeerRequests.PeerRequestHandler>();
-        const handle: Handler = (from, topic, body) => {
-          const handler = topics.get(topic);
-          return handler
-            ? handler(from, body)
-            : Effect.fail(new OrchestratorMcpFailure({ code: "invalid_request", message: topic }));
-        };
-        network.handlers.set(self, handle);
-        return PeerRequests.PeerRequests.of({
-          register: (topic, handler) => Effect.sync(() => void topics.set(topic, handler)),
-          handle,
-          call: (environmentId, topic, body) => {
-            const operation = (body as { readonly op?: string }).op ?? "";
-            if (network.outages.delete(operation))
-              return Effect.fail(
-                new PeerRequests.PeerUnavailable({ environmentId, message: "offline" }),
-              );
-            return network.handlers.get(environmentId)!(self, topic, body).pipe(
-              Effect.mapError((cause) => new PeerRequests.PeerRejected({ message: cause.message })),
-            );
-          },
-        });
-      }),
-    ),
-  );
-
-const layerWorld = (
-  self: EnvironmentId,
-  other: EnvironmentId,
-  network: Network,
-  world: string,
-  codexHome: string,
-) =>
-  SessionMoves.layer.pipe(
-    Layer.provideMerge(layerPeers(self, other, network)),
-    Layer.provideMerge(
-      EventStore.layerFromOrchestrationEventStore.pipe(
-        Layer.provide(RuntimeLayer.layerEventInfrastructure),
-      ),
-    ),
-    Layer.provideMerge(ServerConfig.layerTest(world, { prefix: `t3-moves-${self}-` })),
-    Layer.provideMerge(NodeServices.layer),
-    Layer.provideMerge(
-      layerRuntime(defaultProviders, {
-        environmentId: self,
-        label: `Peer ${self}`,
-        workspaceRoot: world,
-        codexHome,
-      }),
-    ),
-  );
-
-interface World {
-  readonly context: Context.Context<Layer.Success<ReturnType<typeof layerWorld>>>;
-  readonly root: string;
-  readonly codexHome: string;
-}
-
-const makeWorld = Effect.fn("makeWorld")(function* (
-  self: EnvironmentId,
-  other: EnvironmentId,
-  network: Network,
-) {
-  const root = tmp(self.replace(/\W/g, ""));
-  git(root, "init", "-q", "-b", "main");
-  NodeFS.writeFileSync(NodePath.join(root, "README.md"), "hello\n");
-  git(root, "add", ".");
-  git(root, "commit", "-q", "-m", "initial");
-  const codexHome = tmp(`${self.replace(/\W/g, "")}-codex`);
-  const scope = yield* Effect.scope;
-  yield* Scope.addFinalizer(
-    scope,
-    Effect.sync(() => {
-      NodeFS.rmSync(root, { recursive: true, force: true });
-      NodeFS.rmSync(codexHome, { recursive: true, force: true });
-    }),
-  );
-  const context = yield* Layer.build(layerWorld(self, other, network, root, codexHome));
-  return { context, root, codexHome } satisfies World;
-});
 
 const seedSession = Effect.fn("seedSession")(function* (world: World) {
   const at = yield* DateTime.now;
@@ -199,9 +87,6 @@ const moveInput = (requestId: string, environment: EnvironmentId): SessionMoveIn
   environment,
 });
 
-const inWorld = <A, E, R>(world: World, effect: Effect.Effect<A, E, R>) =>
-  Effect.provideContext(effect, world.context);
-
 const startMoves = (world: World) =>
   inWorld(
     world,
@@ -234,8 +119,6 @@ const shellOf = (world: World) =>
       return yield* threads.getThreadShell(master);
     }),
   );
-
-const newNetwork = (): Network => ({ handlers: new Map(), outages: new Set() });
 
 it.effect("moves a session out and back with the same native ID and one writer", () =>
   Effect.gen(function* () {

@@ -145,7 +145,50 @@ export const Plan = Schema.Struct({
   ...SpawnInput.fields,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  /** On a master's record of a worker that runs on a linked computer: that computer. */
+  environmentId: Schema.optional(Schema.String),
+  /** On a linked computer's worker: the permission mode of the remote master that owns it. */
+  ownerRuntimeMode: Schema.optional(RuntimeMode),
+  /** On a master's record of a remote worker: the owner the other computer was last told of. */
+  syncedOwnerId: Schema.optional(Schema.String),
 });
+
+/** A session on a linked computer is addressed as `peer:<environmentId>:<threadId>` wherever a local thread ID goes. */
+export const peerRef = (environmentId: string, threadId: string) =>
+  `peer:${environmentId}:${threadId}`;
+export const parsePeerRef = (id: string | null | undefined) => {
+  if (id === null || id === undefined || !id.startsWith("peer:")) return undefined;
+  const at = id.indexOf(":", 5);
+  return at < 0
+    ? undefined
+    : { environmentId: id.slice(5, at), threadId: ThreadId.make(id.slice(at + 1)) };
+};
+
+/** What a linked computer needs to know about the master that owns a worker there. */
+export const PeerOwner = Schema.Struct({
+  threadId: ThreadId,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
+
+/** Requests the `worker` peer topic carries; both computers run the same service. */
+export const WorkerPeerRequest = Schema.Union([
+  Schema.TaggedStruct("spawn", { owner: PeerOwner, input: SpawnInput }),
+  Schema.TaggedStruct("worker", {
+    owner: PeerOwner,
+    workerThreadId: ThreadId,
+    action: Schema.Literals(["describe", "read", "send", "wait", "control"]),
+    input: Schema.Unknown,
+  }),
+  Schema.TaggedStruct("owner", { owner: PeerOwner, workerThreadId: ThreadId }),
+  Schema.TaggedStruct("deliver", {
+    jobId: TrimmedNonEmptyString,
+    kind: Schema.Literals(["message", "notice", "done", "blocked"]),
+    senderThreadId: ThreadId,
+    recipientThreadId: ThreadId,
+    prompt: TrimmedNonEmptyString,
+  }),
+]);
 
 export interface WorkerRow {
   thread_id: string;

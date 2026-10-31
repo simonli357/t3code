@@ -550,7 +550,10 @@ const layerSessionMoves = SessionMoves.layer.pipe(
 );
 
 // One instance of each, shared by the reactors, the MCP routes and the provider start guard.
-const layerProviderAllocation = ProviderAllocation.layer.pipe(Layer.provide(AllocationStore.layer));
+const layerProviderAllocation = ProviderAllocation.layer.pipe(
+  Layer.provide(AllocationStore.layer),
+  Layer.provide(layerPeers),
+);
 const layerWorkerService = WorkerService.layer.pipe(Layer.provide(layerProviderAllocation));
 const layerAllocationAssignments = AllocationAssignments.layer.pipe(
   Layer.provide(Layer.merge(layerProviderAllocation, layerWorkerService)),

@@ -48,6 +48,8 @@ import {
 /** `t3_worker_spawn` input: the worker plus the master's assessment and override reasons. */
 export const ManagedSpawnInput = Schema.Struct({
   ...SpawnInput.fields,
+  /** A linked computer to run the worker on, by name or ID; omitted means this computer. */
+  environment: Schema.optional(Schema.String),
   assessment: Schema.optional(AssignmentAssessment),
   overrides: Schema.optional(RecommendationOverrides),
 });
@@ -564,15 +566,16 @@ const make = Effect.gen(function* () {
     }, starts.withPermit),
     spawn: Effect.fn("AllocationAssignments.spawn")(
       function* (owner, input) {
-        const { assessment, overrides, ...spawnInput } = input;
+        const { assessment, overrides, environment: requested, ...spawnInput } = input;
+        const peer = yield* workers.peerFor(requested);
         if (!assessment) return yield* new WorkerError({ message: MISSING_ASSESSMENT });
         const intent = intentOf({ spawn: input, owner });
         const prior = yield* readStored(input.threadId);
         let stored = prior?.intent === intent ? decodeStored(prior.record_json) : undefined;
         if (!stored) {
           const advice = yield* advise({
-            environment: local.environmentId,
-            ...(input.projectId ? { projectId: input.projectId } : {}),
+            environment: peer ?? local.environmentId,
+            ...(input.projectId && !peer ? { projectId: input.projectId } : {}),
             threadId: input.threadId,
             assignmentId: `spawn:${input.threadId}`,
             assessment,
@@ -614,7 +617,9 @@ const make = Effect.gen(function* () {
           stored = { recommendation, computers: advice.computers?.hosts ?? [] };
           yield* saveStored(input.threadId, intent, stored);
         }
-        const worker = yield* workers.spawn(owner, spawnInput);
+        const worker = peer
+          ? yield* workers.spawnRemote(owner, peer, spawnInput)
+          : yield* workers.spawn(owner, spawnInput);
         return { ...worker, recommendation: stored.recommendation };
       },
       Effect.catchTags({
