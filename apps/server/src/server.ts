@@ -79,6 +79,8 @@ import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
+import * as SessionMoves from "./moves/SessionMoves.ts";
+import * as ThreadMoveGuard from "./moves/ThreadMoveGuard.ts";
 import * as PeerRequests from "./peer/PeerRequests.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -531,6 +533,22 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
   }),
 );
 
+// Links to other environments and the request channel between them, one instance for everyone.
+const layerPeers = PeerForwarding.layer.pipe(
+  Layer.provideMerge(PeerRequests.layer),
+  Layer.provideMerge(PeerMcpClient.layer),
+  Layer.provideMerge(PeerLinks.layer),
+);
+const layerSessionMoves = SessionMoves.layer.pipe(
+  Layer.provide(layerPeers),
+  Layer.provide(RuntimeLayer.layerEventSink),
+  Layer.provide(
+    EventStoreV2.layerFromOrchestrationEventStore.pipe(
+      Layer.provide(RuntimeLayer.layerEventInfrastructure),
+    ),
+  ),
+);
+
 // One instance of each, shared by the reactors, the MCP routes and the provider start guard.
 const layerProviderAllocation = ProviderAllocation.layer.pipe(Layer.provide(AllocationStore.layer));
 const layerWorkerService = WorkerService.layer.pipe(Layer.provide(layerProviderAllocation));
@@ -544,6 +562,7 @@ const layerUsageCapEnforcement = UsageCapEnforcement.layer.pipe(
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provide(layerSessionWorkspaces),
   Layer.provide(UsageCapEnforcement.guardLayer),
+  Layer.provide(ThreadMoveGuard.layer),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -782,6 +801,7 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+    Layer.provide(layerSessionMoves),
     Layer.provide(layerWorkerService),
     Layer.provide(layerProviderAllocation),
     Layer.provide(layerAllocationAssignments),
@@ -790,6 +810,10 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
   ),
+  // Carries sessions to other computers and resumes moves that a restart interrupted.
+  Layer.effectDiscard(
+    SessionMoves.SessionMoves.pipe(Effect.flatMap((moves) => moves.start())),
+  ).pipe(Layer.provide(layerSessionMoves)),
 ).pipe(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
@@ -808,13 +832,7 @@ const layerMakeRoutes = Layer.mergeAll(
   ),
   Layer.provide(PreviewBrowser.layer),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
-  Layer.provide(
-    PeerForwarding.layer.pipe(
-      Layer.provideMerge(PeerRequests.layer),
-      Layer.provideMerge(PeerMcpClient.layer),
-      Layer.provideMerge(PeerLinks.layer),
-    ),
-  ),
+  Layer.provide(layerPeers),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
@@ -1124,6 +1142,7 @@ const layerMakeServer = Layer.unwrap(
     }).pipe(
       Layer.provide(layerAllocationAssignments),
       Layer.provide(layerProviderAllocation),
+      Layer.provide(layerSessionMoves),
       withUntracedRequests,
       Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)),
     );

@@ -63,6 +63,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverUpdateSettings]: "server",
   [WS_METHODS.providerAllocation]: "provider-allocation",
   [WS_METHODS.providerAllocationStart]: "provider-allocation",
+  [WS_METHODS.sessionMovesRequest]: "session-moves",
+  [WS_METHODS.sessionMovesStatus]: "session-moves",
   [WS_METHODS.serverSearchAcpRegistry]: "server",
   [WS_METHODS.serverPrepareAcpRegistryAgent]: "server",
   [WS_METHODS.serverUninstallAcpRegistryManagedBinary]: "server",

@@ -127,6 +127,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { ThreadMoveGuard } from "../moves/ThreadMoveGuard.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import {
@@ -472,6 +473,19 @@ export function threadHasUnfinishedWork(records: {
     ) || records.runtimeRequests.some((request) => request.status === "pending")
   );
 }
+
+const MOVE_BLOCKED_COMMANDS: ReadonlySet<string> = new Set([
+  "thread.create",
+  "message.dispatch",
+  "thread.archive",
+  "thread.unarchive",
+  "thread.delete",
+  "thread.metadata.update",
+  "thread.runtime-mode.set",
+  "thread.interaction-mode.set",
+  "thread.model-selection.set",
+  "provider.switch",
+]);
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
@@ -1006,6 +1020,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const threadForkService = yield* ThreadForkServiceV2;
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
+  const moveGuard = yield* Effect.serviceOption(ThreadMoveGuard);
 
   /** The driver when this provider runs `/goal` natively, else undefined. */
   const goalDriverFor = Effect.fn("Orchestrator.goalDriverFor")(function* (
@@ -12430,6 +12445,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }),
     );
 
+  /** Commands that change a session; a session with a locked move receipt takes none of them. */
+  const refuseWhileMoving = Effect.fn("orchestrationV2.dispatch.refuseWhileMoving")(function* (
+    command: OrchestrationV2ServerCommand,
+  ) {
+    if (moveGuard._tag === "None" || !MOVE_BLOCKED_COMMANDS.has(command.type)) return;
+    yield* moveGuard.value
+      .check({ threadId: commandThreadId(command), commandId: command.commandId })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+        ),
+      );
+  });
+
   const dispatchOnce = Effect.fn("orchestrationV2.dispatch.once")(function* (
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<
@@ -12449,6 +12483,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.command_type": command.type,
       "orchestration_v2.thread_id": commandThreadId(command),
     });
+    yield* refuseWhileMoving(command);
 
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);

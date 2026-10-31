@@ -1,5 +1,6 @@
 import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
 import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
+import * as SessionMoves from "./moves/SessionMoves.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1340,6 +1341,7 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const allocation = yield* ProviderAllocation.ProviderAllocation;
       const allocationAssignments = yield* AllocationAssignments.AllocationAssignments;
+      const sessionMoves = yield* SessionMoves.SessionMoves;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2506,6 +2508,8 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.providerAllocation]: (input) => allocation.execute(input),
         [WS_METHODS.providerAllocationStart]: (input) => allocationAssignments.start(input),
+        [WS_METHODS.sessionMovesRequest]: (input) => sessionMoves.request(input),
+        [WS_METHODS.sessionMovesStatus]: (input) => sessionMoves.status(input),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {

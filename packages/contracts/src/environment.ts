@@ -157,6 +157,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   linkFence: Schema.optionalKey(Schema.Boolean),
   /** Server answers server.prepareTriage. */
   triage: Schema.optionalKey(Schema.Boolean),
+  /** Server moves a session's native state to another linked computer and receives such moves. */
+  nativeSessionMoves: Schema.optionalKey(Schema.Boolean),
+  /** Direct session messages need an exact-message confirmation first. */
+  sessionMessageConfirmation: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

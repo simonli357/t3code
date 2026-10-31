@@ -1,4 +1,10 @@
 import {
+  SessionMoveError,
+  SessionMoveInput,
+  SessionMoveResult,
+  SessionMoveStatusInput,
+} from "./sessionMoves.ts";
+import {
   AllocationError,
   AllocationOperation,
   AllocationResponse,
@@ -519,6 +525,8 @@ export const WS_METHODS = {
   serverUpdateSettings: "server.updateSettings",
   providerAllocation: "providerAllocation.execute",
   providerAllocationStart: "providerAllocation.start",
+  sessionMovesRequest: "sessionMoves.request",
+  sessionMovesStatus: "sessionMoves.status",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -828,6 +836,18 @@ const WsProviderAllocationStartRpc = Rpc.make(WS_METHODS.providerAllocationStart
   payload: AllocationStart,
   success: AllocationStartResult,
   error: Schema.Union([AllocationError, EnvironmentAuthorizationError]),
+});
+
+const WsSessionMovesRequestRpc = Rpc.make(WS_METHODS.sessionMovesRequest, {
+  payload: SessionMoveInput,
+  success: SessionMoveResult,
+  error: Schema.Union([SessionMoveError, EnvironmentAuthorizationError]),
+});
+
+const WsSessionMovesStatusRpc = Rpc.make(WS_METHODS.sessionMovesStatus, {
+  payload: SessionMoveStatusInput,
+  success: SessionMoveResult,
+  error: Schema.Union([SessionMoveError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -2005,6 +2025,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsProviderAllocationRpc,
   WsProviderAllocationStartRpc,
+  WsSessionMovesRequestRpc,
+  WsSessionMovesStatusRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

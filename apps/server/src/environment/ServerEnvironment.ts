@@ -248,6 +248,8 @@ export const make = Effect.gen(function* () {
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,
+      nativeSessionMoves: true,
+      sessionMessageConfirmation: true,
       threadAutoSettleOptOut: true,
       threadProjectFromScratch: true,
       computers: true,

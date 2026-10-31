@@ -68,6 +68,7 @@ export * from "./resourceTelemetry.ts";
 export * from "./sessionOrganization.ts";
 export * from "./computers.ts";
 export * from "./providerAllocation.ts";
+export * from "./sessionMoves.ts";
 export * from "./modelRouting.ts";
 export * from "./usageMeasurements.ts";
 export * from "./rpc.ts";

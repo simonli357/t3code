@@ -55,6 +55,8 @@ import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import { AllocationToolkit } from "./toolkits/allocation/tools.ts";
 import * as PeerHandlers from "./toolkits/peer/handlers.ts";
+import * as SessionMovesHandlers from "./toolkits/sessionMoves/handlers.ts";
+import { SessionMovesToolkit } from "./toolkits/sessionMoves/tools.ts";
 import { PeerToolkit } from "./toolkits/peer/tools.ts";
 import * as AllocationHandlers from "./toolkits/allocation/handlers.ts";
 import { WorkersToolkit } from "./toolkits/workers/tools.ts";
@@ -1103,6 +1105,10 @@ export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandl
 const layerWorkersToolkit = toolkitRegistration(WorkersToolkit, WorkersHandlers.layer);
 const layerAllocationToolkit = toolkitRegistration(AllocationToolkit, AllocationHandlers.layer);
 const layerPeerToolkit = toolkitRegistration(PeerToolkit, PeerHandlers.layer);
+const layerSessionMovesToolkit = toolkitRegistration(
+  SessionMovesToolkit,
+  SessionMovesHandlers.layer,
+);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
@@ -1162,6 +1168,7 @@ export const layerTools = Layer.mergeAll(
   layerWorkersToolkit,
   layerAllocationToolkit,
   layerPeerToolkit,
+  layerSessionMovesToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,

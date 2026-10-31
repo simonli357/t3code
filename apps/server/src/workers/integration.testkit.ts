@@ -26,6 +26,7 @@ import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as ThreadMoveGuard from "../moves/ThreadMoveGuard.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -102,34 +103,53 @@ const layerInstances = (providers: ReadonlyArray<unknown>) => {
   });
 };
 
-const defaultProviders = [provider("codex", "gpt-5.4"), provider("claude", "sonnet")];
+export const defaultProviders = [provider("codex", "gpt-5.4"), provider("claude", "sonnet")];
 
-const layerShared = (providers: ReadonlyArray<unknown>) =>
-  Layer.mergeAll(
+/** What differs between the computers of a test: its identity, checkout and provider home. */
+export interface WorldOptions {
+  readonly environmentId?: string;
+  readonly label?: string;
+  readonly workspaceRoot?: string;
+  readonly codexHome?: string;
+}
+
+const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = {}) => {
+  const environmentId = EnvironmentId.make(options.environmentId ?? "environment:local");
+  return Layer.mergeAll(
     ServerSettings.layerTest({
       providerInstances: Object.fromEntries(
         providers.map((candidate) => [
           (candidate as { instanceId: string }).instanceId,
-          { driver: ProviderDriverKind.make("codex"), enabled: true },
+          {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            ...(options.codexHome === undefined ? {} : { config: { homePath: options.codexHome } }),
+          },
         ]),
       ),
     }),
     ProviderRegistryMock.layer(providers as ReadonlyArray<ServerProvider>),
     Layer.mock(ProjectService.ProjectService)({
-      getById: () => Effect.succeedSome({ id: project } as never),
+      getById: () =>
+        Effect.succeedSome({
+          id: project,
+          workspaceRoot: options.workspaceRoot ?? process.cwd(),
+        } as never),
     }),
     Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
-      getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:local")),
+      getEnvironmentId: Effect.succeed(environmentId),
     }),
     Layer.mock(ServerEnvironment.ServerEnvironment)({
-      getEnvironmentId: Effect.succeed(EnvironmentId.make("environment:local")),
-      getDescriptor: Effect.succeed({ label: "This computer" } as never),
+      getEnvironmentId: Effect.succeed(environmentId),
+      getDescriptor: Effect.succeed({ label: options.label ?? "This computer" } as never),
     }),
   );
+};
 
-const layerRuntime = (providers: ReadonlyArray<unknown>) =>
+export const layerRuntime = (providers: ReadonlyArray<unknown>, options: WorldOptions = {}) =>
   Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink, ProjectStore.layer).pipe(
     Layer.provide(UsageCapEnforcement.guardLayer),
+    Layer.provide(ThreadMoveGuard.layer),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => Effect.die("unused title link"),
@@ -137,7 +157,7 @@ const layerRuntime = (providers: ReadonlyArray<unknown>) =>
     ),
     Layer.provide(McpSessionRegistryTestkit.layer),
     Layer.provide(McpProviderSessions.layer),
-    Layer.provideMerge(layerShared(providers)),
+    Layer.provideMerge(layerShared(providers, options)),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provide(layerCheckpoints),
     Layer.provide(layerConfig),
@@ -192,7 +212,10 @@ export const layerWorld = (providers: ReadonlyArray<unknown> = defaultProviders)
   ).pipe(Layer.provideMerge(layerLauncher), Layer.provideMerge(layerRuntime(providers)));
 };
 
-export const seed = Effect.fn("seed")(function* (masterId: ThreadId = master) {
+export const seed = Effect.fn("seed")(function* (
+  masterId: ThreadId = master,
+  workspaceRoot: string = process.cwd(),
+) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   if ((yield* orchestrator.getThreadShell(masterId)) !== null) return;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -213,7 +236,7 @@ export const seed = Effect.fn("seed")(function* (masterId: ThreadId = master) {
       payload: {
         projectId: project,
         title: "Workers",
-        workspaceRoot: process.cwd(),
+        workspaceRoot,
         defaultModelSelection: model,
         scripts: [],
         createdAt: at,
@@ -230,7 +253,7 @@ export const seed = Effect.fn("seed")(function* (masterId: ThreadId = master) {
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
-    worktreePath: process.cwd(),
+    worktreePath: workspaceRoot,
     createdBy: "user",
     creationSource: "web",
   });
