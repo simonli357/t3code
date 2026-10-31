@@ -1,4 +1,5 @@
 import * as NodeSqlite from "node:sqlite";
+import * as NodeFS from "node:fs";
 
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -41,7 +42,14 @@ export const initializeV2Database = Effect.fn("initializeV2Database")(function* 
     yield* Effect.tryPromise(async () => {
       const database = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });
       try {
-        await NodeSqlite.backup(database, snapshotPath);
+        // VACUUM INTO writes one compact file, so the copy does not carry the V1 free-page pool
+        // (measured at about 3 GiB on the live database). The page-level backup is the fallback.
+        try {
+          database.exec(`VACUUM INTO '${snapshotPath.replaceAll("'", "''")}'`);
+        } catch {
+          NodeFS.rmSync(snapshotPath, { force: true });
+          await NodeSqlite.backup(database, snapshotPath);
+        }
       } finally {
         database.close();
       }
