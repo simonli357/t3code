@@ -45,6 +45,7 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  MessageId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -56,12 +57,21 @@ import {
   OrchestrationV2ThreadTranscript,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestDiffInput,
   PullRequestDiffResult,
   PullRequestOperationError,
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
+import {
+  SESSION_HISTORY_MAX_CHARS,
+  SESSION_HISTORY_MAX_MESSAGES,
+  SESSION_HISTORY_MIN_CHARS,
+  SessionHistoryReadError,
+  SessionHistoryReadResult,
+} from "./sessionHistory.ts";
+import { UsageMeasurementsReport } from "./usageMeasurements.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
@@ -722,6 +732,63 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+// Agent-facing reads that keep their V1 routes, so t3-workflows scripts work on either protocol.
+class EnvironmentAgentReadsHttpApi extends HttpApiGroup.make("agentReads")
+  .add(
+    HttpApiEndpoint.get("sessionHistory", "/api/orchestration/threads/:threadId/messages", {
+      headers: OptionalBearerHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: {
+        messageLimit: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: SESSION_HISTORY_MAX_MESSAGES }),
+          ),
+        ),
+        maxChars: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({
+              minimum: SESSION_HISTORY_MIN_CHARS,
+              maximum: SESSION_HISTORY_MAX_CHARS,
+            }),
+          ),
+        ),
+        view: Schema.optional(Schema.Literals(["final", "all"])),
+        beforeMessageId: Schema.optional(MessageId),
+        messageId: Schema.optional(MessageId),
+        offset: Schema.optional(
+          Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+        ),
+      },
+      success: SessionHistoryReadResult,
+      error: [...EnvironmentOrchestrationThreadSnapshotErrors, SessionHistoryReadError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("usageMeasurements", "/api/orchestration/usage-measurements", {
+      headers: OptionalBearerHeaders,
+      query: {
+        instanceId: Schema.optional(ProviderInstanceId),
+        threadId: Schema.optional(ThreadId),
+        lookbackHours: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: 336 }),
+          ),
+        ),
+        turnLimit: Schema.optional(
+          Schema.FiniteFromString.check(
+            Schema.isInt(),
+            Schema.isBetween({ minimum: 1, maximum: 100 }),
+          ),
+        ),
+      },
+      success: UsageMeasurementsReport,
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/projects", {
@@ -840,6 +907,7 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
+  .add(EnvironmentAgentReadsHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentConnectHttpApi)

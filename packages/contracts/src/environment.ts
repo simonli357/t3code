@@ -161,6 +161,20 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   nativeSessionMoves: Schema.optionalKey(Schema.Boolean),
   /** Direct session messages need an exact-message confirmation first. */
   sessionMessageConfirmation: Schema.optionalKey(Schema.Boolean),
+  /** t3_worker_spawn can start fresh sessions on this server. */
+  workerFreshSessions: Schema.optionalKey(Schema.Boolean),
+  /** Messages and threads are readable in bounded, paged form (`/api/orchestration/threads/:id/bounded`). */
+  boundedSessionHistory: Schema.optionalKey(Schema.Boolean),
+  /** Server answers placement and allocation requests (t3_recommend_computer, t3_allocate_account). */
+  providerAllocation: Schema.optionalKey(Schema.Boolean),
+  /** Masters can hand off to a successor (t3_orchestrator_handoff). */
+  orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
+  /** A master can take back workers it handed off (t3_worker_reclaim). */
+  workerReclaim: Schema.optionalKey(Schema.Boolean),
+  /** A retired caller gets one informational warning instead of being blocked. */
+  workerRetirementWarning: Schema.optionalKey(Schema.Boolean),
+  /** Worker tools and session messages can reach linked peer environments. */
+  peerEnvironments: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

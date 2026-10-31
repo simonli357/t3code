@@ -81,6 +81,8 @@ import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as SessionMoves from "./moves/SessionMoves.ts";
 import * as EffectOutbox from "./orchestration-v2/EffectOutbox.ts";
+import * as AgentReadsHttp from "./orchestration-v2/agentReadsHttp.ts";
+import * as SessionMessages from "./orchestration-v2/SessionMessages.ts";
 import * as SettledThreadPurge from "./orchestration-v2/SettledThreadPurge.ts";
 import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import * as ThreadMoveGuard from "./moves/ThreadMoveGuard.ts";
@@ -800,6 +802,12 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       Layer.provide(CloudHttp.layer),
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(
+        AgentReadsHttp.layer.pipe(
+          Layer.provide(SessionMessages.layer),
+          Layer.provide(layerUsageMeasurements),
+        ),
+      ),
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
