@@ -94,6 +94,7 @@ const layerComputer = (
   root: string,
   codexHome: string,
   dshHome: string,
+  claudeHome: string,
 ) => {
   const peers = layerPeers(self, other, network);
   return SessionMoves.layer.pipe(
@@ -111,6 +112,7 @@ const layerComputer = (
         workspaceRoot: root,
         codexHome,
         dshHome,
+        claudeHome,
         peers,
       }),
     ),
@@ -131,7 +133,7 @@ const deepseek = {
     },
   ],
 };
-const providers = [...defaultProviders, deepseek];
+const providers = [...defaultProviders, deepseek, provider("claudeAgent", "claude-sonnet")];
 
 export interface Computer {
   readonly context: import("effect/Context").Context<
@@ -140,6 +142,7 @@ export interface Computer {
   readonly root: string;
   readonly codexHome: string;
   readonly dshHome: string;
+  readonly claudeHome: string;
 }
 
 /** A whole T3 server in memory, linked to `other` through `network`, with a git checkout and a Codex home. */
@@ -156,6 +159,7 @@ export const makeComputer = Effect.fn("makeComputer")(function* (
   git(root, "commit", "-q", "-m", "initial");
   const codexHome = tmp(`${slug}-codex`);
   const dshHome = tmp(`${slug}-dsh`);
+  const claudeHome = tmp(`${slug}-claude`);
   const scope = yield* Effect.scope;
   yield* Scope.addFinalizer(
     scope,
@@ -163,10 +167,13 @@ export const makeComputer = Effect.fn("makeComputer")(function* (
       NodeFS.rmSync(root, { recursive: true, force: true });
       NodeFS.rmSync(codexHome, { recursive: true, force: true });
       NodeFS.rmSync(dshHome, { recursive: true, force: true });
+      NodeFS.rmSync(claudeHome, { recursive: true, force: true });
     }),
   );
-  const context = yield* Layer.build(layerComputer(self, other, network, root, codexHome, dshHome));
-  return { context, root, codexHome, dshHome } satisfies Computer;
+  const context = yield* Layer.build(
+    layerComputer(self, other, network, root, codexHome, dshHome, claudeHome),
+  );
+  return { context, root, codexHome, dshHome, claudeHome } satisfies Computer;
 });
 
 /** Runs an effect on one computer of a test. */

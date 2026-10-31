@@ -115,6 +115,7 @@ export interface WorldOptions {
   readonly workspaceRoot?: string;
   readonly codexHome?: string;
   readonly dshHome?: string;
+  readonly claudeHome?: string;
   /** Peer services of this computer, for tests that link it to another. */
   readonly peers?: Layer.Layer<PeerLinks.PeerLinks | PeerRequests.PeerRequests>;
 }
@@ -127,11 +128,14 @@ const layerShared = (providers: ReadonlyArray<unknown>, options: WorldOptions = 
         providers.map((candidate) => {
           const instanceId = (candidate as { instanceId: string }).instanceId;
           const deepseek = instanceId === "deepseekHarness";
-          const home = deepseek ? options.dshHome : options.codexHome;
+          const claude = instanceId === "claudeAgent";
+          const home = deepseek ? options.dshHome : claude ? options.claudeHome : options.codexHome;
           return [
             instanceId,
             {
-              driver: ProviderDriverKind.make(deepseek ? "deepseekHarness" : "codex"),
+              driver: ProviderDriverKind.make(
+                deepseek ? "deepseekHarness" : claude ? "claudeAgent" : "codex",
+              ),
               enabled: true,
               ...(home === undefined ? {} : { config: { homePath: home } }),
             },

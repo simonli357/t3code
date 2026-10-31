@@ -243,6 +243,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const hostEnvironment = yield* HostProcess.Environment;
   const isExecutable = yield* HostProcess.IsExecutable;
+  const executablePath = yield* HostProcess.ExecutablePath;
   const settings = yield* ServerSettingsService;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const events = yield* EventStore.EventStoreV2;
@@ -1049,16 +1050,24 @@ const make = Effect.gen(function* () {
     for (const file of manifest.files.filter((entry) => entry.kind === "provider-asset"))
       yield* io(() => Files.installMoveFile(staging, file, home.homePath, file.name, replace));
     if (manifest.driver === "claudeAgent") {
+      const fromSource = import.meta.url.endsWith(".ts");
+      // A single executable hosts the worker itself; otherwise it is the script beside the server.
       const workerArgs = isExecutable
         ? ["__claude-history"]
         : [
+            ...(fromSource ? ["--experimental-strip-types"] : []),
             yield* path
-              .fromFileUrl(new URL("../claude-history-worker.ts", import.meta.url))
+              .fromFileUrl(
+                new URL(
+                  fromSource ? "../claude-history-worker.ts" : "./claude-history-worker.mjs",
+                  import.meta.url,
+                ),
+              )
               .pipe(Effect.mapError(failure)),
           ];
       yield* io(() =>
         Files.verifyClaudeMove(
-          process.execPath,
+          executablePath,
           workerArgs,
           home.homePath,
           manifest.targetCwd,

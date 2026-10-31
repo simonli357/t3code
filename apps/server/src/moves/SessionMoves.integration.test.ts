@@ -573,3 +573,92 @@ it.effect("refuses a DeepSeek Harness fork whose ancestry is missing on disk", (
     assert.isNull(yield* shellOf(b));
   }).pipe(Effect.scoped),
 );
+
+const CLAUDE_ID = "33333333-3333-4333-8333-333333333333";
+
+it.effect(
+  "moves a Claude session into the destination's project directory for its new workspace",
+  () =>
+    Effect.gen(function* () {
+      const network = newNetwork();
+      const a = yield* makeWorld(idA, idB, network);
+      const b = yield* makeWorld(idB, idA, network);
+      yield* seed(master, a.root).pipe(Effect.provideContext(a.context));
+      const sink = yield* EventSink.EventSinkV2.pipe(Effect.provideContext(a.context));
+      const at = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("seed:claude-provider-thread"),
+            type: "provider-thread.updated",
+            threadId: master,
+            occurredAt: at,
+            payload: {
+              id: ProviderThreadId.make("provider-thread:claude"),
+              driver: "claudeAgent" as never,
+              providerInstanceId: "claudeAgent" as never,
+              providerSessionId: null,
+              appThreadId: master,
+              ownerNodeId: null,
+              nativeThreadRef: {
+                driver: "claudeAgent" as never,
+                nativeId: CLAUDE_ID,
+                strength: "strong",
+              },
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: at,
+              updatedAt: at,
+            },
+          },
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make("select-claude"),
+          threadId: master,
+          modelSelection: { instanceId: "claudeAgent" as never, model: "claude-sonnet" },
+        });
+      }).pipe(Effect.provideContext(a.context));
+      const encode = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+      const sourceFile = NodePath.join(
+        a.claudeHome,
+        "projects",
+        encode(a.root),
+        `${CLAUDE_ID}.jsonl`,
+      );
+      NodeFS.mkdirSync(NodePath.dirname(sourceFile), { recursive: true });
+      NodeFS.writeFileSync(
+        sourceFile,
+        `${JSON.stringify({
+          type: "user",
+          uuid: "44444444-4444-4444-8444-444444444444",
+          sessionId: CLAUDE_ID,
+          cwd: a.root,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          message: { role: "user", content: "hello from the first computer" },
+        })}\n`,
+      );
+      const movesA = yield* startMoves(a);
+      yield* startMoves(b);
+
+      yield* inWorld(a, movesA.request(moveInput("claude-out", idB)));
+      yield* inWorld(a, movesA.drain());
+      const [row] = yield* rowsOf(a);
+      assert.deepEqual([row!.state, row!.error], ["complete", null]);
+      // The destination files it where Claude looks for sessions of the workspace the move created.
+      const landed = NodeFS.readdirSync(NodePath.join(b.claudeHome, "projects"))
+        .map((directory) =>
+          NodePath.join(b.claudeHome, "projects", directory, `${CLAUDE_ID}.jsonl`),
+        )
+        .filter((file) => NodeFS.existsSync(file));
+      assert.lengthOf(landed, 1);
+      assert.equal(sha(landed[0]!), sha(sourceFile));
+    }).pipe(Effect.scoped),
+);
