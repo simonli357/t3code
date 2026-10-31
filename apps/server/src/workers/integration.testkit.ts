@@ -256,18 +256,14 @@ export const layerPlacementProbe = Layer.merge(
       }),
   }),
   Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
-    getAvailable: () =>
+    readRepositoryIdentity: () =>
       Effect.succeed({
-        repositoryIdentity: {
-          canonicalKey: TEST_REPOSITORY_KEY,
-          locator: {
-            source: "git-remote" as const,
-            remoteName: "origin",
-            remoteUrl: "https://github.com/acme/repo.git",
-          },
+        canonicalKey: TEST_REPOSITORY_KEY,
+        locator: {
+          source: "git-remote" as const,
+          remoteName: "origin",
+          remoteUrl: "https://github.com/acme/repo.git",
         },
-        faviconPath: null,
-        repositoryIdentityResolved: true,
       }),
   }),
 );

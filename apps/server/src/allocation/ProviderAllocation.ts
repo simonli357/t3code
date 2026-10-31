@@ -71,6 +71,7 @@ const decodeInventory = Schema.decodeUnknownEffect(AllocationInventorySchema);
 const decodeProbeBody = Schema.decodeUnknownEffect(
   Schema.Struct({ placement: Schema.optional(ComputerPlacementProbeSchema) }),
 );
+const REPOSITORY_LOOKUP_TIMEOUT = Duration.seconds(5);
 /** Each linked computer gets this long to describe itself before advice goes on without it. */
 const PEER_INVENTORY_TIMEOUT = Duration.seconds(15);
 
@@ -148,10 +149,12 @@ const make = Effect.gen(function* () {
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
   const projectShells = projectStore.listShells().pipe(Effect.mapError(unavailable));
+  // A project's repository is resolved with git on first use; a slow one counts as unknown, not as a different repository.
   const repositoryKeyOf = (workspaceRoot: string) =>
-    enrichment
-      .getAvailable(workspaceRoot)
-      .pipe(Effect.map((found) => found.repositoryIdentity?.canonicalKey));
+    enrichment.readRepositoryIdentity(workspaceRoot).pipe(
+      Effect.timeoutOption(REPOSITORY_LOOKUP_TIMEOUT),
+      Effect.map((identity) => Option.getOrNull(identity)?.canonicalKey),
+    );
 
   const inventory = Effect.fn("ProviderAllocation.inventory")(function* (
     request: AllocationRequest | undefined,
