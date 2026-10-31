@@ -13,6 +13,8 @@ import {
   type AllocationResponse,
   type AllocationSnapshot,
   type ComputerPlacement,
+  type ComputerPlacementProbe,
+  ComputerPlacementProbe as ComputerPlacementProbeSchema,
   type ComputerPlacementRequest,
   type ModelSelection,
   type OrchestrationV2ThreadShell,
@@ -27,9 +29,12 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as Computers from "../computers/Computers.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerRequests from "../peer/PeerRequests.ts";
+import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -62,6 +67,10 @@ const NO_MEASUREMENTS: UsageMeasurementsReport = {
 };
 
 const decodeInventory = Schema.decodeUnknownEffect(AllocationInventorySchema);
+/** A peer asking only for accounts sends `{}`; a placement read adds what it needs measured. */
+const decodeProbeBody = Schema.decodeUnknownEffect(
+  Schema.Struct({ placement: Schema.optional(ComputerPlacementProbeSchema) }),
+);
 /** Each linked computer gets this long to describe itself before advice goes on without it. */
 const PEER_INVENTORY_TIMEOUT = Duration.seconds(15);
 
@@ -127,6 +136,10 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const peers = yield* Effect.serviceOption(PeerRequests.PeerRequests);
   const links = yield* Effect.serviceOption(PeerLinks.PeerLinks);
+  // A placement read measures this computer and finds its checkouts of a repository.
+  const computers = yield* Computers.Computers;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
+  const enrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const localEnvironmentId = yield* environment.getEnvironmentId;
   const local = {
     environmentId: localEnvironmentId,
@@ -134,8 +147,15 @@ const make = Effect.gen(function* () {
   };
   const now = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
+  const projectShells = projectStore.listShells().pipe(Effect.mapError(unavailable));
+  const repositoryKeyOf = (workspaceRoot: string) =>
+    enrichment
+      .getAvailable(workspaceRoot)
+      .pipe(Effect.map((found) => found.repositoryIdentity?.canonicalKey));
+
   const inventory = Effect.fn("ProviderAllocation.inventory")(function* (
     request: AllocationRequest | undefined,
+    placement?: ComputerPlacementProbe,
   ) {
     const shell = yield* threads.getShellSnapshot();
     const current = yield* settings.getSettings;
@@ -145,6 +165,23 @@ const make = Effect.gen(function* () {
     const measurementReport = Option.isSome(measurements)
       ? yield* measurements.value.read({}).pipe(Effect.orElseSucceed(() => NO_MEASUREMENTS))
       : NO_MEASUREMENTS;
+    const checkouts =
+      placement?.repositoryKey === undefined
+        ? undefined
+        : yield* Effect.filter(
+            yield* projectShells,
+            (project) =>
+              repositoryKeyOf(project.workspaceRoot).pipe(
+                Effect.map((key) => key === placement.repositoryKey),
+              ),
+            { concurrency: 8 },
+          );
+    // A reading that outlasts the peer deadline leaves this computer unmeasured, not the advice late.
+    const computer = placement
+      ? yield* computers
+          .capacity({ workPath: current.agentWorkRoot.trim() || checkouts?.[0]?.workspaceRoot })
+          .pipe(Effect.timeoutOption(PEER_INVENTORY_TIMEOUT), Effect.map(Option.getOrUndefined))
+      : undefined;
     const snapshot = allocationInventory({
       environmentId: local.environmentId,
       at: yield* now,
@@ -181,6 +218,10 @@ const make = Effect.gen(function* () {
       environmentLabel: local.label,
       demand,
       coordinatorEnvironmentId: local.environmentId,
+      ...(computer ? { computer } : {}),
+      ...(checkouts
+        ? { projects: checkouts.slice(0, 20).map(({ id, title }) => ({ id, title })) }
+        : {}),
     } satisfies AllocationInventory;
   }, Effect.mapError(unavailable));
 
@@ -188,7 +229,9 @@ const make = Effect.gen(function* () {
    * What each linked computer reports about its accounts and load. One that does not answer is an
    * offline entry, so advice ranks it last instead of waiting on it or dropping it silently.
    */
-  const peerInventories = Effect.fn("ProviderAllocation.peerInventories")(function* () {
+  const peerInventories = Effect.fn("ProviderAllocation.peerInventories")(function* (
+    placement?: ComputerPlacementProbe,
+  ) {
     if (Option.isNone(peers) || Option.isNone(links)) return [] as AllocationInventory[];
     const linked = yield* links.value.list.pipe(Effect.orElseSucceed(() => []));
     const at = yield* now;
@@ -196,7 +239,12 @@ const make = Effect.gen(function* () {
       linked,
       (peer) =>
         peers.value
-          .call(peer.environmentId, "allocationInventory", {}, PEER_INVENTORY_TIMEOUT)
+          .call(
+            peer.environmentId,
+            "allocationInventory",
+            placement ? { placement } : {},
+            PEER_INVENTORY_TIMEOUT,
+          )
           .pipe(
             Effect.flatMap((raw) => decodeInventory(raw)),
             Effect.flatMap((reported) =>
@@ -353,9 +401,33 @@ const make = Effect.gen(function* () {
     request: ComputerPlacementRequest,
   ) {
     const policy = yield* store.policy;
-    const inventories = [yield* inventory(undefined), ...(yield* peerInventories())];
+    // Only this computer knows its project IDs; checkouts elsewhere match by repository.
+    const repositoryKey =
+      request.repositoryKey ??
+      (request.projectId === undefined
+        ? undefined
+        : yield* projectShells.pipe(
+            Effect.flatMap((projects) => {
+              const project = projects.find(({ id }) => id === request.projectId);
+              return project
+                ? repositoryKeyOf(project.workspaceRoot)
+                : Effect.fail(
+                    new AllocationError({
+                      code: "invalid",
+                      detail: `Project ${request.projectId} was not found on this computer.`,
+                    }),
+                  );
+            }),
+          ));
+    const probe = repositoryKey === undefined ? {} : { repositoryKey };
+    const inventories = [yield* inventory(undefined, probe), ...(yield* peerInventories(probe))];
     return {
-      placement: recommendPlacement({ at: yield* now, policy, request, inventories }),
+      placement: recommendPlacement({
+        at: yield* now,
+        policy,
+        request: repositoryKey === undefined ? request : { ...request, repositoryKey },
+        inventories,
+      }),
       inventories,
     };
   });
@@ -549,11 +621,15 @@ const make = Effect.gen(function* () {
   });
 
   if (Option.isSome(peers))
-    yield* peers.value.register("allocationInventory", () =>
-      inventory(undefined).pipe(
+    yield* peers.value.register("allocationInventory", (_from, body) =>
+      decodeProbeBody(body).pipe(
+        Effect.flatMap(({ placement }) => inventory(undefined, placement)),
         Effect.mapError(
           (cause) =>
-            new OrchestratorMcpFailure({ code: "orchestration_error", message: cause.detail }),
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "detail" in cause ? cause.detail : cause.message,
+            }),
         ),
       ),
     );

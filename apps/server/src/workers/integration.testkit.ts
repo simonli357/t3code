@@ -22,6 +22,8 @@ import * as Stream from "effect/Stream";
 import * as AllocationAssignments from "../allocation/AllocationAssignments.ts";
 import * as AllocationStore from "../allocation/AllocationStore.ts";
 import * as ProviderAllocation from "../allocation/ProviderAllocation.ts";
+import * as Computers from "../computers/Computers.ts";
+import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as UsageCapEnforcement from "../allocation/UsageCapEnforcement.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -232,7 +234,47 @@ const layerLauncher = Layer.effect(
   }),
 );
 
-const layerAllocation = ProviderAllocation.layer.pipe(Layer.provideMerge(AllocationStore.layer));
+/** Every checkout in these worlds is the same repository, on a computer with room to spare. */
+export const TEST_REPOSITORY_KEY = "github.com/acme/repo";
+export const layerPlacementProbe = Layer.merge(
+  Layer.mock(Computers.Computers)({
+    capacity: () =>
+      Effect.succeed({
+        sampledAt: 0,
+        os: "linux" as const,
+        resources: {
+          sampledAt: 0,
+          cpuUtilization: 0.1,
+          cpuCount: 8,
+          availableMemoryBytes: 16e9,
+          totalMemoryBytes: 32e9,
+        },
+        disks: [],
+        workDisk: null,
+        jobs: null,
+        notices: [],
+      }),
+  }),
+  Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({
+    getAvailable: () =>
+      Effect.succeed({
+        repositoryIdentity: {
+          canonicalKey: TEST_REPOSITORY_KEY,
+          locator: {
+            source: "git-remote" as const,
+            remoteName: "origin",
+            remoteUrl: "https://github.com/acme/repo.git",
+          },
+        },
+        faviconPath: null,
+        repositoryIdentityResolved: true,
+      }),
+  }),
+);
+const layerAllocation = ProviderAllocation.layer.pipe(
+  Layer.provide(layerPlacementProbe),
+  Layer.provideMerge(AllocationStore.layer),
+);
 
 /** Everything the integration tests drive, over one in-memory database. */
 export const layerWorld = (
@@ -263,8 +305,8 @@ export const seed = Effect.fn("seed")(function* (
   if ((yield* orchestrator.getThreadShell(masterId)) !== null) return;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const at = DateTime.formatIso(yield* DateTime.now);
-  const existing = yield* projects.get(project).pipe(Effect.orElseSucceed(() => null));
-  if (!existing)
+  const existing = yield* projects.get(project).pipe(Effect.orElseSucceed(() => Option.none()));
+  if (Option.isNone(existing))
     yield* projects.apply({
       sequence: 0,
       eventId: EventId.make("seed:worker-integration-project"),

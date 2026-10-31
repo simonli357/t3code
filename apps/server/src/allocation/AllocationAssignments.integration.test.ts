@@ -21,6 +21,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   failLatestRun,
+  layerPlacementProbe,
   layerWorld,
   master,
   project,
@@ -235,7 +236,12 @@ it.layer(layerWorld(providers))("allocation over the real orchestrator", (it) =>
       >();
       const rebuilt = yield* Layer.build(
         Assignments.layer.pipe(
-          Layer.provideMerge(Allocation.layer.pipe(Layer.provideMerge(AllocationStore.layer))),
+          Layer.provideMerge(
+            Allocation.layer.pipe(
+              Layer.provide(layerPlacementProbe),
+              Layer.provideMerge(AllocationStore.layer),
+            ),
+          ),
           Layer.fresh,
           Layer.provide(Layer.succeedContext(context)),
         ),

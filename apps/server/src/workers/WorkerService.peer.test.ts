@@ -5,7 +5,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { ProviderAllocation } from "../allocation/ProviderAllocation.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import { master, model, project, seed, setLatestRun } from "./integration.testkit.ts";
+import {
+  master,
+  model,
+  project,
+  seed,
+  setLatestRun,
+  TEST_REPOSITORY_KEY,
+} from "./integration.testkit.ts";
 import { makeComputer, newNetwork, on } from "./peerWorld.testkit.ts";
 import * as WorkerService from "./WorkerService.ts";
 
@@ -173,6 +180,34 @@ it.effect("ranks linked computers in placement advice and marks an unreachable o
     const offline = away.placement.hosts.find((host) => host.environmentId === idB);
     assert.equal(offline?.state, "offline");
     assert.notEqual(away.placement.recommendedEnvironmentId, idB);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("finds a linked computer's checkout of the project and measures its capacity", () =>
+  Effect.gen(function* () {
+    const { a } = yield* makePair();
+    const allocation = yield* on(a, ProviderAllocation);
+
+    // The project ID is local to A; B is found through the repository it checks out.
+    const placed = yield* on(a, allocation.place({ projectId: project }));
+    const hostB = placed.placement.hosts.find((host) => host.environmentId === idB);
+    assert.deepEqual(
+      placed.inventories.map((inventory) => [
+        inventory.environmentId,
+        inventory.projects?.map((entry) => entry.id),
+        inventory.computer?.os,
+      ]),
+      [
+        [idA, [project], "linux"],
+        [idB, [project], "linux"],
+      ],
+    );
+    assert.isTrue(hostB?.reasons.some((reason) => reason.startsWith("Checkout:")));
+    assert.equal(TEST_REPOSITORY_KEY, "github.com/acme/repo");
+
+    // Without a project no repository is named, so no checkout is looked up.
+    const open = yield* on(a, allocation.place({}));
+    assert.isTrue(open.inventories.every((inventory) => inventory.projects === undefined));
   }).pipe(Effect.scoped),
 );
 
