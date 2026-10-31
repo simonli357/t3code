@@ -10,6 +10,7 @@ import {
   EventId,
   ProviderThreadId,
   type SessionMoveInput,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -20,13 +21,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
-import { master, model, project, seed } from "../workers/integration.testkit.ts";
+import { master, model, project, seed, setLatestRun } from "../workers/integration.testkit.ts";
 import {
   type Computer,
   makeComputer,
   newNetwork,
   on as inWorld,
 } from "../workers/peerWorld.testkit.ts";
+import * as WorkerService from "../workers/WorkerService.ts";
 import * as SessionMoves from "./SessionMoves.ts";
 
 const NATIVE_ID = "0248b7d6-1ead-447d-894b-5edbafe089df";
@@ -39,26 +41,32 @@ const makeWorld = makeComputer;
 const sha = (file: string) =>
   NodeCrypto.createHash("sha256").update(NodeFS.readFileSync(file)).digest("hex");
 
-const seedSession = Effect.fn("seedSession")(function* (world: World) {
+const rolloutOf = (nativeId: string) =>
+  `sessions/2026/01/01/rollout-2026-01-01T00-00-00-${nativeId}.jsonl`;
+
+/** Gives a thread of a computer a Codex session behind it, as a conversation that has already run would have. */
+const bindNativeSession = Effect.fn("bindNativeSession")(function* (
+  world: World,
+  threadId: ThreadId,
+  nativeId: string,
+) {
   const at = yield* DateTime.now;
-  yield* seed(master, world.root).pipe(Effect.provideContext(world.context));
   const sink = yield* EventSink.EventSinkV2.pipe(Effect.provideContext(world.context));
-  const providerThreadId = ProviderThreadId.make("provider-thread:moving");
   yield* sink.write({
     events: [
       {
-        id: EventId.make("seed:moving-provider-thread"),
+        id: EventId.make(`seed:provider-thread:${threadId}`),
         type: "provider-thread.updated",
-        threadId: master,
+        threadId,
         occurredAt: at,
         payload: {
-          id: providerThreadId,
-          driver: model.instanceId === "codex" ? ("codex" as never) : ("codex" as never),
+          id: ProviderThreadId.make(`provider-thread:${threadId}`),
+          driver: "codex" as never,
           providerInstanceId: model.instanceId,
           providerSessionId: null,
-          appThreadId: master,
+          appThreadId: threadId,
           ownerNodeId: null,
-          nativeThreadRef: { driver: "codex" as never, nativeId: NATIVE_ID, strength: "strong" },
+          nativeThreadRef: { driver: "codex" as never, nativeId, strength: "strong" },
           nativeConversationHeadRef: null,
           status: "idle",
           firstRunOrdinal: null,
@@ -71,18 +79,27 @@ const seedSession = Effect.fn("seedSession")(function* (world: World) {
       },
     ],
   });
-  const rollout = NodePath.join(world.codexHome, ROLLOUT);
+  const rollout = NodePath.join(world.codexHome, rolloutOf(nativeId));
   NodeFS.mkdirSync(NodePath.dirname(rollout), { recursive: true });
   NodeFS.writeFileSync(
     rollout,
-    `${JSON.stringify({ type: "session_meta", payload: { id: NATIVE_ID } })}\n${JSON.stringify({ type: "event_msg", payload: { text: "hello" } })}\n`,
+    `${JSON.stringify({ type: "session_meta", payload: { id: nativeId } })}\n${JSON.stringify({ type: "event_msg", payload: { text: "hello" } })}\n`,
   );
   return rollout;
 });
 
-const moveInput = (requestId: string, environment: EnvironmentId): SessionMoveInput => ({
+const seedSession = Effect.fn("seedSession")(function* (world: World) {
+  yield* seed(master, world.root).pipe(Effect.provideContext(world.context));
+  return yield* bindNativeSession(world, master, NATIVE_ID);
+});
+
+const moveInput = (
+  requestId: string,
+  environment: EnvironmentId,
+  threadId: ThreadId = master,
+): SessionMoveInput => ({
   requestId: CommandId.make(requestId),
-  threadId: master,
+  threadId,
   projectId: project,
   environment,
 });
@@ -240,5 +257,191 @@ it.effect("recovers a move interrupted at commit from its durable receipt", () =
     );
     assert.equal(sha(NodePath.join(b.codexHome, ROLLOUT)), sha(rollout));
     assert.isNotNull((yield* shellOf(a))!.archivedAt);
+  }).pipe(Effect.scoped),
+);
+
+const plain = (
+  rows: ReadonlyArray<{
+    readonly thread_id: string;
+    readonly owner_id: string | null;
+    readonly state: string;
+  }>,
+) => rows.map((row) => [row.thread_id, row.owner_id, row.state]);
+
+const workerRows = (world: World) =>
+  inWorld(
+    world,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      return yield* sql<{
+        thread_id: string;
+        owner_id: string | null;
+        state: string;
+      }>`SELECT thread_id, owner_id, state FROM custom_workers ORDER BY thread_id`;
+    }),
+  );
+
+const textsOf = (world: World, threadId: ThreadId) =>
+  inWorld(
+    world,
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      return (yield* orchestrator.getThreadProjection(threadId)).messages.map(
+        (message) => message.text,
+      );
+    }),
+  );
+
+const childInput = (threadId: ThreadId) => ({
+  threadId,
+  title: "Child",
+  modelSelection: model,
+  prompt: "Work on the child task.",
+  projectId: project,
+});
+
+it.effect("keeps a moved master's workers reporting to it, and brings them back with it", () =>
+  Effect.gen(function* () {
+    const network = newNetwork();
+    const a = yield* makeWorld(idA, idB, network);
+    const b = yield* makeWorld(idB, idA, network);
+    yield* seedSession(a);
+    const movesA = yield* startMoves(a);
+    const movesB = yield* startMoves(b);
+    const workersA = Context.get(a.context, WorkerService.WorkerService);
+    const workersB = Context.get(b.context, WorkerService.WorkerService);
+    const child = ThreadId.make("thread:child");
+    yield* inWorld(a, workersA.spawn(master, childInput(child)));
+    yield* inWorld(a, setLatestRun(child, "completed"));
+    yield* inWorld(a, workersA.drain());
+
+    yield* inWorld(a, movesA.request(moveInput("master-out", idB)));
+    yield* inWorld(a, movesA.drain());
+
+    assert.deepEqual(plain(yield* workerRows(a)), [[child, `peer:${idB}:${master}`, "ready"]]);
+    assert.deepEqual(plain(yield* workerRows(b)), [[child, master, "remote"]]);
+
+    // The worker still runs here, and its report now reaches the master on the other computer.
+    yield* inWorld(
+      a,
+      workersA.report(child, {
+        clientRequestId: "child-done",
+        outcome: "done",
+        summary: "Child finished while its master was away.",
+      }),
+    );
+    yield* inWorld(a, workersA.drain());
+    yield* inWorld(b, workersB.drain());
+    assert.isTrue(
+      (yield* textsOf(b, master)).some((text) => text.includes("Child finished while its master")),
+    );
+
+    // The master comes home with its worker.
+    yield* inWorld(b, setLatestRun(master, "completed"));
+    yield* inWorld(b, movesB.request(moveInput("master-back", idA)));
+    yield* inWorld(b, movesB.drain());
+    assert.deepEqual(
+      (yield* rowsOf(b)).map((row) => [row.direction, row.state, row.error]),
+      [
+        ["in", "complete", null],
+        ["out", "complete", null],
+      ],
+    );
+    assert.deepEqual(plain(yield* workerRows(a)), [[child, master, "ready"]]);
+    assert.deepEqual(yield* workerRows(b), []);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("keeps a moved worker reporting to its master", () =>
+  Effect.gen(function* () {
+    const network = newNetwork();
+    const a = yield* makeWorld(idA, idB, network);
+    const b = yield* makeWorld(idB, idA, network);
+    yield* inWorld(a, seed(master, a.root));
+    yield* inWorld(b, seed(ThreadId.make("thread:b-local"), b.root));
+    const movesA = yield* startMoves(a);
+    yield* startMoves(b);
+    const workersA = Context.get(a.context, WorkerService.WorkerService);
+    const workersB = Context.get(b.context, WorkerService.WorkerService);
+    const worker = ThreadId.make("thread:moving-worker");
+    yield* inWorld(a, workersA.spawn(master, childInput(worker)));
+    yield* bindNativeSession(a, worker, "3eb759e7-b92c-43aa-9344-c277e5ca72aa");
+
+    // An assignment the master has not yet seen finish keeps the session where it is.
+    yield* inWorld(a, setLatestRun(worker, "completed"));
+    yield* inWorld(a, movesA.request(moveInput("worker-out", idB, worker)));
+    yield* inWorld(a, movesA.drain());
+    const early = (yield* rowsOf(a, worker))[0]!;
+    assert.include(early.error ?? "", "queued assignments");
+    yield* inWorld(a, workersA.drain());
+    yield* inWorld(a, movesA.drain());
+    assert.deepEqual(
+      (yield* rowsOf(a, worker)).map((row) => [row.state, row.error]),
+      [["complete", null]],
+    );
+    assert.deepEqual(plain(yield* workerRows(a)), [[worker, master, "remote"]]);
+    assert.deepEqual(plain(yield* workerRows(b)), [[worker, `peer:${idA}:${master}`, "ready"]]);
+
+    yield* inWorld(
+      b,
+      workersB.report(worker, {
+        clientRequestId: "moved-done",
+        outcome: "done",
+        summary: "Finished on the other computer.",
+      }),
+    );
+    yield* inWorld(b, workersB.drain());
+    yield* inWorld(a, workersA.drain());
+    assert.isTrue(
+      (yield* textsOf(a, master)).some((text) => text.includes("Finished on the other computer.")),
+    );
+    const listed = yield* inWorld(a, workersA.list(master));
+    assert.deepEqual(
+      listed.map((entry) => [entry.threadId, entry.environment]),
+      [[worker, `Peer ${idB}`]],
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("holds ownership changes while a session is parked, but not for a cancelled copy", () =>
+  Effect.gen(function* () {
+    const network = newNetwork();
+    const a = yield* makeWorld(idA, idB, network);
+    const b = yield* makeWorld(idB, idA, network);
+    yield* seedSession(a);
+    const movesA = yield* startMoves(a);
+    yield* startMoves(b);
+    const workersA = Context.get(a.context, WorkerService.WorkerService);
+    const workersB = Context.get(b.context, WorkerService.WorkerService);
+    const keeper = ThreadId.make("thread:keeper");
+    yield* inWorld(a, seed(keeper, a.root));
+    const assign = (clientRequestId: string, ownerThreadId: ThreadId | null) => ({
+      clientRequestId,
+      threadId: master,
+      ownerThreadId,
+      expectedOwnerThreadId: null,
+      expectedRevision: 0,
+    });
+
+    // A cancelled incoming copy never held the session, though it keeps the copied thread.
+    network.lostReplies.add("prepare");
+    yield* inWorld(a, movesA.request(moveInput("cancelled-move", idB)));
+    yield* inWorld(a, movesA.drain());
+    yield* inWorld(a, movesA.status({ requestId: CommandId.make("cancelled-move"), cancel: true }));
+    assert.deepEqual(
+      (yield* rowsOf(b)).map((row) => [row.direction, row.state, row.locked]),
+      [["in", "cancelled", 1]],
+    );
+    yield* inWorld(b, seed(keeper, b.root));
+    const adopted = yield* inWorld(b, workersB.changeOwnership(assign("adopt-on-b", keeper)));
+    assert.equal(adopted.ownerThreadId, keeper);
+
+    yield* inWorld(a, movesA.request(moveInput("parked-move", idB)));
+    yield* inWorld(a, movesA.drain());
+    const refused = yield* inWorld(
+      a,
+      workersA.changeOwnership(assign("adopt-on-a", keeper)).pipe(Effect.flip),
+    );
+    assert.include(refused.message, "moving between computers");
   }).pipe(Effect.scoped),
 );

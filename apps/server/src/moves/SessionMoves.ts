@@ -42,6 +42,7 @@ import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.t
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerRequests from "../peer/PeerRequests.ts";
 import { findSessionTranscripts, resolveTranscriptHome } from "../project/AgentTranscripts.ts";
+import { parsePeerRef, peerRef } from "../workers/workerSchemas.ts";
 import * as CodexHistory from "../project/CodexMoveHistory.ts";
 import * as CodexState from "../project/CodexMoveState.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -72,6 +73,26 @@ const moveDriver = (driver: ProviderDriverKind): MoveDriver | undefined => {
       return undefined;
   }
 };
+/** What a session owes the workers around it, so they keep reporting to it from the other computer. */
+const CoordinatedWorker = Schema.Struct({
+  threadId: Schema.String,
+  planJson: Schema.String,
+  notify: Schema.Number,
+  /** The worker already lives on the destination, so the move brings its master back to it. */
+  home: Schema.Boolean,
+});
+const Coordination = Schema.Struct({
+  /** The moving session as a worker, with the master that owns it. */
+  worker: Schema.optional(
+    Schema.Struct({
+      ...CoordinatedWorker.fields,
+      ownerThreadId: Schema.String,
+      ownerRuntimeMode: RuntimeMode,
+    }),
+  ),
+  /** The workers the moving session owns as a master. */
+  children: Schema.Array(CoordinatedWorker),
+});
 const Manifest = Schema.Struct({
   input: SessionMoveInput,
   sourceEnvironmentId: Schema.String,
@@ -90,6 +111,7 @@ const Manifest = Schema.Struct({
     branch: Schema.NullOr(Schema.String),
   }),
   files: Schema.Array(MoveFile),
+  coordination: Schema.optional(Coordination),
 });
 type Manifest = typeof Manifest.Type;
 
@@ -105,6 +127,13 @@ const MoveRequest = Schema.Struct({
   offset: Schema.optional(Schema.Number),
   data: Schema.optional(Schema.String.check(Schema.isMaxLength(750_000))),
 });
+type WorkerRecord = {
+  thread_id: string;
+  owner_id: string | null;
+  plan_json: string;
+  state: string;
+  notify: number;
+};
 type MoveRow = {
   id: string;
   thread_id: string;
@@ -125,6 +154,7 @@ const isMoveError = Schema.is(SessionMoveError);
 const eventsCodec = Schema.toCodecJson(Schema.Array(OrchestrationV2DomainEvent));
 const encodeEvents = Schema.encodeSync(eventsCodec);
 const decodeEvents = Schema.decodeUnknownEffect(Schema.fromJsonString(eventsCodec));
+const parseJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encode = (value: unknown) => JSON.stringify(value);
 const decodeCodexState = CodexState.decodeCodexMoveState;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -395,6 +425,183 @@ const make = Effect.gen(function* () {
     }
   }, Effect.mapError(failure));
 
+  const replan = (planJson: string, change: (plan: Record<string, unknown>) => void) => {
+    const plan = recordObject(parseJson(planJson));
+    change(plan);
+    return encode(plan);
+  };
+
+  /**
+   * The workers a session owns, and the master that owns it, as they must travel with it. A
+   * session whose workers or master run on a third computer waits until they come back.
+   */
+  const coordinationOf = Effect.fn("SessionMoves.coordinationOf")(function* (
+    threadId: ThreadId,
+    destination: string,
+  ) {
+    const own =
+      yield* sql<WorkerRecord>`SELECT * FROM custom_workers WHERE thread_id = ${threadId}`;
+    const children = yield* sql<WorkerRecord>`SELECT * FROM custom_workers
+      WHERE owner_id = ${threadId} AND thread_id != ${threadId}`;
+    const busy = yield* sql`SELECT 1 FROM custom_worker_jobs
+      WHERE state IN ('queued', 'submitted')
+        AND (worker_id = ${threadId} AND kind IN ('work', 'message'))
+      LIMIT 1`;
+    if (busy.length > 0)
+      return yield* new SessionMoveError({
+        message: "Wait for this session's queued assignments and messages before moving it.",
+      });
+    const refuse = (message: string) => new SessionMoveError({ message });
+    let worker: typeof Coordination.Type.worker;
+    const record = own[0];
+    if (record?.owner_id) {
+      if (record.state !== "ready")
+        return yield* refuse("This worker is still starting; move it once it is ready.");
+      const peer = parsePeerRef(record.owner_id);
+      if (peer && peer.environmentId !== destination)
+        return yield* refuse(
+          "This worker belongs to a master on another computer. Move it from that master's computer or release it first.",
+        );
+      const ownerThreadId = peer ? peer.threadId : record.owner_id;
+      const ownerShell = peer
+        ? undefined
+        : yield* threads
+            .getThreadShell(ThreadId.make(ownerThreadId))
+            .pipe(Effect.mapError(failure));
+      worker = {
+        threadId,
+        planJson: record.plan_json,
+        notify: record.notify,
+        home: peer !== undefined,
+        ownerThreadId,
+        ownerRuntimeMode:
+          ownerShell?.runtimeMode ??
+          (recordObject(parseJson(record.plan_json)).ownerRuntimeMode as typeof RuntimeMode.Type) ??
+          "approval-required",
+      };
+    }
+    const owned: Array<typeof CoordinatedWorker.Type> = [];
+    for (const child of children) {
+      const plan = recordObject(parseJson(child.plan_json));
+      const remoteHome = child.state === "remote" && plan.environmentId === destination;
+      if (child.state !== "ready" && !remoteHome)
+        return yield* refuse(
+          child.state === "remote"
+            ? "This session owns workers on another computer. Hand them back before moving it."
+            : "A worker of this session is still starting; move it once the worker is ready.",
+        );
+      owned.push({
+        threadId: child.thread_id,
+        planJson: child.plan_json,
+        notify: child.notify,
+        home: remoteHome,
+      });
+    }
+    return worker === undefined && owned.length === 0
+      ? undefined
+      : { ...(worker ? { worker } : {}), children: owned };
+  });
+
+  /** The source's side of coordination once the destination holds the session. Safe to repeat. */
+  const releaseCoordination = Effect.fn("SessionMoves.releaseCoordination")(function* (
+    value: MoveRow,
+  ) {
+    const saved = yield* row(value.id);
+    const coordination = saved?.manifest_json
+      ? decodeManifest(saved.manifest_json).coordination
+      : undefined;
+    if (!coordination) return;
+    const threadId = value.thread_id;
+    const destination = value.peer_environment_id;
+    const guest = peerRef(destination, threadId);
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const worker = coordination.worker;
+        if (worker?.home) yield* sql`DELETE FROM custom_workers WHERE thread_id = ${threadId}`;
+        else if (worker)
+          yield* sql`UPDATE custom_workers SET state = 'remote', plan_json = ${replan(
+            worker.planJson,
+            (plan) => {
+              plan.environmentId = destination;
+              plan.syncedOwnerId = worker.ownerThreadId;
+            },
+          )} WHERE thread_id = ${threadId}`;
+        const away = coordination.children
+          .filter((child) => !child.home)
+          .map((child) => child.threadId);
+        const back = coordination.children
+          .filter((child) => child.home)
+          .map((child) => child.threadId);
+        if (back.length > 0)
+          yield* sql`DELETE FROM custom_workers WHERE ${sql.in("thread_id", back)}`;
+        for (const child of coordination.children.filter((entry) => !entry.home))
+          yield* sql`UPDATE custom_workers SET owner_id = ${guest}, plan_json = ${replan(
+            child.planJson,
+            (plan) => {
+              plan.ownerRuntimeMode = recordObject(plan).runtimeMode;
+            },
+          )} WHERE thread_id = ${child.threadId}`;
+        // Reports still waiting for this session now follow it to the destination.
+        yield* sql`UPDATE custom_worker_jobs SET target_id = ${guest}, attempt = attempt + 1, dispatched_at = NULL
+          WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND target_id = ${threadId}`;
+        if (away.length > 0)
+          yield* sql`UPDATE custom_worker_jobs SET target_id = ${guest}, attempt = attempt + 1, dispatched_at = NULL
+            WHERE state = 'queued' AND kind IN ('notice', 'done', 'blocked') AND ${sql.in("worker_id", away)}`;
+      }),
+    );
+  });
+
+  /** The destination's side of coordination, applied as the move commits. Safe to repeat. */
+  const adoptCoordination = Effect.fn("SessionMoves.adoptCoordination")(function* (
+    value: MoveRow,
+    manifest: Manifest,
+  ) {
+    const coordination = manifest.coordination;
+    if (!coordination) return;
+    const threadId = manifest.input.threadId;
+    const source = value.peer_environment_id;
+    const baseline = yield* events.latestSequence({ threadId });
+    const worker = coordination.worker;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        if (worker?.home)
+          yield* sql`UPDATE custom_workers SET state = 'ready', owner_id = ${worker.ownerThreadId},
+            plan_json = ${replan(worker.planJson, (plan) => {
+              delete plan.environmentId;
+              delete plan.syncedOwnerId;
+              delete plan.ownerRuntimeMode;
+              plan.modelSelection = manifest.modelSelection;
+              plan.projectId = manifest.input.projectId;
+            })} WHERE thread_id = ${threadId}`;
+        else if (worker) {
+          const planJson = replan(worker.planJson, (plan) => {
+            delete plan.environmentId;
+            delete plan.syncedOwnerId;
+            plan.modelSelection = manifest.modelSelection;
+            plan.projectId = manifest.input.projectId;
+            plan.ownerRuntimeMode = worker.ownerRuntimeMode;
+          });
+          yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state, notify, baseline, read_seq)
+            VALUES (${threadId}, ${peerRef(source, worker.ownerThreadId)}, ${planJson}, 'ready', ${worker.notify}, ${baseline}, ${baseline})
+            ON CONFLICT(thread_id) DO UPDATE SET owner_id = excluded.owner_id, plan_json = excluded.plan_json,
+              state = 'ready', notify = excluded.notify`;
+        }
+        for (const child of coordination.children)
+          if (child.home)
+            yield* sql`UPDATE custom_workers SET owner_id = ${threadId} WHERE thread_id = ${child.threadId}`;
+          else {
+            const planJson = replan(child.planJson, (plan) => {
+              plan.environmentId = source;
+              plan.syncedOwnerId = threadId;
+            });
+            yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state, notify)
+              VALUES (${child.threadId}, ${threadId}, ${planJson}, 'remote', ${child.notify})
+              ON CONFLICT(thread_id) DO UPDATE SET owner_id = excluded.owner_id, plan_json = excluded.plan_json, state = 'remote'`;
+          }
+      }),
+    );
+  });
+
   const capture = Effect.fn("SessionMoves.capture")(function* (value: MoveRow) {
     if (value.manifest_json) return decodeManifest(value.manifest_json);
     const input = decodeInput(value.input_json);
@@ -579,6 +786,7 @@ const make = Effect.gen(function* () {
       )),
     );
     yield* io(async () => Files.validateMoveFiles(files));
+    const coordination = yield* coordinationOf(input.threadId, value.peer_environment_id);
     const manifest: Manifest = {
       input,
       sourceEnvironmentId: localId,
@@ -593,6 +801,7 @@ const make = Effect.gen(function* () {
       targetCwd: probe.cwd,
       workspace,
       files,
+      ...(coordination ? { coordination } : {}),
     };
     yield* sql`UPDATE custom_session_moves SET manifest_json = ${encode(manifest)} WHERE id = ${value.id}`;
     return manifest;
@@ -916,7 +1125,10 @@ const make = Effect.gen(function* () {
           return yield* new SessionMoveError({
             message: "The native session must be verified before commit.",
           });
-        yield* sql`UPDATE custom_session_moves SET state = 'complete', locked = 0, error = NULL, updated_at = ${yield* now} WHERE id = ${saved.id}`;
+        if (saved.state === "prepared") {
+          yield* adoptCoordination(saved, decodeManifest(saved.manifest_json!));
+          yield* sql`UPDATE custom_session_moves SET state = 'complete', locked = 0, error = NULL, updated_at = ${yield* now} WHERE id = ${saved.id}`;
+        }
       }
       return result((yield* row(saved.id))!);
     },
@@ -1022,6 +1234,7 @@ const make = Effect.gen(function* () {
       return yield* new SessionMoveError({
         message: "The destination did not confirm native continuation.",
       });
+    yield* releaseCoordination(value);
     const archiveId = CommandId.make(`${MOVE_COMMAND_PREFIX}${value.id}:archive`);
     const archived =
       yield* sql`SELECT 1 FROM orchestration_v2_command_receipts WHERE command_id = ${archiveId}`;

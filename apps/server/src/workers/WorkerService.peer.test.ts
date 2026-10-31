@@ -175,3 +175,79 @@ it.effect("ranks linked computers in placement advice and marks an unreachable o
     assert.notEqual(away.placement.recommendedEnvironmentId, idB);
   }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "asks the sender to confirm a message to another session, then queues it for a linked computer",
+  () =>
+    Effect.gen(function* () {
+      const { network, a, b } = yield* makePair();
+      const workersA = yield* on(a, WorkerService.WorkerService);
+      const workersB = yield* on(b, WorkerService.WorkerService);
+      const recipient = ThreadId.make("thread:b-local");
+      const input = {
+        threadId: recipient,
+        environment: idB,
+        clientRequestId: "hello-1",
+        prompt: "The build is green.",
+      };
+
+      const preview = yield* on(a, workersA.message(master, input));
+      assert.equal(preview.state, "confirmation_required");
+      assert.equal(preview.confirmation?.recipient.environmentId, idB);
+      assert.deepEqual(yield* on(b, messagesOf(recipient)), []);
+
+      const wrong = yield* on(a, workersA.message(master, { ...input, confirmationToken: "nope" }));
+      assert.equal(wrong.state, "confirmation_required");
+
+      const sent = yield* on(
+        a,
+        workersA.message(master, { ...input, confirmationToken: wrong.confirmation!.token }),
+      );
+      assert.equal(sent.state, "queued");
+      const changed = yield* on(
+        a,
+        workersA.message(master, { ...input, prompt: "Another message." }).pipe(Effect.flip),
+      );
+      assert.include(changed.message, "different message");
+
+      network.outages.add("deliver");
+      yield* on(a, workersA.drain());
+      assert.deepEqual(yield* on(b, messagesOf(recipient)), []);
+      yield* on(a, workersA.drain());
+      yield* on(b, workersB.drain());
+      const received = yield* on(b, messagesOf(recipient));
+      assert.lengthOf(received, 1);
+      assert.include(received[0]!, `From session: ${master} in environment Peer ${idA}`);
+      assert.include(received[0]!, "The build is green.");
+
+      const retry = yield* on(
+        a,
+        workersA.message(master, { ...input, confirmationToken: wrong.confirmation!.token }),
+      );
+      assert.equal(retry.state, "dispatched");
+      yield* on(b, workersB.drain());
+      assert.lengthOf(yield* on(b, messagesOf(recipient)), 1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("keeps masters and workers on their own channels", () =>
+  Effect.gen(function* () {
+    const { a } = yield* makePair();
+    const workersA = yield* on(a, WorkerService.WorkerService);
+    yield* on(
+      a,
+      workersA.spawn(master, { ...spawnInput, threadId: ThreadId.make("thread:own-worker") }),
+    );
+    const refused = yield* on(
+      a,
+      workersA
+        .message(master, {
+          threadId: ThreadId.make("thread:own-worker"),
+          clientRequestId: "own",
+          prompt: "Do more.",
+        })
+        .pipe(Effect.flip),
+    );
+    assert.include(refused.message, "t3_worker_send");
+  }).pipe(Effect.scoped),
+);

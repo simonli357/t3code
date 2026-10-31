@@ -56,6 +56,12 @@ export const layer = McpToolAccess.toLayer(WorkersToolkit, {
       return yield* workers.report(yield* caller("t3_worker_report"), input);
     }),
   ),
+  t3_session_send: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const workers = yield* WorkerService.WorkerService;
+      return yield* workers.message(yield* caller("t3_session_send"), input);
+    }),
+  ),
   t3_session_ownership_read: McpToolAccess.reads(({ threadId }) =>
     Effect.gen(function* () {
       const workers = yield* WorkerService.WorkerService;

@@ -25,8 +25,14 @@ export interface Network {
   readonly handlers: Map<string, Handler>;
   /** Peer operations that fail once as an outage, keyed by the operation or request name. */
   readonly outages: Set<string>;
+  /** Operations the other computer carries out, but whose answer never arrives. */
+  readonly lostReplies: Set<string>;
 }
-export const newNetwork = (): Network => ({ handlers: new Map(), outages: new Set() });
+export const newNetwork = (): Network => ({
+  handlers: new Map(),
+  outages: new Set(),
+  lostReplies: new Set(),
+});
 
 const requestName = (topic: string, body: unknown) => {
   const named = body as { readonly op?: string; readonly _tag?: string };
@@ -57,9 +63,15 @@ const layerPeers = (self: EnvironmentId, other: EnvironmentId, network: Network)
               return Effect.fail(
                 new PeerRequests.PeerUnavailable({ environmentId, message: "offline" }),
               );
-            return network.handlers.get(environmentId)!(self, topic, body).pipe(
+            const answered = network.handlers.get(environmentId)!(self, topic, body).pipe(
               Effect.mapError((cause) => new PeerRequests.PeerRejected({ message: cause.message })),
             );
+            return network.lostReplies.delete(requestName(topic, body))
+              ? Effect.andThen(
+                  answered,
+                  Effect.fail(new PeerRequests.PeerUnavailable({ environmentId, message: "lost" })),
+                )
+              : answered;
           },
         });
       }),

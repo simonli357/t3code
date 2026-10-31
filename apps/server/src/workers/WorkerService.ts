@@ -16,6 +16,7 @@ import {
   WorkerRenewalSettings,
 } from "@t3tools/contracts";
 import {
+  formatPeerMessage,
   WORKER_REVIEW_BLOCKED as REVIEW_BLOCKED,
   WORKER_REVIEW_DONE as REVIEW_DONE,
 } from "@t3tools/shared/workerMessages";
@@ -54,6 +55,8 @@ import {
   type HandoffResult,
   type JobRow,
   JobResult,
+  type MessageInput,
+  MessagePolicy,
   Plan,
   type PeerOwner,
   ReadInput,
@@ -63,6 +66,8 @@ import {
   type ReportInput,
   type ReportResult,
   SendInput,
+  SessionInfo,
+  type SessionMessageResult,
   type SpawnInput,
   WaitInput,
   WaitResult,
@@ -75,6 +80,7 @@ import {
   jobResult,
   parsePeerRef,
   peerRef,
+  reportClock,
   reportHeader,
   retirementWarning,
   selectionKey,
@@ -88,6 +94,11 @@ const decodePlanRecord = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 const decodeHandoffInput = Schema.decodeUnknownSync(Schema.fromJsonString(HandoffInput));
+const decodeSessionInfo = Schema.decodeUnknownEffect(SessionInfo);
+const decodeSessionInfoFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(SessionInfo));
+const encodeSessionInfo = Schema.encodeSync(Schema.fromJsonString(SessionInfo));
+const encodePolicy = Schema.encodeSync(Schema.fromJsonString(MessagePolicy));
+const decodePolicy = Schema.decodeUnknownSync(Schema.fromJsonString(MessagePolicy));
 const decodeWorkerPeerRequest = Schema.decodeUnknownSync(WorkerPeerRequest);
 const decodeWorkerResult = Schema.decodeUnknownSync(WorkerResult);
 const decodeReadResult = Schema.decodeUnknownSync(ReadResult);
@@ -199,6 +210,15 @@ export class WorkerService extends Context.Service<
     readonly list: (
       owner: ThreadId,
     ) => Effect.Effect<ReadonlyArray<typeof WorkerResult.Type>, WorkerError>;
+    /**
+     * Messages another session, here or on a linked computer, outside any master and worker
+     * relationship. The first call for a request returns the warning and a token to confirm; the
+     * identical request with that token sends it.
+     */
+    readonly message: (
+      sender: ThreadId,
+      input: typeof MessageInput.Type,
+    ) => Effect.Effect<typeof SessionMessageResult.Type, WorkerError>;
     readonly read: (
       owner: ThreadId,
       input: typeof ReadInput.Type,
@@ -783,7 +803,22 @@ const make = Effect.gen(function* () {
 
   const deliverToMaster = Effect.fn("WorkerService.deliverToMaster")(function* (job: JobRow) {
     const remote = parsePeerRef(job.target_id);
+    const mine = job.id.startsWith("message:");
     if (remote) return yield* deliverRemote(job, remote);
+    let text = job.prompt;
+    if (mine) {
+      const checked = yield* validateMessage(job).pipe(Effect.result);
+      if (Result.isFailure(checked)) {
+        yield* sql`UPDATE custom_worker_jobs SET state = 'error', error = ${checked.failure.message} WHERE id = ${job.id}`;
+        return;
+      }
+      text = formatPeerMessage({
+        senderId: job.worker_id,
+        senderTitle: checked.success.sender.title,
+        time: reportClock(yield* now),
+        body: job.prompt,
+      });
+    }
     const master = yield* threads
       .getThreadShell(ThreadId.make(job.target_id))
       .pipe(Effect.mapError(failure));
@@ -806,7 +841,7 @@ const make = Effect.gen(function* () {
         threadId: master.id,
         senderThreadId: ThreadId.make(job.worker_id),
         messageId: MessageId.make(`worker-job:${job.id}`),
-        text: job.prompt,
+        text,
         attachments: [],
         mode: "queue",
         createdBy: "agent",
@@ -1399,6 +1434,25 @@ const make = Effect.gen(function* () {
         });
   });
 
+  /**
+   * A session in the middle of a move, or the archived source of a finished one, keeps its owner
+   * until the move is settled. A cancelled incoming copy never held the session, so it does not
+   * block an ownership change.
+   */
+  const assertNotMoving = Effect.fn(function* (...ids: ReadonlyArray<string | null | undefined>) {
+    const named = ids.filter((id): id is string => typeof id === "string" && !parsePeerRef(id));
+    if (named.length === 0) return;
+    const moving = yield* sql`SELECT 1 FROM custom_session_moves
+      WHERE locked = 1 AND NOT (direction = 'in' AND state = 'cancelled') AND ${sql.in("thread_id", named)}
+      LIMIT 1`;
+    if (moving.length > 0)
+      return yield* new WorkerError({
+        code: "pending",
+        message:
+          "This session is moving between computers. Change its owner after the move completes or is cancelled.",
+      });
+  });
+
   const ownershipOf = Effect.fn(function* (threadId: ThreadId) {
     const record = yield* workerOf(threadId);
     if (record && record.state !== "ready")
@@ -1542,6 +1596,7 @@ const make = Effect.gen(function* () {
           result.revision,
         );
       }
+      yield* assertNotMoving(input.threadId, input.ownerThreadId);
       if (actor) {
         const authorizationId = `ownership-authorized:${actor.threadId}:${input.clientRequestId}`;
         const request = encodeJson({ input, actor });
@@ -1781,6 +1836,7 @@ const make = Effect.gen(function* () {
         input = { ...input, sourceThreadId: owner };
       }
       yield* thread(owner);
+      yield* assertNotMoving(owner);
       if (input.threadId === owner || input.threadId === input.sourceThreadId)
         return yield* new WorkerError({ message: "A successor must have a new thread ID." });
       const saved =
@@ -2012,6 +2068,231 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const localSessionInfo = Effect.fn("WorkerService.localSessionInfo")(function* (id: ThreadId) {
+    const value = yield* thread(id);
+    if (value.archivedAt !== null)
+      return yield* new WorkerError({
+        message: "The session is archived. Unarchive it before messaging.",
+      });
+    const local = yield* localId;
+    const record = yield* workerOf(id);
+    const owner =
+      record?.owner_id == null
+        ? null
+        : (parsePeerRef(record.owner_id) ?? {
+            environmentId: local,
+            threadId: ThreadId.make(record.owner_id),
+          });
+    const project = yield* projects.getById(value.projectId).pipe(Effect.mapError(failure));
+    return {
+      environmentId: local,
+      threadId: id,
+      title: value.title,
+      projectId: value.projectId,
+      projectTitle: Option.isSome(project)
+        ? (project.value.title ?? value.projectId)
+        : value.projectId,
+      owner,
+      revision: (yield* authorityOf(id))?.revision ?? 0,
+    } satisfies typeof SessionInfo.Type;
+  });
+  const sessionInfo = Effect.fn("WorkerService.sessionInfo")(function* (ref: string) {
+    const remote = parsePeerRef(ref);
+    if (!remote) return yield* localSessionInfo(ThreadId.make(ref));
+    const raw = yield* callPeer(remote.environmentId, {
+      _tag: "sessionInfo",
+      threadId: remote.threadId,
+    });
+    return yield* decodeSessionInfo(raw).pipe(
+      Effect.mapError(
+        () =>
+          new WorkerError({
+            message: "The linked server does not support confirmed session messaging.",
+          }),
+      ),
+    );
+  });
+  const messagePolicy = Effect.fn("WorkerService.messagePolicy")(function* (
+    senderRef: string,
+    targetRef: string,
+  ) {
+    if (senderRef === targetRef)
+      return yield* new WorkerError({ message: "Choose another session as the recipient." });
+    const sender = yield* sessionInfo(senderRef);
+    const recipient = yield* sessionInfo(targetRef);
+    const same = (
+      a: typeof SessionInfo.Type.owner,
+      b: { readonly environmentId: string; readonly threadId: string },
+    ) => a?.environmentId === b.environmentId && a.threadId === b.threadId;
+    if (same(recipient.owner, sender))
+      return yield* new WorkerError({
+        message:
+          "Use t3_worker_send for your own worker; generic messaging cannot bypass assignment controls.",
+      });
+    if (same(sender.owner, recipient)) {
+      if (!parsePeerRef(senderRef)) yield* assertCommunicationAllowed(senderRef);
+      return yield* new WorkerError({
+        message:
+          "Use t3_worker_report to report to your current master; the server chooses the recipient.",
+      });
+    }
+    return { sender, recipient };
+  });
+  const messageLock = yield* Semaphore.make(1);
+  const sha256 = (text: string) =>
+    Effect.promise(() =>
+      globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)),
+    ).pipe(
+      Effect.map((digest) =>
+        Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+      ),
+    );
+
+  /**
+   * Decides whether a message may be sent yet: a new or changed request gets a warning and a
+   * one-time token to confirm, the same request with its token passes, and a retry of one already
+   * sent is a no-op.
+   */
+  const confirmMessage = Effect.fn("WorkerService.confirmMessage")(function* (
+    senderId: ThreadId,
+    targetRef: string,
+    input: typeof MessageInput.Type,
+  ) {
+    type Confirmation = {
+      readonly id: string;
+      readonly target_id: string;
+      readonly prompt_hash: string;
+      readonly token: string;
+      readonly sender_state: string;
+      readonly target_state: string;
+      readonly expires_at: string;
+      readonly confirmed: number;
+    };
+    const id = `message:${senderId}:${input.clientRequestId}`;
+    const promptHash = yield* sha256(input.prompt);
+    let saved =
+      (yield* sql<Confirmation>`SELECT * FROM custom_session_message_confirmations WHERE id = ${id}`)[0];
+    if (saved && (saved.target_id !== targetRef || saved.prompt_hash !== promptHash))
+      return yield* new WorkerError({
+        message: "This request ID already belongs to a different message. Use a new ID.",
+      });
+    // Identical retries of accepted messages return their receipt, never resend.
+    if ((yield* jobById(id)) && saved?.confirmed) return { id, policy: undefined };
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const policy = yield* messagePolicy(senderId, targetRef).pipe(
+      Effect.catchIf(
+        (error) => isWorkerError(error) && error.code === "peer_unavailable",
+        (error) =>
+          Effect.gen(function* () {
+            // A recipient reviewed earlier may go offline before the confirmation arrives; delivery
+            // checks both ends again when it is back.
+            if (
+              !saved ||
+              input.confirmationToken !== saved.token ||
+              Date.parse(saved.expires_at) <= nowMs
+            )
+              return yield* error;
+            const sender = yield* localSessionInfo(senderId);
+            if (encodeSessionInfo(sender) !== saved.sender_state) return yield* error;
+            return { sender, recipient: decodeSessionInfoFromJson(saved.target_state) };
+          }),
+      ),
+    );
+    const senderState = encodeSessionInfo(policy.sender);
+    const targetState = encodeSessionInfo(policy.recipient);
+    if (
+      !saved ||
+      Date.parse(saved.expires_at) <= nowMs ||
+      saved.sender_state !== senderState ||
+      saved.target_state !== targetState
+    ) {
+      const token = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      const expiresAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 10 }));
+      yield* sql`INSERT INTO custom_session_message_confirmations
+        (id, sender_id, target_id, prompt_hash, token, sender_state, target_state, expires_at)
+        VALUES (${id}, ${senderId}, ${targetRef}, ${promptHash}, ${token}, ${senderState}, ${targetState}, ${expiresAt})
+        ON CONFLICT(id) DO UPDATE SET token = excluded.token, sender_state = excluded.sender_state,
+          target_state = excluded.target_state, expires_at = excluded.expires_at, confirmed = 0`;
+      saved =
+        (yield* sql<Confirmation>`SELECT * FROM custom_session_message_confirmations WHERE id = ${id}`)[0]!;
+    } else if (input.confirmationToken === saved.token) {
+      return { id, policy };
+    }
+    return {
+      id,
+      confirmation: {
+        token: saved.token,
+        expiresAt: saved.expires_at,
+        warning: `You are messaging ${policy.recipient.title} (${policy.recipient.threadId}) in project ${policy.recipient.projectTitle}, outside your master/worker relationship. Are you sure this is what you want to do, and is it necessary? Check the recipient, project and relevance to your user's task before confirming.`,
+        ...policy,
+        messagePreview: Array.from(input.prompt).slice(0, 500).join(""),
+      },
+    };
+  });
+
+  const message = Effect.fn("WorkerService.message")(
+    function* (sender: ThreadId, input: typeof MessageInput.Type) {
+      yield* thread(sender);
+      const peer = yield* peerFor(input.environment);
+      const targetRef = peer ? peerRef(peer, input.threadId) : input.threadId;
+      const jobId = yield* Effect.gen(function* () {
+        const checked = yield* confirmMessage(sender, targetRef, input);
+        if (checked.confirmation) return checked;
+        if (checked.policy) {
+          const policy = checked.policy;
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`UPDATE custom_session_message_confirmations SET confirmed = 1 WHERE id = ${checked.id}`;
+              yield* enqueue(checked.id, sender, targetRef, "message", input.prompt);
+              yield* sql`UPDATE custom_worker_jobs SET policy_json = ${encodePolicy(policy)} WHERE id = ${checked.id}`;
+            }),
+          );
+        }
+        return checked;
+      }).pipe(messageLock.withPermit);
+      if (jobId.confirmation)
+        return {
+          requestId: jobId.id,
+          threadId: input.threadId,
+          state: "confirmation_required" as const,
+          error: null,
+          confirmation: jobId.confirmation,
+        };
+      yield* kick();
+      const job = (yield* jobById(jobId.id))!;
+      return {
+        requestId: job.id,
+        threadId: input.threadId,
+        state:
+          job.state === "completed"
+            ? ("dispatched" as const)
+            : job.state === "error"
+              ? ("error" as const)
+              : ("queued" as const),
+        error: job.error,
+      };
+    },
+    (effect, sender) => warnIfRetired(sender)(effect),
+  );
+
+  /** A message job is sent only if the confirmed sender and recipient are still the ones it named. */
+  const validateMessage = Effect.fn("WorkerService.validateMessage")(function* (job: JobRow) {
+    if (!job.policy_json)
+      return yield* new WorkerError({
+        message:
+          "This peer message needs sender confirmation before delivery. Send it again with a new request ID to review the warning.",
+      });
+    const policy = yield* messagePolicy(job.worker_id, job.target_id);
+    if (job.policy_json !== encodePolicy(policy))
+      return yield* new WorkerError({
+        message:
+          "The sender or recipient changed since confirmation. Review a new warning before sending.",
+      });
+    return policy;
+  });
+
   const spawnRemote = Effect.fn("WorkerService.spawnRemote")(
     function* (owner: ThreadId, environmentId: EnvironmentId, input: typeof SpawnInput.Type) {
       const master = yield* thread(owner);
@@ -2065,6 +2346,7 @@ const make = Effect.gen(function* () {
     job: JobRow,
     remote: NonNullable<ReturnType<typeof parsePeerRef>>,
   ) {
+    const isMessage = job.kind === "message";
     const outcome = yield* callPeer(remote.environmentId, {
       _tag: "deliver",
       jobId: job.id,
@@ -2072,6 +2354,12 @@ const make = Effect.gen(function* () {
       senderThreadId: job.worker_id,
       recipientThreadId: remote.threadId,
       prompt: job.prompt,
+      ...(isMessage && job.policy_json
+        ? {
+            policy: decodePolicy(job.policy_json),
+            senderTitle: decodePolicy(job.policy_json).sender.title,
+          }
+        : {}),
     }).pipe(Effect.result);
     if (Result.isSuccess(outcome))
       yield* sql`UPDATE custom_worker_jobs SET state = 'completed', error = NULL WHERE id = ${job.id}`;
@@ -2121,6 +2409,8 @@ const make = Effect.gen(function* () {
         }
         return undefined;
       }
+      case "sessionInfo":
+        return yield* localSessionInfo(request.threadId);
       case "owner": {
         const owner = peerRef(from, request.owner.threadId);
         yield* Effect.gen(function* () {
@@ -2139,23 +2429,42 @@ const make = Effect.gen(function* () {
       case "deliver": {
         // Reports follow the worker's current master here, even when the sender still names the one
         // before a handoff.
-        const record =
-          request.kind === "message"
-            ? undefined
-            : yield* workerOf(request.senderThreadId).pipe(
-                Effect.map((row) =>
-                  row?.state === "remote" &&
-                  decodePlan(row.plan_json).environmentId === from &&
-                  row.owner_id !== null
-                    ? row
-                    : undefined,
-                ),
-              );
-        if (request.kind !== "message" && record === undefined)
+        if (request.kind === "message") {
+          const policy = yield* messagePolicy(
+            peerRef(from, request.senderThreadId),
+            request.recipientThreadId,
+          );
+          if (!request.policy || encodePolicy(request.policy) !== encodePolicy(policy))
+            return yield* new WorkerError({
+              message: "Peer message requires confirmation for the current sender and recipient.",
+            });
+          const text = formatPeerMessage({
+            senderId: request.senderThreadId,
+            senderTitle: policy.sender.title,
+            time: reportClock(yield* now),
+            body: request.prompt,
+            environment: { id: from, label: yield* peerLabel(from) },
+          });
+          yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+            VALUES (${`peer:${from}:${request.jobId}`}, ${request.senderThreadId}, ${request.recipientThreadId}, 'message', ${text}, ${yield* now})
+            ON CONFLICT(id) DO NOTHING`;
+          yield* kick();
+          return { accepted: true };
+        }
+        const record = yield* workerOf(request.senderThreadId).pipe(
+          Effect.map((row) =>
+            row?.state === "remote" &&
+            decodePlan(row.plan_json).environmentId === from &&
+            row.owner_id !== null
+              ? row
+              : undefined,
+          ),
+        );
+        if (record === undefined)
           return yield* new WorkerError({
             message: "This computer does not own a worker with that report.",
           });
-        const target = record?.owner_id ?? request.recipientThreadId;
+        const target = record.owner_id!;
         const recipient = yield* threads
           .getThreadShell(ThreadId.make(target))
           .pipe(Effect.mapError(failure));
@@ -2294,6 +2603,7 @@ const make = Effect.gen(function* () {
     spawnRemote,
     peerFor,
     list,
+    message,
     read: Effect.fn("WorkerService.read.route")(function* (owner, input) {
       const remote = yield* remoteWorker(owner, input.threadId).pipe(Effect.mapError(failure));
       if (!remote) return yield* read(owner, input);

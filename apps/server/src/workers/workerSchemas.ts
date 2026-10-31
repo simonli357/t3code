@@ -32,6 +32,39 @@ export const SendInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
 });
+/** `environment` names the linked computer (label or ID) that holds the recipient. */
+export const MessageInput = Schema.Struct({
+  ...SendInput.fields,
+  environment: Schema.optional(TrimmedNonEmptyString),
+  confirmationToken: Schema.optional(TrimmedNonEmptyString),
+});
+const SessionAddress = Schema.Struct({ environmentId: Schema.String, threadId: ThreadId });
+export const SessionInfo = Schema.Struct({
+  ...SessionAddress.fields,
+  title: Schema.String,
+  projectId: ProjectId,
+  projectTitle: Schema.String,
+  owner: Schema.NullOr(SessionAddress),
+  revision: Schema.Number,
+});
+export const MessagePolicy = Schema.Struct({ sender: SessionInfo, recipient: SessionInfo });
+export const SessionMessageResult = Schema.Struct({
+  warning: Schema.optional(Schema.String),
+  requestId: Schema.String,
+  threadId: ThreadId,
+  state: Schema.Literals(["confirmation_required", "queued", "dispatched", "error"]),
+  error: Schema.NullOr(Schema.String),
+  confirmation: Schema.optional(
+    Schema.Struct({
+      token: Schema.String,
+      expiresAt: Schema.String,
+      warning: Schema.String,
+      sender: SessionInfo,
+      recipient: SessionInfo,
+      messagePreview: Schema.String,
+    }),
+  ),
+});
 export const ReclaimInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
   workerThreadIds: Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(50)),
@@ -181,12 +214,16 @@ export const WorkerPeerRequest = Schema.Union([
     input: Schema.Unknown,
   }),
   Schema.TaggedStruct("owner", { owner: PeerOwner, workerThreadId: ThreadId }),
+  Schema.TaggedStruct("sessionInfo", { threadId: ThreadId }),
   Schema.TaggedStruct("deliver", {
     jobId: TrimmedNonEmptyString,
     kind: Schema.Literals(["message", "notice", "done", "blocked"]),
     senderThreadId: ThreadId,
     recipientThreadId: ThreadId,
     prompt: TrimmedNonEmptyString,
+    /** For a message: what the sender confirmed, and the sender's title for the recipient's header. */
+    policy: Schema.optional(MessagePolicy),
+    senderTitle: Schema.optional(Schema.String),
   }),
 ]);
 
@@ -262,7 +299,7 @@ const reportTime = new Intl.DateTimeFormat("en-CA", {
   hour: "2-digit",
   minute: "2-digit",
 });
-const reportClock = (createdAt: string) =>
+export const reportClock = (createdAt: string) =>
   DateTime.formatIntl(DateTime.makeUnsafe(createdAt), reportTime);
 export const reportHeader = (title: string, createdAt?: string) =>
   `[T3 worker report — ${title}${createdAt ? ` — ${reportClock(createdAt)}` : ""}]`;

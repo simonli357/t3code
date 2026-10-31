@@ -16,6 +16,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as AllocationAssignments from "../allocation/AllocationAssignments.ts";
@@ -180,24 +181,30 @@ const layerLauncher = Layer.effect(
   ThreadLaunchService.ThreadLaunchService,
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projects = yield* ProjectService.ProjectService;
     return ThreadLaunchService.ThreadLaunchService.of({
       launch: (input: ThreadLaunchService.ThreadLaunchInput) =>
-        orchestrator
-          .dispatch({
-            type: "thread.create",
-            commandId: input.commandId,
-            threadId: input.threadId!,
-            projectId: input.projectId,
-            title: input.title,
-            modelSelection: input.modelSelection,
-            runtimeMode: input.runtimeMode,
-            interactionMode: input.interactionMode,
-            branch: null,
-            worktreePath: process.cwd(),
-            createdBy: input.createdBy,
-            creationSource: input.creationSource,
-          })
-          .pipe(Effect.as({ threadId: input.threadId } as never), Effect.orDie),
+        projects.getById(input.projectId).pipe(
+          Effect.orDie,
+          Effect.flatMap((found) =>
+            orchestrator
+              .dispatch({
+                type: "thread.create",
+                commandId: input.commandId,
+                threadId: input.threadId!,
+                projectId: input.projectId,
+                title: input.title,
+                modelSelection: input.modelSelection,
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                branch: null,
+                worktreePath: Option.isSome(found) ? found.value.workspaceRoot : process.cwd(),
+                createdBy: input.createdBy,
+                creationSource: input.creationSource,
+              })
+              .pipe(Effect.as({ threadId: input.threadId } as never), Effect.orDie),
+          ),
+        ),
     } as never);
   }),
 );
