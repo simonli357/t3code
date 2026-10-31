@@ -1346,7 +1346,7 @@ const make = Effect.gen(function* () {
   );
 
   const renewal = settings.getSettings.pipe(
-    Effect.map((current) => current.workerRenewal),
+    Effect.map((current) => decodeWorkerRenewal(current.workerRenewal ?? {})),
     Effect.orElseSucceed(() => decodeWorkerRenewal({})),
   );
   const renewalAdvice = (kind: "worker" | "master", hard: number | null, scale: number) =>
