@@ -806,6 +806,7 @@ const layerMakeRoutes = Layer.mergeAll(
         AgentReadsHttp.layer.pipe(
           Layer.provide(SessionMessages.layer),
           Layer.provide(layerUsageMeasurements),
+          Layer.provide(layerSessionMoves),
         ),
       ),
       Layer.provide(PullRequestHttp.layer),

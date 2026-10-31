@@ -71,6 +71,12 @@ import {
   SessionHistoryReadError,
   SessionHistoryReadResult,
 } from "./sessionHistory.ts";
+import {
+  SessionMoveError,
+  SessionMoveInput,
+  SessionMoveResult,
+  SessionMoveStatusInput,
+} from "./sessionMoves.ts";
 import { UsageMeasurementsReport } from "./usageMeasurements.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
@@ -732,8 +738,24 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-// Agent-facing reads that keep their V1 routes, so t3-workflows scripts work on either protocol.
+// Agent-facing endpoints that keep their V1 routes, so t3-workflows scripts work on either protocol.
 class EnvironmentAgentReadsHttpApi extends HttpApiGroup.make("agentReads")
+  .add(
+    HttpApiEndpoint.post("moveSession", "/api/orchestration/session-moves", {
+      headers: OptionalBearerHeaders,
+      payload: SessionMoveInput,
+      success: SessionMoveResult,
+      error: [EnvironmentScopeRequiredError, SessionMoveError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sessionMoveStatus", "/api/orchestration/session-moves/status", {
+      headers: OptionalBearerHeaders,
+      payload: SessionMoveStatusInput,
+      success: SessionMoveResult,
+      error: [EnvironmentScopeRequiredError, SessionMoveError, EnvironmentInternalError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("sessionHistory", "/api/orchestration/threads/:threadId/messages", {
       headers: OptionalBearerHeaders,
