@@ -98,7 +98,9 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
 import { AdvancedSettings } from "./AdvancedSettings";
+import { GlobalInstructionsSettings } from "./GlobalInstructionsSettings";
 import { PullRequestLinksOpenInAppSetting } from "./IntegrationsSettings";
+import { SessionWorkspaceSettings } from "./SessionWorkspaceSettings";
 import { StorageCleanupSections } from "./StorageSettings";
 import { UpdateTrackSwitchDialog } from "./UpdateTrackSwitchDialog";
 import { environmentIdsKey } from "~/state/environmentAtomList";
@@ -772,6 +774,8 @@ export function GeneralSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <GlobalInstructionsSettings />
+
       <SettingsSection id="notifications" title="Notifications">
         <NotificationSettings />
         <SettingsRow
@@ -1963,6 +1967,7 @@ export function MaintenanceSettingsPanel() {
         <BackgroundActivitySettingsRow />
       </SettingsSection>
 
+      <SessionWorkspaceSettings />
       <StorageCleanupSections />
 
       <SettingsSection id="diagnostics-section" title="Diagnostics">
