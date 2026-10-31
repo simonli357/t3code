@@ -134,11 +134,7 @@ export const applyDeepseekHarnessEffort = Effect.fn("applyDeepseekHarnessEffort"
   yield* runtime.setConfigOption(EFFORT_CONFIG_ID, effort);
 });
 
-/**
- * Compaction is a harness request rather than a `/compact` prompt. Wiring it
- * into a first-class compact action needs a flavor hook in provider-acp; until
- * then this stays the call that hook will make.
- */
+/** Compaction is a harness request rather than a model-visible `/compact` prompt. */
 export const requestDeepseekHarnessCompaction = Effect.fn("requestDeepseekHarnessCompaction")(
   function* (
     runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,

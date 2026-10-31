@@ -419,6 +419,88 @@ function assertReinjectedInstructions(
 }
 
 describe("AcpAdapterV2", () => {
+  it.effect("runs a native compaction hook without prompting and emits a V2 compaction item", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("acp-test-native-compaction");
+      const threadId = ThreadId.make("thread-acp-test-native-compaction");
+      const nativeCompactions: Array<string> = [];
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          supportsCompaction: true,
+          nativeCompaction: (_runtime, sessionId) =>
+            Effect.sync(() => {
+              nativeCompactions.push(sessionId);
+            }),
+          makeRuntime: makeMockRuntime({ childProcessSpawner, mockAgentPath }),
+        },
+      });
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("provider-session-acp-native-compaction"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped,
+      );
+
+      assert.isDefined(runtime.compactThread);
+      yield* runtime.compactThread!(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          messageText: "ignored by compactThread",
+        }),
+      );
+
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+      while (true) {
+        const event = yield* Queue.take(events);
+        seen.push(event);
+        if (event.type === "turn.terminal") break;
+      }
+      assert.deepEqual(nativeCompactions, [providerThread.nativeThreadRef?.nativeId]);
+      const terminal = seen.at(-1);
+      assert.equal(terminal?.type, "turn.terminal");
+      if (terminal?.type === "turn.terminal") {
+        assert.equal(terminal.status, "completed");
+      }
+      const compaction = seen.find(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
+      );
+      assert.isDefined(compaction);
+      if (compaction?.type === "turn_item.updated") {
+        assert.equal(compaction.turnItem.status, "completed");
+        assert.equal(compaction.turnItem.title, "Context compacted");
+      }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.live.each(["details", "none"] as const)(
     "fails the turn on an ACP v2 idle error with %s, settles its open tool, and accepts the next prompt",
     (details) =>

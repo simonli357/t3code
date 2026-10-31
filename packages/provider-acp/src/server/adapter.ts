@@ -319,6 +319,10 @@ export interface AcpAdapterV2Flavor {
   ) => Effect.Effect<void>;
   readonly subagentsIdleOnTurnCompletion?: boolean;
   readonly supportsCompaction?: boolean;
+  readonly nativeCompaction?: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+    sessionId: string,
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly runtimeHarness?: string;
   readonly registerExtensions?: (
     context: AcpAdapterV2ExtensionContext,
@@ -7408,9 +7412,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 return wasRequested;
               }),
             );
-            const promptParts = isContinuationTurn
-              ? null
-              : yield* resolvePromptParts(turnInput, requestedSessionId);
+            const isNativeCompaction =
+              flavor.nativeCompaction !== undefined &&
+              turnInput.message.text.trim() === "/compact" &&
+              turnInput.message.attachments.length === 0;
+            const promptParts =
+              isContinuationTurn || isNativeCompaction
+                ? null
+                : yield* resolvePromptParts(turnInput, requestedSessionId);
             const startedAt = yield* DateTime.now;
             const nativeTurnId = `${requestedSessionId}:turn:${turnInput.providerTurnOrdinal}`;
             const providerTurnId = deriveProviderTurnId(nativeTurnId);
@@ -7603,6 +7612,52 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               return;
             }
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
+            if (isNativeCompaction) {
+              yield* flavor.nativeCompaction!(runtime, requestedSessionId).pipe(
+                Effect.tap(() =>
+                  Deferred.succeed(context.promptWireSettled, undefined).pipe(Effect.asVoid),
+                ),
+                Effect.flatMap(() =>
+                  runRuntimeCallbackAtGeneration(
+                    promptGeneration,
+                    Effect.gen(function* () {
+                      if (context.finalized) return;
+                      yield* finalizeTurn(context, "completed");
+                    }),
+                  ),
+                ),
+                Effect.catchCause((cause) =>
+                  runRuntimeCallbackAtGeneration(
+                    promptGeneration,
+                    Effect.gen(function* () {
+                      if (context.finalized) return;
+                      yield* finalizeTurn(
+                        context,
+                        "failed",
+                        flavor.promptFailure?.(Cause.squash(cause)) ??
+                          makeProviderFailure({
+                            cause: Cause.squash(cause),
+                            class: "provider_error",
+                          }),
+                      ).pipe(
+                        Effect.andThen(
+                          Effect.logWarning("orchestration-v2.acp-native-compaction-failed", {
+                            driver,
+                            providerSessionId: input.providerSessionId,
+                            providerThreadId: turnInput.providerThread.id,
+                            providerTurnId,
+                            cause,
+                          }),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+                Effect.asVoid,
+                Effect.forkIn(sessionScope),
+              );
+              return;
+            }
             yield* runtime.prompt({ prompt: promptParts!.prompt }).pipe(
               Effect.tap(() =>
                 Ref.update(promptInstructionStates, (current) => {

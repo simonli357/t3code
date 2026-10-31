@@ -24,6 +24,7 @@ import {
   applyDeepseekHarnessModelSelection,
   DEEPSEEK_HARNESS_DRIVER_KIND,
   makeDeepseekHarnessAcpRuntime,
+  requestDeepseekHarnessCompaction,
 } from "./acpSupport.ts";
 import {
   mergeProviderInstanceEnvironment,
@@ -88,13 +89,15 @@ export interface DeepseekHarnessAdapterV2Options {
   >;
 }
 
-function makeDeepseekHarnessAcpAdapterFlavor(
+export function makeDeepseekHarnessAcpAdapterFlavor(
   options: DeepseekHarnessAdapterV2Options,
 ): AcpAdapterV2Flavor {
   return {
     driver: DEEPSEEK_HARNESS_DRIVER_KIND,
     runtimeHarness: "deepseek-harness",
     capabilities: DeepseekHarnessProviderCapabilitiesV2,
+    supportsCompaction: true,
+    nativeCompaction: (runtime, sessionId) => requestDeepseekHarnessCompaction(runtime, sessionId),
     // DSH keys a session's directory by the cwd in its header; relocation lets a moved or forked
     // session open under the workspace of the computer it now runs on.
     activationMeta: { load: { dshRelocate: true }, fork: { dshRelocate: true, dshAncestry: [] } },
