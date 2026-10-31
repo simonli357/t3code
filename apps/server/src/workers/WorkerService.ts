@@ -20,7 +20,9 @@ import {
   WORKER_REVIEW_BLOCKED as REVIEW_BLOCKED,
   WORKER_REVIEW_DONE as REVIEW_DONE,
 } from "@t3tools/shared/workerMessages";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -280,6 +282,7 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projects = yield* ProjectService.ProjectService;
   const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
+  const crypto = yield* Crypto.Crypto;
   // Allocation is optional here: without it a usage-limited worker is reported, never switched.
   const allocation = yield* Effect.serviceOption(ProviderAllocation);
   // Linked computers are optional: without peers every worker is local.
@@ -1351,7 +1354,7 @@ const make = Effect.gen(function* () {
       ? kind === "worker"
         ? "Consider renewing this worker; this warning does not stop work."
         : "Consider a handoff at a convenient point; this warning does not stop work."
-      : `A hard limit of ${hard * scale} h is configured. Automatic renewal is not available here, so renew manually at a safe turn boundary.`;
+      : `A hard limit of ${hard * scale} h is configured. Automatic renewal runs only at an idle completed-turn boundary and preserves the session's work.`;
   // Warning lines only: a failed measurement must never hold back a report.
   const usageLines = Effect.fn("WorkerService.usageLines")(function* (
     workerId: string,
@@ -1873,6 +1876,208 @@ const make = Effect.gen(function* () {
     (effect, owner) => warnIfRetired(owner)(effect),
     Effect.mapError(failure),
   );
+
+  /**
+   * Automatic renewal performs a normal T3 turn first, then transfers the same managed role
+   * through the durable handoff path. The checkpoint turn is never sent into a live turn or
+   * ahead of an accepted assignment, and a persisted renewal row prevents duplicate successors.
+   */
+  const processRenewals = Effect.fn("WorkerService.processRenewals")(function* () {
+    const limits = yield* renewal;
+    const directWorkers = yield* sql<{
+      thread_id: string;
+    }>`SELECT thread_id FROM custom_workers WHERE state = 'ready' AND owner_id IS NOT NULL`;
+    const owners = yield* sql<{
+      owner_id: string;
+    }>`SELECT DISTINCT owner_id FROM custom_workers WHERE owner_id IS NOT NULL`;
+    const candidates = [
+      ...new Set(
+        [...directWorkers, ...owners].map((row) =>
+          "thread_id" in row ? row.thread_id : row.owner_id,
+        ),
+      ),
+    ];
+
+    for (const id of candidates) {
+      const ownsChildren =
+        (yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${id} AND state = 'ready' LIMIT 1`)
+          .length > 0;
+      const hard = ownsChildren ? limits.masterHardHours : limits.workerHardHours;
+      if (hard === null) continue;
+      const target = yield* threads
+        .getThreadShell(ThreadId.make(id))
+        .pipe(Effect.orElseSucceed(() => null));
+      if (
+        target === null ||
+        target.deletedAt !== null ||
+        target.archivedAt !== null ||
+        target.settledAt !== null ||
+        target.snoozedUntil != null ||
+        target.latestRunStopRequested === true ||
+        (target.pendingBackgroundTasks?.length ?? 0) > 0 ||
+        busy(target) ||
+        (yield* authorityOf(id))?.active === 0 ||
+        (yield* sql`SELECT 1 FROM custom_session_moves WHERE thread_id = ${id} AND locked = 1`)
+          .length > 0 ||
+        (yield* sql`SELECT 1 FROM custom_orchestrator_handoffs
+          WHERE owner_id = ${id} AND state IN ('queued', 'error') LIMIT 1`).length > 0
+      )
+        continue;
+
+      const row = (yield* sql<{
+        thread_id: string;
+        warned: number;
+        successor_id: string | null;
+        checkpoint_id: string | null;
+        state: string;
+        error: string | null;
+      }>`SELECT * FROM custom_session_renewals WHERE thread_id = ${id}`)[0];
+      if (row?.state === "completed" || row?.state === "error") continue;
+
+      yield* Effect.gen(function* () {
+        const checkpointMessageId = `renewal:${id}:checkpoint`;
+        const dispatchCheckpoint = () =>
+          threads
+            .sendToThread({
+              projectId: target.projectId,
+              commandId: CommandId.make(checkpointMessageId),
+              threadId: target.id,
+              messageId: MessageId.make(checkpointMessageId),
+              text: "[Automatic session renewal]\nThe configured hard working-time limit has been reached. Prepare a concise handoff in your final response only. Include the current objective, user constraints, exact workspace and dirty/uncommitted work, active workers and assignments, outstanding operations, tests/results, and the concrete next action. Preserve all files and ongoing jobs. Do not create a successor, stop workers, restart services, or perform more task work in this turn; T3 will transfer ownership and start the successor after this checkpoint completes. If there is no remaining task, state that clearly. The full conversation stays available to the successor.",
+              attachments: [],
+              mode: "queue",
+              createdBy: "agent",
+              creationSource: "server",
+            })
+            .pipe(Effect.mapError(failure));
+
+        if (row?.state === "preparing") {
+          yield* dispatchCheckpoint();
+          yield* sql`UPDATE custom_session_renewals SET state = 'checkpoint', error = NULL
+            WHERE thread_id = ${id}`;
+          return;
+        }
+        if (row?.state === "checkpoint") {
+          const { runs, messages } = yield* threads
+            .getThreadRecords(target.id, ["runs", "messages"])
+            .pipe(Effect.mapError(failure));
+          const checkpointRun = runs.find((run) => run.userMessageId === checkpointMessageId);
+          if (!checkpointRun) return;
+          if (
+            checkpointRun.status === "queued" ||
+            checkpointRun.status === "preparing" ||
+            checkpointRun.status === "starting" ||
+            checkpointRun.status === "running" ||
+            checkpointRun.status === "waiting"
+          )
+            return;
+          if (checkpointRun.status !== "completed")
+            return yield* new WorkerError({
+              message:
+                "Renewal checkpoint did not complete. The original session remains available.",
+            });
+          if (runs.some((run) => run.ordinal > checkpointRun.ordinal))
+            return yield* new WorkerError({
+              message:
+                "New work arrived after the renewal checkpoint. Renew this session manually from its current state.",
+            });
+          const summary = messages
+            .filter(
+              (message) =>
+                message.role === "assistant" &&
+                message.runId === checkpointRun.id &&
+                !message.streaming,
+            )
+            .map((message) => message.text)
+            .join("\n")
+            .trim();
+          if (!summary)
+            return yield* new WorkerError({
+              message: "Renewal checkpoint was empty. The original session remains available.",
+            });
+          const input: typeof HandoffInput.Type = {
+            threadId: ThreadId.make(row.successor_id!),
+            sourceThreadId: target.id,
+            title: `${target.title.replace(/ · renewed$/, "")} · renewed`,
+            modelSelection: target.modelSelection,
+            prompt: `Automatic renewal of ${id}. Continue only its unfinished task. Preserve the exact workspace, permission modes and managed-role ownership. Existing work and files remain there; inspect them before continuing and do not repeat completed work.\n\n${summary.slice(0, 48_000)}${summary.length > 48_000 ? "\n[Checkpoint truncated; read the original conversation before continuing.]" : ""}`,
+          };
+          const renewed = yield* handoff(ThreadId.make(id), input);
+          if (renewed.state === "error")
+            return yield* new WorkerError({
+              message: renewed.error ?? "The automatic renewal handoff failed.",
+            });
+          if (renewed.state === "completed")
+            yield* sql`UPDATE custom_session_renewals SET state = 'completed', error = NULL
+              WHERE thread_id = ${id}`;
+          else
+            yield* sql`UPDATE custom_session_renewals SET state = 'handoff', error = NULL
+              WHERE thread_id = ${id}`;
+          return;
+        }
+        if (row?.state === "handoff") {
+          const renewed = yield* handoff(
+            ThreadId.make(id),
+            decodeHandoffInput(
+              (yield* sql<{ plan_json: string }>`SELECT plan_json FROM custom_orchestrator_handoffs
+              WHERE owner_id = ${id} AND thread_id = ${row.successor_id}`)[0]!.plan_json,
+            ),
+          );
+          if (renewed.state === "completed")
+            yield* sql`UPDATE custom_session_renewals SET state = 'completed', error = NULL
+              WHERE thread_id = ${id}`;
+          return;
+        }
+
+        if (
+          (yield* sql`SELECT 1 FROM custom_worker_jobs
+            WHERE target_id = ${id} AND kind = 'work'
+              AND state IN ('queued', 'submitted') LIMIT 1`).length > 0
+        )
+          return;
+        const { runs } = yield* threads
+          .getThreadRecords(target.id, ["runs"])
+          .pipe(Effect.mapError(failure));
+        if (
+          runs.some(
+            (run) =>
+              run.status === "queued" ||
+              run.status === "preparing" ||
+              run.status === "starting" ||
+              run.status === "running" ||
+              run.status === "waiting",
+          )
+        )
+          return;
+        const work = yield* measureWorkingTime(sql, id, limits);
+        if (!work || work.hours < hard * work.scale) return;
+        const successorId = yield* crypto.randomUUIDv4();
+        yield* sql`INSERT INTO custom_session_renewals
+          (thread_id, successor_id, checkpoint_id, state)
+          VALUES (${id}, ${successorId}, ${checkpointMessageId}, 'preparing')
+          ON CONFLICT(thread_id) DO NOTHING`;
+        const claimed = (yield* sql<{
+          successor_id: string | null;
+        }>`SELECT successor_id FROM custom_session_renewals WHERE thread_id = ${id}`)[0];
+        if (!claimed?.successor_id) return;
+        yield* dispatchCheckpoint();
+        yield* sql`UPDATE custom_session_renewals SET state = 'checkpoint', error = NULL
+          WHERE thread_id = ${id} AND state = 'preparing'`;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.gen(function* () {
+            const message = failure(cause).message;
+            yield* sql`UPDATE custom_session_renewals SET state = 'error', error = ${message}
+              WHERE thread_id = ${id} AND state != 'completed'`;
+            yield* Effect.logWarning("Automatic session renewal failed", {
+              threadId: id,
+              message,
+            });
+          }),
+        ),
+      );
+    }
+  });
 
   const processHandoffs = Effect.fn(function* () {
     const rows =
@@ -2514,6 +2719,7 @@ const make = Effect.gen(function* () {
       yield* reportTerminalJobs(worker.thread_id);
       yield* noticePendingRequests(worker);
     }
+    yield* processRenewals();
     yield* processHandoffs();
     yield* syncRemoteOwners();
     yield* deliverQueued();
@@ -2650,4 +2856,4 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(WorkerService, make);
+export const layer = Layer.effect(WorkerService, make).pipe(Layer.provide(NodeCrypto.layer));

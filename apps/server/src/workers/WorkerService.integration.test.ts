@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
-import { CommandId, MessageId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EventId, MessageId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
@@ -8,6 +9,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -98,6 +100,113 @@ it.layer(layerWorld())("workers over the real orchestrator", (it) => {
       assert.match(text, /Worker working time: \d+\.\d h over 1 turn, 0 compactions\./);
       assert.include(text, "Over the 1.5 h renewal threshold");
       yield* settings.updateSettings({ workerRenewal: { workerHours: 3.5 } });
+    }),
+  );
+
+  it.effect("renews one hard-limit master with its child and queued report", () =>
+    Effect.gen(function* () {
+      const boss = ThreadId.make("thread:renewal-master");
+      const child = ThreadId.make("thread:renewal-child");
+      yield* seed(boss);
+      const workers = yield* WorkerService.WorkerService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const sql = yield* SqlClient.SqlClient;
+      const sink = yield* EventSink.EventSinkV2;
+      yield* settings.updateSettings({
+        workerRenewal: { masterHardHours: 1, toolWaitSeconds: 0 },
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("renewal-master:work"),
+        threadId: boss,
+        messageId: MessageId.make("renewal-master:work"),
+        text: "Long master task",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* setLatestRun(boss, "running");
+      yield* TestClock.adjust(Duration.minutes(90));
+      yield* setLatestRun(boss, "completed");
+      yield* workers.spawn(boss, spawnInput(child, "Held task"));
+      yield* setLatestRun(child, "running");
+      yield* setLatestRun(child, "completed");
+
+      yield* workers.drain();
+      const checkpointId = `renewal:${boss}:checkpoint`;
+      const checkpoint = (yield* orchestrator.getThreadProjection(boss)).runs.find(
+        (run) => run.userMessageId === checkpointId,
+      );
+      assert.isDefined(checkpoint);
+      yield* sql`INSERT INTO custom_worker_jobs
+        (id, worker_id, target_id, kind, prompt, created_at, state)
+        VALUES ('report:queued-before-renewal', ${child}, ${boss}, 'done',
+          '[T3 worker report] queued before renewal', ${DateTime.formatIso(yield* DateTime.now)}, 'queued')`;
+      yield* setLatestRun(boss, "running");
+      const repliedAt = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("renewal-checkpoint:assistant"),
+            type: "message.updated",
+            threadId: boss,
+            runId: checkpoint!.id,
+            occurredAt: repliedAt,
+            payload: {
+              id: MessageId.make("renewal-checkpoint:assistant"),
+              threadId: boss,
+              runId: checkpoint!.id,
+              nodeId: checkpoint!.rootNodeId,
+              role: "assistant",
+              text: "The task is half done. Finish the remaining verifier.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "provider",
+              createdAt: repliedAt,
+              updatedAt: repliedAt,
+            },
+          },
+        ],
+      });
+      yield* setLatestRun(boss, "completed");
+      yield* workers.drain();
+
+      const handoffs = yield* sql<{
+        thread_id: string;
+        state: string;
+        transferred_json: string;
+      }>`SELECT thread_id, state, transferred_json FROM custom_orchestrator_handoffs
+        WHERE owner_id = ${boss}`;
+      assert.lengthOf(handoffs, 1);
+      assert.equal(handoffs[0]!.state, "completed");
+      const successor = ThreadId.make(handoffs[0]!.thread_id);
+      assert.deepEqual(JSON.parse(handoffs[0]!.transferred_json), [child]);
+      assert.equal((yield* workers.readOwnership(child)).ownerThreadId, successor);
+      const queued = yield* sql<{
+        target_id: string;
+      }>`SELECT target_id FROM custom_worker_jobs WHERE id = 'report:queued-before-renewal'`;
+      assert.equal(queued[0]!.target_id, successor);
+      const renewal = yield* sql<{
+        successor_id: string;
+        state: string;
+      }>`SELECT successor_id, state FROM custom_session_renewals WHERE thread_id = ${boss}`;
+      assert.equal(renewal[0]?.successor_id, successor);
+      assert.equal(renewal[0]?.state, "completed");
+      const authority = yield* sql<{
+        active: number;
+        successor_id: string;
+      }>`SELECT active, successor_id FROM custom_orchestrator_authority WHERE thread_id = ${boss}`;
+      assert.equal(authority[0]?.active, 0);
+      assert.equal(authority[0]?.successor_id, successor);
+
+      yield* workers.drain();
+      assert.lengthOf(
+        yield* sql`SELECT 1 FROM custom_orchestrator_handoffs WHERE owner_id = ${boss}`,
+        1,
+      );
     }),
   );
 
