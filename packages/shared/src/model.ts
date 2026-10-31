@@ -360,6 +360,20 @@ export function resolveSelectableModel(
   return resolved ? resolved.slug : null;
 }
 
+/**
+ * Find a catalog model by exact slug, or by the short name of a provider-qualified
+ * slug ("deepseek-flash" for "deepseek-official/deepseek-flash") when only one matches.
+ */
+export function findCatalogModel<T extends { readonly slug: string }>(
+  models: ReadonlyArray<T>,
+  requested: string,
+): T | undefined {
+  const exact = models.find((model) => model.slug === requested);
+  if (exact) return exact;
+  const matches = models.filter((model) => model.slug.endsWith(`/${requested}`));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 /** Trim a string, returning null for empty/missing values. */
 function trimOrNull<T extends string>(value: T | null | undefined): T | null {
   if (typeof value !== "string") return null;

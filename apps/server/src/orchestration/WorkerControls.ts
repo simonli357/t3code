@@ -54,6 +54,7 @@ import {
   describeInputRequest,
   formatPeerMessage,
 } from "@t3tools/shared/workerMessages";
+import { findCatalogModel } from "@t3tools/shared/model";
 
 const reportTime = new Intl.DateTimeFormat("en-CA", {
   timeZone: "America/Toronto",
@@ -1083,6 +1084,13 @@ const make = Effect.gen(function* () {
         });
     }
   });
+  // Masters may name a provider-qualified model by its short name, e.g. "deepseek-flash".
+  const catalogSelection = Effect.fn(function* (selection: typeof ModelSelection.Type) {
+    const providers = yield* catalog.getProviders;
+    const instance = providers.find((entry) => entry.instanceId === selection.instanceId);
+    const model = findCatalogModel(instance?.models ?? [], selection.model);
+    return model ? { ...selection, model: model.slug } : selection;
+  });
   const checkWorkerAccount = Effect.fn(function* (selection: ModelSelection) {
     if ((yield* settings.getSettings).workerDisabledInstanceIds.includes(selection.instanceId))
       return yield* new WorkerError({ message: WORKER_ACCOUNT_DISABLED_REASON });
@@ -2093,6 +2101,7 @@ const make = Effect.gen(function* () {
     continuation?: OrchestrationThreadShell,
   ) {
     yield* assertTopologyAvailable();
+    input = { ...input, modelSelection: yield* catalogSelection(input.modelSelection) };
     if (input.threadId === owner || input.threadId === input.sourceThreadId)
       return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
     const existing =
@@ -2368,7 +2377,9 @@ const make = Effect.gen(function* () {
       const target = yield* thread(input.threadId);
       const plan = decodePlan(worker.plan_json);
       yield* checkPermissions(owner, target, plan.ownerRuntimeMode);
-      const selection = input.modelSelection ?? target.modelSelection;
+      const selection = input.modelSelection
+        ? yield* catalogSelection(input.modelSelection)
+        : target.modelSelection;
       if (input.modelSelection || selectionKey(selection) !== selectionKey(plan.modelSelection))
         yield* checkWorkerAccount(selection);
       yield* checkSelection(selection);
@@ -3182,6 +3193,7 @@ const make = Effect.gen(function* () {
           });
         input = { ...input, sourceThreadId: owner };
       }
+      input = { ...input, modelSelection: yield* catalogSelection(input.modelSelection) };
       yield* thread(owner);
       if (input.threadId === owner || input.threadId === input.sourceThreadId)
         return yield* new WorkerError({ message: "A successor must have a new thread ID." });

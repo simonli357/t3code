@@ -242,6 +242,23 @@ describe("deterministic recommendations", () => {
     }
     expect(decideAllocation(x).request).toEqual(request);
   });
+  it("accepts the short name of one provider-qualified model, never an ambiguous one", () => {
+    const qualified = (...slugs: string[]) =>
+      account("a", {
+        models: slugs.map((slug) => ({ slug, capabilities: account("a").models[0]!.capabilities })),
+      });
+    const decide = (slugs: string[], model: string) =>
+      decideAllocation({
+        ...input(),
+        request: { ...request, model },
+        inventories: [inventory([qualified(...slugs)])],
+      }).selectedInstanceId;
+    const catalog = ["deepseek-official/deepseek-flash", "deepseek-official/deepseek-v4-flash"];
+    expect(decide(catalog, "deepseek-flash")).toBe("a");
+    expect(decide(catalog, "deepseek-official/deepseek-flash")).toBe("a");
+    expect(decide(catalog, "flash")).toBeNull();
+    expect(decide(["one/deepseek-flash", "two/deepseek-flash"], "deepseek-flash")).toBeNull();
+  });
   it("warns on unsafe short windows despite weekly underuse or reset credits", () => {
     const a = account("a", {
       windows: [

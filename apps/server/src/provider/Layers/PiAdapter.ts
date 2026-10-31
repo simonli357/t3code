@@ -60,7 +60,14 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
-import { applyPiModelSelection, makePiAcpRuntime } from "../acp/PiAcpSupport.ts";
+import {
+  PI_T3_EXTENSION,
+  applyPiModelSelection,
+  makePiAcpRuntime,
+  piLauncher,
+} from "../acp/PiAcpSupport.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { type PiAdapterShape } from "../Services/PiAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -314,22 +321,58 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
         });
       });
 
+    // Written once per adapter: the extension and a launcher around the configured Pi command.
+    const platform = yield* HostProcessPlatform;
+    const environment = options.environment ?? (yield* HostProcessEnvironment);
+    const piBridge = yield* Effect.cached(
+      Effect.gen(function* () {
+        const dir = path.join(serverConfig.stateDir, "pi-bridge", boundInstanceId);
+        const extension = path.join(dir, "t3-code.ts");
+        const launcher = piLauncher(
+          platform,
+          environment.PI_ACP_PI_COMMAND ?? (platform === "win32" ? "pi.cmd" : "pi"),
+          extension,
+        );
+        const launcherPath = path.join(dir, launcher.name);
+        yield* fileSystem.makeDirectory(dir, { recursive: true });
+        yield* fileSystem.writeFileString(extension, PI_T3_EXTENSION);
+        yield* fileSystem.writeFileString(launcherPath, launcher.content);
+        yield* fileSystem.chmod(launcherPath, 0o755);
+        return launcherPath;
+      }),
+    );
+
     const makeRuntime = Effect.fn("PiAdapter.makeRuntime")(function* (input: {
       readonly threadId: ThreadId;
       readonly cwd: string;
       readonly resumeSessionId?: string;
       readonly clientName: string;
       readonly workspaceEnvironment?: Readonly<Record<string, string>>;
+      readonly mcpSession?: ReturnType<typeof McpProviderSession.readMcpProviderSession>;
     }) {
       const effectiveSettings = options.resolveSettings
         ? yield* options.resolveSettings
         : piSettings;
+      const mcpEnvironment = input.mcpSession && {
+        PI_ACP_PI_COMMAND: yield* piBridge.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: `Could not prepare Pi's T3 tools: ${cause.message}`,
+                cause,
+              }),
+          ),
+        ),
+        T3CODE_MCP_URL: input.mcpSession.endpoint,
+        T3CODE_MCP_AUTHORIZATION: input.mcpSession.authorizationHeader,
+      };
       return yield* makePiAcpRuntime({
         settings: effectiveSettings,
         ...(options.environment ? { baseEnvironment: options.environment } : {}),
-        ...(input.workspaceEnvironment
-          ? { workspaceEnvironment: input.workspaceEnvironment }
-          : {}),
+        ...(input.workspaceEnvironment ? { workspaceEnvironment: input.workspaceEnvironment } : {}),
+        ...(mcpEnvironment ? { mcpEnvironment } : {}),
         childProcessSpawner,
         cwd: input.cwd,
         ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
@@ -389,6 +432,7 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
           let ctx!: PiSessionContext;
 
           const resumed = parsePiResume(input.resumeCursor);
+          const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
           const acp = yield* makeRuntime({
             threadId: input.threadId,
             cwd,
@@ -397,87 +441,88 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
             ...(input.workspaceEnvironment
               ? { workspaceEnvironment: input.workspaceEnvironment }
               : {}),
+            ...(mcpSession ? { mcpSession } : {}),
           }).pipe(Effect.provideService(Scope.Scope, sessionScope));
           const started = yield* Effect.gen(function* () {
             yield* acp.handleRequestPermission((params) =>
               Effect.gen(function* () {
-                  const autoApprovedOptionId = selectAutoApprovedPermissionOption(
-                    params,
-                    input.runtimeMode,
-                  );
-                  if (autoApprovedOptionId !== undefined) {
-                    return {
-                      outcome: {
-                        outcome: "selected" as const,
-                        optionId: autoApprovedOptionId,
-                      },
-                    };
-                  }
-                  const permissionRequest = parsePermissionRequest(params);
-                  const requestId = ApprovalRequestId.make(
-                    yield* randomUUIDv4.pipe(
-                      Effect.mapError(
-                        (cause) =>
-                          new EffectAcpErrors.AcpTransportError({
-                            detail: "Could not allocate a permission request id.",
-                            cause,
-                          }),
-                      ),
+                const autoApprovedOptionId = selectAutoApprovedPermissionOption(
+                  params,
+                  input.runtimeMode,
+                );
+                if (autoApprovedOptionId !== undefined) {
+                  return {
+                    outcome: {
+                      outcome: "selected" as const,
+                      optionId: autoApprovedOptionId,
+                    },
+                  };
+                }
+                const permissionRequest = parsePermissionRequest(params);
+                const requestId = ApprovalRequestId.make(
+                  yield* randomUUIDv4.pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new EffectAcpErrors.AcpTransportError({
+                          detail: "Could not allocate a permission request id.",
+                          cause,
+                        }),
                     ),
-                  );
-                  const runtimeRequestId = RuntimeRequestId.make(requestId);
-                  const decision = yield* Deferred.make<ProviderApprovalDecision>();
-                  pendingApprovals.set(requestId, {
-                    decision,
-                    kind: permissionRequest.kind,
-                  });
-                  yield* offerRuntimeEvent(
-                    makeAcpRequestOpenedEvent({
-                      stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      turnId: ctx?.activeTurnId,
-                      requestId: runtimeRequestId,
-                      permissionRequest,
-                      detail:
-                        permissionRequest.detail ??
-                        encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
-                        "[unserializable params]",
-                      args: params,
-                      source: "acp.jsonrpc",
-                      method: "session/request_permission",
-                      rawPayload: params,
-                    }),
-                  );
-                  const resolved = yield* Deferred.await(decision);
-                  pendingApprovals.delete(requestId);
-                  yield* offerRuntimeEvent(
-                    makeAcpRequestResolvedEvent({
-                      stamp: yield* makeEventStamp(),
-                      provider: PROVIDER,
-                      threadId: input.threadId,
-                      turnId: ctx?.activeTurnId,
-                      requestId: runtimeRequestId,
-                      permissionRequest,
-                      decision: resolved,
-                    }),
-                  );
-                  if (resolved === "cancel") {
-                    return { outcome: { outcome: "cancelled" as const } };
-                  }
-                  const optionId = piPermissionOptionId(params, resolved);
-                  return optionId === undefined
-                    ? { outcome: { outcome: "cancelled" as const } }
-                    : { outcome: { outcome: "selected" as const, optionId } };
-                }).pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new EffectAcpErrors.AcpTransportError({
-                        detail: "Pi permission handling failed.",
-                        cause,
-                      }),
                   ),
+                );
+                const runtimeRequestId = RuntimeRequestId.make(requestId);
+                const decision = yield* Deferred.make<ProviderApprovalDecision>();
+                pendingApprovals.set(requestId, {
+                  decision,
+                  kind: permissionRequest.kind,
+                });
+                yield* offerRuntimeEvent(
+                  makeAcpRequestOpenedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    detail:
+                      permissionRequest.detail ??
+                      encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
+                      "[unserializable params]",
+                    args: params,
+                    source: "acp.jsonrpc",
+                    method: "session/request_permission",
+                    rawPayload: params,
+                  }),
+                );
+                const resolved = yield* Deferred.await(decision);
+                pendingApprovals.delete(requestId);
+                yield* offerRuntimeEvent(
+                  makeAcpRequestResolvedEvent({
+                    stamp: yield* makeEventStamp(),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    permissionRequest,
+                    decision: resolved,
+                  }),
+                );
+                if (resolved === "cancel") {
+                  return { outcome: { outcome: "cancelled" as const } };
+                }
+                const optionId = piPermissionOptionId(params, resolved);
+                return optionId === undefined
+                  ? { outcome: { outcome: "cancelled" as const } }
+                  : { outcome: { outcome: "selected" as const, optionId } };
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new EffectAcpErrors.AcpTransportError({
+                      detail: "Pi permission handling failed.",
+                      cause,
+                    }),
                 ),
+              ),
             );
             return yield* acp.start();
           }).pipe(
@@ -493,12 +538,7 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
               getModelSelectionStringOptionValue(modelSelection, "reasoning_effort") ??
               getModelSelectionStringOptionValue(modelSelection, "reasoningEffort"),
             mapError: (cause) =>
-              mapAcpToAdapterError(
-                PROVIDER,
-                input.threadId,
-                "session/set_config_option",
-                cause,
-              ),
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
           });
 
           const now = yield* nowIso;
@@ -669,7 +709,9 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
               }),
             ),
           ).pipe(
-            Effect.catch((cause) => Effect.logError("Failed to process Pi runtime notification.", { cause })),
+            Effect.catch((cause) =>
+              Effect.logError("Failed to process Pi runtime notification.", { cause }),
+            ),
             Effect.forkIn(ctx.scope),
           );
 
@@ -721,12 +763,7 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
               getModelSelectionStringOptionValue(turnModelSelection, "reasoning_effort") ??
               getModelSelectionStringOptionValue(turnModelSelection, "reasoningEffort"),
             mapError: (cause) =>
-              mapAcpToAdapterError(
-                PROVIDER,
-                input.threadId,
-                "session/set_config_option",
-                cause,
-              ),
+              mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_config_option", cause),
           });
           ctx.activeTurnId = turnId;
           if (steeringTurnId === undefined) {
@@ -841,11 +878,7 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
         );
       });
 
-    const respondToRequest: PiAdapterShape["respondToRequest"] = (
-      threadId,
-      requestId,
-      decision,
-    ) =>
+    const respondToRequest: PiAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
         const pending = ctx.pendingApprovals.get(requestId);
@@ -859,10 +892,7 @@ export function makePiAdapter(piSettings: PiSettings, options: PiAdapterLiveOpti
         yield* Deferred.succeed(pending.decision, decision);
       });
 
-    const respondToUserInput: PiAdapterShape["respondToUserInput"] = (
-      threadId,
-      requestId,
-    ) =>
+    const respondToUserInput: PiAdapterShape["respondToUserInput"] = (threadId, requestId) =>
       Effect.gen(function* () {
         yield* requireSession(threadId);
         return yield* new ProviderAdapterRequestError({

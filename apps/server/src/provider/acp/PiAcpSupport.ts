@@ -30,6 +30,7 @@ export interface PiAcpRuntimeInput extends Omit<
   readonly baseEnvironment?: NodeJS.ProcessEnv;
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
   readonly workspaceEnvironment?: Readonly<Record<string, string>>;
+  readonly mcpEnvironment?: Readonly<Record<string, string>>;
 }
 
 export function piBridgeCommand(settings: PiSettings): string {
@@ -59,6 +60,7 @@ export const makePiAcpRuntime = Effect.fn("makePiAcpRuntime")(function* (input: 
           ...(input.baseEnvironment ?? process.env),
           ...input.agentDeviceEnvironment,
           ...input.workspaceEnvironment,
+          ...input.mcpEnvironment,
         },
       },
     }).pipe(
@@ -69,6 +71,37 @@ export const makePiAcpRuntime = Effect.fn("makePiAcpRuntime")(function* (input: 
   );
   return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
 });
+
+/**
+ * pi-acp ignores ACP `mcpServers`, so T3's tools reach Pi through this extension.
+ * It registers the session's T3 MCP endpoint, passed in the environment.
+ */
+export const PI_T3_EXTENSION = `// Written by T3 Code: gives Pi sessions started by T3 the T3 tools.
+export default function (pi) {
+  const url = process.env.T3CODE_MCP_URL;
+  const authorization = process.env.T3CODE_MCP_AUTHORIZATION;
+  if (!url || !authorization) return;
+  pi.registerMcpServer("t3-code", {
+    url,
+    headers: { Authorization: authorization },
+    exposure: "direct",
+  });
+}
+`;
+
+/** pi-acp starts `PI_ACP_PI_COMMAND` with fixed arguments, so this launcher adds the extension. */
+export function piLauncher(platform: NodeJS.Platform, piCommand: string, extensionPath: string) {
+  if (platform === "win32")
+    return {
+      name: "pi-t3.cmd",
+      content: `@echo off\r\n"${piCommand}" -e "${extensionPath}" %*\r\n`,
+    };
+  const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+  return {
+    name: "pi-t3",
+    content: `#!/bin/sh\nexec ${quote(piCommand)} -e ${quote(extensionPath)} "$@"\n`,
+  };
+}
 
 /** Pi advertises fully-qualified `provider/model-id` values. */
 export function piModelSlug(optionValue: string): string {

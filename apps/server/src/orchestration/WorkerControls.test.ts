@@ -107,6 +107,13 @@ const instances = [
   ["claudeAgent", "claudeAgent", "claude-opus-5-5", "effort", "xhigh"],
   ["claude_eol", "claudeAgent", "claude-sonnet-5-5", "effort", "max"],
   ["deepseek_codex", "codex", "deepseek-flash", "reasoningEffort", "max"],
+  [
+    "deepseekHarness",
+    "deepseekHarness",
+    "deepseek-official/deepseek-flash",
+    "reasoning_effort",
+    "max",
+  ],
 ] as const;
 const selections = instances.map(([id, , model, option, value]) => ({
   instanceId: ProviderInstanceId.make(id),
@@ -2843,6 +2850,19 @@ it.layer(testLayer)("persistent workers", (it) => {
         expect((yield* restarted.list(owner))[0]!.modelSelection).toEqual(selections[1]);
       }),
   );
+  it.effect("master switches a worker by the short name of a provider-qualified model", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const { owner, worker, input } = yield* seed("switch-short-name");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "switch-short-name-active");
+      const changed = yield* service.control(owner, {
+        threadId: worker,
+        modelSelection: { ...selections[5]!, model: "deepseek-flash" },
+      });
+      expect(changed.modelSelection).toEqual(selections[5]);
+    }),
+  );
   for (const index of [1, 2]) {
     it.effect(
       `master switches an active worker to ${instances[index]![0]} for its next assignment`,
@@ -4474,7 +4494,8 @@ it.layer(testLayer)("session organization", (it) => {
       yield* sql`UPDATE custom_session_moves SET state = 'complete', locked = 0 WHERE id = 'in-flight'`;
       // A refused request is final; retry under a new request ID.
       expect(
-        (yield* service.changeOwnership({ ...input, clientRequestId: "adopt-after-move" })).revision,
+        (yield* service.changeOwnership({ ...input, clientRequestId: "adopt-after-move" }))
+          .revision,
       ).toBe(1);
     }),
   );

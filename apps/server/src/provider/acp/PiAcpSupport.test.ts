@@ -6,6 +6,7 @@ import {
   PI_DEFAULT_MODEL_SLUG,
   applyPiModelSelection,
   piBridgeArgs,
+  piLauncher,
   piModelOption,
 } from "./PiAcpSupport.ts";
 
@@ -44,6 +45,18 @@ describe("piBridgeArgs", () => {
         customModels: [],
       }),
     ).toEqual(["-y", "pi-acp", "--quiet"]);
+  });
+});
+
+describe("piLauncher", () => {
+  it("passes pi-acp's arguments through and quotes paths for each shell", () => {
+    expect(piLauncher("linux", "/opt/it's/pi", "/state/pi-bridge/pi/t3-code.ts").content).toBe(
+      `#!/bin/sh\nexec '/opt/it'\\''s/pi' -e '/state/pi-bridge/pi/t3-code.ts' "$@"\n`,
+    );
+    expect(piLauncher("win32", "pi.cmd", "C:\\T3 Home\\t3-code.ts")).toEqual({
+      name: "pi-t3.cmd",
+      content: `@echo off\r\n"pi.cmd" -e "C:\\T3 Home\\t3-code.ts" %*\r\n`,
+    });
   });
 });
 
