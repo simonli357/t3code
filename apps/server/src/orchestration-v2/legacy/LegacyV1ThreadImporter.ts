@@ -216,12 +216,14 @@ const decodeResumeCursor = Schema.decodeUnknownOption(
 );
 
 // These adapters still use the same native session format as the custom V1 adapters.
-// Cursor's CLI id is not an SDK agent id; never invent native continuity for it.
+// Cursor continues through its CLI adapter, whose native ID is distinct from an SDK agent ID.
 function importedProviderThread(row: LegacyThreadRow): OrchestrationV2ProviderThread | undefined {
   const driverName = row.provider_name;
   if (
     !driverName ||
-    !["codex", "claudeAgent", "pi", "deepseekHarness", "opencode", "grok"].includes(driverName)
+    !["codex", "claudeAgent", "pi", "deepseekHarness", "opencode", "grok", "cursor"].includes(
+      driverName,
+    )
   )
     return;
   const cursor = Option.getOrUndefined(

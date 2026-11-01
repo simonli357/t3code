@@ -680,6 +680,11 @@ it.effect(
         ["deepseekHarness", { schemaVersion: 1, sessionId: "native-dsh" }, "native-dsh"],
         ["pi", { schemaVersion: 1, sessionId: "native-pi" }, "native-pi"],
         ["opencode", { schemaVersion: 1, sessionId: "native-opencode" }, "native-opencode"],
+        [
+          "cursor",
+          { schemaVersion: 1, sessionId: "7e3b86cd-9f51-4c2e-bb0a-cf801a2f6310" },
+          "7e3b86cd-9f51-4c2e-bb0a-cf801a2f6310",
+        ],
       ] as const) {
         const threadId = ThreadId.make(`native-${driver}`);
         yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
