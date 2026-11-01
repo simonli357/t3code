@@ -1,3 +1,4 @@
+import { resolveLegacyClaudeBoundary } from "../../provider/legacyClaudeBoundary.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
@@ -594,6 +595,14 @@ export class ClaudeSettingsLaunchArgError extends Schema.TaggedError<ClaudeSetti
 }
 
 export interface ClaudeAgentSdkQueryRunnerShape {
+  readonly readLegacyBoundaries?: (input: {
+    readonly sessionId: string;
+    readonly environment: NodeJS.ProcessEnv;
+    readonly options: { readonly dir?: string | undefined };
+  }) => Effect.Effect<
+    ReadonlyArray<{ readonly uuid: string; readonly type: string }>,
+    ClaudeAgentSdkQueryRunnerError
+  >;
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
   readonly open: (
     input: ClaudeAgentSdkQueryOpenInput,
@@ -854,6 +863,9 @@ function makeClaudeAgentSdkProtocolLogger(input: {
 }
 
 const encodeClaudeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeClaudeLegacyBoundaries = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Array(Schema.Struct({ uuid: Schema.String, type: Schema.String }))),
+);
 const decodeClaudeHistoryFork = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
     Schema.Struct({ sessionId: Schema.String, headMessageId: Schema.optionalKey(Schema.String) }),
@@ -869,7 +881,7 @@ const claudeConfigDirOf = (
 // The SDK reads CLAUDE_CONFIG_DIR from process.env. Isolate custom homes in a
 // worker so concurrent providers keep the server's environment.
 const runClaudeWorker = Effect.fn("runClaudeWorker")(function* (input: {
-  readonly method: "forkSession";
+  readonly method: "forkSession" | "getSessionBoundaries";
   readonly sessionId: string;
   readonly options?: ForkSessionOptions;
   readonly environment: NodeJS.ProcessEnv;
@@ -1259,6 +1271,18 @@ export const layerQueryRunner: Layer.Layer<
                 isClaudeMcpRegistrationTimeoutError(error.cause),
             }),
           ),
+      ),
+      readLegacyBoundaries: Effect.fn("ClaudeAgentSdkQueryRunner.readLegacyBoundaries")((input) =>
+        runClaudeWorker({
+          ...input,
+          method: "getSessionBoundaries",
+          options: input.options.dir ? { dir: input.options.dir } : {},
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(Path.Path, path),
+          Effect.flatMap(decodeClaudeLegacyBoundaries),
+          Effect.mapError((cause) => queryRunnerError(cause, "getSessionBoundaries")),
+        ),
       ),
       forkSession: Effect.fn("ClaudeAgentSdkQueryRunner.forkSession")(function* (
         input: ClaudeAgentSdkSessionForkInput,
@@ -11039,7 +11063,42 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const nativeThreadId = yield* getNativeThreadId(rollbackInput.providerThread);
               yield* closeLiveQueryForNativeThread(nativeThreadId);
               const now = yield* DateTime.now;
-              const resumeSessionAt = yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
+              const resumeSessionAt =
+                rollbackInput.target.type === "provider_turn" &&
+                rollbackInput.target.providerTurn.historyOrigin === "v1_import"
+                  ? yield* Effect.gen(function* () {
+                      const boundary =
+                        rollbackInput.target.type === "provider_turn"
+                          ? rollbackInput.target.providerTurn.nativeTurnRef?.nativeId
+                            ? {
+                                headMessageId:
+                                  rollbackInput.target.providerTurn.nativeTurnRef.nativeId,
+                              }
+                            : rollbackInput.target.providerTurn.legacyClaudeBoundary
+                          : undefined;
+                      if (!boundary || !queryRunner.readLegacyBoundaries)
+                        return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                          driver: CLAUDE_PROVIDER,
+                          providerThreadId: rollbackInput.providerThread.id,
+                          cause:
+                            "The imported Claude checkpoint has no recoverable native message boundary.",
+                        });
+                      const messages = yield* queryRunner.readLegacyBoundaries({
+                        sessionId: nativeThreadId,
+                        environment: sessionEnvironment,
+                        options: { dir: input.runtimePolicy.cwd ?? undefined },
+                      });
+                      return yield* Effect.try({
+                        try: () => resolveLegacyClaudeBoundary(messages, boundary),
+                        catch: (cause) =>
+                          new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                            driver: CLAUDE_PROVIDER,
+                            providerThreadId: rollbackInput.providerThread.id,
+                            cause,
+                          }),
+                      });
+                    })
+                  : yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
 
               if (rollbackInput.target.type === "thread_start" && resumeSessionAt === null) {
                 const resetNativeThreadId = yield* queryRunner.allocateSessionId;
@@ -11083,7 +11142,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   lastRunOrdinal: rollbackInput.target.appRunOrdinal,
                   updatedAt: now,
                 },
-                providerTurns: [],
+                providerTurns:
+                  rollbackInput.target.type === "provider_turn" &&
+                  rollbackInput.target.providerTurn.historyOrigin === "v1_import" &&
+                  resumeSessionAt
+                    ? [
+                        {
+                          ...rollbackInput.target.providerTurn,
+                          nativeTurnRef: {
+                            driver: CLAUDE_PROVIDER,
+                            nativeId: resumeSessionAt,
+                            strength: "strong" as const,
+                          },
+                        },
+                      ]
+                    : [],
                 messages: [],
                 runtimeRequests: [],
               };

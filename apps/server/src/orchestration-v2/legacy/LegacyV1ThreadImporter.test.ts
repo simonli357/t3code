@@ -669,7 +669,12 @@ it.effect(
         ["codex", { threadId: "native-codex" }, "native-codex"],
         [
           "claudeAgent",
-          { resume: "native-claude", resumeSessionAt: "head-claude" },
+          {
+            resume: "native-claude",
+            resumeSessionAt: "head-claude",
+            turnCount: 1,
+            turnStartMessageIds: ["native-user-claude"],
+          },
           "native-claude",
         ],
         ["deepseekHarness", { schemaVersion: 1, sessionId: "native-dsh" }, "native-dsh"],
@@ -689,15 +694,26 @@ it.effect(
         yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at)
           VALUES (${`message-${driver}`},${threadId},'user','Retained message',0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z')`;
         yield* sql`UPDATE projection_threads SET is_base = 'true' WHERE thread_id = ${threadId}`;
+        if (driver === "claudeAgent")
+          yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json, state) VALUES (${threadId}, 'native-codex', 'native-codex', '{}', 'ready')`;
         yield* importer.reconcileShells;
         yield* importer.ensureTranscript(threadId);
         yield* importer.ensureTranscript(threadId);
         const projection = yield* projections.getThreadProjection(threadId);
         assert.equal(projection.providerThreads[0]?.nativeThreadRef?.nativeId, nativeId);
         assert.equal(projection.thread.activeProviderThreadId, projection.providerThreads[0]?.id);
-        assert.equal(projection.providerThreads[0]?.providerSessionId, null);
+        assert.equal(
+          projection.providerThreads[0]?.providerSessionId,
+          `migration:v1:session:${threadId}`,
+        );
         assert.equal(projection.providerThreads[0]?.status, "not_loaded");
         assert.equal(projection.thread.isBase, true);
+        if (driver === "claudeAgent")
+          assert.deepStrictEqual(projection.thread.lineage, {
+            parentThreadId: ThreadId.make("native-codex"),
+            relationshipToParent: "fork",
+            rootThreadId: ThreadId.make("native-codex"),
+          });
         yield* sql`UPDATE orchestration_v2_projection_threads
           SET payload_json = json_set(payload_json, '$.isBase', json('false'))
           WHERE thread_id = ${threadId}`;
@@ -715,10 +731,20 @@ it.effect(
           )?.value,
           "high",
         );
-        assert.lengthOf(projection.runs, 0);
+        assert.lengthOf(projection.runs, 1);
         assert.lengthOf(projection.plans, 1);
         assert.equal(projection.checkpoints[0]?.ref, "refs/t3/checkpoints/retained");
         assert.equal(projection.checkpoints[0]?.files[0]?.additions, 2);
+        if (driver === "claudeAgent")
+          assert.deepStrictEqual(projection.providerTurns[0]?.legacyClaudeBoundary, {
+            headMessageId: "head-claude",
+          });
+        if (driver === "pi" || driver === "deepseekHarness")
+          assert.include(
+            projection.checkpoints[0]?.legacyV1?.rollbackUnavailableReason ?? "",
+            "no recoverable native rollback boundary",
+          );
+
         const tool = projection.turnItems.find((item) => item.type === "dynamic_tool");
         assert.equal(tool?.type, "dynamic_tool");
         if (tool?.type === "dynamic_tool")
@@ -735,5 +761,71 @@ it.effect(
             "head-claude",
           );
       }
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect.each([3, 6])(
+  "retries interrupted multi-batch history hydration at batch %s after projection replay without losing or duplicating timeline positions",
+  (interruptAt) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      yield* seedPendingTranscripts;
+      const threadId = ThreadId.make("thread:first");
+      for (let i = 0; i < 230; i++) {
+        yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at, sequence)
+        VALUES (${`hydration-${i}`}, ${threadId}, 'info', 'tool.completed', 'retained', ${JSON.stringify({ index: i })}, '2026-01-01T02:00:00Z', ${i})`;
+      }
+      let writes = 0;
+      const interrupted = yield* Effect.gen(function* () {
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        yield* importer.ensureTranscript(threadId);
+      }).pipe(
+        Effect.provide(LegacyV1ThreadImporter.layer),
+        Effect.provideService(EventSink.EventSinkV2, {
+          ...sink,
+          write: (input) => (++writes === interruptAt ? Effect.interrupt : sink.write(input)),
+        }),
+        Effect.exit,
+      );
+      assert.isTrue(Exit.hasInterrupts(interrupted));
+      assert.isNull(
+        (yield* sql<{
+          transcript_imported_at: string | null;
+        }>`SELECT transcript_imported_at FROM orchestration_v2_legacy_imports WHERE thread_id = ${threadId}`)[0]
+          ?.transcript_imported_at,
+      );
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      yield* Effect.gen(function* () {
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        yield* importer.ensureTranscript(threadId);
+        const after = yield* sink.latestSequence();
+        yield* importer.ensureTranscript(threadId);
+        assert.equal(yield* sink.latestSequence(), after);
+      }).pipe(Effect.provide(LegacyV1ThreadImporter.layer));
+      const hydrated = yield* projections.getThreadProjection(threadId);
+      assert.lengthOf(hydrated.messages, 2);
+      assert.lengthOf(hydrated.turnItems, 232);
+      assert.equal(new Set(hydrated.turnItems.map((item) => item.ordinal)).size, 232);
+      assert.deepStrictEqual(
+        hydrated.turnItems
+          .filter((item) => item.type === "dynamic_tool")
+          .map((item) => item.id)
+          .sort(),
+        Array.from({ length: 230 }, (_, i) => `migration:v1:activity:hydration-${i}`).sort(),
+      );
+      const positions =
+        yield* sql`SELECT turn_item_id, ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`;
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      assert.deepStrictEqual(
+        yield* sql`SELECT turn_item_id, ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`,
+        positions,
+      );
+      assert.deepStrictEqual(
+        (yield* projections.getThreadProjection(threadId)).turnItems,
+        hydrated.turnItems,
+      );
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );

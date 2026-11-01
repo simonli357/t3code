@@ -665,6 +665,15 @@ export type OrchestrationV2ThreadLaunchWorkspaceStrategy =
 export const ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed";
 
 export const OrchestrationV2Run = Schema.Struct({
+  legacyV1: Schema.optional(
+    Schema.Struct({
+      turnId: Schema.NullOr(Schema.String),
+      state: Schema.String,
+      modelSelectionRecovered: Schema.Boolean,
+      runtimeMode: Schema.optional(Schema.String),
+      interactionMode: Schema.optional(Schema.String),
+    }),
+  ),
   id: RunId,
   threadId: ThreadId,
   ordinal: PositiveInt,
@@ -1139,6 +1148,13 @@ export const OrchestrationV2ContextHandoff = Schema.Struct({
 export type OrchestrationV2ContextHandoff = typeof OrchestrationV2ContextHandoff.Type;
 
 export const OrchestrationV2ProviderTurn = Schema.Struct({
+  historyOrigin: Schema.optional(Schema.Literal("v1_import")),
+  legacyClaudeBoundary: Schema.optional(
+    Schema.Struct({
+      nextUserMessageId: Schema.optional(Schema.String),
+      headMessageId: Schema.optional(Schema.String),
+    }),
+  ),
   id: ProviderTurnId,
   providerThreadId: ProviderThreadId,
   nodeId: NodeId,
@@ -1319,6 +1335,12 @@ export const OrchestrationV2UserInputQuestion = Schema.Struct({
 export type OrchestrationV2UserInputQuestion = typeof OrchestrationV2UserInputQuestion.Type;
 
 const OrchestrationV2PlanArtifactBaseFields = {
+  implementation: Schema.optional(
+    Schema.Struct({
+      threadId: Schema.NullOr(ThreadId),
+      implementedAt: Schema.String,
+    }),
+  ),
   id: PlanId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -1351,6 +1373,13 @@ export const OrchestrationV2CheckpointFileSummary = Schema.Struct({
 export type OrchestrationV2CheckpointFileSummary = typeof OrchestrationV2CheckpointFileSummary.Type;
 
 export const OrchestrationV2Checkpoint = Schema.Struct({
+  legacyV1: Schema.optional(
+    Schema.Struct({
+      turnId: Schema.NullOr(Schema.String),
+      checkpointTurnCount: Schema.NullOr(Schema.Number),
+      rollbackUnavailableReason: Schema.optional(Schema.String),
+    }),
+  ),
   id: CheckpointId,
   threadId: ThreadId,
   scopeId: CheckpointScopeId,

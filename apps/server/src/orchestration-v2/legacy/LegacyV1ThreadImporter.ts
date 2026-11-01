@@ -16,6 +16,8 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
+  RunId,
   ProviderDriverKind,
   type OrchestrationV2ProviderThread,
   ThreadId,
@@ -240,7 +242,8 @@ function importedProviderThread(row: LegacyThreadRow): OrchestrationV2ProviderTh
     id: derive.providerThread({ driver, nativeThreadId: nativeId }),
     driver,
     providerInstanceId: instanceId,
-    providerSessionId: null,
+    // A logical, unloaded binding; opening it still resumes the verified native thread.
+    providerSessionId: ProviderSessionId.make(`migration:v1:session:${row.thread_id}`),
     appThreadId: ThreadId.make(row.thread_id),
     ownerNodeId: null,
     nativeThreadRef: { driver, nativeId, strength: "strong" },
@@ -662,10 +665,37 @@ const make = Effect.gen(function* () {
       )
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
+    const workerTable =
+      yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'custom_workers'`;
+    const ancestry = workerTable.length
+      ? yield* sql<{ thread_id: string; source_id: string }>`
+      SELECT worker.thread_id, worker.source_id FROM custom_workers worker
+      JOIN projection_threads source ON source.thread_id = worker.source_id
+      WHERE worker.source_id <> worker.thread_id`
+      : [];
+    const parents = new Map(ancestry.map((row) => [row.thread_id, row.source_id]));
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
     for (const row of rows) {
-      const thread = importedThread(row);
+      const imported = importedThread(row);
+      const parent = parents.get(row.thread_id);
+      const visited = new Set([row.thread_id]);
+      let root = parent;
+      while (root && !visited.has(root) && parents.has(root)) {
+        visited.add(root);
+        root = parents.get(root);
+      }
+      const thread =
+        parent && root && !visited.has(root)
+          ? {
+              ...imported,
+              lineage: {
+                parentThreadId: ThreadId.make(parent),
+                relationshipToParent: "fork" as const,
+                rootThreadId: ThreadId.make(root),
+              },
+            }
+          : imported;
       const nativeThread = importedProviderThread(row);
       const previews = yield* listShellMessages(thread.id);
       const events: Array<OrchestrationV2DomainEvent> = [
@@ -808,10 +838,56 @@ const make = Effect.gen(function* () {
         const historyEvents = yield* readHistoryEvents(threadId, messages.length).pipe(
           Effect.provideService(SqlClient.SqlClient, sql),
         );
+        const historicalRuns = new Map(
+          historyEvents
+            .filter((event) => event.type === "run.created")
+            .map((event) => [event.payload.id, event.payload]),
+        );
+        const messageRunIds = new Map<string, RunId>();
+        if (historicalRuns.size) {
+          const rows = yield* sql<{
+            row_id: number;
+            pending_message_id: string | null;
+            assistant_message_id: string | null;
+          }>`SELECT row_id, pending_message_id, assistant_message_id FROM projection_turns WHERE thread_id = ${threadId} ORDER BY requested_at, row_id`;
+          for (const row of rows)
+            for (const messageId of [row.pending_message_id, row.assistant_message_id]) {
+              if (messageId)
+                messageRunIds.set(
+                  messageId,
+                  RunId.make(`migration:v1:run:${threadId}:${row.row_id}`),
+                );
+            }
+        }
+        const linkedMessageEvents = messages
+          .flatMap(messageEvents)
+          .map((event): OrchestrationV2DomainEvent => {
+            if (event.type !== "message.updated" && event.type !== "turn-item.updated")
+              return event;
+            const messageId =
+              event.type === "message.updated"
+                ? event.payload.id
+                : "messageId" in event.payload
+                  ? event.payload.messageId
+                  : undefined;
+            const run = messageId ? historicalRuns.get(messageRunIds.get(messageId)!) : undefined;
+            if (!run) return event;
+            if (event.type === "message.updated")
+              return {
+                ...event,
+                id: EventId.make(`${event.id}:history-link`),
+                payload: { ...event.payload, runId: run.id, nodeId: run.rootNodeId },
+              };
+            return {
+              ...event,
+              id: EventId.make(`${event.id}:history-link`),
+              payload: { ...event.payload, runId: run.id, nodeId: run.rootNodeId },
+            };
+          });
         const timeline =
           historyEvents.length === 0
             ? []
-            : [...messages.flatMap(messageEvents), ...historyEvents]
+            : [...linkedMessageEvents, ...historyEvents]
                 .filter((event) => event.type === "turn-item.updated")
                 .sort(
                   (left, right) =>
@@ -847,7 +923,7 @@ const make = Effect.gen(function* () {
           WHERE application_event_version = 2
             AND aggregate_kind = 'thread'
             AND stream_id = ${threadId}
-            AND event_id LIKE ${`${IMPORT_EVENT_PREFIX}:message:%`}
+            AND event_id LIKE ${`${IMPORT_EVENT_PREFIX}:%`}
         `.pipe(NodeSqliteClient.readOnly);
         const existing = new Set(existingRows.map((row) => row.event_id));
         const missing = messages.filter(
@@ -875,7 +951,16 @@ const make = Effect.gen(function* () {
           yield* eventSink.write({ events: batch.flatMap(messageEvents) });
           yield* Effect.yieldNow;
         }
-        for (const batch of chunks([...historyEvents, ...timeline], TRANSCRIPT_EVENT_BATCH_SIZE)) {
+        for (const batch of chunks(
+          [
+            ...historyEvents,
+            ...linkedMessageEvents.filter(
+              (event) => event.type === "message.updated" && event.id.endsWith(":history-link"),
+            ),
+            ...timeline,
+          ].filter((event) => !existing.has(event.id)),
+          TRANSCRIPT_EVENT_BATCH_SIZE,
+        )) {
           yield* eventSink.write({ events: batch });
         }
         const now = DateTime.formatIso(yield* DateTime.now);

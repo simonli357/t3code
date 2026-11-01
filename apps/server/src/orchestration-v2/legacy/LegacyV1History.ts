@@ -5,6 +5,13 @@ import {
   EventId,
   NodeId,
   PlanId,
+  MessageId,
+  ModelSelection,
+  RunId,
+  RunAttemptId,
+  ProviderTurnId,
+  OrchestrationV2AppThreadJson,
+  OrchestrationV2ProviderThreadJson,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
   OrchestrationV2CheckpointFileSummary,
@@ -21,6 +28,30 @@ const decodePayload = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Un
 
 const decodeFiles = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Array(OrchestrationV2CheckpointFileSummary)),
+);
+
+const decodeApp = Schema.decodeEffect(Schema.fromJsonString(OrchestrationV2AppThreadJson));
+const decodeProvider = Schema.decodeEffect(
+  Schema.fromJsonString(OrchestrationV2ProviderThreadJson),
+);
+const decodeCursor = Schema.decodeOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      turnCount: Schema.optionalKey(Schema.Number),
+      turnStartMessageIds: Schema.optionalKey(Schema.Array(Schema.String)),
+      resumeSessionAt: Schema.optionalKey(Schema.String),
+    }),
+  ),
+);
+const decodeRequest = Schema.decodeOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      messageId: Schema.String,
+      modelSelection: ModelSelection,
+      runtimeMode: Schema.optionalKey(Schema.String),
+      interactionMode: Schema.optionalKey(Schema.String),
+    }),
+  ),
 );
 
 /** Import historical records without reviving provider actions, approvals, or jobs. */
@@ -48,6 +79,7 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
     turn_id: string | null;
   }>`SELECT * FROM projection_thread_activities WHERE thread_id = ${threadId} ORDER BY created_at, sequence, activity_id`;
   const plans = yield* sql<{
+    turn_id: string | null;
     plan_id: string;
     plan_markdown: string;
     created_at: string;
@@ -57,14 +89,19 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
   }>`SELECT * FROM projection_thread_proposed_plans WHERE thread_id = ${threadId} ORDER BY created_at, plan_id`;
   const turns = yield* sql<{
     row_id: number;
+    pending_message_id: string | null;
+    state: string;
+    started_at: string | null;
+    source_proposed_plan_thread_id: string | null;
+    source_proposed_plan_id: string | null;
     turn_id: string | null;
-    checkpoint_ref: string;
+    checkpoint_ref: string | null;
     checkpoint_status: string;
-    checkpoint_turn_count: number;
+    checkpoint_turn_count: number | null;
     checkpoint_files_json: string;
     completed_at: string | null;
     requested_at: string;
-  }>`SELECT * FROM projection_turns WHERE thread_id = ${threadId} AND checkpoint_ref IS NOT NULL ORDER BY checkpoint_turn_count, row_id`;
+  }>`SELECT * FROM projection_turns WHERE thread_id = ${threadId} ORDER BY requested_at, row_id`;
   if (activities.length + plans.length + turns.length === 0) return [];
   const thread = (yield* sql<{ cwd: string; created_at: string; updated_at: string }>`
     SELECT COALESCE(t.worktree_path, p.workspace_root) AS cwd, t.created_at, t.updated_at
@@ -72,6 +109,33 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
     WHERE t.thread_id = ${threadId}
   `)[0];
   if (!thread) return [];
+  const appRow = (yield* sql<{
+    payload_json: string;
+  }>`SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`)[0];
+  if (!appRow) return [];
+  const app = yield* decodeApp(appRow.payload_json);
+  const providerRow = (yield* sql<{
+    payload_json: string;
+  }>`SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${app.activeProviderThreadId}`)[0];
+  const provider = providerRow ? yield* decodeProvider(providerRow.payload_json) : undefined;
+  const cursorRow = (yield* sql<{
+    resume_cursor_json: string;
+  }>`SELECT resume_cursor_json FROM provider_session_runtime WHERE thread_id = ${threadId}`)[0];
+  const cursor = cursorRow
+    ? Option.getOrUndefined(decodeCursor(cursorRow.resume_cursor_json))
+    : undefined;
+  const requests = yield* sql<{
+    payload_json: string;
+  }>`SELECT payload_json FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND stream_id = ${threadId} AND event_type = 'thread.turn-start-requested'
+    ORDER BY sequence`;
+  const starts = new Map(
+    requests.flatMap((row) => {
+      const decoded = Option.getOrUndefined(decodeRequest(row.payload_json));
+      return decoded ? [[decoded.messageId, decoded] as const] : [];
+    }),
+  );
+  const lastCheckpointCount = Math.max(0, ...turns.map((turn) => turn.checkpoint_turn_count ?? 0));
   const nodeId = NodeId.make(`migration:v1:history:${threadId}`);
   const scopeId = CheckpointScopeId.make(`migration:v1:checkpoints:${threadId}`);
   const createdAt = DateTime.makeUnsafe(thread.created_at);
@@ -101,13 +165,28 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
       },
     },
   ];
+  if (provider && turns.length)
+    events.push({
+      id: EventId.make(`migration:v1:history:${threadId}:provider-range`),
+      type: "provider-thread.updated",
+      threadId,
+      occurredAt: updatedAt,
+      payload: { ...provider, firstRunOrdinal: 1, lastRunOrdinal: turns.length },
+    });
   const items: Array<OrchestrationV2TurnItem> = [];
-  const base = (id: string, at: string) => ({
+  const turnRowsById = new Map(
+    turns.filter((turn) => turn.turn_id !== null).map((turn) => [turn.turn_id, turn]),
+  );
+  const runForTurn = (turnId: string | null) => {
+    const row = turnId ? turnRowsById.get(turnId) : undefined;
+    return row ? RunId.make(`migration:v1:run:${threadId}:${row.row_id}`) : null;
+  };
+  const base = (id: string, at: string, turnId: string | null = null) => ({
     id: TurnItemId.make(`migration:v1:${id}`),
     threadId,
-    runId: null,
-    nodeId,
-    providerThreadId: null,
+    runId: runForTurn(turnId),
+    nodeId: runForTurn(turnId) ? NodeId.make(`${runForTurn(turnId)}:root`) : nodeId,
+    providerThreadId: runForTurn(turnId) ? (provider?.id ?? null) : null,
     providerTurnId: null,
     nativeItemRef: null,
     parentItemId: null,
@@ -124,7 +203,7 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
       () => activity.payload_json,
     );
     items.push({
-      ...base(`activity:${activity.activity_id}`, activity.created_at),
+      ...base(`activity:${activity.activity_id}`, activity.created_at, activity.turn_id),
       type: "dynamic_tool",
       title: activity.summary,
       toolName: activity.kind.trim() || "legacy_activity",
@@ -148,15 +227,25 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
       payload: {
         id: planId,
         threadId,
-        nodeId,
-        runId: null,
+        nodeId: runForTurn(plan.turn_id) ? NodeId.make(`${runForTurn(plan.turn_id)}:root`) : nodeId,
+        runId: runForTurn(plan.turn_id),
         kind: "proposed_plan",
         status: plan.implemented_at ? "completed" : "active",
         markdown: plan.plan_markdown,
+        ...(plan.implemented_at
+          ? {
+              implementation: {
+                threadId: plan.implementation_thread_id
+                  ? ThreadId.make(plan.implementation_thread_id)
+                  : null,
+                implementedAt: plan.implemented_at,
+              },
+            }
+          : {}),
       },
     });
     items.push({
-      ...base(`plan:${plan.plan_id}`, plan.created_at),
+      ...base(`plan:${plan.plan_id}`, plan.created_at, plan.turn_id),
       type: "proposed_plan",
       planId,
       markdown: plan.plan_markdown,
@@ -185,10 +274,161 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
     });
     let parentCheckpointId: CheckpointId | null = null;
     for (const [index, turn] of turns.entries()) {
-      const checkpointId = CheckpointId.make(`migration:v1:checkpoint:${threadId}:${turn.row_id}`);
+      const runId = RunId.make(`migration:v1:run:${threadId}:${turn.row_id}`);
+      const rootNodeId = NodeId.make(`${runId}:root`);
+      const attemptId = RunAttemptId.make(`${runId}:attempt`);
+      const ordinal = index + 1;
+      const request = turn.pending_message_id ? starts.get(turn.pending_message_id) : undefined;
+      const selection = request?.modelSelection ?? app.modelSelection;
+      const matchingProvider =
+        provider?.providerInstanceId === selection.instanceId ? provider : undefined;
+      // V1 Codex turn ids are native ids. Other adapters used local UUIDs; treating
+      // those UUIDs as native boundaries can rewind the wrong conversation.
+      const nativeTurnId = matchingProvider?.driver === "codex" ? turn.turn_id : null;
+      const count = turn.checkpoint_turn_count;
+      const legacyClaudeBoundary =
+        matchingProvider?.driver === "claudeAgent" &&
+        count !== null &&
+        count > 0 &&
+        cursor?.turnCount === lastCheckpointCount &&
+        cursor.turnStartMessageIds?.length === lastCheckpointCount
+          ? count < lastCheckpointCount && cursor.turnStartMessageIds[count]
+            ? { nextUserMessageId: cursor.turnStartMessageIds[count] }
+            : count === lastCheckpointCount && cursor.resumeSessionAt
+              ? { headMessageId: cursor.resumeSessionAt }
+              : undefined
+          : undefined;
+      const providerTurnId =
+        matchingProvider && (nativeTurnId || legacyClaudeBoundary)
+          ? ProviderTurnId.make(`${runId}:provider-turn`)
+          : null;
+      const status =
+        turn.state === "completed"
+          ? "completed"
+          : turn.state === "error"
+            ? "failed"
+            : "interrupted";
+      const occurredAt = DateTime.makeUnsafe(turn.completed_at ?? turn.requested_at);
+      const startedAt = turn.started_at ? DateTime.makeUnsafe(turn.started_at) : null;
+      const checkpointId = turn.checkpoint_ref
+        ? CheckpointId.make(`migration:v1:checkpoint:${threadId}:${turn.row_id}`)
+        : null;
+      events.push(
+        {
+          id: EventId.make(`${runId}:created`),
+          type: "run.created",
+          threadId,
+          occurredAt,
+          payload: {
+            legacyV1: {
+              turnId: turn.turn_id,
+              state: turn.state,
+              modelSelectionRecovered: request !== undefined,
+              ...(request?.runtimeMode ? { runtimeMode: request.runtimeMode } : {}),
+              ...(request?.interactionMode ? { interactionMode: request.interactionMode } : {}),
+            },
+            id: runId,
+            threadId,
+            ordinal,
+            providerInstanceId: selection.instanceId,
+            modelSelection: selection,
+            providerThreadId: matchingProvider?.id ?? null,
+            // Some V1 records have lost their initiating message; retain an audit-only
+            // reference rather than manufacturing a user message or replaying a turn.
+            userMessageId: MessageId.make(
+              turn.pending_message_id ?? `${runId}:missing-user-message`,
+            ),
+            rootNodeId,
+            activeAttemptId: matchingProvider ? attemptId : null,
+            status,
+            requestedAt: DateTime.makeUnsafe(turn.requested_at),
+            startedAt,
+            completedAt: occurredAt,
+            checkpointId,
+            contextHandoffId: null,
+            ...(turn.source_proposed_plan_thread_id && turn.source_proposed_plan_id
+              ? {
+                  sourcePlanRef: {
+                    threadId: ThreadId.make(turn.source_proposed_plan_thread_id),
+                    planId: PlanId.make(turn.source_proposed_plan_id),
+                  },
+                }
+              : {}),
+          },
+        },
+        {
+          id: EventId.make(`${rootNodeId}:created`),
+          type: "node.updated",
+          threadId,
+          occurredAt,
+          payload: {
+            id: rootNodeId,
+            threadId,
+            runId,
+            parentNodeId: null,
+            rootNodeId,
+            kind: "root_turn",
+            status,
+            countsForRun: true,
+            providerThreadId: matchingProvider?.id ?? null,
+            providerTurnId,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: scopeId,
+            startedAt,
+            completedAt: occurredAt,
+          },
+        },
+      );
+      if (matchingProvider)
+        events.push({
+          id: EventId.make(`${attemptId}:created`),
+          type: "run-attempt.created",
+          threadId,
+          occurredAt,
+          payload: {
+            id: attemptId,
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId,
+            providerInstanceId: matchingProvider.providerInstanceId,
+            providerThreadId: matchingProvider.id,
+            providerTurnId,
+            reason: "initial",
+            status,
+            startedAt,
+            completedAt: occurredAt,
+            ...(matchingProvider.nativeThreadRef?.nativeId
+              ? { nativeThreadId: matchingProvider.nativeThreadRef.nativeId }
+              : {}),
+          },
+        });
+      if (matchingProvider && providerTurnId)
+        events.push({
+          id: EventId.make(`${providerTurnId}:created`),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt,
+          payload: {
+            id: providerTurnId,
+            providerThreadId: matchingProvider.id,
+            nodeId: rootNodeId,
+            runAttemptId: attemptId,
+            nativeTurnRef: nativeTurnId
+              ? { driver: matchingProvider.driver, nativeId: nativeTurnId, strength: "strong" }
+              : null,
+            ...(legacyClaudeBoundary ? { legacyClaudeBoundary } : {}),
+            historyOrigin: "v1_import",
+            ordinal,
+            status,
+            startedAt,
+            completedAt: occurredAt,
+          },
+        });
+      if (!turn.checkpoint_ref || !checkpointId) continue;
       const at = turn.completed_at ?? turn.requested_at;
       const files = Option.getOrElse(decodeFiles(turn.checkpoint_files_json), () => []);
-      const status =
+      const checkpointStatus =
         turn.checkpoint_status === "ready"
           ? "ready"
           : turn.checkpoint_status === "error"
@@ -203,19 +443,29 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
           id: checkpointId,
           threadId,
           scopeId,
-          runId: null,
-          nodeId,
+          runId,
+          nodeId: rootNodeId,
           parentCheckpointId,
           ordinalWithinScope: index,
-          appRunOrdinal: null,
+          appRunOrdinal: ordinal,
+          legacyV1: {
+            turnId: turn.turn_id,
+            checkpointTurnCount: turn.checkpoint_turn_count,
+            ...(!providerTurnId
+              ? {
+                  rollbackUnavailableReason:
+                    "The V1 record has no recoverable native rollback boundary for this provider. Its Git checkpoint is preserved for inspection.",
+                }
+              : {}),
+          },
           ref: CheckpointRef.make(turn.checkpoint_ref),
-          status,
+          status: checkpointStatus,
           files,
           capturedAt: DateTime.makeUnsafe(at),
         },
       });
       items.push({
-        ...base(`checkpoint:${threadId}:${turn.row_id}`, at),
+        ...base(`checkpoint:${threadId}:${turn.row_id}`, at, turn.turn_id),
         type: "checkpoint",
         checkpointId,
         scopeId,

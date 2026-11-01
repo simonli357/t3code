@@ -20,19 +20,21 @@ export async function runClaudeHistoryWorker(
   const options = decodeHistoryOptions(rawOptions ?? "{}");
   if (!sessionId) throw new Error("Claude history session id is required.");
   const result =
-    method === "getSessionInfo"
-      ? await getSessionInfo(sessionId, options)
-      : method === "getSessionMessages"
-        ? await getSessionMessages(sessionId, options)
-        : method === "forkSession"
-          ? await forkSession(sessionId, options).then(async (forked) => {
-              const headMessageId = await getSessionMessages(forked.sessionId, options)
-                .then((messages) => messages.at(-1)?.uuid)
-                .catch(() => undefined);
-              return headMessageId === undefined ? forked : { ...forked, headMessageId };
-            })
-          : (() => {
-              throw new Error("Unknown Claude history operation.");
-            })();
+    method === "getSessionBoundaries"
+      ? (await getSessionMessages(sessionId, options)).map(({ uuid, type }) => ({ uuid, type }))
+      : method === "getSessionInfo"
+        ? await getSessionInfo(sessionId, options)
+        : method === "getSessionMessages"
+          ? await getSessionMessages(sessionId, options)
+          : method === "forkSession"
+            ? await forkSession(sessionId, options).then(async (forked) => {
+                const headMessageId = await getSessionMessages(forked.sessionId, options)
+                  .then((messages) => messages.at(-1)?.uuid)
+                  .catch(() => undefined);
+                return headMessageId === undefined ? forked : { ...forked, headMessageId };
+              })
+            : (() => {
+                throw new Error("Unknown Claude history operation.");
+              })();
   process.stdout.write(JSON.stringify(result));
 }
