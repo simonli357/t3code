@@ -21,7 +21,14 @@ export async function runClaudeHistoryWorker(
   if (!sessionId) throw new Error("Claude history session id is required.");
   const result =
     method === "getSessionBoundaries"
-      ? (await getSessionMessages(sessionId, options)).map(({ uuid, type }) => ({ uuid, type }))
+      ? (await getSessionMessages(sessionId, options)).map(
+          ({ uuid, type, parent_tool_use_id, message }) => ({
+            uuid,
+            type,
+            parent_tool_use_id,
+            message,
+          }),
+        )
       : method === "getSessionInfo"
         ? await getSessionInfo(sessionId, options)
         : method === "getSessionMessages"

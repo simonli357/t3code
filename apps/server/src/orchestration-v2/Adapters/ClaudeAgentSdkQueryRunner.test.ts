@@ -24,6 +24,7 @@ import { AgentScope } from "@t3tools/shared/AgentScope";
 import { ProviderEventLoggers } from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import { resolveLegacyClaudeBoundary } from "../../provider/legacyClaudeBoundary.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import {
   ClaudeAgentSdkQueryRunner,
@@ -98,10 +99,57 @@ it.effect("forks a session stored under the instance's own CLAUDE_CONFIG_DIR", (
         options: { dir: "/repo" },
         environment: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
       });
-      assert.deepStrictEqual(boundaries, [
-        { uuid: "aaaaaaaa-0000-4000-8000-000000000001", type: "user" },
-        { uuid: "aaaaaaaa-0000-4000-8000-000000000002", type: "assistant" },
-      ]);
+      assert.deepStrictEqual(
+        boundaries.map(({ uuid, type }) => ({ uuid, type })),
+        [
+          { uuid: "aaaaaaaa-0000-4000-8000-000000000001", type: "user" },
+          { uuid: "aaaaaaaa-0000-4000-8000-000000000002", type: "assistant" },
+        ],
+      );
+      assert.equal(boundaries[0]?.parent_tool_use_id, null);
+      assert.deepStrictEqual(boundaries[0]?.message, { role: "user", content: "hello" });
+      const originalPath = path.join(projectDir, `${FORK_SESSION_ID}.jsonl`);
+      const original = yield* fileSystem.readFileString(originalPath);
+      const uuid = (index: number) => `aaaaaaaa-0000-4000-8000-${String(index).padStart(12, "0")}`;
+      const extra = [
+        { role: "user", content: "second prompt" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call", name: "Read", input: { file_path: "fixture" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call", content: "fixture output" }],
+        },
+        { role: "assistant", content: [{ type: "text", text: "second answer" }] },
+        { role: "user", content: "third prompt" },
+        { role: "assistant", content: [{ type: "text", text: "third answer" }] },
+      ].map((message, index) =>
+        JSON.stringify({
+          type: message.role,
+          uuid: uuid(index + 3),
+          parentUuid: uuid(index + 2),
+          sessionId: FORK_SESSION_ID,
+          cwd: "/repo",
+          isSidechain: false,
+          timestamp: "2026-10-01T00:00:00.000Z",
+          message,
+        }),
+      );
+      yield* fileSystem.writeFileString(originalPath, `${original}\n${extra.join("\n")}\n`);
+      const nativeHistory = yield* runner.readLegacyBoundaries!({
+        sessionId: FORK_SESSION_ID,
+        options: { dir: "/repo" },
+        environment: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+      });
+      assert.equal(
+        resolveLegacyClaudeBoundary(nativeHistory, {
+          recoverTurnStarts: { retainedTurnCount: 2, turnCount: 3, sourceHeadMessageId: uuid(8) },
+        }),
+        uuid(6),
+      );
       assert.notEqual(forked.sessionId, FORK_SESSION_ID);
       const transcript = yield* fileSystem.readFileString(
         path.join(projectDir, `${forked.sessionId}.jsonl`),

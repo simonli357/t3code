@@ -1153,6 +1153,22 @@ export const OrchestrationV2ProviderTurn = Schema.Struct({
     Schema.Struct({
       nextUserMessageId: Schema.optional(Schema.String),
       headMessageId: Schema.optional(Schema.String),
+      recoverTurnStarts: Schema.optional(
+        Schema.Struct({
+          retainedTurnCount: PositiveInt,
+          turnCount: PositiveInt,
+          sourceHeadMessageId: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
+  legacyOpenCodeBoundary: Schema.optional(
+    Schema.Struct({
+      retainedTurnCount: PositiveInt,
+      turnCount: PositiveInt,
+      headMessageId: Schema.optional(Schema.String),
+      messagePartIds: Schema.Array(Schema.String),
+      toolCallIds: Schema.Array(Schema.String),
     }),
   ),
   id: ProviderTurnId,

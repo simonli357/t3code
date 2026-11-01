@@ -1,4 +1,7 @@
-import { resolveLegacyClaudeBoundary } from "../../provider/legacyClaudeBoundary.ts";
+import {
+  resolveLegacyClaudeBoundary,
+  type LegacyClaudeMessage,
+} from "../../provider/legacyClaudeBoundary.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
@@ -599,10 +602,7 @@ export interface ClaudeAgentSdkQueryRunnerShape {
     readonly sessionId: string;
     readonly environment: NodeJS.ProcessEnv;
     readonly options: { readonly dir?: string | undefined };
-  }) => Effect.Effect<
-    ReadonlyArray<{ readonly uuid: string; readonly type: string }>,
-    ClaudeAgentSdkQueryRunnerError
-  >;
+  }) => Effect.Effect<ReadonlyArray<LegacyClaudeMessage>, ClaudeAgentSdkQueryRunnerError>;
   readonly allocateSessionId: Effect.Effect<string, ClaudeAgentSdkQueryRunnerError>;
   readonly open: (
     input: ClaudeAgentSdkQueryOpenInput,
@@ -864,7 +864,16 @@ function makeClaudeAgentSdkProtocolLogger(input: {
 
 const encodeClaudeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeClaudeLegacyBoundaries = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Array(Schema.Struct({ uuid: Schema.String, type: Schema.String }))),
+  Schema.fromJsonString(
+    Schema.Array(
+      Schema.Struct({
+        uuid: Schema.String,
+        type: Schema.String,
+        parent_tool_use_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+        message: Schema.optionalKey(Schema.Unknown),
+      }),
+    ),
+  ),
 );
 const decodeClaudeHistoryFork = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
@@ -11063,6 +11072,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const nativeThreadId = yield* getNativeThreadId(rollbackInput.providerThread);
               yield* closeLiveQueryForNativeThread(nativeThreadId);
               const now = yield* DateTime.now;
+              let resolvedLegacyTurns: Array<OrchestrationV2ProviderTurn> = [];
               const resumeSessionAt =
                 rollbackInput.target.type === "provider_turn" &&
                 rollbackInput.target.providerTurn.historyOrigin === "v1_import"
@@ -11088,7 +11098,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                         environment: sessionEnvironment,
                         options: { dir: input.runtimePolicy.cwd ?? undefined },
                       });
-                      return yield* Effect.try({
+                      const head = yield* Effect.try({
                         try: () => resolveLegacyClaudeBoundary(messages, boundary),
                         catch: (cause) =>
                           new ProviderAdapter.ProviderAdapterRollbackThreadError({
@@ -11097,6 +11107,53 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                             cause,
                           }),
                       });
+                      const selected =
+                        rollbackInput.target.type === "provider_turn"
+                          ? rollbackInput.target.providerTurn
+                          : undefined;
+                      resolvedLegacyTurns = rollbackInput.providerThreadTurns.flatMap((turn) => {
+                        if (
+                          !selected ||
+                          turn.historyOrigin !== "v1_import" ||
+                          turn.providerThreadId !== selected.providerThreadId ||
+                          turn.ordinal > selected.ordinal
+                        )
+                          return [];
+                        const candidate = turn.nativeTurnRef?.nativeId
+                          ? { headMessageId: turn.nativeTurnRef.nativeId }
+                          : turn.legacyClaudeBoundary;
+                        if (!candidate) return [];
+                        try {
+                          const nativeId = resolveLegacyClaudeBoundary(messages, candidate);
+                          if (
+                            messages.findIndex((message) => message.uuid === nativeId) >
+                            messages.findIndex((message) => message.uuid === head)
+                          )
+                            return [];
+                          return [
+                            {
+                              ...turn,
+                              nativeTurnRef: {
+                                driver: CLAUDE_PROVIDER,
+                                nativeId,
+                                strength: "strong" as const,
+                              },
+                            },
+                          ];
+                        } catch {
+                          return [];
+                        }
+                      });
+                      if (selected && !resolvedLegacyTurns.some((turn) => turn.id === selected.id))
+                        resolvedLegacyTurns.push({
+                          ...selected,
+                          nativeTurnRef: {
+                            driver: CLAUDE_PROVIDER,
+                            nativeId: head,
+                            strength: "strong",
+                          },
+                        });
+                      return head;
                     })
                   : yield* resolveClaudeRollbackResumeSessionAt(rollbackInput);
 
@@ -11142,21 +11199,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   lastRunOrdinal: rollbackInput.target.appRunOrdinal,
                   updatedAt: now,
                 },
-                providerTurns:
-                  rollbackInput.target.type === "provider_turn" &&
-                  rollbackInput.target.providerTurn.historyOrigin === "v1_import" &&
-                  resumeSessionAt
-                    ? [
-                        {
-                          ...rollbackInput.target.providerTurn,
-                          nativeTurnRef: {
-                            driver: CLAUDE_PROVIDER,
-                            nativeId: resumeSessionAt,
-                            strength: "strong" as const,
-                          },
-                        },
-                      ]
-                    : [],
+                providerTurns: resolvedLegacyTurns,
                 messages: [],
                 runtimeRequests: [],
               };

@@ -5177,9 +5177,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect(
-    "recovers an imported Claude rollback cursor and retries using the resolved durable boundary",
-    () =>
+  it.effect.each([false, true])(
+    "recovers an imported Claude rollback cursor and retries using the resolved durable boundary, null markers=%s",
+    (recoverNulls) =>
       Effect.gen(function* () {
         let reads = 0;
         const harness = yield* makeWakeHarnessWithOptions({
@@ -5188,11 +5188,40 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             Effect.sync(() =>
               ++reads === 1
                 ? [
+                    {
+                      uuid: "u1",
+                      type: "user",
+                      parent_tool_use_id: null,
+                      message: { content: "first" },
+                    },
+                    { uuid: "a1", type: "assistant" },
+                    {
+                      uuid: "u2",
+                      type: "user",
+                      parent_tool_use_id: null,
+                      message: { content: "second" },
+                    },
+                    {
+                      uuid: "tool-result",
+                      type: "user",
+                      parent_tool_use_id: null,
+                      message: { content: [{ type: "tool_result" }] },
+                    },
                     { uuid: "a2", type: "assistant" },
-                    { uuid: "u3", type: "user" },
+                    {
+                      uuid: "u3",
+                      type: "user",
+                      parent_tool_use_id: null,
+                      message: { content: "third" },
+                    },
                     { uuid: "a3", type: "assistant" },
                   ]
-                : [{ uuid: "a2", type: "assistant" }],
+                : [
+                    { uuid: "u1", type: "user" },
+                    { uuid: "a1", type: "assistant" },
+                    { uuid: "u2", type: "user" },
+                    { uuid: "a2", type: "assistant" },
+                  ],
             ),
         });
         const now = yield* DateTime.now;
@@ -5207,7 +5236,17 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           startedAt: now,
           completedAt: now,
           historyOrigin: "v1_import",
-          legacyClaudeBoundary: { nextUserMessageId: "u3" },
+          legacyClaudeBoundary: recoverNulls
+            ? { recoverTurnStarts: { retainedTurnCount: 2, turnCount: 3 } }
+            : { nextUserMessageId: "u3" },
+        };
+        const older: OrchestrationV2ProviderTurn = {
+          ...providerTurn,
+          id: ProviderTurnId.make("imported-claude-older"),
+          ordinal: 1,
+          legacyClaudeBoundary: recoverNulls
+            ? { recoverTurnStarts: { retainedTurnCount: 1, turnCount: 3 } }
+            : { nextUserMessageId: "u2" },
         };
         const target = {
           type: "provider_turn" as const,
@@ -5218,7 +5257,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const restored = yield* harness.runtime.rollbackThread({
           providerThread: harness.providerThread,
           target,
-          providerThreadTurns: [providerTurn],
+          providerThreadTurns: [providerTurn, older],
         });
         assert.equal(restored.providerThread.nativeConversationHeadRef?.nativeId, "a2");
         assert.equal(restored.providerTurns?.[0]?.nativeTurnRef?.nativeId, "a2");
@@ -5229,6 +5268,14 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         });
         assert.equal(retry.providerThread.nativeConversationHeadRef?.nativeId, "a2");
         assert.equal(reads, 2);
+        const earlier = retry.providerTurns.find((turn) => turn.id === older.id)!;
+        assert.equal(earlier.nativeTurnRef?.nativeId, "a1");
+        const earlierResult = yield* harness.runtime.rollbackThread({
+          providerThread: retry.providerThread,
+          target: { ...target, appRunOrdinal: 1, providerTurn: earlier },
+          providerThreadTurns: retry.providerTurns,
+        });
+        assert.equal(earlierResult.providerThread.nativeConversationHeadRef?.nativeId, "a1");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
