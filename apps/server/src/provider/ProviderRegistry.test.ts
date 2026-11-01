@@ -226,6 +226,7 @@ function makeCodexProbeSnapshot(
 ): CodexAppServerProviderSnapshot {
   return {
     version: "1.0.0",
+    config: { kind: "available", config: {} },
     account: {
       account: {
         type: "chatgpt",
@@ -322,6 +323,35 @@ it.layer(
   Layer.mergeAll(layerTestNodeServices, ServerSettingsModule.layerTest(), layerTestHttpClient),
 )("ProviderRegistry", (it) => {
   describe("checkCodexProviderStatus", () => {
+    it.effect(
+      "excludes custom and unverified quota sources despite an unrelated ChatGPT login",
+      () =>
+        Effect.gen(function* () {
+          const custom = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                config: {
+                  kind: "available",
+                  config: {
+                    model_provider: "deepseek",
+                    model_providers: { deepseek: { name: "DeepSeek" } },
+                  },
+                },
+              }),
+            ),
+          );
+          assert.equal(custom.auth.type, "apiKey");
+          assert.equal(custom.auth.label, "DeepSeek API key");
+          assert.equal(custom.auth.email, undefined);
+          assert.equal(custom.usageLimits?.unavailable?.reason, "unsupported");
+          const unverified = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(makeCodexProbeSnapshot({ config: { kind: "unavailable" } })),
+          );
+          assert.equal(unverified.usageLimits?.unavailable?.reason, "unverified");
+          assert.deepEqual(unverified.usageLimits?.windows, []);
+          assert.equal(unverified.auth.email, undefined);
+        }),
+    );
     it.effect("uses the app-server account and model list for provider status", () =>
       Effect.gen(function* () {
         const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>

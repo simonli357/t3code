@@ -21,6 +21,22 @@ const weekly = {
 const published = { checkedAt, windows: [session, weekly] };
 
 describe("applyUsageLimitsUpdate", () => {
+  it("keeps unverified provenance authoritative across runtime ticks and failed probes", () => {
+    const unverified = { checkedAt, windows: [], unavailable: { reason: "unverified" as const } };
+    expect(
+      applyUsageLimitsUpdate({ previous: unverified, checkedAt, update: { windows: [session] } }),
+    ).toBe(unverified);
+    expect(
+      resolveUsageLimitsAfterProbe({
+        published: unverified,
+        probed: { checkedAt, windows: [], unavailable: { reason: "probeFailed" } },
+      }),
+    ).toBe(unverified);
+    expect(resolveUsageLimitsAfterProbe({ published, probed: unverified })).toBe(unverified);
+    expect(resolveUsageLimitsAfterProbe({ published: unverified, probed: published })).toBe(
+      published,
+    );
+  });
   it("returns the published object itself when no window moved", () => {
     const next = applyUsageLimitsUpdate({
       previous: published,

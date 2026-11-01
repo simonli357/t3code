@@ -7,6 +7,7 @@ import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReact
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
 import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
+import * as LinkedSessions from "./peer/LinkedSessions.ts";
 import * as AllocationStore from "./allocation/AllocationStore.ts";
 import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
 import * as UsageCapEnforcement from "./allocation/UsageCapEnforcement.ts";
@@ -804,6 +805,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(
         AgentReadsHttp.layer.pipe(
+          Layer.provide(LinkedSessions.layer),
           Layer.provide(SessionMessages.layer),
           Layer.provide(layerUsageMeasurements),
           Layer.provide(layerSessionMoves),

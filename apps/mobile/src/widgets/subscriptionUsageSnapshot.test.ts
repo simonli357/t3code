@@ -50,6 +50,21 @@ function presentations(providers: readonly ServerProvider[] = [provider()]) {
 }
 
 describe("subscription widget snapshots", () => {
+  it("does not invent subscription bars for an unverified custom account", () => {
+    const snapshot = buildSubscriptionUsageSnapshot(
+      presentations([
+        provider({
+          usageLimits: {
+            checkedAt,
+            windows: [window],
+            unavailable: { reason: "unverified" },
+          },
+        }),
+      ]),
+      deepLink,
+    );
+    expect(snapshot.providers).toEqual([]);
+  });
   it("uses provider data and its observation time without exposing account emails", () => {
     const snapshot = buildSubscriptionUsageSnapshot(
       presentations([provider({ displayName: "private@example.com" })]),

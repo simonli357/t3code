@@ -159,6 +159,20 @@ const peerOrigin = (url: string) => {
 const linkLimitsHold = (peer: { readonly capabilities: ExecutionEnvironmentCapabilities }) =>
   peer.capabilities.mcpModeLimitHeader === true && peer.capabilities.linkFence === true;
 
+const LegacyPeers = Schema.fromJsonString(
+  Schema.Struct({
+    peers: Schema.Array(
+      Schema.Struct({
+        environmentId: Schema.String,
+        label: Schema.String,
+        url: Schema.String,
+        token: Schema.String,
+      }),
+    ),
+  }),
+);
+const decodeLegacyPeers = Schema.decodeUnknownOption(LegacyPeers);
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
@@ -166,6 +180,37 @@ const make = Effect.gen(function* () {
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // V1 links use /api/peer/v1 and unfenced bearer credentials. Preserve their identity,
+  // URLs and original secret; never send those tokens to the V2 MCP route as a guess.
+  // This receipt prevents an explicitly unlinked peer from reappearing on restart.
+  yield* Effect.gen(function* () {
+    const legacyImported = yield* secrets.get("peer-environments-v2-imported");
+    if (Option.isNone(legacyImported)) {
+      const legacy = yield* secrets.get("peer-environments");
+      if (Option.isSome(legacy)) {
+        const decoded = decodeLegacyPeers(new TextDecoder().decode(legacy.value));
+        if (Option.isSome(decoded)) {
+          const now = DateTime.formatIso(yield* DateTime.now);
+          for (const peer of decoded.value.peers) {
+            const secretName = `peer-link-v1-${Hex.encode(new TextEncoder().encode(peer.environmentId))}`;
+            yield* secrets.set(secretName, new TextEncoder().encode(peer.token));
+            yield* sql`
+            INSERT INTO peer_environment_links (
+              environment_id, secret_name, label, urls_json, access, linked_at, expires_at,
+              last_reached_at, last_error, fenced
+            ) VALUES (
+              ${peer.environmentId}, ${secretName}, ${peer.label},
+              ${yield* encodeUrls([peer.url])},
+              'full-access', ${now}, ${now}, NULL,
+              'Preserved V1 link. Its protocol-1 route and unfenced credential require a validated V2 transition; the original peer-environments secret is retained.', 0
+            ) ON CONFLICT(environment_id) DO NOTHING
+          `;
+          }
+          yield* secrets.set("peer-environments-v2-imported", new TextEncoder().encode("1"));
+        }
+      }
+    }
+  }).pipe(Effect.catch(failStorage));
   const enabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),

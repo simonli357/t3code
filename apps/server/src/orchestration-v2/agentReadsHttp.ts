@@ -10,6 +10,7 @@ import { annotateEnvironmentRequest, requireEnvironmentScope } from "../auth/htt
 import * as SessionMoves from "../moves/SessionMoves.ts";
 import * as UsageMeasurements from "../usage/UsageMeasurements.ts";
 import * as SessionMessages from "./SessionMessages.ts";
+import * as LinkedSessions from "../peer/LinkedSessions.ts";
 
 /** What t3-workflows scripts call over HTTP: session moves, another session's recent messages, and retained usage. */
 export const layer = HttpApiBuilder.group(
@@ -19,7 +20,24 @@ export const layer = HttpApiBuilder.group(
     const sessionMessages = yield* SessionMessages.SessionMessages;
     const usageMeasurements = yield* UsageMeasurements.UsageMeasurements;
     const moves = yield* SessionMoves.SessionMoves;
+    const linked = yield* LinkedSessions.LinkedSessions;
     return handlers
+      .handle(
+        "linkedSessionQuery",
+        Effect.fn("environment.agentReads.linkedSessionQuery")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* linked.query(args.payload);
+        }),
+      )
+      .handle(
+        "linkedSessionCommand",
+        Effect.fn("environment.agentReads.linkedSessionCommand")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          return yield* linked.command(args.payload);
+        }),
+      )
       .handle(
         "moveSession",
         Effect.fn("environment.agentReads.moveSession")(function* (args) {

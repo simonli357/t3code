@@ -9,6 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import { isMasterInstruction } from "@t3tools/shared/workerMessages";
 import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
@@ -318,11 +319,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   );
   const userMessage = resolveUserMessagePresentation(row.message);
   // Messages from other agents fold to one line so the user's own messages stay easy to find.
-  const folded = userMessage.attribution === "agent";
+  const masterInstruction = isMasterInstruction(row.message);
+  const folded = userMessage.attribution === "agent" && !masterInstruction;
   const [expanded, setExpanded] = useState(false);
   const revealFoldRef = findRevealRef(() => setExpanded(true));
   const senderShell = useQuietThreadShell(
-    folded && senderThreadId
+    (folded || masterInstruction) && senderThreadId
       ? { environmentId: ctx.activeThreadEnvironmentId, threadId: senderThreadId }
       : null,
   );
@@ -476,12 +478,20 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
       >
         {/* Outside the fold so a collapsed message still has a heading to navigate to. */}
         <MessageAuthorHeading>
-          {folded
-            ? senderLabel
-            : userMessage.guestName === undefined
-              ? "You"
-              : `${userMessage.guestName} (guest)`}
+          {masterInstruction
+            ? `From master: ${senderLabel}`
+            : folded
+              ? senderLabel
+              : userMessage.guestName === undefined
+                ? "You"
+                : `${userMessage.guestName} (guest)`}
         </MessageAuthorHeading>
+        {masterInstruction ? (
+          <p className="mb-2 text-xs text-muted-foreground">
+            From master: {senderShell?.title.trim() || "Master"} ·{" "}
+            {formatDayAwareTimestamp(row.message.createdAt, ctx.timestampFormat)}
+          </p>
+        ) : null}
         {folded ? (
           <FoldedMessageHeader
             icon={MessagesSquareIcon}
@@ -637,7 +647,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                 renderContextReference={renderContextReference}
                 skills={ctx.skills}
                 markdownCwd={ctx.markdownCwd}
-                collapsible={!folded}
+                collapsible={!folded && !masterInstruction}
               />
             </div>
           </div>

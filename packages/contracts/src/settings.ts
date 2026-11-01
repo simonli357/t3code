@@ -1178,6 +1178,9 @@ export const ServerSettings = Schema.Struct({
   workerDisabledInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  allocationCoordinatorEnvironmentId: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** Opt-in local capacity measurements. Shared accounts should stay excluded. */
   usageMeasurementInstanceIds: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
@@ -1550,6 +1553,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  allocationCoordinatorEnvironmentId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   workerDisabledInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   usageMeasurementInstanceIds: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
   workerAutoSwitchOnUsageLimit: Schema.optionalKey(Schema.Boolean),

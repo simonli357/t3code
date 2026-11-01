@@ -7,6 +7,8 @@ import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as PlatformError from "effect/PlatformError";
 import * as FileSystem from "effect/FileSystem";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - FileSystem.symlink cannot select Windows junctions.
+import * as NodeFSP from "node:fs/promises";
 import * as ProcessRunner from "../processRunner.ts";
 import { folders, processes, processUsage, realVolumes } from "./ComputerTelemetry.ts";
 import { output, toJson } from "./testSupport.ts";
@@ -40,6 +42,7 @@ describe("process usage", () => {
 it.layer(NodeServices.layer)("folder sizes", (it) => {
   const fixture = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const platform = yield* HostProcess.Platform;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-folders-" });
     const bytes = (size: number) => "x".repeat(size);
     yield* fs.makeDirectory(`${root}/big/nested`, { recursive: true });
@@ -50,10 +53,17 @@ it.layer(NodeServices.layer)("folder sizes", (it) => {
     yield* fs.link(`${root}/big/a.bin`, `${root}/big/a-again.bin`);
     yield* fs.writeFileString(`${root}/small/note.txt`, "ten bytes!");
     yield* fs.writeFileString(`${root}/file.bin`, bytes(5_000));
-    yield* fs.symlink(`${root}/big`, `${root}/linked`);
+    // Junctions exercise native Windows link boundaries without requiring symlink privileges.
+    if (platform === "win32")
+      yield* Effect.promise(() => NodeFSP.symlink(`${root}/big`, `${root}/linked`, "junction"));
+    else yield* fs.symlink(`${root}/big`, `${root}/linked`);
     const outside = yield* fs.makeTempDirectoryScoped({ prefix: "outside-size-" });
     yield* fs.writeFileString(`${outside}/large.bin`, bytes(2_000_000));
-    yield* fs.symlink(`${outside}/large.bin`, `${root}/big/outside-file`);
+    if (platform === "win32")
+      yield* Effect.promise(() =>
+        NodeFSP.symlink(outside, `${root}/big/outside-folder`, "junction"),
+      );
+    else yield* fs.symlink(`${outside}/large.bin`, `${root}/big/outside-file`);
     return root;
   });
   const row = (rows: ReadonlyArray<{ name: string }>, name: string) =>
@@ -103,7 +113,7 @@ it.layer(NodeServices.layer)("folder sizes", (it) => {
       const denied = FileSystem.FileSystem.of({
         ...fs,
         stat: (file) =>
-          file.endsWith("/secret")
+          file.replaceAll("\\", "/").endsWith("/secret")
             ? Effect.fail(
                 PlatformError.systemError({
                   _tag: "PermissionDenied",

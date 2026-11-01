@@ -5067,6 +5067,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               scope === undefined ||
               checkpoint.scopeId !== scope.id ||
               checkpoint.status !== "ready" ||
+              (checkpoint.appRunOrdinal === null &&
+                (scope.kind !== "root_run" || checkpoint.ordinalWithinScope !== 0)) ||
+              checkpoint.legacyV1?.rollbackUnavailableReason !== undefined ||
               providerThread.id !== thread.activeProviderThreadId ||
               providerThread.providerInstanceId !== thread.modelSelection.instanceId
             )
@@ -5097,7 +5100,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             WHERE run.thread_id = ${threadId} AND run.status = 'rolled_back'
               AND attempt.thread_id = ${threadId}`,
                 sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_checkpoints
-            WHERE thread_id = ${threadId} AND scope_id = ${scope.id} AND status = 'ready'
+            WHERE thread_id = ${threadId} AND status = 'ready'
+              AND (scope_id = ${scope.id} OR scope_id IN (
+                SELECT scope_id FROM orchestration_v2_projection_checkpoint_scopes
+                WHERE thread_id = ${threadId} AND kind = 'root_run'))
               AND app_run_ordinal > ${targetOrdinal}
             ORDER BY ordinal_within_scope ASC`,
               ]);

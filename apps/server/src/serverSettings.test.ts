@@ -94,6 +94,83 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("preserves custom settings and account flags through import, save and restart", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fs.writeFileString(
+        config.settingsPath,
+        JSON.stringify({
+          allocationCoordinatorEnvironmentId: "coordinator-environment",
+          continueThreadsAfterServerUpdate: false,
+          linkedEnvironmentsEnabled: true,
+          workspaceLifecycleCommand: { executable: "workenv", args: ["session"] },
+          globalInstructions: { enabled: true, text: "Retain custom workflow" },
+          workerRenewal: { workerHours: 3, masterHours: 5 },
+          providers: {
+            cursor: { enabled: false },
+            grok: { enabled: false },
+            opencode: { enabled: true },
+          },
+          providerInstances: {
+            codex_work: {
+              driver: "codex",
+              enabled: true,
+              config: { binaryPath: "/opt/codex", codexHome: "/accounts/work" },
+            },
+            claude_work: {
+              driver: "claudeAgent",
+              enabled: false,
+              config: { binaryPath: "/opt/claude" },
+            },
+          },
+          projectSettingsOverrides: {
+            project: {
+              continueThreadsAfterServerUpdate: true,
+              defaultRuntimeMode: "approval-required",
+            },
+          },
+        }),
+      );
+      const before = yield* service.getSettings;
+      yield* service.updateSettings({ sidebarAutoSettleOnMerge: false });
+      const restarted = yield* Effect.gen(function* () {
+        return yield* (yield* ServerSettingsModule.ServerSettingsService).getSettings;
+      }).pipe(Effect.provide(Layer.fresh(ServerSettingsModule.layer)));
+      for (const key of [
+        "allocationCoordinatorEnvironmentId",
+        "continueThreadsAfterServerUpdate",
+        "linkedEnvironmentsEnabled",
+        "workspaceLifecycleCommand",
+        "globalInstructions",
+        "workerRenewal",
+        "providerInstances",
+        "projectSettingsOverrides",
+      ] as const) {
+        assert.deepEqual(restarted[key], before[key], key);
+      }
+      assert.equal(restarted.allocationCoordinatorEnvironmentId, "coordinator-environment");
+      assert.isTrue(restarted.linkedEnvironmentsEnabled);
+      assert.isFalse(restarted.continueThreadsAfterServerUpdate);
+      assert.isFalse(
+        resolveProviderInstanceEnabled(
+          restarted.providerInstances[ProviderInstanceId.make("cursor")]!,
+        ),
+      );
+      assert.isTrue(
+        resolveProviderInstanceEnabled(
+          restarted.providerInstances[ProviderInstanceId.make("opencode")]!,
+        ),
+      );
+      assert.isFalse(
+        resolveProviderInstanceEnabled(
+          restarted.providerInstances[ProviderInstanceId.make("claude_work")]!,
+        ),
+      );
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
@@ -827,6 +904,21 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         },
         [ProviderInstanceId.make("claudeAgent")]: {
           driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: false,
+          config: {},
+        },
+        [ProviderInstanceId.make("cursor")]: {
+          driver: ProviderDriverKind.make("cursor"),
+          enabled: false,
+          config: {},
+        },
+        [ProviderInstanceId.make("grok")]: {
+          driver: ProviderDriverKind.make("grok"),
+          enabled: false,
+          config: {},
+        },
+        [ProviderInstanceId.make("opencode")]: {
+          driver: ProviderDriverKind.make("opencode"),
           enabled: false,
           config: {},
         },

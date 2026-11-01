@@ -43,9 +43,9 @@ function processHandle(input: {
 
 function piProbeSpawner(version: string) {
   return ChildProcessSpawner.make((command) => {
-    const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+    const args = ChildProcess.isStandardCommand(command) ? [command.command, ...command.args] : [];
     return Effect.succeed(
-      args.includes("--version")
+      args.some((arg) => arg.includes("--version"))
         ? processHandle({ stdout: `pi ${version}\n` })
         : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
     );
@@ -82,9 +82,11 @@ const piDiscoverySpawner = (inventory: unknown, state: unknown = {}) =>
       }),
     );
     return ChildProcessSpawner.make((command) => {
-      const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+      const args = ChildProcess.isStandardCommand(command)
+        ? [command.command, ...command.args]
+        : [];
       return Effect.succeed(
-        args.includes("--version")
+        args.some((arg) => arg.includes("--version"))
           ? processHandle({ stdout: "pi 0.84.3\n" })
           : ChildProcessSpawner.makeHandle({
               ...processHandle({}),

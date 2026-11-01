@@ -384,7 +384,11 @@ function migrateLegacyProviderSettings(
       explicitEnabled ??
       (HISTORY_RESTORED_DRIVERS.has(driver) && usedProviders.has(driver) ? true : undefined);
     const driverDefault = resolveProviderInstanceEnabled({ driver, config: {} });
-    if (Object.keys(config).length === 0 && (enabled === undefined || enabled === driverDefault)) {
+    if (
+      Object.keys(config).length === 0 &&
+      explicitEnabled === undefined &&
+      (enabled === undefined || enabled === driverDefault)
+    ) {
       continue;
     }
     providerInstances[instanceId] = {

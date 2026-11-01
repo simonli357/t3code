@@ -30,6 +30,8 @@ import * as Option from "effect/Option";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { resolveLegacyPiSession } from "./legacySession.ts";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -417,6 +419,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const agentScope = yield* AgentScope;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -2144,7 +2147,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           );
         }
         const existing = threadInput.existingProviderThread;
-        const resumeId = existing?.nativeThreadRef?.nativeId;
+        const originalResumeId = existing?.nativeThreadRef?.nativeId;
+        const resumeId =
+          originalResumeId == null
+            ? originalResumeId
+            : yield* resolveLegacyPiSession(originalResumeId, environment).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError((cause) =>
+                  protocolError("Could not resolve the imported Pi session file", cause),
+                ),
+              );
         const needsNewSession = resumeId == null && registrationAttempted;
         registrationAttempted = true;
         if (resumeId != null || needsNewSession) {
@@ -3309,6 +3322,7 @@ function piUiResponse(
 }
 
 export type PiAdapterV2DriverEnv =
+  | Path.Path
   | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2

@@ -30,13 +30,13 @@ export class ProjectStoreV2Error extends Schema.TaggedError<ProjectStoreV2Error>
 }
 
 export const ProjectRow = Schema.Struct({
+  basePrompt: Schema.optional(Schema.NullOr(Schema.String)),
   projectId: ProjectId,
   title: Schema.String,
   workspaceRoot: Schema.String,
   defaultModelSelection: Schema.NullOr(ModelSelection),
   defaultThreadEnvMode: Schema.NullOr(ThreadEnvMode),
   autoPull: Schema.Boolean,
-  basePrompt: Schema.optional(Schema.NullOr(Schema.String)),
   faviconPath: Schema.NullOr(Schema.String),
   projectIcon: Schema.NullOr(StoredProjectIcon),
   scripts: Schema.Array(ProjectScript),
@@ -57,13 +57,13 @@ const ProjectDbRow = Schema.Struct({
 function toShell(row: ProjectRow): OrchestrationProjectShell {
   return {
     id: row.projectId,
+    basePrompt: row.basePrompt ?? null,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity: null,
     defaultModelSelection: row.defaultModelSelection,
     defaultThreadEnvMode: row.defaultThreadEnvMode,
     autoPull: row.autoPull,
-    basePrompt: row.basePrompt ?? null,
     faviconPath: row.faviconPath,
     projectIcon: row.projectIcon,
     scripts: row.scripts,
@@ -114,12 +114,12 @@ export const make = Effect.gen(function* () {
     execute: (request) => sql`
       SELECT
         project_id AS "projectId",
+        base_prompt AS "basePrompt",
         title,
         workspace_root AS "workspaceRoot",
         default_model_selection_json AS "defaultModelSelection",
         default_thread_env_mode AS "defaultThreadEnvMode",
         auto_pull AS "autoPull",
-        base_prompt AS "basePrompt",
         favicon_path AS "faviconPath",
         project_icon_json AS "projectIcon",
         scripts_json AS "scripts",

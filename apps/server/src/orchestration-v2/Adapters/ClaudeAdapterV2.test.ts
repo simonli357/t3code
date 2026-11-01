@@ -37,6 +37,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2PendingBackgroundTask,
+  type OrchestrationV2ProviderTurn,
   OrchestrationV2ProviderThread,
   ProjectId,
   ProviderInstanceId,
@@ -2765,6 +2766,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly settings?: ClaudeSettings;
     readonly freshQueueOnReopen?: boolean;
     readonly forkSession?: ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerShape["forkSession"];
+    readonly readLegacyBoundaries?: ClaudeAdapterV2.ClaudeAgentSdkQueryRunnerShape["readLegacyBoundaries"];
     readonly allocateSessionId?: Effect.Effect<string>;
   }) =>
     Effect.gen(function* () {
@@ -2911,6 +2913,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 close: options?.close?.(sdkMessages) ?? Effect.void,
               };
             }),
+          ...(options?.readLegacyBoundaries
+            ? { readLegacyBoundaries: options.readLegacyBoundaries }
+            : {}),
           forkSession: options?.forkSession ?? (() => Effect.die("unused forkSession")),
           subagentLaunchToolUseId: () => Effect.succeed(options?.subagentLaunchToolUseId ?? null),
           assertComplete: Effect.void,
@@ -5170,6 +5175,65 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
+  );
+
+  it.effect(
+    "recovers an imported Claude rollback cursor and retries using the resolved durable boundary",
+    () =>
+      Effect.gen(function* () {
+        let reads = 0;
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: (messages) => Queue.shutdown(messages),
+          readLegacyBoundaries: () =>
+            Effect.sync(() =>
+              ++reads === 1
+                ? [
+                    { uuid: "a2", type: "assistant" },
+                    { uuid: "u3", type: "user" },
+                    { uuid: "a3", type: "assistant" },
+                  ]
+                : [{ uuid: "a2", type: "assistant" }],
+            ),
+        });
+        const now = yield* DateTime.now;
+        const providerTurn: OrchestrationV2ProviderTurn = {
+          id: ProviderTurnId.make("imported-claude-turn"),
+          providerThreadId: harness.providerThread.id,
+          nodeId: NodeId.make("imported-root"),
+          runAttemptId: RunAttemptId.make("imported-attempt"),
+          nativeTurnRef: null,
+          ordinal: 2,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+          historyOrigin: "v1_import",
+          legacyClaudeBoundary: { nextUserMessageId: "u3" },
+        };
+        const target = {
+          type: "provider_turn" as const,
+          checkpointId: CheckpointId.make("imported-claude-checkpoint"),
+          appRunOrdinal: 2,
+          providerTurn,
+        };
+        const restored = yield* harness.runtime.rollbackThread({
+          providerThread: harness.providerThread,
+          target,
+          providerThreadTurns: [providerTurn],
+        });
+        assert.equal(restored.providerThread.nativeConversationHeadRef?.nativeId, "a2");
+        assert.equal(restored.providerTurns?.[0]?.nativeTurnRef?.nativeId, "a2");
+        const retry = yield* harness.runtime.rollbackThread({
+          providerThread: restored.providerThread,
+          target: { ...target, providerTurn: restored.providerTurns![0]! },
+          providerThreadTurns: restored.providerTurns!,
+        });
+        assert.equal(retry.providerThread.nativeConversationHeadRef?.nativeId, "a2");
+        assert.equal(reads, 2);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
   );
 
   it.effect(

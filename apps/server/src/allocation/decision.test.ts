@@ -97,6 +97,25 @@ const input = () => ({
 });
 
 describe("allowance curves", () => {
+  it("accepts a unique short model name and uses its canonical quota windows", () => {
+    const model = "deepseek-official/deepseek-flash";
+    const result = decideAllocation({
+      ...input(),
+      request: { ...request, model: "deepseek-flash", options: [] },
+      inventories: [
+        inventory([
+          account("dsh", {
+            models: [{ slug: model, capabilities: null }],
+            windows: [window({ models: [model] })],
+          }),
+        ]),
+      ],
+    });
+    expect(result.candidates[0]?.eligible).toBe(true);
+    expect(result.candidates[0]?.warnings).not.toContain(
+      "No measured allowance for this assignment.",
+    );
+  });
   it("uses Codex's 30-point allowance plus 10 per elapsed day", () => {
     expect(targetPoints(window(), defaultAllocationPolicy.codex, at)).toBe(40);
     expect(targetPoints(window(), { ...defaultAllocationPolicy.codex, burstHours: 48 }, at)).toBe(

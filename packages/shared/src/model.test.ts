@@ -11,7 +11,19 @@ import {
   getProviderOptionDescriptors,
   readCustomModelEntries,
   modelSelectionsEqual,
+  findCatalogModel,
 } from "./model.ts";
+
+describe("catalog short names", () => {
+  it("resolves only a unique suffix and prefers an exact slug", () => {
+    const flash = { slug: "deepseek-official/deepseek-flash" };
+    const other = { slug: "other/deepseek-flash" };
+    expect(findCatalogModel([flash], "deepseek-flash")).toBe(flash);
+    expect(findCatalogModel([flash, other], "deepseek-flash")).toBeUndefined();
+    expect(findCatalogModel([flash, other], flash.slug)).toBe(flash);
+    expect(findCatalogModel([flash], "flash")).toBeUndefined();
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

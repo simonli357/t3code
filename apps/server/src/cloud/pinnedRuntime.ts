@@ -498,19 +498,33 @@ const selectUnusedRuntimes = Effect.fn("cloud.pinned_runtime.select_unused")(fun
   const path = yield* Path.Path;
   const versionsDir = pinnedRuntimeVersionsDir(path, input.baseDir);
   const entries = yield* fs.readDirectory(versionsDir).pipe(Effect.orElseSucceed(() => []));
-  // An interrupted prune has already renamed its runtime out of the way.
-  const pruned = new Set(
-    entries
-      .filter((entry) => entry.startsWith(PINNED_RUNTIME_PRUNED_PREFIX))
-      .map((entry) => path.join(versionsDir, entry)),
-  );
+  // Interrupted removals can carry a retention marker added by recovery tooling.
+  const pruned = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.startsWith(PINNED_RUNTIME_PRUNED_PREFIX)) continue;
+    const version = entry.slice(PINNED_RUNTIME_PRUNED_PREFIX.length);
+    if (input.keep.includes(version) || /(?:[+.-])custom(?:[.-]|$)/.test(version)) continue;
+    const target = path.join(versionsDir, entry);
+    const retained = yield* fs
+      .exists(path.join(target, ".retain"))
+      .pipe(Effect.orElseSucceed(() => true));
+    if (!retained) pruned.add(target);
+  }
 
   const settledBefore =
     (yield* Clock.currentTimeMillis) - Duration.toMillis(PINNED_RUNTIME_PRUNE_GRACE);
   const completed: Array<string> = [];
   for (const version of entries) {
     if (!isExactServiceVersion(version)) continue;
+    // Custom builds are rollback assets, not disposable downloaded releases.
+    if (/(?:[+.-])custom(?:[.-]|$)/.test(version)) continue;
     const versionDir = path.join(versionsDir, version);
+    // A per-version marker lets release tooling retain any exact runtime indefinitely.
+    // Fail closed when the marker cannot be inspected.
+    const retained = yield* fs
+      .exists(path.join(versionDir, ".retain"))
+      .pipe(Effect.orElseSucceed(() => true));
+    if (retained) continue;
     const sentinelPath = path.join(versionDir, ".install-complete");
     const isLink = yield* fs.readLink(versionDir).pipe(Effect.isSuccess);
     const sentinel = yield* fs.readFileString(sentinelPath).pipe(Effect.option);
@@ -578,6 +592,10 @@ const selectUnusedRuntimes = Effect.fn("cloud.pinned_runtime.select_unused")(fun
       continue;
     }
     const target = path.join(versionsDir, `${PINNED_RUNTIME_PRUNED_PREFIX}${version}`);
+    // A retained interrupted removal may coexist with a reinstalled version. Do not
+    // erase it while making room for the next prune's rename.
+    if (!pruned.has(target) && (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => true))))
+      continue;
     // Renaming first means an interrupted removal never leaves a partial tree that still carries
     // its sentinel and would pass for a complete install.
     yield* fs.remove(target, { recursive: true, force: true }).pipe(
@@ -593,7 +611,7 @@ const selectUnusedRuntimes = Effect.fn("cloud.pinned_runtime.select_unused")(fun
 
 /**
  * Keep runtimes named by callers, service state, running processes, launchers, or references,
- * and anything published within an hour. Only prune completed runtimes; leave staging
+ * custom builds, versions carrying a `.retain` marker, and anything published within an hour. Only prune completed runtimes; leave staging
  * directories, symlinks, and unexpected entries untouched.
  */
 export const prunePinnedRuntimes = Effect.fn("cloud.pinned_runtime.prune")(function* (input: {

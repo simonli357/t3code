@@ -44,6 +44,7 @@ import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { AllocationAssignments } from "../allocation/AllocationAssignments.ts";
 import { ProviderAllocation } from "../allocation/ProviderAllocation.ts";
 import { WorkerService } from "../workers/WorkerService.ts";
+import * as Sqlite from "../persistence/Sqlite.ts";
 import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
 import { DocumentText } from "./DocumentText.ts";
@@ -52,6 +53,7 @@ import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Sqlite.layerMemory,
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),
   Layer.mock(GitVcsDriver)({}),

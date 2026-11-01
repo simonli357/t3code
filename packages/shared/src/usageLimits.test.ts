@@ -23,9 +23,34 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  hasProviderUsageLimits,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
+
+it.each(["unsupported", "unverified"] as const)(
+  "does not borrow a sibling subscription for an %s instance",
+  (reason) => {
+    const subscription = provider({
+      usageLimits: { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] },
+    });
+    const custom = provider({
+      instanceId: ProviderInstanceId.make("custom-codex"),
+      usageLimits: {
+        checkedAt: subscription.checkedAt,
+        windows: [window],
+        unavailable: { reason },
+      },
+    });
+    const providers = [subscription, custom];
+    expect(hasProviderUsageLimits(custom.instanceId, providers, [])).toBe(false);
+    expect(collectProviderUsageLimits(custom.instanceId, providers, [], now)).toBeNull();
+    expect(withUsageLimitsCommands(providers, [])[1]?.slashCommands).toEqual([]);
+    expect(
+      collectProviderUsageLimits(subscription.instanceId, providers, [], now)?.accounts,
+    ).toHaveLength(1);
+  },
+);
 
 const window = {
   id: "five_hour",

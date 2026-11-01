@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -56,6 +56,31 @@ const failureOf = <A, E>(effect: Effect.Effect<A, E>) =>
   );
 
 describe("spawn and send", () => {
+  it.effect("stores canonical short-name selections on spawn, retry, switch and renewal", () => {
+    const { world, run } = harness();
+    const pi = { instanceId: ProviderInstanceId.make("pi"), model: "deepseek-flash" };
+    const dsh = { instanceId: ProviderInstanceId.make("deepseekHarness"), model: "deepseek-flash" };
+    return run(
+      Effect.gen(function* () {
+        const service = yield* WorkerService;
+        const first = yield* service.spawn(master, { ...spawnInput(), modelSelection: pi });
+        assert.equal(first.modelSelection.model, "deepseek/deepseek-flash");
+        assert.equal(world.launched[0]?.modelSelection.model, "deepseek/deepseek-flash");
+        yield* service.spawn(master, { ...spawnInput(), modelSelection: pi });
+        assert.equal(world.launched.length, 1);
+        yield* finish(world, worker, "completed");
+        const switched = yield* service.control(master, { threadId: worker, modelSelection: dsh });
+        assert.equal(switched.modelSelection.model, "deepseek-official/deepseek-flash");
+        yield* service.handoff(master, {
+          threadId: other,
+          title: "Successor",
+          prompt: "Continue",
+          modelSelection: pi,
+        });
+        assert.equal(world.thread(other).modelSelection.model, "deepseek/deepseek-flash");
+      }),
+    );
+  });
   it.effect("launches a fresh worker, starts its assignment once and survives a retry", () => {
     const { world, run } = harness();
     return run(

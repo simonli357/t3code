@@ -1,6 +1,33 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  mapCodexModelCapabilities,
+  resolveCodexUsageSource,
+} from "./CodexProvider.ts";
+
+it("verifies subscription provenance and fails closed when config is missing", () => {
+  const account = { type: "chatgpt", email: "test@example.test", planType: "pro" } as const;
+  for (const model_provider of [undefined, "openai", "openai_token_sharing"]) {
+    assert.deepEqual(
+      resolveCodexUsageSource({
+        account,
+        config: { kind: "available", config: model_provider ? { model_provider } : {} },
+      }),
+      { kind: "subscription" },
+    );
+  }
+  assert.equal(
+    resolveCodexUsageSource({ account, config: { kind: "unavailable" } }).kind,
+    "unverified",
+  );
+  for (const type of ["apiKey", "amazonBedrock"] as const) {
+    assert.equal(
+      resolveCodexUsageSource({ account: { type }, config: { kind: "unavailable" } }).kind,
+      "apiKey",
+    );
+  }
+});
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({

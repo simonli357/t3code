@@ -9,6 +9,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -423,6 +424,82 @@ it.layer(layerWorld())("workers over the real orchestrator", (it) => {
       const read = yield* workers.read(master, { threadId: imported });
       assert.isTrue(read.items.some((item) => item.text.includes("Continue with the next step.")));
       assert.equal((yield* workers.readOwnership(imported)).ownerThreadId, master);
+    }),
+  );
+});
+
+it.layer(layerWorld())("imported custom worker records", (it) => {
+  it.effect("reads a V1 worker, sends new work and routes its report to the retained owner", () =>
+    Effect.gen(function* () {
+      yield* seed();
+      const sql = yield* SqlClient.SqlClient;
+      const worker = ThreadId.make("thread:imported-worker");
+      yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
+        VALUES (${worker},${project},'Imported worker',${JSON.stringify(model)},'full-access','default','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`;
+      yield* sql`INSERT INTO custom_workers (thread_id,owner_id,plan_json,state,read_seq,read_offset)
+        VALUES (${worker},${master},${JSON.stringify({ threadId: worker, projectId: project, title: "Imported worker", modelSelection: model, runtimeMode: "full-access", interactionMode: "default", prompt: "Old assignment" })},'ready',0,0)`;
+      yield* sql`INSERT INTO custom_worker_jobs (id,worker_id,target_id,kind,prompt,created_at,state,turn_id)
+        VALUES ('v1-completed-job',${worker},${worker},'work','Old assignment','2026-01-01T00:00:00Z','completed','v1-native-turn')`;
+      for (const state of ["queued", "submitted"]) {
+        yield* sql`INSERT INTO custom_worker_jobs (id,worker_id,target_id,kind,prompt,created_at,state,turn_id)
+          VALUES (${`v1-${state}`},${worker},${worker},'work','Never replay this copied assignment','2026-01-02T00:00:00Z',${state},'old-live-turn')`;
+      }
+      yield* Effect.gen(function* () {
+        yield* (yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter).reconcileShells;
+      }).pipe(Effect.provide(LegacyV1ThreadImporter.layer));
+      const workers = yield* WorkerService.WorkerService;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const retained = (yield* workers.list(master)).find((item) => item.threadId === worker);
+      assert.equal(retained?.ownerThreadId, master);
+      assert.equal(retained?.latestRequest?.state, "interrupted");
+      yield* workers.drain();
+      assert.isFalse(
+        (yield* orchestrator.getThreadProjection(worker)).messages.some((message) =>
+          message.text.includes("Never replay this copied assignment"),
+        ),
+      );
+      const pending = yield* sql<{
+        state: string;
+        prompt: string;
+        turn_id: string;
+        error: string;
+      }>`SELECT state,prompt,turn_id,error FROM custom_worker_jobs WHERE id IN ('v1-queued','v1-submitted')`;
+      for (const job of pending) {
+        assert.equal(job.state, "interrupted");
+        assert.equal(job.prompt, "Never replay this copied assignment");
+        assert.equal(job.turn_id, "old-live-turn");
+        assert.include(job.error, "explicit new assignment");
+      }
+      yield* workers.send(master, {
+        threadId: worker,
+        clientRequestId: "v2-followup",
+        prompt: "Continue after import",
+      });
+      yield* workers.drain();
+      assert.isTrue(
+        (yield* orchestrator.getThreadProjection(worker)).messages.some((message) =>
+          message.text.includes("Continue after import"),
+        ),
+      );
+      yield* setLatestRun(worker, "running");
+      yield* workers.report(worker, {
+        clientRequestId: "v2-import-report",
+        outcome: "done",
+        summary: "Retained worker completed its new assignment.",
+      });
+      yield* setLatestRun(worker, "completed");
+      yield* workers.drain();
+      assert.isTrue(
+        (yield* orchestrator.getThreadProjection(master)).messages.some((message) =>
+          message.text.includes("Retained worker completed"),
+        ),
+      );
+      assert.equal(
+        (yield* sql<{
+          state: string;
+        }>`SELECT state FROM custom_worker_jobs WHERE id = 'v1-completed-job'`)[0]?.state,
+        "completed",
+      );
     }),
   );
 });

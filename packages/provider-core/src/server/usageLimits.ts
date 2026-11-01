@@ -34,7 +34,7 @@ export function makeUsageLimits(input: {
 
 export function makeUnavailableUsageLimits(input: {
   readonly checkedAt: string;
-  readonly reason: "unsupported" | "probeFailed";
+  readonly reason: "unsupported" | "unverified" | "probeFailed";
   readonly message?: string;
 }): ServerProviderUsageLimits {
   return {
@@ -53,7 +53,11 @@ export function applyUsageLimitsUpdate(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
-  if (update.windows.length === 0 || previous?.unavailable?.reason === "unsupported") {
+  if (
+    update.windows.length === 0 ||
+    previous?.unavailable?.reason === "unsupported" ||
+    previous?.unavailable?.reason === "unverified"
+  ) {
     return previous;
   }
   const merged = new Map(previous?.windows.map((window) => [window.id, window] as const));
@@ -104,7 +108,11 @@ export function resolveUsageLimitsAfterProbe(input: {
   readonly probed: ServerProviderUsageLimits | undefined;
 }): ServerProviderUsageLimits | undefined {
   const { published, probed } = input;
-  if (probed?.unavailable?.reason === "probeFailed" && published && !published.unavailable) {
+  if (
+    probed?.unavailable?.reason === "probeFailed" &&
+    published &&
+    published.unavailable?.reason !== "probeFailed"
+  ) {
     return published;
   }
   if (

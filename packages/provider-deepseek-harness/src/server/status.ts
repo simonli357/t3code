@@ -30,6 +30,7 @@ import {
   DEEPSEEK_HARNESS_FLASH_BASENAME,
   DEEPSEEK_HARNESS_RETIRED_FLASH_ALIAS,
   DEEPSEEK_HARNESS_SUPPORTED_RUNTIME_MODES,
+  DEEPSEEK_HARNESS_T3_SOURCE,
   deepseekHarnessModelSlug,
   deepseekHarnessSupportsNativeLifecycle,
   makeDeepseekHarnessAcpRuntime,
@@ -354,7 +355,9 @@ export const checkDeepseekHarnessProviderStatus = Effect.fn("checkDeepseekHarnes
             ? probed === undefined
               ? { message: "Harness is installed, but its ACP catalog probe did not complete." }
               : {}
-            : { message: "This Harness build lacks native load/fork. Install a T3-enabled build." }
+            : {
+                message: `This Harness build lacks native load/fork. Install the T3 build: ${DEEPSEEK_HARNESS_T3_SOURCE}`,
+              }
           : { message: "Add a DeepSeek API key to start a session." }),
       },
     });

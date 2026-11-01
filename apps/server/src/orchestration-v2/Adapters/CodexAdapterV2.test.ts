@@ -385,6 +385,42 @@ describe("CodexAdapterV2 rollback mapping", () => {
       });
 
       assert.equal(numTurns, 2);
+      const imported = {
+        providerThread,
+        target: {
+          type: "provider_turn" as const,
+          checkpointId: CheckpointId.make("imported"),
+          appRunOrdinal: 9,
+          providerTurn: { ...firstTurn, historyOrigin: "v1_import" as const },
+        },
+        // Application rows deliberately disagree with native history after renewal.
+        providerThreadTurns: [firstTurn, secondTurn, interruptedTurn],
+      };
+      assert.equal(
+        yield* CodexAdapterV2.resolveImportedCodexRollbackTurnCount(imported, {
+          turns: [
+            { id: firstTurn.nativeTurnRef!.nativeId, status: "completed" },
+            { id: "actual-next", status: "completed" },
+          ],
+        }),
+        1,
+      );
+      assert.equal(
+        yield* CodexAdapterV2.resolveImportedCodexRollbackTurnCount(imported, {
+          turns: [{ id: firstTurn.nativeTurnRef!.nativeId, status: "completed" }],
+        }),
+        0,
+      );
+      for (const turns of [
+        [],
+        [{ id: "different", status: "completed" }],
+        [{ id: firstTurn.nativeTurnRef!.nativeId, status: "inProgress" }],
+      ]) {
+        const error = yield* CodexAdapterV2.resolveImportedCodexRollbackTurnCount(imported, {
+          turns,
+        }).pipe(Effect.flip);
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+      }
     }),
   );
 });
@@ -6496,6 +6532,125 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     startedAt: input.now,
     completedAt: input.now,
   });
+
+  it.effect(
+    "validates an imported paginated rollback and reverts at its exact native boundary, including retry",
+    () =>
+      Effect.gen(function* () {
+        const nativeThreadId = "imported-paginated-thread";
+        const first = "native-imported-first";
+        const selected = "native-imported-second";
+        const removed = "native-after-selected";
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: selected,
+          prompt: "unused",
+        });
+        const entries = preamble.slice(0, 5);
+        const exchange = (id: number, method: string, params: unknown, result: unknown) => {
+          entries.push(
+            { type: "expect_outbound", label: method, frame: { id, method, params } },
+            { type: "emit_inbound", label: method, frame: { id, result } },
+          );
+        };
+        const metadata = {
+          thread: { id: nativeThreadId, historyMode: "paginated", status: { type: "idle" } },
+        };
+        exchange(3, "thread/read", { threadId: nativeThreadId, includeTurns: false }, metadata);
+        exchange(
+          4,
+          "thread/turns/list",
+          {
+            threadId: nativeThreadId,
+            cursor: null,
+            limit: 100,
+            sortDirection: "asc",
+            itemsView: "summary",
+          },
+          {
+            data: [
+              makeCodexReplayTurn({ id: first, status: "completed" }),
+              makeCodexReplayTurn({ id: selected, status: "completed" }),
+            ],
+            nextCursor: "next-page",
+          },
+        );
+        exchange(
+          5,
+          "thread/turns/list",
+          {
+            threadId: nativeThreadId,
+            cursor: "next-page",
+            limit: 100,
+            sortDirection: "asc",
+            itemsView: "summary",
+          },
+          { data: [makeCodexReplayTurn({ id: removed, status: "completed" })], nextCursor: null },
+        );
+        exchange(
+          6,
+          "thread/revert",
+          { threadId: nativeThreadId, beforeTurnId: removed },
+          { thread: codexReplayThreadResult({ nativeThreadId, forkedFromId: null }).thread },
+        );
+        exchange(7, "thread/read", { threadId: nativeThreadId, includeTurns: false }, metadata);
+        exchange(
+          8,
+          "thread/turns/list",
+          {
+            threadId: nativeThreadId,
+            cursor: null,
+            limit: 100,
+            sortDirection: "asc",
+            itemsView: "summary",
+          },
+          {
+            data: [
+              makeCodexReplayTurn({ id: first, status: "completed" }),
+              makeCodexReplayTurn({ id: selected, status: "completed" }),
+            ],
+            nextCursor: null,
+          },
+        );
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({ scenario: "imported-paginated-rollback", entries }),
+          () => Effect.void,
+        );
+        const turn = {
+          ...codexReplaySourceTurn({
+            id: "imported-target",
+            ordinal: 2,
+            nativeId: selected,
+            providerThreadId: harness.providerThread.id,
+            now: yield* DateTime.now,
+          }),
+          historyOrigin: "v1_import" as const,
+        };
+        const target = {
+          type: "provider_turn" as const,
+          checkpointId: CheckpointId.make("imported-codex-checkpoint"),
+          appRunOrdinal: 2,
+          providerTurn: turn,
+        };
+        const restored = yield* harness.runtime.rollbackThread({
+          providerThread: harness.providerThread,
+          target,
+          providerThreadTurns: [turn],
+        });
+        assert.equal(restored.providerThread.nativeConversationHeadRef?.nativeId, selected);
+        const retried = yield* harness.runtime.rollbackThread({
+          providerThread: restored.providerThread,
+          target,
+          providerThreadTurns: [turn],
+        });
+        assert.equal(retried.providerThread.nativeConversationHeadRef?.nativeId, selected);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   it.effect("fails honestly when rolling back a legacy Codex thread", () =>
     Effect.gen(function* () {

@@ -151,27 +151,17 @@ export const layer: Layer.Layer<
               .pipe(Stream.runCollect);
             for (const stored of page) {
               yield* projectionStore.apply(stored.event);
-              if (stored.event.type === "turn-item.updated") {
-                yield* sql`
-                INSERT INTO orchestration_v2_turn_item_positions (
-                  thread_id,
-                  turn_item_id,
-                  ordinal
-                )
-                VALUES (
-                  ${stored.event.threadId},
-                  ${stored.event.payload.id},
-                  ${stored.event.payload.ordinal}
-                )
-                ON CONFLICT(thread_id, turn_item_id) DO UPDATE SET
-                  ordinal = excluded.ordinal
-                `;
-              }
               lastSequence = stored.sequence;
             }
             if (page.length < pageSize) break;
             yield* Effect.yieldNow;
           }
+          // Timeline imports can move several items across each other's old positions.
+          // Reconstruct positions only after final projections; pending imports own their
+          // complete position reservation and rebuild it before any command can run.
+          yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+            SELECT thread_id, turn_item_id, ordinal FROM orchestration_v2_projection_turn_items
+            WHERE thread_id NOT IN (SELECT thread_id FROM orchestration_v2_legacy_imports WHERE transcript_imported_at IS NULL)`;
           const now = DateTime.formatIso(yield* DateTime.now);
           yield* sql`
             INSERT INTO orchestration_v2_projection_metadata (

@@ -936,9 +936,13 @@ export function shouldPrepareLegacyImportHandoff(input: {
   readonly hasCompletedRun: boolean;
   readonly historyOrigin: OrchestrationV2AppThread["historyOrigin"];
   readonly legacyImportItemCount: number;
+  readonly hasNativeContinuation?: boolean;
 }): boolean {
   return (
-    input.historyOrigin === "v1_import" && !input.hasCompletedRun && input.legacyImportItemCount > 0
+    input.historyOrigin === "v1_import" &&
+    !input.hasCompletedRun &&
+    !input.hasNativeContinuation &&
+    input.legacyImportItemCount > 0
   );
 }
 
@@ -5507,7 +5511,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...(sourcePlan.runId === null ? {} : { runId: sourcePlan.runId }),
             nodeId: sourcePlan.nodeId,
             occurredAt,
-            payload: { ...sourcePlan, status: "completed" },
+            payload: {
+              ...sourcePlan,
+              status: "completed",
+              implementation: {
+                threadId: command.threadId,
+                implementedAt: DateTime.formatIso(occurredAt),
+              },
+            },
           });
 
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
@@ -5990,6 +6001,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
         historyOrigin: projection.thread.historyOrigin,
+        hasNativeContinuation: activeProviderThread?.nativeThreadRef?.nativeId != null,
         hasCompletedRun: latestCompletedRun !== undefined,
         legacyImportItemCount: legacyImportItems.length,
       })
@@ -11506,6 +11518,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
       }
 
+      if (
+        (targetCheckpoint.appRunOrdinal === null &&
+          (targetScope.kind !== "root_run" || targetCheckpoint.ordinalWithinScope !== 0)) ||
+        targetCheckpoint.legacyV1?.rollbackUnavailableReason
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            targetCheckpoint.legacyV1?.rollbackUnavailableReason ??
+            "The V1 checkpoint has no recovered run boundary; it cannot be interpreted as thread start.",
+        });
+      }
       const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);

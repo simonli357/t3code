@@ -1042,6 +1042,70 @@ export const resolveCodexRollbackTurnCount = Effect.fn("CodexAdapterV2.resolveRo
   },
 );
 
+const decodeImportedCodexHistory = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
+  }),
+);
+
+/** Imported application ordinals are not native turn counts (renewals and forks can
+ * change membership). Validate the exact native boundary before any mutation. */
+export const resolveImportedCodexRollbackTurnCount = Effect.fn(
+  "CodexAdapterV2.resolveImportedRollbackTurnCount",
+)(function* (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput, history: unknown) {
+  const decoded = yield* decodeImportedCodexHistory(history);
+  const boundary =
+    input.target.type === "provider_turn"
+      ? input.target.providerTurn.nativeTurnRef?.nativeId
+      : undefined;
+  const index = decoded.turns.findIndex((turn) => turn.id === boundary);
+  if (
+    !boundary ||
+    input.target.type !== "provider_turn" ||
+    input.target.providerTurn.providerThreadId !== input.providerThread.id ||
+    index < 0 ||
+    decoded.turns.filter((turn) => turn.id === boundary).length !== 1 ||
+    decoded.turns.some((turn) => !["completed", "interrupted", "failed"].includes(turn.status))
+  ) {
+    return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+      driver: CODEX_PROVIDER,
+      providerThreadId: input.providerThread.id,
+      cause:
+        "The imported checkpoint's exact native turn is unavailable in the current idle Codex history. No rollback was performed.",
+    });
+  }
+  return decoded.turns.length - index - 1;
+});
+
+const readImportedCodexTurns = Effect.fn("CodexAdapterV2.readImportedTurns")(function* (
+  client: Pick<CodexClient.CodexAppServerClient["Service"], "request">,
+  threadId: string,
+  paginated: boolean,
+) {
+  if (!paginated)
+    return (yield* client.request("thread/read", { threadId, includeTurns: true })).thread.turns;
+  const turns: Array<{ id: string; status: string }> = [];
+  let cursor: string | null = null;
+  const seen = new Set<string | null>();
+  do {
+    if (seen.has(cursor))
+      return yield* CodexErrors.CodexAppServerRequestError.internalError(
+        "Native history repeated a pagination cursor.",
+      );
+    seen.add(cursor);
+    const page: CodexSchema.V2ThreadTurnsListResponse = yield* client.request("thread/turns/list", {
+      threadId,
+      cursor,
+      limit: 100,
+      sortDirection: "asc",
+      itemsView: "summary",
+    });
+    turns.push(...page.data.map(({ id, status }) => ({ id, status })));
+    cursor = page.nextCursor ?? null;
+  } while (cursor !== null);
+  return turns;
+});
+
 function parseCodexRetryProgress(
   message: string,
 ): Pick<OrchestrationV2ProviderRetry, "attempt" | "maxAttempts"> | null {
@@ -7565,7 +7629,27 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           rollbackThread: Effect.fn("CodexAdapterV2.rollbackThread")(
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.providerThread);
-              const numTurns = yield* resolveCodexRollbackTurnCount(threadInput);
+              const imported =
+                threadInput.target.type === "provider_turn" &&
+                threadInput.target.providerTurn.historyOrigin === "v1_import";
+              const importedMetadata = imported
+                ? yield* ensureInitialized.pipe(
+                    Effect.andThen(readCodexThreadHistoryMetadata(client.raw, threadId)),
+                  )
+                : undefined;
+              const importedTurns = importedMetadata
+                ? yield* readImportedCodexTurns(
+                    client,
+                    threadId,
+                    importedMetadata.historyMode === "paginated",
+                  )
+                : undefined;
+              const numTurns = importedTurns
+                ? yield* resolveImportedCodexRollbackTurnCount(threadInput, {
+                    turns: importedTurns,
+                  })
+                : yield* resolveCodexRollbackTurnCount(threadInput);
+              const firstRemovedNativeTurnId = importedTurns?.[importedTurns.length - numTurns]?.id;
               const nativeConversationHeadRef =
                 threadInput.target.type === "provider_turn"
                   ? threadInput.target.providerTurn.nativeTurnRef
@@ -7582,9 +7666,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   runtimeRequests: [],
                 };
               }
-              const { historyMode, loaded } = yield* ensureInitialized.pipe(
-                Effect.andThen(readCodexThreadHistoryMetadata(client.raw, threadId)),
-              );
+              const { historyMode, loaded } =
+                importedMetadata ??
+                (yield* ensureInitialized.pipe(
+                  Effect.andThen(readCodexThreadHistoryMetadata(client.raw, threadId)),
+                ));
               if (historyMode !== "paginated") {
                 return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
                   driver: CODEX_PROVIDER,
@@ -7604,9 +7690,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 });
               }
-              const response = yield* ensureInitialized.pipe(
-                Effect.andThen(revertCodexThread(client, threadId, numTurns)),
-              );
+              // Revert at the exact validated native boundary. Recounting newest turns
+              // here could select a different boundary if native history changed meanwhile.
+              const response = firstRemovedNativeTurnId
+                ? yield* client.request("thread/revert", {
+                    threadId,
+                    beforeTurnId: firstRemovedNativeTurnId,
+                  })
+                : yield* ensureInitialized.pipe(
+                    Effect.andThen(revertCodexThread(client, threadId, numTurns)),
+                  );
               turnTokenUsageByThread.delete(threadId);
               return {
                 providerThread: {

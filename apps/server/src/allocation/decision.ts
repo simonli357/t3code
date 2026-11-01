@@ -16,6 +16,8 @@ import type {
   AllocationWindow,
 } from "@t3tools/contracts";
 
+import { findCatalogModel } from "@t3tools/shared/model";
+
 const HOUR = 3_600_000;
 const bounded = (value: number, max = 100) => Math.max(0, Math.min(max, value));
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -43,7 +45,7 @@ export function targetPoints(window: AllocationWindow, curve: AllocationCurve, a
 }
 
 function compatible(account: AllocationAccount, request: AllocationRequest) {
-  const model = account.models.find((m) => m.slug === request.model);
+  const model = findCatalogModel(account.models, request.model);
   if (!model) return false;
   return request.options.every((option) => {
     const descriptor = model.capabilities?.optionDescriptors?.find((d) => d.id === option.id);
@@ -287,7 +289,8 @@ export function decideAllocation(input: {
             : d.environmentId === account.environmentId && d.instanceId === account.instanceId) &&
           !(d.threadId === request.threadId && d.environmentId === request.environmentId),
       );
-      const relevant = account.windows.filter((w) => !w.models || w.models.includes(request.model));
+      const model = findCatalogModel(account.models, request.model)?.slug ?? request.model;
+      const relevant = account.windows.filter((w) => !w.models || w.models.includes(model));
       if (!relevant.length) warnings.push("No measured allowance for this assignment.");
       if (
         account.shortWindow === "reported" &&

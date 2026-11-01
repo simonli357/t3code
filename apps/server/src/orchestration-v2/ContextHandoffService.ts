@@ -135,67 +135,6 @@ function makeForkDeltaSummary(input: {
   ].join("\n");
 }
 
-function makeLegacyImportSummary(items: ReadonlyArray<OrchestrationV2TurnItem>): string {
-  const sections = items.flatMap((item) => {
-    switch (item.type) {
-      case "user_message":
-        return [{ label: "User", body: item.text }];
-      case "assistant_message":
-        return [{ label: "Assistant", body: item.text }];
-      default:
-        return [];
-    }
-  });
-  const header =
-    "Imported conversation history from the previous T3 Code orchestrator. Use it as context; do not repeat it unless the user asks.";
-  const maxChars = 32_000;
-  const selected: Array<string> = [];
-  let remaining = maxChars - header.length - 2;
-  for (const section of sections.toReversed()) {
-    if (remaining <= 0) break;
-    const fullSection = `${section.label}:\n${section.body}`;
-    if (fullSection.length <= remaining) {
-      selected.unshift(fullSection);
-      remaining -= fullSection.length + 2;
-      continue;
-    }
-
-    const prefix = `${section.label}:\n... `;
-    const bodyBudget = remaining - prefix.length;
-    if (bodyBudget <= 0) continue;
-
-    const initialStart = section.body.length - bodyBudget;
-    let bodyStart = Math.max(0, initialStart);
-    if (
-      bodyStart > 0 &&
-      !/\s/.test(section.body[bodyStart - 1] ?? "") &&
-      !/\s/.test(section.body[bodyStart] ?? "")
-    ) {
-      const nextWhitespace = section.body.slice(bodyStart).search(/\s/);
-      if (nextWhitespace !== -1) {
-        bodyStart += nextWhitespace;
-      }
-    }
-    const codeUnitAtStart = section.body.charCodeAt(bodyStart);
-    const codeUnitBeforeStart = section.body.charCodeAt(bodyStart - 1);
-    if (
-      codeUnitAtStart >= 0xdc00 &&
-      codeUnitAtStart <= 0xdfff &&
-      codeUnitBeforeStart >= 0xd800 &&
-      codeUnitBeforeStart <= 0xdbff
-    ) {
-      bodyStart += 1;
-    }
-    const bodySuffix = section.body.slice(bodyStart).trimStart();
-    if (bodySuffix.length === 0) continue;
-
-    const suffix = `${prefix}${bodySuffix}`;
-    selected.unshift(suffix);
-    remaining -= suffix.length + 2;
-  }
-  return [header, ...selected].join("\n\n");
-}
-
 const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffService.layer")(
   function* () {
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -250,7 +189,7 @@ const makeContextHandoffService = Effect.fn("orchestrationV2.ContextHandoffServi
           strategy: "manual_context",
           status: "ready",
           summaryMessageId: null,
-          summaryText: makeLegacyImportSummary(input.items),
+          summaryText: renderHistory(selected.messages, selected.context),
           history: {
             messages: selected.messages,
             coverage,
