@@ -398,9 +398,9 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
             status,
             startedAt,
             completedAt: occurredAt,
-            ...(matchingProvider.nativeThreadRef?.nativeId
-              ? { nativeThreadId: matchingProvider.nativeThreadRef.nativeId }
-              : {}),
+            // The V1 runtime row identifies the current session, not necessarily
+            // this historical attempt's original destination after renewals.
+            // Native membership is validated before rollback; do not invent it here.
           },
         });
       if (matchingProvider && providerTurnId)
