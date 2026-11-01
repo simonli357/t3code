@@ -79,6 +79,37 @@ afterEach(async () => {
 });
 
 describe("third-party license generation", () => {
+  it.each(["dependencies", "bundled modules"])(
+    "excludes first-party effect-acp from %s while retaining third-party notices",
+    async (discovery) => {
+      const fixture = await createFixture();
+      const acpRoot = NodePath.join(fixture.root, "node_modules", "effect-acp");
+      await writeJson(NodePath.join(acpRoot, "package.json"), {
+        name: "effect-acp",
+        private: true,
+        main: "index.js",
+        dependencies: { "demo-dependency": "1.2.3" },
+      });
+      const acpEntry = NodePath.join(acpRoot, "index.js");
+      await NodeFSP.writeFile(acpEntry, "export {};\n");
+      if (discovery === "dependencies") {
+        await writeJson(fixture.appManifest, {
+          name: "fixture-app",
+          dependencies: { "effect-acp": "workspace:*" },
+        });
+      }
+      const manifest = await generateThirdPartyLicenseManifest({
+        configFile: fixture.configFile,
+        packageManifests: [{ bundle: "web", path: fixture.appManifest }],
+        ...(discovery === "bundled modules"
+          ? { bundledModuleIds: [acpEntry], bundleName: "web" }
+          : {}),
+      });
+      expect(manifest.entries.some((entry) => entry.name === "effect-acp")).toBe(false);
+      expect(manifest.entries.some((entry) => entry.name === "demo-dependency")).toBe(true);
+    },
+  );
+
   it.each(["web", "mobile"])(
     "uses installer pins for device tool notices in the %s manifest",
     async (bundle) => {
