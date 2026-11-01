@@ -54,7 +54,7 @@ export const readWorkflowBases = Effect.fn(
     );
     let accounts: Record<string, typeof Account.Type | null> = {};
     for (const home of config.skillHomes ?? [path.join(NodeOS.homedir(), ".codex")]) {
-      const file = path.join(home, "skills", "t3-fork-session", "references", "accounts.json");
+      const file = path.join(home.startsWith("~/") ? path.join(NodeOS.homedir(), home.slice(2)) : home, "skills", "t3-fork-session", "references", "accounts.json");
       if (yield* fs.exists(file)) {
         accounts = (yield* decodeDefaults(yield* fs.readFileString(file))).accounts;
         break;

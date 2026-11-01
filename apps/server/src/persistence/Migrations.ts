@@ -79,6 +79,7 @@ import Migration0068 from "./Migrations/068_ShellStopRequestIndex.ts";
 import Migration0069 from "./Migrations/069_ThreadMessageSearch.ts";
 import Migration0070 from "./Migrations/070_PeerLinks.ts";
 import Migration0071 from "./Migrations/071_PeerLinkFence.ts";
+import Migration0074 from "./Migrations/074_NativeConversationForks.ts";
 import Migration0073 from "./Migrations/073_ImportedV1AuthGrants.ts";
 import Migration0072 from "./Migrations/072_WaitingLinkRequestIndex.ts";
 
@@ -157,6 +158,7 @@ const migrationEntries = [
   [71, "PeerLinkFence", Migration0071],
   [72, "WaitingLinkRequestIndex", Migration0072],
   [73, "ImportedV1AuthGrants", Migration0073],
+  [74, "NativeConversationForks", Migration0074],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

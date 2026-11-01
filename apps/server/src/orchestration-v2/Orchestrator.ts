@@ -1,3 +1,4 @@
+import { retainNativeConversationFork } from "./NativeConversationFork.ts";
 import type {
   GuestShareId,
   OrchestrationV2SearchThreadInput,
@@ -35,7 +36,7 @@ import {
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
-  type OrchestrationV2AppThread,
+  OrchestrationV2AppThread,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2ContextSourcePoint,
   type OrchestrationV2ContextTransfer,
@@ -45,10 +46,10 @@ import {
   type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
-  type OrchestrationV2ProviderThread,
+  OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RemoteTaskChild,
-  type OrchestrationV2Run,
+  OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadShellSnapshot,
@@ -4145,7 +4146,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
 
     if (
-      command.nativeOnly &&
+      (command.nativeOnly || command.wholeSession) &&
       sourceProjection.runs.some((run) =>
         ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
       )
@@ -4153,10 +4154,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause: "The Base is busy. Wait for its work to finish before sending a task.",
+        cause: "The source is busy. Wait for its work to finish before forking.",
       });
     }
-    const sourceRun = runForSourcePoint(sourceProjection, command.sourcePoint);
+    if (command.wholeSession) {
+      const shell = yield* projectionStore.getThreadShell(command.sourceThreadId).pipe(mapDispatchError(command));
+      if (shell?.pendingRuntimeRequest != null || (shell?.pendingBackgroundTasks.length ?? 0) > 0)
+        return yield* new OrchestratorDispatchError({ commandId: command.commandId, commandType: command.type, cause: "The source has pending work. Wait before forking." });
+      const existing = yield* projectionStore.getThread(command.targetThreadId).pipe(Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }), mapDispatchError(command));
+      if (existing !== null)
+        return yield* new OrchestratorDispatchError({ commandId: command.commandId, commandType: command.type, cause: "The fork destination already exists." });
+    }
+    const sourceRun = command.wholeSession
+      ? (sourceProjection.runs.toSorted((a, b) => b.ordinal - a.ordinal)[0] ?? null)
+      : runForSourcePoint(sourceProjection, command.sourcePoint);
 
     if (sourceRun === null) {
       return yield* new OrchestratorDispatchError({
@@ -4203,19 +4214,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .pipe(mapDispatchError(command));
     }
 
+    const native = command.wholeSession ? yield* mapDispatchError(command)(Effect.gen(function* () {
+      if (sourceProviderThread?.nativeThreadRef?.strength !== "strong")
+        return yield* new OrchestratorDispatchError({ commandId: command.commandId, commandType: command.type, cause: "This conversation has no resumable native session." });
+      const modelSelection = { ...targetThread.modelSelection, instanceId: sourceProviderThread.providerInstanceId };
+      const adapter = yield* providerAdapters.get(modelSelection.instanceId);
+      const capabilities = yield* adapter.getCapabilities();
+      yield* commandPolicy.ensureNativeFork({ commandId: command.commandId, threadId: command.targetThreadId, providerInstanceId: modelSelection.instanceId, capabilities, fromSpecificTurn: false });
+      const policy = yield* runtimePolicy.resolve({ thread: targetThread, modelSelection });
+      return yield* retainNativeConversationFork({
+        commandId: command.commandId,
+        targetThreadId: command.targetThreadId,
+        sourceFingerprint: Schema.encodeSync(Schema.fromJsonString(Schema.Struct({ thread: OrchestrationV2AppThread, run: OrchestrationV2Run, providerThread: OrchestrationV2ProviderThread })))({ thread: sourceProjection.thread, run: sourceRun, providerThread: sourceProviderThread }),
+        clone: Effect.gen(function* () {
+          const providerSessionId = yield* providerSessionIdFor({ adapter, providerInstanceId: modelSelection.instanceId, threadId: command.targetThreadId });
+          const session = yield* providerSessions.open({ threadId: command.targetThreadId, providerSessionId, modelSelection, runtimePolicy: policy });
+          const providerThread = yield* session.forkThread({ sourceProviderThread, sourceProviderTurns: sourceProjection.providerTurns, targetThreadId: command.targetThreadId, modelSelection, runtimePolicy: policy });
+          if (providerThread.nativeThreadRef?.strength !== "strong" || providerThread.nativeThreadRef.nativeId === sourceProviderThread.nativeThreadRef?.nativeId)
+            return yield* new OrchestratorDispatchError({ commandId: command.commandId, commandType: command.type, cause: "The provider did not confirm an independent native fork." });
+          return { providerThread, providerSession: session.providerSession };
+        }),
+      });
+    })) : null;
+
     yield* emitEvent({
       type: "thread.created",
       threadId: command.targetThreadId,
       providerInstanceId: targetThread.providerInstanceId,
       occurredAt: now,
-      payload: targetThread,
+      payload: native ? { ...targetThread, providerInstanceId: native.providerThread.providerInstanceId, modelSelection: { ...targetThread.modelSelection, instanceId: native.providerThread.providerInstanceId }, activeProviderThreadId: native.providerThread.id } : targetThread,
     });
+    if (native) {
+      yield* emitEvent({ type: "provider-session.updated", threadId: command.targetThreadId, providerInstanceId: native.providerThread.providerInstanceId, occurredAt: now, payload: native.providerSession });
+      yield* emitEvent({ type: "provider-thread.updated", threadId: command.targetThreadId, providerInstanceId: native.providerThread.providerInstanceId, occurredAt: now, payload: native.providerThread });
+    }
     yield* emitEvent({
       type: "context-transfer.created",
       threadId: command.targetThreadId,
       providerInstanceId: sourceRun.providerInstanceId,
       occurredAt: now,
-      payload: { ...transfer, nativeOnly: command.nativeOnly },
+      payload: { ...transfer, nativeOnly: command.nativeOnly || command.wholeSession, ...(native ? { status: "consumed" as const, consumedAt: now, targetProviderInstanceId: native.providerThread.providerInstanceId, resolution: { strategy: "native_fork" as const, providerThreadRef: native.providerThread.nativeThreadRef! }, error: null } : {}) },
     });
   });
 
@@ -13125,6 +13163,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
+    if (command.type === "thread.fork" && command.wholeSession) {
+      if (command.sourceThreadId === command.targetThreadId)
+        return yield* new OrchestratorDispatchError({ commandId: command.commandId, commandType: command.type, cause: "The fork must have a new thread ID." });
+      const [first, second] = [command.sourceThreadId, command.targetThreadId].sort();
+      return yield* threadDispatch.withLock(first!, threadDispatch.withLock(second!, dispatchWithReceiptEffect(command)));
+    }
     const dispatch = threadDispatch.withLock(
       commandThreadId(command),
       dispatchWithReceiptEffect(command),

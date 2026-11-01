@@ -28,6 +28,7 @@ import {
   editQueuedRun,
   interruptThreadTurn,
   forkThreadFromRun,
+  forkConversation,
   markThreadUnread,
   mergeThreadBack,
   promoteQueuedRun,
@@ -297,6 +298,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       execute: stopThreadSession,
       scheduler,
       concurrency,
+    }),
+    forkConversation: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:fork-conversation",
+      execute: forkConversation,
+      scheduler,
+      concurrency: { mode: "serial", key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]) },
     }),
     forkFromRun: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:fork-from-run",

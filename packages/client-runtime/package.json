@@ -527,6 +527,10 @@
       "types": "./src/state/sessionOrganization.ts",
       "default": "./src/state/sessionOrganization.ts"
     },
+    "./state/conversation-fork": {
+      "types": "./src/state/conversation-fork.ts",
+      "default": "./src/state/conversation-fork.ts"
+    },
     "./state/base-sessions": {
       "types": "./src/state/baseSessions.ts",
       "default": "./src/state/baseSessions.ts"

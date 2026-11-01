@@ -691,6 +691,13 @@ const make = Effect.gen(function* () {
 
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
+      case "thread.fork":
+        return !command.wholeSession ? Effect.void : orchestrator.getThreadRecords(command.sourceThreadId, ["providerThreads"]).pipe(
+          Effect.flatMap(({ thread, providerThreads }) => assertProviderInstanceEnabled({
+            projectId: thread.projectId, commandId: command.commandId,
+            instanceId: providerThreads.find((p) => p.id === thread.activeProviderThreadId)?.providerInstanceId ?? thread.modelSelection.instanceId,
+          })),
+        );
       case "message.dispatch":
         return bases.policyCommand(command).pipe(
           Effect.flatMap((target) =>

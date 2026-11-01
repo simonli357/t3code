@@ -967,6 +967,23 @@ export const stopThreadSession = Effect.fn("EnvironmentCommands.stopThreadSessio
   return result;
 });
 
+export const forkConversation = Effect.fn("EnvironmentCommands.forkConversation")(function* (
+  input: Omit<ForkThreadFromRunInput, "runId">,
+) {
+  return yield* dispatch({
+    type: "thread.fork",
+    wholeSession: true,
+    nativeOnly: true,
+    commandId: yield* allocateCommandId(input),
+    createdBy: "user",
+    creationSource: input.creationSource ?? "web",
+    sourceThreadId: input.sourceThreadId,
+    targetThreadId: input.targetThreadId,
+    sourcePoint: { type: "latest_stable" },
+    ...(input.title === undefined ? {} : { title: input.title }),
+  });
+});
+
 export const forkThreadFromRun = Effect.fn("EnvironmentCommands.forkThreadFromRun")(function* (
   input: ForkThreadFromRunInput,
 ) {

@@ -260,6 +260,7 @@ export const make = Effect.gen(function* () {
       workerRetirementWarning: true,
       peerEnvironments: true,
       threadAutoSettleOptOut: true,
+      threadNativeFork: true,
       threadProjectFromScratch: true,
       computers: true,
       computersStorage: true,

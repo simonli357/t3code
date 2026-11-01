@@ -559,9 +559,7 @@ function ThreadNavigationSidebarPane(
             providerInstance={resolveProviderInstance(thread)}
             providers={providersByEnvironmentId.get(thread.environmentId)}
             environmentLabel={
-              Object.keys(savedConnectionsById).length > 1
-                ? (savedConnectionsById[thread.environmentId]?.environmentLabel ?? null)
-                : null
+              savedConnectionsById[thread.environmentId]?.environmentLabel ?? thread.environmentId
             }
             environmentMachine={machineByEnvironmentId.get(thread.environmentId)}
             searchMatch={

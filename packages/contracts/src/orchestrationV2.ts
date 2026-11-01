@@ -3290,6 +3290,8 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.fork"),
+    /** Snapshot the entire saved native session now, without starting a turn. */
+    wholeSession: Schema.optional(Schema.Boolean),
     nativeOnly: Schema.optional(Schema.Boolean),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,

@@ -355,7 +355,7 @@ export function useThreadListV2(input: {
         type: "v2-session-group",
         key: "base-sessions",
         groupKey: "base-sessions",
-        title: "Bases",
+        title: "Base sessions",
         summary: `${bases.length} prepared bases`,
         expanded: groups.expanded.has("base-sessions"),
         finished: 0,

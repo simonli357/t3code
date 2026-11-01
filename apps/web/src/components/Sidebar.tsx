@@ -1,3 +1,4 @@
+import { useForkConversation, hasSavedConversationFork, discardConversationFork } from "../hooks/useForkConversation";
 import {
   buildSessionHierarchy,
   sessionKey,
@@ -10,7 +11,6 @@ import {
   describeSessionOwner,
 } from "@t3tools/client-runtime/state/session-organization";
 import { SessionGroupHeader, SessionFinishedToggle } from "./SessionGroupHeader";
-import { SessionRoleLabel } from "./SessionRoleLabel";
 import { useSessionGroupExpansion } from "../hooks/useSessionGroupExpansion";
 import { useEnvironments } from "../state/environments";
 import { openSessionOrganization } from "./SessionOrganizationDialog";
@@ -955,6 +955,7 @@ function readRouteThreadKey(router: AnyRouter): string | null {
 }
 
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
+  const forkConversation = useForkConversation();
   const {
     projects,
     serverConfigs,
@@ -2634,6 +2635,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           api.contextMenu.show(
             [
               { id: "organization" as const, label: "Session organization and Base" },
+              ...(hasSavedConversationFork(threadRef) ? [{ id: "discard-fork" as const, label: "Discard saved fork request…" }] : []),
               ...buildThreadActionMenuItems({
                 canOperate: readEnvironmentScope(
                   threadRef.environmentId,
@@ -2658,6 +2660,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 ),
                 canTurnIntoProject: canTurnThreadIntoProject(threadRef),
                 supports: {
+                  forking: serverConfigs.get(thread.environmentId)?.environment.capabilities.threadNativeFork === true,
                   settlement: configLoaded,
                   autoSettleOptOut: supportsAutoSettleOptOut,
                   snooze: configLoaded,
@@ -2675,6 +2678,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           openSessionOrganization(threadRef);
           return;
         }
+        if (clicked.value === "discard-fork") {
+          const confirmed = await api.dialogs.confirm("Discard the saved fork request? Any native fork already created is retained. Inspect its outcome before starting another fork.");
+          if (confirmed) discardConversationFork(threadRef);
+          return;
+        }
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
@@ -2690,6 +2698,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           return;
         }
         switch (clicked.value) {
+          case "fork-conversation":
+            await forkConversation(threadRef);
+            return;
           case "filter-by-project":
             if (threadProjectGroup) {
               setProjectScopeKeys(
@@ -3319,31 +3330,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             key={threadKey}
                             style={depth ? { marginLeft: Math.min(depth, 3) * 12 } : undefined}
                           >
-                            <div className="flex items-center gap-2 px-3 text-xs text-muted-foreground">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  openSessionOrganization(
-                                    scopeThreadRef(thread.environmentId, thread.id),
-                                  )
-                                }
-                                aria-label="Session organization"
-                              >
-                                <SessionRoleLabel thread={thread} nested={depth > 0} />
-                              </button>
-                              {owner && (
-                                <Tooltip>
-                                  <TooltipTrigger
-                                    render={
-                                      <span className="truncate" aria-label={owner.ariaLabel} />
-                                    }
-                                  >
-                                    {owner.text}
-                                  </TooltipTrigger>
-                                  <TooltipPopup>{owner.detail}</TooltipPopup>
-                                </Tooltip>
-                              )}
-                            </div>
                             <SortableThreadRow
                               key={threadKey}
                               sortableId={threadKey}
@@ -3355,6 +3341,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 optimisticDrop !== null
                               }
                               thread={thread}
+                              organizationOwner={owner}
+                              organizationNested={depth > 0}
+                              onOrganization={openSessionOrganization}
                               variant={rowVariant}
                               navigationParent={
                                 folderRow ??
@@ -3478,7 +3467,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           onDraftContextMenu={handleDraftContextMenu}
                         />,
                       ];
-                      if (bases.length) {
+                      {
                         items.push(
                           <button
                             key="base-shelf"
@@ -3487,9 +3476,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             aria-expanded={expanded.has("base-sessions")}
                             onClick={() => toggleGroup("base-sessions")}
                           >
-                            Bases · {bases.length}
+                            Base sessions · {bases.length}
                           </button>,
                         );
+                        if (bases.length === 0 && expanded.has("base-sessions"))
+                          items.push(<li key="base-empty" className="px-3 py-2 text-xs text-muted-foreground">No designated Base sessions on these computers. Open a session’s “Session organization and Base” menu to designate it or adopt a configured account base.</li>);
                         items.push(
                           ...visibleBases.map((thread) => renderThreadRow(thread, "active")),
                         );

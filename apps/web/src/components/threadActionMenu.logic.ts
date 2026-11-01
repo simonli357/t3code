@@ -16,6 +16,7 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  | "fork-conversation"
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -82,6 +83,7 @@ export interface ThreadActionMenuState {
   /** Archive rejects attached providers, so disable it while running. */
   readonly isRunning: boolean;
   readonly supports: {
+    readonly forking?: boolean;
     readonly settlement: boolean;
     readonly autoSettleOptOut: boolean;
     readonly snooze: boolean;
@@ -160,6 +162,7 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    ...(state.supports.forking ? [{ id: "fork-conversation" as const, label: "Fork", icon: "git-branch", disabled: state.isRunning }] : []),
     { id: "rename", label: "Rename thread", icon: "pencil", separatorBefore: true },
     ...(state.supports.titleRegeneration
       ? [

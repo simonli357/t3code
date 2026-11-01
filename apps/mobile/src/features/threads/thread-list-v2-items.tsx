@@ -1,3 +1,6 @@
+import { useForkConversation } from "./useForkConversation";
+import { serverEnvironment } from "../../state/server";
+import { useAtomValue } from "@effect/atom-react";
 import { SessionOrganizationSheet } from "./SessionOrganizationSheet";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
@@ -665,6 +668,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const dormant = useSwipeRowDormant(props.activationKey);
 
   const [organizationOpen, setOrganizationOpen] = useState(false);
+  const forkConversation = useForkConversation();
+  const config = useAtomValue(serverEnvironment.configValueAtom(thread.environmentId));
+  const nativeForkSupported = config?.environment.capabilities.threadNativeFork === true;
   const selectThread = () => onSelectThread(thread);
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
@@ -846,6 +852,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const canTurnIntoProject = canTurnThreadIntoProject(thread);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      ...(nativeForkSupported ? [{ id: "fork-conversation", title: "Fork", image: "arrow.triangle.branch", attributes: { disabled: !canOperateThread || !threadCanArchive(thread.runtime) } }] : []),
       { id: "organization", title: "Session organization and Base", image: "person.2" },
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
@@ -865,6 +872,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ],
     [
       canTurnIntoProject,
+      canOperateThread,
+      nativeForkSupported,
       props.titleRegenerationSupported,
       thread.runtime,
       thread.titleRegeneration,
@@ -932,6 +941,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event === "fork-conversation" && canOperateThread) void forkConversation(thread);
       if (nativeEvent.event === "organization") setOrganizationOpen(true);
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "settle") handleSettle();
@@ -1073,6 +1083,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           {props.organizationCaption}
         </Text>
       )}
+      <Text className="text-xs text-foreground-muted" numberOfLines={1} accessibilityLabel="Originating computer">
+        {props.environmentLabel ?? thread.environmentId}
+      </Text>
       {organizationOpen && (
         <SessionOrganizationSheet thread={thread} onClose={() => setOrganizationOpen(false)} />
       )}
