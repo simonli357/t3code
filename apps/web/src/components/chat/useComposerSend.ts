@@ -985,7 +985,10 @@ export function useComposerSend(input: ComposerSendInput) {
             sendCtx?.shownPendingApprovalIds.includes(approval.requestId),
           )
         : [];
-    if (approvalsToDecline.length > 0 || approvalFeedbackTarget !== undefined) {
+    if (
+      !activeThread.isBase &&
+      (approvalsToDecline.length > 0 || approvalFeedbackTarget !== undefined)
+    ) {
       // A draft edited since send, or a paste still landing in it, is no longer the message
       // the user sent.
       const attachmentIdsAtSend = composerAttachmentsSnapshot.map((attachment) => attachment.id);

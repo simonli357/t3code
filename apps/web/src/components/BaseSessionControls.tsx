@@ -230,7 +230,7 @@ export function BaseSessionControls({
             message: {
               messageId: MessageId.make(randomUUID()),
               role: "user",
-              text: project.basePrompt ?? DEFAULT_BASE_PROMPT,
+              text: project.basePrompt ?? configuration?.configuredPrompt ?? DEFAULT_BASE_PROMPT,
               attachments: [],
             },
             modelSelection: thread.modelSelection,
