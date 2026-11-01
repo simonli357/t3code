@@ -199,6 +199,28 @@ export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
         Effect.mapError((cause) => (isOrchestratorError(cause) ? cause : reject(input, cause))),
       ),
   );
+  // Admission follows the saved send identity and fixed destination profile on retry.
+  // Confirmed requests are read-only recovery even if the account was disabled later.
+  const policyCommand = Effect.fn("BaseSessions.policyCommand")(
+    function* (input: Send) {
+      const saved =
+        (yield* sql<Receipt>`SELECT * FROM base_session_submissions WHERE request_id = ${input.commandId}`)[0];
+      if (!saved) return input;
+      if (saved.input_json !== encode(input))
+        return yield* reject(
+          input,
+          "This Base submission ID belongs to another message. Retry the saved request.",
+        );
+      if (saved.state === "started") return null;
+      if (!saved.command_json) return input;
+      const command = decode(saved.command_json);
+      return command.type === "message.dispatch" ? command : input;
+    },
+    (effect, input) =>
+      effect.pipe(
+        Effect.mapError((cause) => (isOrchestratorError(cause) ? cause : reject(input, cause))),
+      ),
+  );
   const create = Effect.fn("BaseSessions.create")(function* (input: BaseSessionCreateInput) {
     const id = (step: string) => CommandId.make(`base-create:${input.clientRequestId}:${step}`);
     const creationCommand = {
@@ -259,5 +281,5 @@ export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
       creationSource: "web",
     });
   });
-  return { dispatch, create };
+  return { dispatch, create, policyCommand };
 });

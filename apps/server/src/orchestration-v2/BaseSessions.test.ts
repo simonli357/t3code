@@ -172,7 +172,11 @@ it.effect(
         bases = yield* makeBaseSessions(orchestrator);
         h.loseSend();
         yield* Effect.flip(bases.dispatch(input));
+        const retryPolicy = yield* bases.policyCommand(input);
+        assert.equal(retryPolicy?.commandId, "base-send:task-request");
+        assert.deepEqual(retryPolicy?.modelSelection, modelSelection);
         const result = yield* bases.dispatch(input);
+        assert.isNull(yield* bases.policyCommand(input));
         const replay = yield* bases.dispatch(input);
         assert.equal(result.threadId, replay.threadId);
         assert.notEqual(result.threadId, baseId);

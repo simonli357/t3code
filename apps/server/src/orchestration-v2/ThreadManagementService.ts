@@ -691,13 +691,22 @@ const make = Effect.gen(function* () {
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
       case "message.dispatch":
-        return orchestrator.getThreadRecords(command.threadId, []).pipe(
-          Effect.flatMap((projection) =>
-            assertProviderInstanceEnabled({
-              projectId: projection.thread.projectId,
-              commandId: command.commandId,
-              instanceId: (command.modelSelection ?? projection.thread.modelSelection).instanceId,
-            }),
+        return bases.policyCommand(command).pipe(
+          Effect.flatMap((target) =>
+            target === null
+              ? Effect.void
+              : orchestrator.getThreadRecords(target.threadId, []).pipe(
+                  Effect.flatMap((projection) =>
+                    assertProviderInstanceEnabled({
+                      projectId: projection.thread.projectId,
+                      commandId: target.commandId,
+                      instanceId: (projection.thread.isBase
+                        ? projection.thread.modelSelection
+                        : (target.modelSelection ?? projection.thread.modelSelection)
+                      ).instanceId,
+                    }),
+                  ),
+                ),
           ),
         );
       case "delegated_task.request":
