@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
 import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -265,14 +266,18 @@ describe("DirectEndpoints loopback discovery", () => {
     }),
   );
 
-  it("does not swallow interface discovery failures for a wildcard bind", async () => {
-    vi.mocked(NodeOS.networkInterfaces).mockImplementation(() => {
-      throw new Error("interface enumeration denied by sandbox");
-    });
-    await expect(Effect.runPromise(resolveWithServe(200, "0.0.0.0", false))).rejects.toThrow(
-      "interface enumeration denied by sandbox",
-    );
-  });
+  effectIt.effect("does not swallow interface discovery failures for a wildcard bind", () =>
+    Effect.gen(function* () {
+      vi.mocked(NodeOS.networkInterfaces).mockImplementation(() => {
+        throw new Error("interface enumeration denied by sandbox");
+      });
+      const exit = yield* Effect.exit(resolveWithServe(200, "0.0.0.0", false));
+      expect(exit._tag).toBe("Failure");
+      if (exit._tag === "Failure") {
+        expect(Cause.pretty(exit.cause)).toContain("interface enumeration denied by sandbox");
+      }
+    }),
+  );
 });
 
 describe("DirectEndpoints Tailscale Serve", () => {
