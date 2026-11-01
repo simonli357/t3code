@@ -66,7 +66,7 @@ export const buildInitialCursorProviderSnapshot = Effect.fn(
       version: null,
       status: "warning",
       auth: { status: "unknown" },
-      message: "Checking Cursor SDK availability...",
+      message: "Checking Cursor CLI availability...",
     },
   });
 });

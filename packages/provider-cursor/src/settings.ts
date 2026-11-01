@@ -8,7 +8,7 @@ export const CursorSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(false)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    // Preserve V1 CLI fields when V2's SDK rewrites shared settings.
+    // ACP uses the same CLI binary, endpoint and custom model settings as V1.
     binaryPath: Schema.optionalKey(TrimmedString).pipe(
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),

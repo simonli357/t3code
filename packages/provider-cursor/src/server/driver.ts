@@ -10,14 +10,20 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
+import { checkCursorAcpStatus } from "./acpStatus.ts";
 import { readCursorUsageLimits } from "./usageLimits.ts";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeCursorTextGeneration } from "./textGeneration.ts";
-import { makeCursorAdapterV2, type CursorAdapterV2DriverEnv } from "./adapter.ts";
+import { type CursorAdapterV2DriverEnv } from "./adapter.ts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeCursorAcpAdapter } from "./acpAdapter.ts";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
-import { buildInitialCursorProviderSnapshot, checkCursorProviderStatus } from "./status.ts";
-import * as CursorSdkCatalog from "./CursorSdkCatalog.ts";
+import { buildInitialCursorProviderSnapshot } from "./status.ts";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
+import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   defaultProviderContinuationIdentity,
@@ -35,13 +41,12 @@ import {
 import { probeCursorSkills } from "./skills.ts";
 import { makeCursorAuth } from "./auth.ts";
 import * as CursorCredentialStore from "./credentialStore.ts";
-import * as CursorAgentSdk from "./CursorAgentSdk.ts";
+
 import * as CursorSdk from "./CursorSdk.ts";
 import * as CursorKeychain from "./CursorKeychain.ts";
 import * as CursorUsageAccounts from "./CursorUsageAccounts.ts";
 
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
-const isSdkRunnerError = Schema.is(CursorAgentSdk.CursorAgentSdkRunnerError);
 
 const DRIVER_KIND = ProviderDriverKind.make("cursor");
 const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
@@ -50,7 +55,9 @@ const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
 });
 
 export type CursorDriverEnv =
-  | CursorAdapterV2DriverEnv
+  | Exclude<CursorAdapterV2DriverEnv, import("./CursorAgentSdk.ts").CursorAgentSdkRunner>
+  | ChildProcessSpawner.ChildProcessSpawner
+  | ProviderEventLoggers.ProviderEventLoggers
   | Crypto.Crypto
   | FileSystem.FileSystem
   | Path.Path
@@ -99,7 +106,11 @@ export const CursorDriver: ProviderDriver<
     const path = yield* Path.Path;
     const httpClient = yield* HttpClient.HttpClient;
     const keychain = yield* CursorKeychain.CursorKeychain;
-    const sdkRunner = yield* CursorAgentSdk.CursorAgentSdkRunner;
+    const selfInvocation = yield* resolveSelfInvocation();
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const crypto = yield* Crypto.Crypto;
+    const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
+    const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
     const processEnv = yield* mergeProviderInstanceEnvironment(environment);
     const continuationIdentity = defaultProviderContinuationIdentity({
       driverKind: DRIVER_KIND,
@@ -165,37 +176,23 @@ export const CursorDriver: ProviderDriver<
       });
 
     let catalogModels: ReadonlyArray<ServerProviderModel> = [];
-    const orchestrationAdapter = yield* makeCursorAdapterV2({
+    const acpAdapter = yield* makeCursorAcpAdapter({
       instanceId,
+      settings: effectiveConfig,
       environment: processEnv,
+      readEnvironment: auth.readApiKey.pipe(
+        Effect.orElseSucceed(() => undefined),
+        Effect.map((apiKey) => (apiKey ? { ...processEnv, CURSOR_API_KEY: apiKey } : processEnv)),
+      ),
+      selfInvocation,
       getModels: () => catalogModels,
+      nativeLogging: (threadId) =>
+        makeNativeLogger({
+          nativeEventLogger: eventLoggers.native,
+          provider: DRIVER_KIND,
+          threadId,
+        }),
     }).pipe(
-      Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
-        ...sdkRunner,
-        open: (input) =>
-          auth.requireApiKey.pipe(
-            Effect.flatMap((apiKey) =>
-              Effect.acquireRelease(
-                sdkRunner
-                  .open({ ...input, options: { ...input.options, apiKey } })
-                  .pipe(
-                    Effect.flatMap((session) =>
-                      Effect.cached(session.close).pipe(
-                        Effect.map((close) => ({ ...session, close })),
-                      ),
-                    ),
-                  ),
-                (session) => session.close.pipe(Effect.ignore),
-              ),
-            ),
-            auth.withAccess,
-            Effect.mapError((cause) =>
-              isSdkRunnerError(cause)
-                ? cause
-                : new CursorAgentSdk.CursorAgentSdkRunnerError({ method: "open", cause }),
-            ),
-          ),
-      }),
       Effect.mapError(
         (cause) =>
           new ProviderDriverError({
@@ -206,6 +203,21 @@ export const CursorDriver: ProviderDriver<
           }),
       ),
     );
+    const orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+      ...acpAdapter,
+      openSession: (input) =>
+        acpAdapter.openSession(input).pipe(
+          auth.withAccess,
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: DRIVER_KIND,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        ),
+    };
     const textGeneration = yield* makeCursorTextGeneration(
       effectiveConfig,
       processEnv,
@@ -216,14 +228,10 @@ export const CursorDriver: ProviderDriver<
     const checkProvider = auth.readApiKey.pipe(
       Effect.orElseSucceed(() => undefined),
       Effect.flatMap((apiKey) =>
-        checkCursorProviderStatus(
-          effectiveConfig,
-          {
-            ...processEnv,
-            CURSOR_API_KEY: apiKey,
-          },
-          auth.usesApiKey ? "api-key" : "browser",
-        ).pipe(
+        checkCursorAcpStatus(effectiveConfig, {
+          ...processEnv,
+          CURSOR_API_KEY: apiKey,
+        }).pipe(
           Effect.filterOrElse(
             (snapshot) =>
               !(
@@ -250,6 +258,8 @@ export const CursorDriver: ProviderDriver<
       Effect.provideService(Path.Path, path),
       Effect.provideService(CursorKeychain.CursorKeychain, keychain),
       Effect.map(stampSnapshot),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(Crypto.Crypto, crypto),
       Effect.tap((provider) =>
         Effect.sync(() => {
           // A failed check lists only custom models, so keep the last loaded catalog.
@@ -258,7 +268,6 @@ export const CursorDriver: ProviderDriver<
           }
         }),
       ),
-      Effect.provide(CursorSdkCatalog.layer),
     );
 
     const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
