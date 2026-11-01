@@ -95,7 +95,7 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
     }),
   );
 
-  it.effect("preserves role attribution when truncating imported history", () =>
+  it.effect("reports omitted imported history with a complete retrieval path", () =>
     Effect.gen(function* () {
       const service = yield* ContextHandoffService.ContextHandoffServiceV2;
       const handoff = yield* service.prepareLegacyImport({
@@ -114,13 +114,13 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
         createdAt: DateTime.makeUnsafe("2026-01-02T00:00:00.000Z"),
       });
 
-      assert.isAtMost(handoff.summaryText.length, 32_000);
-      assert.include(handoff.summaryText, "User:\n... retained final words");
-      assert.notMatch(handoff.summaryText, /\n+x+ retained final words/);
+      assert.include(handoff.summaryText, "t3_thread_read");
+      assert.include(handoff.summaryText, "textOffset=nextTextOffset");
+      assert.include(handoff.history?.omittedItemIds ?? [], TurnItemId.make("turn-item:long"));
     }),
   );
 
-  it.effect("retains the newest oversized import even when it has no whitespace", () =>
+  it.effect("keeps oversized source items recoverable without splitting their text", () =>
     Effect.gen(function* () {
       const service = yield* ContextHandoffService.ContextHandoffServiceV2;
       const handoff = yield* service.prepareLegacyImport({
@@ -149,9 +149,9 @@ it.layer(layerTest)("ContextHandoffService legacy import", (it) => {
         handoff.history?.omittedItemIds ?? [],
         TurnItemId.make("turn-item:long-single-token"),
       );
-      assert.isAtMost(handoff.summaryText.length, 32_000);
-      assert.include(handoff.summaryText, "User:\n... ");
-      assert.include(handoff.summaryText, "LATEST_SINGLE_TOKEN");
+      assert.include(handoff.summaryText, "t3_thread_read");
+      assert.include(handoff.summaryText, "older message");
+      assert.include(handoff.summaryText, "omitted 1 items");
       assert.notInclude(handoff.summaryText, "\ufffd");
     }),
   );

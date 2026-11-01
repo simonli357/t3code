@@ -8,7 +8,7 @@ import { runMigrations } from "../Migrations.ts";
 const layer = it.layer(NodeSqliteClient.layer({ filename: ":memory:" }));
 
 layer("063_DropUnusedV1Projections", (it) => {
-  it.effect("drops V1 projections nothing reads and keeps the transcript import sources", () =>
+  it.effect("retains complete V1 history for lazy import and recovery", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 62 });
@@ -24,7 +24,7 @@ layer("063_DropUnusedV1Projections", (it) => {
         SELECT name FROM sqlite_master WHERE type = 'table'
       `;
       const tables = new Set(rows.map((row) => row.name));
-      for (const dropped of [
+      for (const retained of [
         "projection_thread_activities",
         "projection_turns",
         "projection_thread_proposed_plans",
@@ -32,7 +32,7 @@ layer("063_DropUnusedV1Projections", (it) => {
         "projection_state",
         "checkpoint_diff_blobs",
       ]) {
-        assert.isFalse(tables.has(dropped), dropped);
+        assert.isTrue(tables.has(retained), retained);
       }
       for (const kept of [
         "projection_threads",

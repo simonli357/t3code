@@ -345,6 +345,43 @@ it.layer(NodeServices.layer)("prunePinnedRuntimes", (it) => {
     return { baseDir, versionsDir, install };
   });
 
+  it.effect(
+    "retains custom fallbacks and explicitly retained releases across repeated pruning",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fallback = "0.0.45+custom.52.git.c7227e08e672";
+        const { baseDir, versionsDir, install } = yield* setup([
+          fallback,
+          "0.1.3",
+          "0.1.4",
+          "0.1.5",
+          "0.1.6",
+        ]);
+        yield* install(".pruned-0.1.3");
+        yield* fs.writeFileString(path.join(versionsDir, ".pruned-0.1.3", ".retain"), "recovery");
+        yield* fs.writeFileString(path.join(versionsDir, "0.1.4", ".retain"), "rollback");
+        const prune = prunePinnedRuntimes({ baseDir, keep: ["0.1.6"] }).pipe(
+          Effect.provideService(
+            ProcessRunner.ProcessRunner,
+            lsofRunner("p42\nftxt\nn/usr/bin/node\n"),
+          ),
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(HostProcess.Environment, {}),
+        );
+        assert.deepEqual(yield* prune, ["0.1.5"]);
+        assert.deepEqual(yield* prune, []);
+        assert.deepEqual((yield* fs.readDirectory(versionsDir)).toSorted(), [
+          ".pruned-0.1.3",
+          fallback,
+          "0.1.3",
+          "0.1.4",
+          "0.1.6",
+        ]);
+      }),
+  );
+
   it.effect("removes only completed runtimes nothing references", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

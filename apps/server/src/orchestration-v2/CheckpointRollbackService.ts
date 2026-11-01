@@ -46,6 +46,7 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
       "rollback-target-invalid",
       "active-provider-changed",
       "provider-turn-unavailable",
+      "historical-boundary-unavailable",
       "unexpected-failure",
       "shared-workspace",
     ]),
@@ -61,6 +62,8 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
         return `Rollback target ${this.checkpointId} for provider thread ${this.providerThreadId} on thread ${this.threadId} is incomplete or invalid.`;
       case "active-provider-changed":
         return `Active provider changed before rollback target ${this.checkpointId} could execute on thread ${this.threadId}.`;
+      case "historical-boundary-unavailable":
+        return "The imported checkpoint could not be restored because its native history boundary is unavailable or incompatible. No files were restored. The original V1 history is retained.";
       case "provider-turn-unavailable":
         return `Provider turn for rollback target ${this.checkpointId} is unavailable on provider thread ${this.providerThreadId}.`;
       case "shared-workspace":
@@ -76,11 +79,11 @@ const isVcsProcessExitError = Schema.is(VcsProcessExitError);
 const isCheckpointRestoreError = Schema.is(CheckpointRestoreError);
 
 /**
- * The message clients see when a rollback fails. Only a held Git index lock
- * gets its own explanation; other reasons carry internal ids or raw Git
- * output, so they fall back to the generic message.
+ * Imported native-history restrictions and held Git locks have safe explanations.
+ * Other failures can contain internal ids or raw Git output, so stay generic.
  */
 export function rollbackFailureClientMessage(error: CheckpointRollbackExecutionError): string {
+  if (error.reason === "historical-boundary-unavailable") return error.message;
   const restoreCause = isCheckpointRestoreError(error.cause) ? error.cause.cause : undefined;
   return isVcsProcessExitError(restoreCause) && restoreCause.detail === GIT_INDEX_LOCKED_DETAIL
     ? GIT_INDEX_LOCKED_DETAIL
@@ -150,7 +153,10 @@ export const layer: Layer.Layer<
         checkpoint === undefined ||
         scope === undefined ||
         checkpoint.scopeId !== scope.id ||
-        checkpoint.status !== "ready"
+        checkpoint.status !== "ready" ||
+        (checkpoint.appRunOrdinal === null &&
+          (scope.kind !== "root_run" || checkpoint.ordinalWithinScope !== 0)) ||
+        checkpoint.legacyV1?.rollbackUnavailableReason !== undefined
       ) {
         return yield* new CheckpointRollbackExecutionError({
           reason: "rollback-target-invalid",
@@ -266,13 +272,27 @@ export const layer: Layer.Layer<
       );
 
       const snapshot =
-        runsToRollback.length === 0
+        runsToRollback.length === 0 && checkpoint.legacyV1 === undefined
           ? { providerThread }
-          : yield* session.rollbackThread({
-              providerThread,
-              target: rollbackTarget,
-              providerThreadTurns,
-            });
+          : yield* session
+              .rollbackThread({
+                providerThread,
+                target: rollbackTarget,
+                providerThreadTurns,
+              })
+              .pipe(
+                Effect.mapError((cause) =>
+                  checkpoint.legacyV1
+                    ? new CheckpointRollbackExecutionError({
+                        reason: "historical-boundary-unavailable",
+                        threadId: input.threadId,
+                        providerThreadId: input.providerThreadId,
+                        checkpointId: input.checkpointId,
+                        cause,
+                      })
+                    : cause,
+                ),
+              );
       if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
       if (staleCheckpoints.length > 0) {
         yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
@@ -307,6 +327,16 @@ export const layer: Layer.Layer<
               },
             }),
           );
+          if ("providerTurns" in snapshot)
+            for (const turn of snapshot.providerTurns ?? [])
+              events.push(
+                yield* makeEvent({
+                  type: "provider-turn.updated",
+                  threadId: input.threadId,
+                  occurredAt: now,
+                  payload: turn,
+                }),
+              );
           for (const staleCheckpoint of staleCheckpoints) {
             events.push(
               yield* makeEvent({

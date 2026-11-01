@@ -93,6 +93,15 @@ it.effect("forks a session stored under the instance's own CLAUDE_CONFIG_DIR", (
         providerSessionId: ProviderSessionId.make("session-fork-config-dir"),
       });
 
+      const boundaries = yield* runner.readLegacyBoundaries!({
+        sessionId: FORK_SESSION_ID,
+        options: { dir: "/repo" },
+        environment: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+      });
+      assert.deepStrictEqual(boundaries, [
+        { uuid: "aaaaaaaa-0000-4000-8000-000000000001", type: "user" },
+        { uuid: "aaaaaaaa-0000-4000-8000-000000000002", type: "assistant" },
+      ]);
       assert.notEqual(forked.sessionId, FORK_SESSION_ID);
       const transcript = yield* fileSystem.readFileString(
         path.join(projectDir, `${forked.sessionId}.jsonl`),

@@ -2,6 +2,10 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  CheckpointRef,
+  CheckpointId,
+  EventId,
+  PlanId,
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -16,6 +20,7 @@ import {
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -36,7 +41,10 @@ import Migration0046 from "../../persistence/Migrations/046_RepairAutomaticSettl
 import Migration0047 from "../../persistence/Migrations/047_ProjectionProjectIcon.ts";
 import Migration0048 from "../../persistence/Migrations/048_ProjectionThreadBranchPullRequest.ts";
 import Migration0049 from "../../persistence/Migrations/049_ProjectionThreadsActiveOrderKey.ts";
-import { CodexProviderCapabilitiesV2 } from "../Adapters/CodexAdapterV2.ts";
+import {
+  CodexProviderCapabilitiesV2,
+  resolveImportedCodexRollbackTurnCount,
+} from "../Adapters/CodexAdapterV2.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
@@ -48,6 +56,18 @@ import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import * as CheckpointDiffQuery from "../../checkpointing/CheckpointDiffQuery.ts";
+import * as ThreadManagement from "../ThreadManagementService.ts";
+import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
+import * as VcsProcess from "../../vcs/VcsProcess.ts";
+import * as ServerConfig from "../../config.ts";
+
+interface HistoricalNativeFixture {
+  readonly history: Ref.Ref<ReadonlyArray<string>>;
+  readonly rollbacks: Ref.Ref<ReadonlyArray<{ boundary: string; removed: number }>>;
+}
 
 const PROJECT_ID = "project:cutover";
 const ACTIVE_THREAD = "thread:cutover:active";
@@ -412,7 +432,10 @@ interface CapturedTurn {
 const unimplemented = (detail: string) =>
   Effect.fail(new ProviderAdapter.ProviderAdapterProtocolError({ driver, detail }));
 
-const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =>
+const makeCodexAdapter = (
+  capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>,
+  native?: HistoricalNativeFixture,
+) =>
   ({
     instanceId,
     driver,
@@ -443,6 +466,12 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
+              if (threadInput.existingProviderThread?.nativeThreadRef?.nativeId)
+                return {
+                  ...threadInput.existingProviderThread,
+                  providerSessionId: sessionInput.providerSessionId,
+                  status: "idle" as const,
+                };
               const nativeThreadId = `${driver}:${threadInput.threadId}`;
               return {
                 id: ProviderThreadId.make(`provider-thread:${nativeThreadId}`),
@@ -477,6 +506,11 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
                   text: turnInput.message.text,
                 },
               ]);
+              if (native)
+                yield* Ref.update(native.history, (history) => [
+                  ...history,
+                  `native-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
+                ]);
               const eventTime = yield* DateTime.now;
               const providerTurnId = ProviderTurnId.make(
                 `provider-turn:${turnInput.threadId}:${turnInput.runOrdinal}`,
@@ -545,7 +579,39 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
           interruptTurn: () => Effect.void,
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () => unimplemented("readThreadSnapshot unused in cutover test"),
-          rollbackThread: () => unimplemented("rollbackThread unused in cutover test"),
+          rollbackThread: (input) =>
+            Effect.gen(function* () {
+              if (!native) return yield* unimplemented("rollbackThread unused in cutover test");
+              const history = yield* Ref.get(native.history);
+              const removed = yield* resolveImportedCodexRollbackTurnCount(input, {
+                turns: history.map((id) => ({ id, status: "completed" })),
+              }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                      driver,
+                      providerThreadId: input.providerThread.id,
+                      cause,
+                    }),
+                ),
+              );
+              if (input.target.type !== "provider_turn")
+                return yield* unimplemented("A historical target must never become thread_start");
+              const boundary = input.target.providerTurn.nativeTurnRef!.nativeId!;
+              yield* Ref.update(native.rollbacks, (calls) => [...calls, { boundary, removed }]);
+              yield* Ref.set(native.history, history.slice(0, history.length - removed));
+              return {
+                providerThread: {
+                  ...input.providerThread,
+                  providerSessionId: sessionInput.providerSessionId,
+                  nativeConversationHeadRef: input.target.providerTurn.nativeTurnRef,
+                  status: "idle" as const,
+                },
+                providerTurns: [],
+                messages: [],
+                runtimeRequests: [],
+              };
+            }),
           forkThread: () => unimplemented("forkThread unused in cutover test"),
         };
       }),
@@ -583,6 +649,7 @@ const layerBoot = (input: {
   readonly dbPath: string;
   readonly workspace: string;
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
+  readonly native?: HistoricalNativeFixture;
 }) => {
   const layerDatabase = SqlitePersistence.layerFromPath(input.dbPath).pipe(
     Layer.provide(NodeServices.layer),
@@ -616,10 +683,21 @@ const layerBoot = (input: {
         },
       },
     },
-    ProviderAdapterRegistry.layerSingle(makeCodexAdapter(input.capturedTurns)),
+    ProviderAdapterRegistry.layerSingle(makeCodexAdapter(input.capturedTurns, input.native)),
     { databaseLayer: layerDatabase },
   );
+  const checkpointLayer = CheckpointStore.layer.pipe(
+    Layer.provide(
+      VcsDriverRegistry.layer.pipe(
+        Layer.provide(VcsProcess.layer),
+        Layer.provide(ServerConfig.layerTest(input.workspace, { prefix: input.name })),
+        Layer.provide(NodeServices.layer),
+      ),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
   return Layer.mergeAll(
+    checkpointLayer,
     layerStoresProvided,
     layerEventSinkProvided,
     layerImporterProvided,
@@ -838,9 +916,12 @@ describe("orchestration v2 legacy v1 cutover", () => {
               assert.equal(continued.contextHandoffs.length, 1);
               const handoff = continued.contextHandoffs[0]!;
               assert.equal(handoff.strategy, "manual_context");
-              assert.isAtMost(handoff.summaryText.length, 32_000);
-              assert.include(handoff.summaryText, LATEST_MARKER);
-              assert.notInclude(handoff.summaryText, EARLIEST_MARKER);
+              assert.include(handoff.summaryText, "t3_thread_read");
+              assert.isAbove(handoff.history?.omittedItems ?? 0, 0);
+              assert.include(continued.messages[0]!.text, EARLIEST_MARKER);
+              assert.isTrue(
+                continued.messages.some((message) => message.text.includes(LATEST_MARKER)),
+              );
               const turns = yield* Ref.get(capturedTurns);
               assert.equal(turns.length, 1);
               assert.include(turns[0]!.text, "Context handoff (manual_context):");
@@ -1023,3 +1104,311 @@ describe("orchestration v2 legacy v1 cutover", () => {
       ),
   );
 });
+
+it.live("continues an imported native session without a lossy handoff", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "v1-native-continuation-" });
+      const workspace = yield* checkpointWorkspace("v1-native-continuation");
+      const dbPath = path.join(directory, "state.sqlite");
+      yield* seedV1Database(dbPath, workspace);
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO provider_session_runtime (thread_id,provider_name,provider_instance_id,adapter_key,status,last_seen_at,resume_cursor_json)
+        VALUES (${LONG_THREAD},'codex','codex','codex','ready','2026-01-10T00:00:00Z','{"threadId":"retained-native-session"}')`;
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      yield* Effect.gen(function* () {
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make(LONG_THREAD);
+        yield* importer.reconcileShells;
+        yield* importer.ensureTranscript(threadId);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("native-continuation"),
+          threadId,
+          messageId: MessageId.make("native-continuation"),
+          text: "Continue natively",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const projection = yield* waitForIdle(threadId);
+        assert.equal(
+          projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+          "retained-native-session",
+        );
+        assert.isEmpty(projection.contextHandoffs);
+        assert.equal(projection.runs[0]?.status, "completed");
+        assert.isTrue(
+          projection.messages.some((message) => message.text.includes(EARLIEST_MARKER)),
+        );
+        assert.isTrue(projection.messages.some((message) => message.text.includes(LATEST_MARKER)));
+      }).pipe(
+        Effect.provide(
+          layerBoot({ name: "native-continuation", dbPath, workspace, capturedTurns }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect(
+  "restores a selected V1 Git checkpoint through commands before continuation, after a V2 turn, and after restart; retains plan implementation links",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspace = yield* checkpointWorkspace("legacy-history-actions", {
+          "proof.txt": "initial\n",
+        });
+        const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "legacy-actions-" });
+        const dbPath = path.join(stateDir, "state.sqlite");
+        yield* seedV1Database(dbPath, workspace);
+        const native: HistoricalNativeFixture = {
+          history: yield* Ref.make<ReadonlyArray<string>>([
+            "old-native-1",
+            "old-native-2",
+            "old-native-3",
+          ]),
+          rollbacks: yield* Ref.make<ReadonlyArray<{ boundary: string; removed: number }>>([]),
+        };
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const threadId = ThreadId.make(ACTIVE_THREAD);
+        for (const boot of [1, 2]) {
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+              const projections = yield* ProjectionStore.ProjectionStoreV2;
+              const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+              const checkpoints = yield* CheckpointStore.CheckpointStore;
+              const orchestrator = yield* Orchestrator.OrchestratorV2;
+              const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+              const sink = yield* EventSink.EventSinkV2;
+              if (boot === 1) {
+                // Other fixture threads are tombstoned so the restored repository has one owner.
+                yield* sql`UPDATE projection_threads SET deleted_at = '2026-01-11T00:00:00Z' WHERE thread_id <> ${threadId}`;
+                yield* sql`UPDATE projection_threads SET worktree_path = ${workspace} WHERE thread_id = ${threadId}`;
+                yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, provider_instance_id, adapter_key, status, runtime_mode, resume_cursor_json, last_seen_at)
+            VALUES (${threadId}, 'codex', 'codex', 'codex', 'ready', 'full-access', '{"threadId":"native-history"}', '2026-01-10T00:00:00Z')`;
+                for (const index of [5, 6])
+                  yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+                  VALUES (${`message:cutover:active:${index}`}, ${threadId}, ${index === 5 ? "user" : "assistant"}, 'third turn', 0, '2026-01-03T00:00:00Z', '2026-01-03T00:01:00Z')`;
+                for (const ordinal of [1, 2, 3]) {
+                  yield* sql`INSERT INTO orchestration_events (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json, application_event_version)
+                    VALUES (${`legacy-start-${ordinal}`}, 'thread', ${threadId}, ${ordinal}, 'thread.turn-start-requested', '2026-01-01T00:00:00Z', 'user', ${JSON.stringify({ threadId, messageId: `message:cutover:active:${ordinal * 2 - 1}`, modelSelection: { instanceId: "codex", model: "retained-historical-model", options: [{ id: "reasoningEffort", value: "high" }] }, runtimeMode: "approval-required", interactionMode: "plan" })}, '{}', 1)`;
+                  const ref = `refs/t3/checkpoints/legacy-${ordinal}`;
+                  yield* fs.writeFileString(
+                    path.join(workspace, "proof.txt"),
+                    `historical-${ordinal}\nexact bytes\n`,
+                  );
+                  yield* checkpoints.captureCheckpoint({
+                    cwd: workspace,
+                    checkpointRef: CheckpointRef.make(ref),
+                  });
+                  yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at, completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status, checkpoint_files_json)
+              VALUES (${threadId}, ${`old-native-${ordinal}`}, ${`message:cutover:active:${ordinal * 2 - 1}`}, ${`message:cutover:active:${ordinal * 2}`}, 'completed', ${`2026-01-0${ordinal}T00:00:00Z`}, ${`2026-01-0${ordinal}T00:01:00Z`}, ${ordinal}, ${ref}, 'ready', '[{"path":"proof.txt","kind":"modified","additions":2,"deletions":1}]')`;
+                }
+                yield* sql`INSERT INTO projection_thread_proposed_plans (plan_id, thread_id, plan_markdown, created_at, updated_at, implemented_at, implementation_thread_id)
+            VALUES ('historical-implemented-plan', ${threadId}, 'Already implemented', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z', ${threadId}),
+            ('historical-active-plan', ${threadId}, 'Implement retained active plan', '2026-01-04T00:00:00Z', '2026-01-04T00:00:00Z', NULL, NULL)`;
+                yield* sql`UPDATE projection_turns SET source_proposed_plan_thread_id = ${threadId}, source_proposed_plan_id = 'historical-implemented-plan' WHERE turn_id = 'old-native-2'`;
+                yield* importer.reconcileShells;
+                yield* importer.ensureTranscript(threadId);
+                const diff = yield* CheckpointDiffQuery.make.pipe(
+                  Effect.provide(
+                    Layer.mock(ThreadManagement.ThreadManagementService)({
+                      getCheckpointContext: orchestrator.getCheckpointContext,
+                    }),
+                  ),
+                );
+                const result = yield* diff.getTurnDiff({
+                  threadId,
+                  fromTurnCount: 1,
+                  toTurnCount: 2,
+                });
+                assert.include(result.diff, "-historical-1");
+                assert.include(result.diff, "+historical-2");
+              }
+              const imported = yield* projections.getThreadProjection(threadId);
+              const target = imported.checkpoints.find(
+                (checkpoint) => checkpoint.legacyV1?.turnId === "old-native-2",
+              )!;
+              assert.isDefined(target);
+              assert.equal(target.appRunOrdinal, 2);
+              const historicalRun = imported.runs.find((run) => run.id === target.runId)!;
+              assert.equal(historicalRun.modelSelection.model, "retained-historical-model");
+              assert.deepStrictEqual(historicalRun.modelSelection.options, [
+                { id: "reasoningEffort", value: "high" },
+              ]);
+              assert.equal(historicalRun.legacyV1?.runtimeMode, "approval-required");
+              assert.equal(historicalRun.legacyV1?.modelSelectionRecovered, true);
+
+              assert.equal(
+                imported.runs.find((run) => run.id === target.runId)?.sourcePlanRef?.planId,
+                "historical-implemented-plan",
+              );
+              assert.equal(
+                imported.plans.find((plan) => plan.id === "historical-implemented-plan")
+                  ?.implementation?.threadId,
+                threadId,
+              );
+              assert.equal(
+                imported.messages.find((message) => message.id === "message:cutover:active:4")
+                  ?.runId,
+                target.runId,
+              );
+              assert.equal(
+                imported.turnItems.find(
+                  (item) =>
+                    item.type === "assistant_message" &&
+                    item.messageId === "message:cutover:active:4",
+                )?.runId,
+                target.runId,
+              );
+              if (boot === 1) {
+                const unsafe = {
+                  ...target,
+                  id: CheckpointId.make("migration:v1:checkpoint:unmapped"),
+                  ordinalWithinScope: 99,
+                  runId: null,
+                  appRunOrdinal: null,
+                  legacyV1: undefined,
+                };
+                yield* sink.write({
+                  events: [
+                    {
+                      id: EventId.make("unmapped-checkpoint"),
+                      type: "checkpoint.captured",
+                      threadId,
+                      occurredAt: yield* DateTime.now,
+                      payload: unsafe,
+                    },
+                  ],
+                });
+                const rejected = yield* orchestrator
+                  .dispatch({
+                    type: "checkpoint.rollback",
+                    commandId: CommandId.make("refuse-unmapped"),
+                    threadId,
+                    checkpointId: unsafe.id,
+                    scopeId: unsafe.scopeId,
+                  })
+                  .pipe(Effect.exit);
+                assert.isTrue(Exit.isFailure(rejected));
+                assert.lengthOf(yield* Ref.get(native.rollbacks), 0);
+                assert.equal(
+                  yield* fs.readFileString(path.join(workspace, "proof.txt")),
+                  "historical-3\nexact bytes\n",
+                );
+              }
+              const restore = (name: string) =>
+                Effect.gen(function* () {
+                  const afterSequence = yield* sink.latestSequence();
+                  yield* orchestrator.dispatch({
+                    type: "checkpoint.rollback",
+                    commandId: CommandId.make(name),
+                    threadId,
+                    checkpointId: target.id,
+                    scopeId: target.scopeId,
+                  });
+                  yield* worker.drain();
+                  yield* sink.stream({ afterSequence }).pipe(
+                    Stream.filter(
+                      (stored) =>
+                        stored.event.type === "provider-thread.updated" &&
+                        stored.event.payload.nativeConversationHeadRef?.nativeId === "old-native-2",
+                    ),
+                    Stream.take(1),
+                    Stream.runDrain,
+                  );
+                  const result = yield* projections.getThreadProjection(threadId);
+                  assert.equal(result.thread.rollbackFailure, null);
+                  assert.equal(result.thread.rollbackRequestId, name);
+                  assert.equal(
+                    yield* fs.readFileString(path.join(workspace, "proof.txt")),
+                    "historical-2\nexact bytes\n",
+                  );
+                  assert.equal((yield* Ref.get(native.rollbacks)).at(-1)?.boundary, "old-native-2");
+                });
+              yield* fs.writeFileString(
+                path.join(workspace, "proof.txt"),
+                "dirty before restore\n",
+              );
+              yield* restore(`restore-before-${boot}`);
+              if (boot === 1) {
+                assert.equal((yield* Ref.get(native.rollbacks)).at(-1)?.removed, 1);
+                yield* fs.writeFileString(path.join(workspace, "proof.txt"), "new V2 bytes\n");
+                yield* orchestrator.dispatch({
+                  type: "message.dispatch",
+                  createdBy: "user",
+                  creationSource: "web",
+                  commandId: CommandId.make("implement-imported-plan"),
+                  threadId,
+                  messageId: MessageId.make("implement-imported-plan-message"),
+                  text: "Implement retained active plan",
+                  attachments: [],
+                  dispatchMode: { type: "start_immediately" },
+                  sourcePlanRef: { threadId, planId: PlanId.make("historical-active-plan") },
+                });
+                const continued = yield* waitForIdle(threadId);
+                const plan = continued.plans.find(
+                  (candidate) => candidate.id === "historical-active-plan",
+                );
+                assert.equal(plan?.status, "completed");
+                assert.equal(plan?.implementation?.threadId, threadId);
+                assert.isTrue(
+                  continued.runs.some(
+                    (run) => run.ordinal > 3 && run.sourcePlanRef?.planId === plan?.id,
+                  ),
+                );
+                assert.lengthOf(yield* Ref.get(capturedTurns), 1);
+                yield* restore("restore-after-v2");
+                assert.equal((yield* Ref.get(native.rollbacks)).at(-1)?.removed, 1);
+                const restored = yield* projections.getThreadProjection(threadId);
+                assert.isTrue(
+                  restored.checkpoints
+                    .filter((checkpoint) => (checkpoint.appRunOrdinal ?? 0) > 2)
+                    .every((checkpoint) => checkpoint.status === "stale"),
+                );
+              } else {
+                assert.equal((yield* Ref.get(native.rollbacks)).at(-1)?.removed, 0);
+                assert.equal(
+                  imported.plans.find((plan) => plan.id === "historical-active-plan")?.status,
+                  "completed",
+                );
+              }
+              assert.isTrue((yield* maintenance.rebuild).valid);
+              const replayed = yield* projections.getThreadProjection(threadId);
+              assert.equal(
+                replayed.checkpoints.find((checkpoint) => checkpoint.id === target.id)
+                  ?.appRunOrdinal,
+                2,
+              );
+              assert.equal(
+                replayed.plans.find((plan) => plan.id === "historical-active-plan")?.implementation
+                  ?.threadId,
+                threadId,
+              );
+            }).pipe(
+              Effect.provide(
+                layerBoot({
+                  name: `legacy-actions-${boot}`,
+                  dbPath,
+                  workspace,
+                  capturedTurns,
+                  native,
+                }),
+              ),
+            ),
+          );
+        }
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);

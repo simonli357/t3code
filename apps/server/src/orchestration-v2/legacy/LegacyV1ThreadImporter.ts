@@ -16,6 +16,10 @@ import {
   type OrchestrationV2TurnItem,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
+  RunId,
+  ProviderDriverKind,
+  type OrchestrationV2ProviderThread,
   ThreadId,
   ThreadLinkedPullRequest,
   ThreadPullRequestLink,
@@ -35,11 +39,16 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as EventSink from "../EventSink.ts";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
+
+import { readHistoryEvents } from "./LegacyV1History.ts";
+
 const IMPORT_EVENT_PREFIX = "migration:v1";
 const TRANSCRIPT_EVENT_BATCH_SIZE = 100;
 
 interface LegacyThreadRow {
   readonly thread_id: string;
+  readonly is_base: string | number;
   readonly project_id: string;
   readonly title: string;
   readonly model_selection_json: string | null;
@@ -63,6 +72,9 @@ interface LegacyThreadRow {
   readonly branch_pull_request_json: string | null;
   readonly active_order_key: string | null;
   readonly deleted_at: string | null;
+  readonly provider_name: string | null;
+  readonly native_instance_id: string | null;
+  readonly resume_cursor_json: string | null;
 }
 
 interface LegacyRepairRow extends LegacyThreadRow {
@@ -194,6 +206,62 @@ function nullableDateTime(value: string | null): DateTime.Utc | null {
   return value === null ? null : dateTime(value);
 }
 
+const decodeResumeCursor = Schema.decodeUnknownOption(
+  Schema.Struct({
+    threadId: Schema.optionalKey(Schema.String),
+    resume: Schema.optionalKey(Schema.String),
+    resumeSessionAt: Schema.optionalKey(Schema.String),
+    sessionId: Schema.optionalKey(Schema.String),
+  }),
+);
+
+// These adapters still use the same native session format as the custom V1 adapters.
+// Cursor's CLI id is not an SDK agent id; never invent native continuity for it.
+function importedProviderThread(row: LegacyThreadRow): OrchestrationV2ProviderThread | undefined {
+  const driverName = row.provider_name;
+  if (
+    !driverName ||
+    !["codex", "claudeAgent", "pi", "deepseekHarness", "opencode", "grok"].includes(driverName)
+  )
+    return;
+  const cursor = Option.getOrUndefined(
+    decodeResumeCursor(parseJson(row.resume_cursor_json ?? "null")),
+  );
+  if (!cursor) return;
+  const nativeId =
+    driverName === "codex"
+      ? cursor.threadId
+      : driverName === "claudeAgent"
+        ? cursor.resume
+        : cursor.sessionId;
+  if (!nativeId?.trim()) return;
+  const selection = modelSelectionFor(row);
+  const instanceId = ProviderInstanceId.make(row.native_instance_id ?? driverName);
+  const driver = ProviderDriverKind.make(driverName);
+  return {
+    id: derive.providerThread({ driver, nativeThreadId: nativeId }),
+    driver,
+    providerInstanceId: instanceId,
+    // A logical, unloaded binding; opening it still resumes the verified native thread.
+    providerSessionId: ProviderSessionId.make(`migration:v1:session:${row.thread_id}`),
+    appThreadId: ThreadId.make(row.thread_id),
+    ownerNodeId: null,
+    nativeThreadRef: { driver, nativeId, strength: "strong" },
+    nativeConversationHeadRef:
+      driverName === "claudeAgent" && cursor.resumeSessionAt
+        ? { driver, nativeId: cursor.resumeSessionAt, strength: "strong" }
+        : null,
+    status: "not_loaded",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    nativeMetadata: { modelSelection: selection },
+    createdAt: dateTime(row.created_at),
+    updatedAt: dateTime(row.updated_at),
+  };
+}
+
 function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
   const threadId = ThreadId.make(row.thread_id);
   const modelSelection = modelSelectionFor(row);
@@ -226,7 +294,8 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     pullRequests: importedPullRequests,
     branchPullRequest: branchPullRequestFor(row),
     activeOrderKey: row.active_order_key?.trim() || null,
-    activeProviderThreadId: null,
+    activeProviderThreadId: importedProviderThread(row)?.id ?? null,
+    isBase: row.is_base === "true" || row.is_base === "1" || row.is_base === 1,
     historyOrigin: "v1_import",
     lineage: {
       parentThreadId: null,
@@ -307,6 +376,7 @@ function messageEvents(row: LegacyMessageRow): ReadonlyArray<OrchestrationV2Doma
           messageId,
           text: row.text,
           ...(context !== undefined ? { context } : {}),
+          attachments,
           streaming: false,
         };
   return [
@@ -437,6 +507,7 @@ const make = Effect.gen(function* () {
     const repairRows = yield* sql<LegacyRepairRow>`
       SELECT
         thread.thread_id,
+        thread.is_base,
         thread.project_id,
         thread.title,
         thread.model_selection_json,
@@ -460,13 +531,22 @@ const make = Effect.gen(function* () {
         thread.branch_pull_request_json,
         thread.active_order_key,
         thread.deleted_at,
+        COALESCE(runtime.provider_name, session.provider_name) AS provider_name,
+        COALESCE(runtime.provider_instance_id, session.provider_instance_id) AS native_instance_id,
+        COALESCE(runtime.resume_cursor_json, json_object(
+          'threadId', session.provider_thread_id, 'resume', session.provider_thread_id,
+          'sessionId', session.provider_thread_id
+        )) AS resume_cursor_json,
         projection.payload_json
       FROM orchestration_v2_legacy_imports AS legacy_import
       INNER JOIN projection_threads AS thread
         ON thread.thread_id = legacy_import.thread_id
+      LEFT JOIN provider_session_runtime AS runtime ON runtime.thread_id = thread.thread_id
+      LEFT JOIN projection_thread_sessions AS session ON session.thread_id = thread.thread_id
       INNER JOIN orchestration_v2_projection_threads AS projection
         ON projection.thread_id = legacy_import.thread_id
-      WHERE json_type(projection.payload_json, '$.pinnedAt') IS NULL
+      WHERE json_type(projection.payload_json, '$.isBase') IS NULL
+         OR json_type(projection.payload_json, '$.pinnedAt') IS NULL
          OR json_type(projection.payload_json, '$.pinOrderKey') IS NULL
          OR json_type(projection.payload_json, '$.snoozedUntil') IS NULL
          OR json_type(projection.payload_json, '$.snoozedAt') IS NULL
@@ -486,6 +566,7 @@ const make = Effect.gen(function* () {
       const legacyPullRequests = legacy.pullRequests ?? [];
       const repaired: OrchestrationV2AppThread = {
         ...current,
+        isBase: current.isBase === undefined ? legacy.isBase : current.isBase,
         pinnedAt: current.pinnedAt === undefined ? legacy.pinnedAt : current.pinnedAt,
         autoSettleDisabledAt:
           current.autoSettleDisabledAt === undefined
@@ -541,6 +622,7 @@ const make = Effect.gen(function* () {
     const rows = yield* sql<LegacyThreadRow>`
       SELECT
         thread.thread_id,
+        thread.is_base,
         thread.project_id,
         thread.title,
         thread.model_selection_json,
@@ -563,8 +645,16 @@ const make = Effect.gen(function* () {
         thread.linked_pull_request_json,
         thread.branch_pull_request_json,
         thread.active_order_key,
-        thread.deleted_at
+        thread.deleted_at,
+        COALESCE(runtime.provider_name, session.provider_name) AS provider_name,
+        COALESCE(runtime.provider_instance_id, session.provider_instance_id) AS native_instance_id,
+        COALESCE(runtime.resume_cursor_json, json_object(
+          'threadId', session.provider_thread_id, 'resume', session.provider_thread_id,
+          'sessionId', session.provider_thread_id
+        )) AS resume_cursor_json
       FROM projection_threads AS thread
+      LEFT JOIN provider_session_runtime AS runtime ON runtime.thread_id = thread.thread_id
+      LEFT JOIN projection_thread_sessions AS session ON session.thread_id = thread.thread_id
       WHERE NOT EXISTS (
         SELECT 1
         FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
@@ -575,10 +665,38 @@ const make = Effect.gen(function* () {
       )
       ORDER BY thread.created_at ASC, thread.thread_id ASC
     `;
+    const workerTable =
+      yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'custom_workers'`;
+    const ancestry = workerTable.length
+      ? yield* sql<{ thread_id: string; source_id: string }>`
+      SELECT worker.thread_id, worker.source_id FROM custom_workers worker
+      JOIN projection_threads source ON source.thread_id = worker.source_id
+      WHERE worker.source_id <> worker.thread_id`
+      : [];
+    const parents = new Map(ancestry.map((row) => [row.thread_id, row.source_id]));
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
     for (const row of rows) {
-      const thread = importedThread(row);
+      const imported = importedThread(row);
+      const parent = parents.get(row.thread_id);
+      const visited = new Set([row.thread_id]);
+      let root = parent;
+      while (root && !visited.has(root) && parents.has(root)) {
+        visited.add(root);
+        root = parents.get(root);
+      }
+      const thread =
+        parent && root && !visited.has(root)
+          ? {
+              ...imported,
+              lineage: {
+                parentThreadId: ThreadId.make(parent),
+                relationshipToParent: "fork" as const,
+                rootThreadId: ThreadId.make(root),
+              },
+            }
+          : imported;
+      const nativeThread = importedProviderThread(row);
       const previews = yield* listShellMessages(thread.id);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
@@ -589,6 +707,18 @@ const make = Effect.gen(function* () {
           occurredAt: thread.createdAt,
           payload: thread,
         },
+        ...(nativeThread === undefined
+          ? []
+          : [
+              {
+                id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:native`),
+                type: "provider-thread.updated" as const,
+                threadId: thread.id,
+                providerInstanceId: nativeThread.providerInstanceId,
+                occurredAt: thread.updatedAt,
+                payload: nativeThread,
+              },
+            ]),
         ...previews.flatMap(messageEvents),
         {
           id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:shell`),
@@ -639,6 +769,13 @@ const make = Effect.gen(function* () {
             )
             ON CONFLICT(thread_id) DO NOTHING
           `;
+          // V1 jobs refer to native turns, not V2 runs. Keep their prompt, ownership,
+          // ids and old turn reference, but never replay copied work or leave it
+          // permanently submitted waiting for a run that cannot exist in V2.
+          yield* sql`UPDATE custom_worker_jobs SET
+            error = 'V1 ' || state || ' assignment interrupted by orchestration migration; continue with an explicit new assignment.',
+            state = 'interrupted', reported = 1
+            WHERE target_id = ${thread.id} AND state IN ('queued', 'submitted')`;
         }),
       );
       importedThreadCount += 1;
@@ -698,6 +835,87 @@ const make = Effect.gen(function* () {
           return { importedThreadCount: 0, importedMessageCount: 0 };
         }
         const messages = yield* listMessages(threadId);
+        const historyEvents = yield* readHistoryEvents(threadId, messages.length).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
+        const historicalRuns = new Map(
+          historyEvents
+            .filter((event) => event.type === "run.created")
+            .map((event) => [event.payload.id, event.payload]),
+        );
+        const messageRunIds = new Map<string, RunId>();
+        if (historicalRuns.size) {
+          const rows = yield* sql<{
+            row_id: number;
+            pending_message_id: string | null;
+            assistant_message_id: string | null;
+          }>`SELECT row_id, pending_message_id, assistant_message_id FROM projection_turns WHERE thread_id = ${threadId} ORDER BY requested_at, row_id`;
+          for (const row of rows)
+            for (const messageId of [row.pending_message_id, row.assistant_message_id]) {
+              if (messageId)
+                messageRunIds.set(
+                  messageId,
+                  RunId.make(`migration:v1:run:${threadId}:${row.row_id}`),
+                );
+            }
+        }
+        const linkedMessageEvents = messages
+          .flatMap(messageEvents)
+          .map((event): OrchestrationV2DomainEvent => {
+            if (event.type !== "message.updated" && event.type !== "turn-item.updated")
+              return event;
+            const messageId =
+              event.type === "message.updated"
+                ? event.payload.id
+                : "messageId" in event.payload
+                  ? event.payload.messageId
+                  : undefined;
+            const run = messageId ? historicalRuns.get(messageRunIds.get(messageId)!) : undefined;
+            if (!run) return event;
+            if (event.type === "message.updated")
+              return {
+                ...event,
+                id: EventId.make(`${event.id}:history-link`),
+                payload: { ...event.payload, runId: run.id, nodeId: run.rootNodeId },
+              };
+            return {
+              ...event,
+              id: EventId.make(`${event.id}:history-link`),
+              payload: { ...event.payload, runId: run.id, nodeId: run.rootNodeId },
+            };
+          });
+        const timeline =
+          historyEvents.length === 0
+            ? []
+            : [...linkedMessageEvents, ...historyEvents]
+                .filter((event) => event.type === "turn-item.updated")
+                .sort(
+                  (left, right) =>
+                    (left.payload.startedAt ?? left.occurredAt).epochMilliseconds -
+                      (right.payload.startedAt ?? right.occurredAt).epochMilliseconds ||
+                    left.payload.id.localeCompare(right.payload.id),
+                )
+                .map((event, index) => ({
+                  ...event,
+                  id: EventId.make(`${event.id}:timeline`),
+                  payload: { ...event.payload, ordinal: index + 1 },
+                }));
+        // Preview messages already own message-only ordinals. Release their old positions
+        // together before inserting the interleaved history, or an earlier activity can
+        // collide with a preview's unique ordinal while moving it later in the timeline.
+        if (timeline.length > 0)
+          yield* sql.withTransaction(
+            Effect.gen(function* () {
+              for (const event of timeline) {
+                yield* sql`DELETE FROM orchestration_v2_turn_item_positions
+              WHERE thread_id = ${threadId} AND turn_item_id = ${event.payload.id}`;
+              }
+              for (const event of timeline) {
+                yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+              VALUES (${threadId}, ${event.payload.id}, ${event.payload.ordinal})`;
+              }
+            }),
+          );
         // Hint the index to skip V1 events without scanning their payloads.
         const existingRows = yield* sql<{ readonly event_id: string }>`
           SELECT event_id
@@ -705,7 +923,7 @@ const make = Effect.gen(function* () {
           WHERE application_event_version = 2
             AND aggregate_kind = 'thread'
             AND stream_id = ${threadId}
-            AND event_id LIKE ${`${IMPORT_EVENT_PREFIX}:message:%`}
+            AND event_id LIKE ${`${IMPORT_EVENT_PREFIX}:%`}
         `.pipe(NodeSqliteClient.readOnly);
         const existing = new Set(existingRows.map((row) => row.event_id));
         const missing = messages.filter(
@@ -732,6 +950,18 @@ const make = Effect.gen(function* () {
           );
           yield* eventSink.write({ events: batch.flatMap(messageEvents) });
           yield* Effect.yieldNow;
+        }
+        for (const batch of chunks(
+          [
+            ...historyEvents,
+            ...linkedMessageEvents.filter(
+              (event) => event.type === "message.updated" && event.id.endsWith(":history-link"),
+            ),
+            ...timeline,
+          ].filter((event) => !existing.has(event.id)),
+          TRANSCRIPT_EVENT_BATCH_SIZE,
+        )) {
+          yield* eventSink.write({ events: batch });
         }
         const now = DateTime.formatIso(yield* DateTime.now);
         yield* sql`
