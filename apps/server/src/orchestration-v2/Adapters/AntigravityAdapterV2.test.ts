@@ -916,3 +916,238 @@ describe("AntigravityAdapterV2 subagent reads", () => {
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });
+
+// Uses a persisted protocol fixture, not a captured Antigravity database or a paid agent.
+it.effect(
+  "resumes copied Antigravity context on its account and workspace across restart, and refuses missing/incompatible state",
+  () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const crypto = yield* Crypto.Crypto;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-antigravity-native-" });
+      const workspace = path.join(root, "workspace");
+      const profile = path.join(root, "work-profile");
+      const otherProfile = path.join(root, "personal-profile");
+      for (const dir of [workspace, profile, otherProfile]) yield* fs.makeDirectory(dir);
+      const fixtureName = "copied-native.fixture.json";
+      const nativeId = "d7e9e825-fef9-49be-8027-81db3fe058a2";
+      const retainedContext =
+        "native context " + "full history beyond summary boundary ".repeat(1500);
+      yield* fs.writeFileString(
+        path.join(profile, fixtureName),
+        JSON.stringify({ sessionId: nativeId, cwd: workspace, history: [retainedContext] }),
+      );
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("antigravity-work");
+      const threadId = ThreadId.make("imported-antigravity");
+      const modelSelection = {
+        instanceId,
+        model: "gemini-test-high",
+        options: [{ id: "mode", value: "auto_edit" }],
+      } as const;
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "auto-accept-edits",
+        interactionMode: "plan",
+        cwd: workspace,
+      });
+      for (const scenario of [
+        "continue",
+        "restart",
+        "wrong-profile",
+        "wrong-workspace",
+        "wrong-id",
+        "missing-id",
+        "unsupported-option",
+        "unsupported-value",
+        "unsupported-model",
+      ] as const) {
+        const requestLog = path.join(root, `${scenario}.ndjson`);
+        yield* Effect.gen(function* () {
+          const adapter = yield* makeAntigravityAdapterV2({
+            instanceId,
+            selfInvocation: yield* resolveSelfInvocation(),
+            makeRuntime: (input) =>
+              makeAntigravityAcpRuntime({
+                ...input,
+                childProcessSpawner,
+                spawn: {
+                  command: process.execPath,
+                  args: [mockAgentPath],
+                  cwd: input.cwd,
+                  env: {
+                    T3_ACP_ANTIGRAVITY: "1",
+                    T3_ACP_REQUEST_LOG_PATH: requestLog,
+                    T3_ACP_NATIVE_FIXTURE_NAME: fixtureName,
+                    GEMINI_HOME: scenario === "wrong-profile" ? otherProfile : profile,
+                  },
+                },
+              }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
+            withProcess: (_stop, task) => task,
+            // @effect-diagnostics-next-line effectSucceedWithVoid:off - Optional model.
+            defaultModel: Effect.succeed(undefined),
+          });
+          const opened = yield* adapter
+            .openSession({
+              threadId,
+              providerSessionId: ProviderSessionId.make(`imported-antigravity-${scenario}`),
+              ...(scenario === "missing-id"
+                ? {}
+                : { initialNativeThreadId: scenario === "wrong-id" ? "absent-session" : nativeId }),
+              initialProviderItemIdentityVersion: 2,
+              requireNativeResume: true,
+              modelSelection:
+                scenario === "unsupported-option"
+                  ? { ...modelSelection, options: [{ id: "unavailable", value: "high" }] }
+                  : scenario === "unsupported-value"
+                    ? { ...modelSelection, options: [{ id: "mode", value: "unavailable" }] }
+                    : scenario === "unsupported-model"
+                      ? { ...modelSelection, model: "unavailable-model" }
+                      : modelSelection,
+              runtimePolicy:
+                scenario === "wrong-workspace" ? { ...runtimePolicy, cwd: root } : runtimePolicy,
+            })
+            .pipe(Effect.result);
+          if (scenario !== "continue" && scenario !== "restart") {
+            assert.equal(opened._tag, "Failure", scenario);
+            return;
+          }
+          if (opened._tag !== "Success") return yield* opened.failure;
+          const runtime = opened.success;
+          const nativeThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection,
+            runtimePolicy,
+          });
+          assert.equal(nativeThread.nativeThreadRef?.nativeId, nativeId);
+          const providerThread = yield* runtime.resumeThread({
+            providerThread: {
+              ...nativeThread,
+              nativeMetadata: {
+                ...nativeThread.nativeMetadata,
+                legacyV1NativeResumeRequired: true,
+              },
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+          assert.isTrue(providerThread.nativeMetadata?.legacyV1NativeResumeRequired);
+          const now = yield* DateTime.now;
+          yield* runtime.startTurn({
+            appThread: {
+              createdBy: "user",
+              creationSource: "web",
+              id: threadId,
+              projectId: ProjectId.make("native-project"),
+              title: "Copied native session",
+              providerInstanceId: instanceId,
+              modelSelection,
+              runtimeMode: runtimePolicy.runtimeMode,
+              interactionMode: runtimePolicy.interactionMode,
+              branch: null,
+              worktreePath: workspace,
+              activeProviderThreadId: providerThread.id,
+              lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              lastVisitedAt: null,
+              deletedAt: null,
+            },
+            threadId,
+            runId: RunId.make(`run-${scenario}`),
+            runOrdinal: scenario === "continue" ? 2 : 3,
+            providerTurnOrdinal: scenario === "continue" ? 2 : 3,
+            attemptId: RunAttemptId.make(`attempt-${scenario}`),
+            rootNodeId: NodeId.make(`node-${scenario}`),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make(`message-${scenario}`),
+              text: `new-${scenario}-message`,
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+          const events = Array.from(
+            yield* runtime.events.pipe(
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          );
+          // The mock reads this context only from the selected native profile, never from the prompt.
+          const serialized = JSON.stringify(events);
+          assert.include(serialized, retainedContext);
+          if (scenario === "restart") assert.include(serialized, "new-continue-message");
+          assert.equal(events.at(-1)?.type, "turn.terminal");
+          const finalThread = events.findLast((event) => event.type === "provider_thread.updated");
+          assert.equal(finalThread?.type, "provider_thread.updated");
+          if (finalThread?.type === "provider_thread.updated")
+            assert.isTrue(finalThread.providerThread.nativeMetadata?.legacyV1NativeResumeRequired);
+        }).pipe(Effect.scoped);
+        const requests = (yield* fs.exists(requestLog))
+          ? (yield* fs.readFileString(requestLog))
+              .trim()
+              .split("\n")
+              .map(
+                (line) =>
+                  JSON.parse(line) as {
+                    method: string;
+                    params?: {
+                      sessionId?: string;
+                      cwd?: string;
+                      configId?: string;
+                      value?: unknown;
+                      modeId?: string;
+                      modelId?: string;
+                    };
+                  },
+              )
+          : [];
+        assert.notInclude(
+          requests.map((request) => request.method),
+          "session/new",
+          scenario,
+        );
+        assert.notInclude(
+          requests.map((request) => request.method),
+          "session/load",
+          scenario,
+        );
+        if (scenario === "continue" || scenario === "restart") {
+          const resumes = requests.filter((request) => request.method === "session/resume");
+          assert.lengthOf(resumes, 1);
+          assert.equal(resumes[0]?.params?.sessionId, nativeId);
+          assert.equal(resumes[0]?.params?.cwd, workspace);
+          assert.isTrue(
+            requests.some(
+              (request) =>
+                request.method === "session/set_config_option" &&
+                request.params?.configId === "model" &&
+                request.params?.value === "gemini-test-high",
+            ),
+          );
+          assert.isTrue(
+            requests.some(
+              (request) =>
+                request.method === "session/set_config_option" &&
+                request.params?.configId === "mode" &&
+                request.params?.value === "auto_edit",
+            ),
+          );
+        } else
+          assert.notInclude(
+            requests.map((request) => request.method),
+            "session/prompt",
+          );
+      }
+    }).pipe(Effect.provide(layerSession), Effect.scoped),
+);

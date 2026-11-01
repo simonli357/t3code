@@ -565,6 +565,7 @@ function makeLocalCommandHarness(input: {
       ),
     ),
   );
+  const fallbackEnsureThread = vi.fn(() => Effect.succeed(providerThread));
   const resumeFallbackSession = {
     driver: providerThread.driver,
     resumeThread: () =>
@@ -575,7 +576,7 @@ function makeLocalCommandHarness(input: {
           cause: "native thread is gone",
         }),
       ),
-    ensureThread: () => Effect.succeed(providerThread),
+    ensureThread: fallbackEnsureThread,
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
@@ -757,6 +758,7 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
+    fallbackEnsureThread,
     getThreadRecords,
     getTurnStartContext,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
@@ -1417,3 +1419,49 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect.each(["missing", "account", "resume"] as const)(
+  "refuses imported Antigravity %s failure without starting or summarizing a replacement session",
+  (failure) =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue the native work",
+        historyReadFailureAfterFallback: "must not read a summary",
+      });
+      const projection = harness.projection();
+      harness.setProjection({
+        ...projection,
+        providerThreads: projection.providerThreads.map((thread) => ({
+          ...thread,
+          driver: ProviderDriverKind.make("antigravity"),
+          providerInstanceId:
+            failure === "account"
+              ? ProviderInstanceId.make("other-account")
+              : thread.providerInstanceId,
+          nativeThreadRef:
+            failure === "missing"
+              ? null
+              : { ...thread.nativeThreadRef!, driver: ProviderDriverKind.make("antigravity") },
+          nativeMetadata: { legacyV1NativeResumeRequired: true },
+        })),
+      });
+      if (failure === "resume") {
+        const retry = yield* Effect.exit(harness.startWithRetry);
+        expect(retry._tag).toBe("Failure");
+        expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+      }
+      yield* harness.start;
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+      expect(harness.startRootRun).not.toHaveBeenCalled();
+      expect(harness.fallbackEnsureThread).not.toHaveBeenCalled();
+      expect(harness.projection().contextHandoffs).toHaveLength(0);
+      if (failure === "resume")
+        expect(harness.open).toHaveBeenCalledWith(
+          expect.objectContaining({
+            requireNativeResume: true,
+            initialNativeThreadId: "native-resume-thread",
+          }),
+        );
+      else expect(harness.open).not.toHaveBeenCalled();
+    }),
+);

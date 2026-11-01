@@ -16,6 +16,9 @@ import type * as AcpCompat from "effect-acp/compat";
 
 import { beginAcpMockPrompt } from "./acpMockCancellationState.ts";
 
+// Protocol fixture only: this JSON is not Antigravity's proprietary native database format.
+const nativeFixtureName = process.env.T3_ACP_NATIVE_FIXTURE_NAME;
+let nativeFixture: { sessionId: string; cwd: string; history: Array<string> } | undefined;
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
@@ -574,6 +577,23 @@ const program = Effect.gen(function* () {
   yield* agent.handleResumeSession((request) =>
     Effect.gen(function* () {
       yield* requireAuthentication();
+      if (nativeFixtureName !== undefined) {
+        const fixture = yield* Effect.try({
+          try: () =>
+            JSON.parse(
+              NodeFS.readFileSync(`${process.env.GEMINI_HOME}/${nativeFixtureName}`, "utf8"),
+            ) as NonNullable<typeof nativeFixture>,
+          catch: () =>
+            AcpError.AcpRequestError.invalidParams(
+              "Saved native session absent from selected account/profile.",
+            ),
+        });
+        if (fixture.sessionId !== request.sessionId || fixture.cwd !== request.cwd)
+          return yield* AcpError.AcpRequestError.invalidParams(
+            "Saved native session ID or workspace mismatch.",
+          );
+        nativeFixture = fixture;
+      }
       yield* agent.client.sessionUpdate({
         sessionId: request.sessionId,
         update: {
@@ -1764,10 +1784,25 @@ const program = Effect.gen(function* () {
         update: {
           sessionUpdate: "agent_message_chunk",
           messageId: "mock-agent-message",
-          content: { type: "text", text: promptResponseText ?? "hello from mock" },
+          content: {
+            type: "text",
+            text:
+              nativeFixture === undefined
+                ? (promptResponseText ?? "hello from mock")
+                : nativeFixture.history.join("\n"),
+          },
         },
       });
 
+      if (nativeFixture !== undefined) {
+        nativeFixture.history.push(
+          ...request.prompt.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+        );
+        NodeFS.writeFileSync(
+          `${process.env.GEMINI_HOME}/${nativeFixtureName}`,
+          JSON.stringify(nativeFixture),
+        );
+      }
       return yield* finishPrompt(requestedSessionId, "end_turn");
     }),
   );

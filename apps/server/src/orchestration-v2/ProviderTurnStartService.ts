@@ -645,6 +645,27 @@ export const layer: Layer.Layer<
           return;
         }
       }
+      const requireNativeResume =
+        providerThread.driver === "antigravity" &&
+        providerThread.nativeMetadata?.legacyV1NativeResumeRequired === true;
+      if (
+        requireNativeResume &&
+        (providerThread.nativeThreadRef?.nativeId == null ||
+          providerThread.providerInstanceId !== run.modelSelection.instanceId)
+      ) {
+        const detail = providerThread.nativeMetadata?.legacyV1NativeResumeError;
+        const message =
+          typeof detail === "string"
+            ? detail
+            : "The imported Antigravity session must resume on its saved provider account/profile. Restore that binding before continuing.";
+        yield* settleStartFailure({
+          signal: "legacy-native-resume-unavailable",
+          title: "Native session unavailable",
+          message,
+          error: new ProviderTurnStartError({ runId, cause: message }),
+        });
+        return;
+      }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {
         const exists = yield* fileSystem
@@ -804,6 +825,7 @@ export const layer: Layer.Layer<
           providerSessionId,
           modelSelection: run.modelSelection,
           runtimePolicy: resolvedRuntimePolicy,
+          ...(requireNativeResume ? { requireNativeResume: true } : {}),
           ...(existingSessionProjection === undefined
             ? {}
             : { resumeFromSession: existingSessionProjection }),
@@ -1211,6 +1233,19 @@ export const layer: Layer.Layer<
             Effect.catchTags({ ContextHandoffBudgetError: () => Effect.succeed(false) }),
           );
           if (fits) return resumed.success;
+          if (requireNativeResume)
+            return yield* loadFromProvider(
+              Effect.fail(
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: session.driver,
+                  threadId: projection.thread.id,
+                  providerThreadId: providerThread.id,
+                  runId,
+                  cause:
+                    "The imported Antigravity native session cannot accept the required context. No fresh-session fallback was performed.",
+                }),
+              ),
+            );
           const freshThread = { ...resumed.success, nativeThreadRef: null };
           const freshContext = handoffContextForThread(freshThread);
           const { handoff } = yield* recoveryHandoff;
@@ -1246,6 +1281,8 @@ export const layer: Layer.Layer<
             );
           }
         }
+        if (requireNativeResume && resumed._tag === "Failure")
+          return yield* loadFromProvider(Effect.fail(resumed.failure));
         resumedHandoffContext = undefined;
         resumedRetryHandoff = [];
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;

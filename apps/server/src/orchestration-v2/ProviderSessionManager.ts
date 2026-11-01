@@ -151,6 +151,7 @@ export interface ProviderSessionManagerV2Shape {
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly resumeFromSession?: OrchestrationV2ProviderSession;
     readonly initialNativeThreadId?: string;
+    readonly requireNativeResume?: boolean;
     readonly initialProviderItemIdentityVersion?: 2;
   }) => Effect.Effect<
     ProviderAdapter.ProviderAdapterV2SessionRuntime,
@@ -2101,6 +2102,7 @@ export const layerWithOptions = (
                   ...(input.initialNativeThreadId === undefined
                     ? {}
                     : { initialNativeThreadId: input.initialNativeThreadId }),
+                  ...(input.requireNativeResume === true ? { requireNativeResume: true } : {}),
                   ...(input.initialProviderItemIdentityVersion === undefined
                     ? {}
                     : {

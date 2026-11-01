@@ -1026,6 +1026,9 @@ export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
+  // A migrated native conversation must fail visibly if its original state cannot be resumed.
+  legacyV1NativeResumeRequired: Schema.optional(Schema.Literal(true)),
+  legacyV1NativeResumeError: Schema.optional(TrimmedNonEmptyString),
   forkHeadMessageId: Schema.optional(TrimmedNonEmptyString),
   claudeAttachmentBudget: Schema.optional(
     Schema.Struct({ bytesUsed: NonNegativeInt, pagesUsed: NonNegativeInt }),

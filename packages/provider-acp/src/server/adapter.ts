@@ -1391,6 +1391,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     }),
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
+        if (input.requireNativeResume === true && !input.initialNativeThreadId?.trim())
+          return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+            "The saved native session ID is required; no replacement session was created.",
+          );
         const sessionScope = yield* Effect.scope;
         let itemIdentityVersion: 2 | undefined =
           input.initialProviderItemIdentityVersion ??
@@ -6643,6 +6647,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const failedMethod =
                 "method" in initialStart.failure ? initialStart.failure.method : undefined;
               if (
+                input.requireNativeResume === true ||
                 input.initialNativeThreadId === undefined ||
                 (failedMethod !== "session/load" && failedMethod !== "session/resume")
               ) {
@@ -6787,6 +6792,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const unsupportedConfigIds = configSelections
             .map((selection) => selection.id)
             .filter((id) => !availableConfigIds.has(id));
+          if (unsupportedConfigIds.length > 0 && input.requireNativeResume === true)
+            return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+              "The saved native session configuration is unavailable on this provider/account; no replacement session was created.",
+            );
           if (unsupportedConfigIds.length > 0) {
             yield* Effect.logWarning(
               "ACP session does not expose requested configuration option(s)",
@@ -6809,16 +6818,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const advertisedValues = option.options.flatMap((entry) =>
                 "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
               );
-              if (!advertisedValues.includes(selection.value)) continue;
+              if (!advertisedValues.includes(selection.value)) {
+                if (input.requireNativeResume === true)
+                  return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+                    "A saved native session option value is incompatible with the selected provider/account.",
+                  );
+                continue;
+              }
             }
             yield* runtime.setConfigOption(selection.id, selection.value).pipe(
               Effect.catchTags({
                 AcpRequestError: (error) =>
-                  Effect.logWarning("ACP session rejected a configuration option value", {
-                    optionId: selection.id,
-                    value: selection.value,
-                    detail: error.message,
-                  }),
+                  input.requireNativeResume === true
+                    ? Effect.fail(error)
+                    : Effect.logWarning("ACP session rejected a configuration option value", {
+                        optionId: selection.id,
+                        value: selection.value,
+                        detail: error.message,
+                      }),
               }),
             );
           }
@@ -6827,6 +6844,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* runtime.setMode(policyMode);
           }
           const modeState = yield* runtime.getModeState;
+          if (
+            input.requireNativeResume === true &&
+            modeSelection !== undefined &&
+            !modeState?.availableModes.some((mode) => mode.id === modeSelection.value)
+          )
+            return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+              "The saved native session mode is unavailable on this provider/account.",
+            );
           if (
             modeSelection !== undefined &&
             typeof modeSelection.value === "string" &&
