@@ -74,7 +74,12 @@ const harness = Effect.gen(function* () {
     ...base,
     rename: (from, to) =>
       Effect.gen(function* () {
-        if (to.includes("/computers/") && (yield* Ref.get(failing)) && to.includes("/actions/")) {
+        const normalized = to.replaceAll("\\", "/");
+        if (
+          normalized.includes("/computers/") &&
+          (yield* Ref.get(failing)) &&
+          normalized.includes("/actions/")
+        ) {
           yield* Queue.offer(failedWrites, to);
           return yield* PlatformError.systemError({
             _tag: "PermissionDenied",
@@ -83,15 +88,15 @@ const harness = Effect.gen(function* () {
             pathOrDescriptor: to,
           });
         }
-        const held = to.includes("/actions/") ? yield* Ref.getAndSet(hold, null) : null;
+        const held = normalized.includes("/actions/") ? yield* Ref.getAndSet(hold, null) : null;
         if (held) {
           yield* Deferred.succeed(held.entered, undefined);
           yield* Deferred.await(held.release);
         }
         yield* base.rename(from, to);
-        if (to.includes("/computers/"))
+        if (normalized.includes("/computers/"))
           yield* Queue.offer(renamed, {
-            file: to,
+            file: normalized,
             text: yield* base.readFileString(to).pipe(Effect.orElseSucceed(() => "")),
           });
       }),
@@ -131,7 +136,8 @@ const harness = Effect.gen(function* () {
       scope,
     ).pipe(
       Effect.map((context) => Context.get(context, Computers.Computers)),
-      Effect.provideService(HostProcess.Environment, { HOME: home }),
+      Effect.provideService(HostProcess.Environment, { HOME: home, USERPROFILE: home }),
+      Effect.provideService(HostProcess.Platform, "linux"),
     );
   const configure = (config = workenvConfig(state)) =>
     base.writeFileString(`${home}/.config/workenv/keep.json`, toJson(config));
@@ -177,7 +183,7 @@ const inspect = (
 ) =>
   service
     .inspect({ section, ...more })
-    .pipe(Effect.provideService(HostProcess.Environment, { HOME: "" }));
+    .pipe(Effect.provideService(HostProcess.Environment, { HOME: "", USERPROFILE: "" }));
 
 it.layer(NodeServices.layer)("the computers service", (it) => {
   it.effect("pages the file list in one stable order, however large the pages", () =>
@@ -1074,8 +1080,8 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
         yield* h.configure();
         const requests = new Map<string, string>(),
           proofs = new Map<string, string>();
-        const proofFolder = `${h.serverConfig.stateDir}/computers/proofs`,
-          requestFolder = `${h.state}/keep/requests`;
+        const proofFolder = `${h.serverConfig.stateDir}/computers/proofs`.replaceAll("\\", "/"),
+          requestFolder = `${h.state}/keep/requests`.replaceAll("\\", "/");
         const proof = {
           schema: "workenv-backup-receipt/2",
           path: bundle.writerPath,
@@ -1095,21 +1101,23 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
         const virtual = FileSystem.FileSystem.of({
           ...h.base,
           readDirectory: (folder, options) =>
-            folder === proofFolder
+            folder.replaceAll("\\", "/") === proofFolder
               ? Effect.succeed([...proofs.keys()])
-              : folder === requestFolder
+              : folder.replaceAll("\\", "/") === requestFolder
                 ? Effect.succeed([...requests.keys()])
                 : h.base.readDirectory(folder, options),
           stat: (file) =>
-            file.startsWith(`${requestFolder}/`) ? Effect.succeed(info) : h.base.stat(file),
+            file.replaceAll("\\", "/").startsWith(`${requestFolder}/`)
+              ? Effect.succeed(info)
+              : h.base.stat(file),
           readFileString: (file, options) =>
-            file.startsWith(`${requestFolder}/`)
+            file.replaceAll("\\", "/").startsWith(`${requestFolder}/`)
               ? Effect.succeed(requests.get(file.slice(requestFolder.length + 1))!)
-              : file.startsWith(`${proofFolder}/`)
+              : file.replaceAll("\\", "/").startsWith(`${proofFolder}/`)
                 ? Effect.succeed(proofs.get(file.slice(proofFolder.length + 1))!)
                 : h.base.readFileString(file, options),
           remove: (file, options) =>
-            file.startsWith(`${proofFolder}/`)
+            file.replaceAll("\\", "/").startsWith(`${proofFolder}/`)
               ? Effect.sync(() => {
                   proofs.delete(file.slice(proofFolder.length + 1));
                 })

@@ -330,7 +330,9 @@ const measureFolder = Effect.fn("Computers.measureFolder")(function* (
           seen.add(identity);
         }
         const blocks = Option.getOrNull(info.value.blocks);
-        bytes += blocks === null ? Number(info.value.size) : Number(blocks) * 512;
+        // Node reports zero blocks on Windows, where stat does not expose allocated size.
+        bytes +=
+          platform === "win32" || blocks === null ? Number(info.value.size) : Number(blocks) * 512;
         measured++;
       }
     }
