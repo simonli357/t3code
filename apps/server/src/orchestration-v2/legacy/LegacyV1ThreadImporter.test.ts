@@ -679,6 +679,7 @@ it.effect(
         ],
         ["deepseekHarness", { schemaVersion: 1, sessionId: "native-dsh" }, "native-dsh"],
         ["pi", { schemaVersion: 1, sessionId: "native-pi" }, "native-pi"],
+        ["antigravity", { schemaVersion: 1, sessionId: "native-antigravity" }, "native-antigravity"],
         ["opencode", { schemaVersion: 1, sessionId: "native-opencode" }, "native-opencode"],
       ] as const) {
         const threadId = ThreadId.make(`native-${driver}`);
@@ -713,6 +714,9 @@ it.effect(
           `migration:v1:session:${threadId}`,
         );
         assert.equal(projection.providerThreads[0]?.status, "not_loaded");
+        assert.equal(projection.providerThreads[0]?.providerInstanceId, `${driver}_work`);
+        if (driver === "antigravity")
+          assert.isTrue(projection.providerThreads[0]?.nativeMetadata?.legacyV1NativeResumeRequired);
         assert.equal(projection.thread.isBase, true);
         if (driver === "claudeAgent")
           assert.deepStrictEqual(projection.thread.lineage, {
@@ -754,7 +758,7 @@ it.effect(
           });
           assert.isUndefined(projection.checkpoints[0]?.legacyV1?.rollbackUnavailableReason);
         }
-        if (driver === "pi" || driver === "deepseekHarness")
+        if (driver === "pi" || driver === "deepseekHarness" || driver === "antigravity")
           assert.include(
             projection.checkpoints[0]?.legacyV1?.rollbackUnavailableReason ?? "",
             "no recoverable native rollback boundary",
@@ -842,5 +846,58 @@ it.effect.each([3, 6])(
         (yield* projections.getThreadProjection(threadId)).turnItems,
         hydrated.turnItems,
       );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+);
+
+it.effect(
+  "isolates imported Antigravity identities and retains invalid cursors as explicit unavailable bindings across replay",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      yield* sql`INSERT INTO projection_projects (project_id,title,workspace_root,scripts_json,created_at,updated_at)
+      VALUES ('p-agy','Native','/tmp/ag-workspace','[]','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`;
+      for (const [name, cursor] of [
+        ["work", { schemaVersion: 1, sessionId: "same-native-id" }],
+        ["personal", { schemaVersion: 1, sessionId: "same-native-id" }],
+        ["invalid", { schemaVersion: 2, sessionId: "same-native-id" }],
+        ["missing", null],
+      ] as const) {
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
+        VALUES (${name},'p-agy','Native',${JSON.stringify({ instanceId: `antigravity-${name}`, model: "gemini-test-high", options: [{ id: "mode", value: "auto_edit" }] })},'auto-accept-edits','plan','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`;
+        yield* sql`INSERT INTO provider_session_runtime (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,resume_cursor_json)
+        VALUES (${name},'antigravity',${`antigravity-${name}`},'antigravity','auto-accept-edits','idle','2026-01-01T00:00:00Z',${JSON.stringify(cursor)})`;
+      }
+      yield* importer.reconcileShells;
+      const before = [];
+      for (const name of ["work", "personal", "invalid", "missing"]) {
+        const projection = yield* projections.getThreadProjection(ThreadId.make(name));
+        const binding = projection.providerThreads[0]!;
+        before.push(binding);
+        assert.equal(binding.providerInstanceId, `antigravity-${name}`);
+        assert.isTrue(binding.nativeMetadata?.legacyV1NativeResumeRequired);
+        assert.equal(binding.nativeMetadata?.itemIdentityVersion, 2);
+        assert.equal(projection.thread.runtimeMode, "auto-accept-edits");
+        assert.equal(projection.thread.interactionMode, "plan");
+        if (name === "invalid" || name === "missing") {
+          assert.isNull(binding.nativeThreadRef);
+          assert.include(
+            String(binding.nativeMetadata?.legacyV1NativeResumeError),
+            "missing or incompatible",
+          );
+        } else assert.equal(binding.nativeThreadRef?.nativeId, "same-native-id");
+      }
+      assert.notEqual(before[0]?.id, before[1]?.id);
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      yield* Effect.gen(function* () {
+        yield* (yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter).reconcileShells;
+      }).pipe(Effect.provide(LegacyV1ThreadImporter.layer));
+      for (const binding of before)
+        assert.deepEqual(
+          (yield* projections.getThreadProjection(binding.appThreadId!)).providerThreads[0],
+          binding,
+        );
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );

@@ -17,6 +17,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
+  ProviderThreadId,
   RunId,
   ProviderDriverKind,
   type OrchestrationV2ProviderThread,
@@ -215,40 +216,54 @@ const decodeResumeCursor = Schema.decodeUnknownOption(
   }),
 );
 
+const decodeAntigravityResumeCursor = Schema.decodeUnknownOption(
+  Schema.Struct({ schemaVersion: Schema.Literal(1), sessionId: Schema.NonEmptyString }),
+);
+
 // These adapters still use the same native session format as the custom V1 adapters.
 // Cursor's CLI id is not an SDK agent id; never invent native continuity for it.
 function importedProviderThread(row: LegacyThreadRow): OrchestrationV2ProviderThread | undefined {
   const driverName = row.provider_name;
   if (
     !driverName ||
-    !["codex", "claudeAgent", "pi", "deepseekHarness", "opencode", "grok"].includes(driverName)
+    !["codex", "claudeAgent", "pi", "deepseekHarness", "opencode", "grok", "antigravity"].includes(
+      driverName,
+    )
   )
     return;
-  const cursor = Option.getOrUndefined(
-    decodeResumeCursor(parseJson(row.resume_cursor_json ?? "null")),
-  );
-  if (!cursor) return;
+  const rawCursor = parseJson(row.resume_cursor_json ?? "null");
+  const cursor = Option.getOrUndefined(decodeResumeCursor(rawCursor));
+  const antigravityCursor =
+    driverName === "antigravity"
+      ? Option.getOrUndefined(decodeAntigravityResumeCursor(rawCursor))
+      : undefined;
+  if (!cursor && driverName !== "antigravity") return;
   const nativeId =
-    driverName === "codex"
-      ? cursor.threadId
-      : driverName === "claudeAgent"
-        ? cursor.resume
-        : cursor.sessionId;
-  if (!nativeId?.trim()) return;
+    driverName === "antigravity"
+      ? antigravityCursor?.sessionId
+      : driverName === "codex"
+        ? cursor?.threadId
+        : driverName === "claudeAgent"
+          ? cursor?.resume
+          : cursor?.sessionId;
+  if (!nativeId?.trim() && driverName !== "antigravity") return;
   const selection = modelSelectionFor(row);
   const instanceId = ProviderInstanceId.make(row.native_instance_id ?? driverName);
   const driver = ProviderDriverKind.make(driverName);
   return {
-    id: derive.providerThread({ driver, nativeThreadId: nativeId }),
+    id:
+      driverName === "antigravity"
+        ? ProviderThreadId.make(`migration:v1:provider-thread:${row.thread_id}`)
+        : derive.providerThread({ driver, nativeThreadId: nativeId! }),
     driver,
     providerInstanceId: instanceId,
     // A logical, unloaded binding; opening it still resumes the verified native thread.
     providerSessionId: ProviderSessionId.make(`migration:v1:session:${row.thread_id}`),
     appThreadId: ThreadId.make(row.thread_id),
     ownerNodeId: null,
-    nativeThreadRef: { driver, nativeId, strength: "strong" },
+    nativeThreadRef: nativeId?.trim() ? { driver, nativeId, strength: "strong" } : null,
     nativeConversationHeadRef:
-      driverName === "claudeAgent" && cursor.resumeSessionAt
+      driverName === "claudeAgent" && cursor?.resumeSessionAt
         ? { driver, nativeId: cursor.resumeSessionAt, strength: "strong" }
         : null,
     status: "not_loaded",
@@ -256,7 +271,21 @@ function importedProviderThread(row: LegacyThreadRow): OrchestrationV2ProviderTh
     lastRunOrdinal: null,
     handoffIds: [],
     forkedFrom: null,
-    nativeMetadata: { modelSelection: selection },
+    nativeMetadata: {
+      modelSelection: selection,
+      ...(driverName === "antigravity"
+        ? {
+            legacyV1NativeResumeRequired: true,
+            itemIdentityVersion: 2,
+            ...(!nativeId?.trim()
+              ? {
+                  legacyV1NativeResumeError:
+                    "The saved V1 Antigravity session cursor is missing or incompatible; restore its native profile and schema-version-1 cursor before continuing.",
+                }
+              : {}),
+          }
+        : {}),
+    },
     createdAt: dateTime(row.created_at),
     updatedAt: dateTime(row.updated_at),
   };

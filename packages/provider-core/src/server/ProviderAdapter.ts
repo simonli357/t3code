@@ -402,6 +402,8 @@ export interface ProviderAdapterV2OpenSessionInput {
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   readonly resumeFromSession?: OrchestrationV2ProviderSession;
   readonly initialNativeThreadId?: string;
+  /** Migrated native history must not be replaced by a fresh session on resume failure. */
+  readonly requireNativeResume?: boolean;
   readonly initialProviderItemIdentityVersion?: 2;
 }
 
