@@ -45,6 +45,49 @@ const layer = TestProviderHost.layer({ runBackgroundWork: false }).pipe(
 );
 
 it.layer(layer)("Cursor ACP isolation", (it) => {
+  it.effect(
+    "refuses a missing required native session on open and retry without creating a replacement",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "cursor-required-resume-" });
+        const log = NodePath.join(cwd, "calls.log");
+        const instanceId = ProviderInstanceId.make("cursor-legacy");
+        const adapter = yield* makeCursorAcpAdapter({
+          instanceId,
+          settings,
+          selfInvocation: { command: process.execPath, entrypoint: undefined },
+          environment: {},
+          makeRuntime: (input) =>
+            AcpSessionRuntime.make({
+              ...input,
+              spawn: {
+                command: process.execPath,
+                args: [fixture],
+                cwd,
+                env: { TEST_ACCOUNT: "legacy", TEST_CALL_LOG: log },
+                extendEnv: false,
+              },
+            }),
+        });
+        for (const attempt of [1, 2]) {
+          const result = yield* adapter
+            .openSession({
+              threadId: ThreadId.make("retained-cursor"),
+              providerSessionId: ProviderSessionId.make(`required-resume-${attempt}`),
+              modelSelection: { instanceId, model: "test-model" },
+              runtimePolicy: { runtimeMode: "approval-required", interactionMode: "default", cwd },
+              initialNativeThreadId: "missing",
+              requireNativeResume: true,
+            })
+            .pipe(Effect.result);
+          expect(result._tag).toBe("Failure");
+        }
+        const calls = (yield* fs.readFileString(log)).trim().split("\n");
+        expect(calls.filter((call) => call === "session/load")).toHaveLength(2);
+        expect(calls).not.toContain("session/new");
+      }).pipe(Effect.scoped),
+  );
   it.effect("loads complete history concurrently without sharing environment, account or cwd", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

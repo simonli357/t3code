@@ -679,7 +679,11 @@ it.effect(
         ],
         ["deepseekHarness", { schemaVersion: 1, sessionId: "native-dsh" }, "native-dsh"],
         ["pi", { schemaVersion: 1, sessionId: "native-pi" }, "native-pi"],
-        ["antigravity", { schemaVersion: 1, sessionId: "native-antigravity" }, "native-antigravity"],
+        [
+          "antigravity",
+          { schemaVersion: 1, sessionId: "native-antigravity" },
+          "native-antigravity",
+        ],
         ["opencode", { schemaVersion: 1, sessionId: "native-opencode" }, "native-opencode"],
         [
           "cursor",
@@ -721,7 +725,9 @@ it.effect(
         assert.equal(projection.providerThreads[0]?.status, "not_loaded");
         assert.equal(projection.providerThreads[0]?.providerInstanceId, `${driver}_work`);
         if (driver === "antigravity")
-          assert.isTrue(projection.providerThreads[0]?.nativeMetadata?.legacyV1NativeResumeRequired);
+          assert.isTrue(
+            projection.providerThreads[0]?.nativeMetadata?.legacyV1NativeResumeRequired,
+          );
         assert.equal(projection.thread.isBase, true);
         if (driver === "claudeAgent")
           assert.deepStrictEqual(projection.thread.lineage, {
@@ -854,9 +860,9 @@ it.effect.each([3, 6])(
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
 );
 
-it.effect(
-  "isolates imported Antigravity identities and retains invalid cursors as explicit unavailable bindings across replay",
-  () =>
+it.effect.each(["antigravity", "cursor"] as const)(
+  "isolates imported %s identities and retains invalid cursors as explicit unavailable bindings across replay",
+  (driver) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
@@ -871,9 +877,9 @@ it.effect(
         ["missing", null],
       ] as const) {
         yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
-        VALUES (${name},'p-agy','Native',${JSON.stringify({ instanceId: `antigravity-${name}`, model: "gemini-test-high", options: [{ id: "mode", value: "auto_edit" }] })},'auto-accept-edits','plan','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`;
+        VALUES (${name},'p-agy','Native',${JSON.stringify({ instanceId: `${driver}-${name}`, model: "gemini-test-high", options: [{ id: "mode", value: "auto_edit" }] })},'auto-accept-edits','plan','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')`;
         yield* sql`INSERT INTO provider_session_runtime (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,resume_cursor_json)
-        VALUES (${name},'antigravity',${`antigravity-${name}`},'antigravity','auto-accept-edits','idle','2026-01-01T00:00:00Z',${JSON.stringify(cursor)})`;
+        VALUES (${name},${driver},${`${driver}-${name}`},${driver},'auto-accept-edits','idle','2026-01-01T00:00:00Z',${JSON.stringify(cursor)})`;
       }
       yield* importer.reconcileShells;
       const before = [];
@@ -881,9 +887,12 @@ it.effect(
         const projection = yield* projections.getThreadProjection(ThreadId.make(name));
         const binding = projection.providerThreads[0]!;
         before.push(binding);
-        assert.equal(binding.providerInstanceId, `antigravity-${name}`);
+        assert.equal(binding.providerInstanceId, `${driver}-${name}`);
         assert.isTrue(binding.nativeMetadata?.legacyV1NativeResumeRequired);
-        assert.equal(binding.nativeMetadata?.itemIdentityVersion, 2);
+        assert.equal(
+          binding.nativeMetadata?.itemIdentityVersion,
+          driver === "antigravity" ? 2 : undefined,
+        );
         assert.equal(projection.thread.runtimeMode, "auto-accept-edits");
         assert.equal(projection.thread.interactionMode, "plan");
         if (name === "invalid" || name === "missing") {

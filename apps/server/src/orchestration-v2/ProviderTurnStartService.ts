@@ -646,7 +646,6 @@ export const layer: Layer.Layer<
         }
       }
       const requireNativeResume =
-        providerThread.driver === "antigravity" &&
         providerThread.nativeMetadata?.legacyV1NativeResumeRequired === true;
       if (
         requireNativeResume &&
@@ -657,7 +656,7 @@ export const layer: Layer.Layer<
         const message =
           typeof detail === "string"
             ? detail
-            : "The imported Antigravity session must resume on its saved provider account/profile. Restore that binding before continuing.";
+            : "The imported native session must resume on its saved provider account/profile. Restore that binding before continuing.";
         yield* settleStartFailure({
           signal: "legacy-native-resume-unavailable",
           title: "Native session unavailable",
@@ -1242,7 +1241,7 @@ export const layer: Layer.Layer<
                   providerThreadId: providerThread.id,
                   runId,
                   cause:
-                    "The imported Antigravity native session cannot accept the required context. No fresh-session fallback was performed.",
+                    "The imported native session cannot accept the required context. No fresh-session fallback was performed.",
                 }),
               ),
             );

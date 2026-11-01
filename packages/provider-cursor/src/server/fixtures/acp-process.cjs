@@ -32,6 +32,8 @@ const update = (role, text) =>
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params } = JSON.parse(line);
   if (id === undefined || !method) return;
+  if (process.env.TEST_CALL_LOG)
+    require("node:fs").appendFileSync(process.env.TEST_CALL_LOG, `${method}\n`);
   let result = {};
   if (
     ["authenticate", "session/new", "session/load"].includes(method) &&

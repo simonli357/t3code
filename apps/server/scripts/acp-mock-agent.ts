@@ -18,6 +18,15 @@ import { beginAcpMockPrompt } from "./acpMockCancellationState.ts";
 
 // Protocol fixture only: this JSON is not Antigravity's proprietary native database format.
 const nativeFixtureName = process.env.T3_ACP_NATIVE_FIXTURE_NAME;
+const decodeNativeFixture = Schema.decodeSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      sessionId: Schema.String,
+      cwd: Schema.String,
+      history: Schema.Array(Schema.String),
+    }),
+  ),
+);
 let nativeFixture: { sessionId: string; cwd: string; history: Array<string> } | undefined;
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
@@ -580,9 +589,9 @@ const program = Effect.gen(function* () {
       if (nativeFixtureName !== undefined) {
         const fixture = yield* Effect.try({
           try: () =>
-            JSON.parse(
+            decodeNativeFixture(
               NodeFS.readFileSync(`${process.env.GEMINI_HOME}/${nativeFixtureName}`, "utf8"),
-            ) as NonNullable<typeof nativeFixture>,
+            ),
           catch: () =>
             AcpError.AcpRequestError.invalidParams(
               "Saved native session absent from selected account/profile.",
@@ -592,7 +601,7 @@ const program = Effect.gen(function* () {
           return yield* AcpError.AcpRequestError.invalidParams(
             "Saved native session ID or workspace mismatch.",
           );
-        nativeFixture = fixture;
+        nativeFixture = { ...fixture, history: [...fixture.history] };
       }
       yield* agent.client.sessionUpdate({
         sessionId: request.sessionId,
@@ -1796,11 +1805,13 @@ const program = Effect.gen(function* () {
 
       if (nativeFixture !== undefined) {
         nativeFixture.history.push(
-          ...request.prompt.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+          ...request.prompt.flatMap((part) =>
+            part.type === "text" && typeof part.text === "string" ? [part.text] : [],
+          ),
         );
         NodeFS.writeFileSync(
           `${process.env.GEMINI_HOME}/${nativeFixtureName}`,
-          JSON.stringify(nativeFixture),
+          encodeJson(nativeFixture),
         );
       }
       return yield* finishPrompt(requestedSessionId, "end_turn");

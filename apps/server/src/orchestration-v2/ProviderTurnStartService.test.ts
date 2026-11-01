@@ -1420,9 +1420,13 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
   );
 }
 
-effectIt.effect.each(["missing", "account", "resume"] as const)(
-  "refuses imported Antigravity %s failure without starting or summarizing a replacement session",
-  (failure) =>
+effectIt.effect.each(
+  (["antigravity", "cursor"] as const).flatMap((driver) =>
+    (["missing", "account", "resume"] as const).map((failure) => ({ driver, failure })),
+  ),
+)(
+  "refuses imported $driver $failure failure without starting or summarizing a replacement session",
+  ({ driver, failure }) =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
         text: "Continue the native work",
@@ -1433,7 +1437,7 @@ effectIt.effect.each(["missing", "account", "resume"] as const)(
         ...projection,
         providerThreads: projection.providerThreads.map((thread) => ({
           ...thread,
-          driver: ProviderDriverKind.make("antigravity"),
+          driver: ProviderDriverKind.make(driver),
           providerInstanceId:
             failure === "account"
               ? ProviderInstanceId.make("other-account")
@@ -1441,7 +1445,7 @@ effectIt.effect.each(["missing", "account", "resume"] as const)(
           nativeThreadRef:
             failure === "missing"
               ? null
-              : { ...thread.nativeThreadRef!, driver: ProviderDriverKind.make("antigravity") },
+              : { ...thread.nativeThreadRef!, driver: ProviderDriverKind.make(driver) },
           nativeMetadata: { legacyV1NativeResumeRequired: true },
         })),
       });
