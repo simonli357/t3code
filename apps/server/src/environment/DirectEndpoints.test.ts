@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
-import type * as NodeOS from "node:os";
+import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
@@ -8,11 +8,20 @@ import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as DirectEndpoints from "./DirectEndpoints.ts";
 import { resolveBoundEndpoints } from "./DirectEndpoints.ts";
+
+vi.mock("node:os", async (importOriginal) => ({
+  ...(await importOriginal<typeof NodeOS>()),
+  networkInterfaces: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(NodeOS.networkInterfaces).mockReset().mockReturnValue(INTERFACES);
+});
 
 const INTERFACES: ReturnType<typeof NodeOS.networkInterfaces> = {
   lo0: [
@@ -200,31 +209,78 @@ const layerServeProbe = (status: number) =>
     ),
   );
 
-const layerServeConfig = Layer.effect(
-  ServerConfig.ServerConfig,
-  Effect.map(ServerConfig.ServerConfig, (config) => ({
-    ...config,
-    host: "127.0.0.1",
-    tailscaleServeEnabled: true,
-    tailscaleServePort: 443,
-  })),
-).pipe(
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-direct-" })),
-  Layer.provide(NodeServices.layer),
-);
+const layerServeConfig = (host: string, tailscaleServeEnabled: boolean) =>
+  Layer.effect(
+    ServerConfig.ServerConfig,
+    Effect.map(ServerConfig.ServerConfig, (config) => ({
+      ...config,
+      host,
+      port: 3773,
+      tailscaleServeEnabled,
+      tailscaleServePort: 443,
+    })),
+  ).pipe(
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-direct-" })),
+    Layer.provide(NodeServices.layer),
+  );
 
-const resolveWithServe = (probeStatus: number) =>
+const resolveWithServe = (probeStatus: number, host = "127.0.0.1", tailscaleServeEnabled = true) =>
   Effect.flatMap(DirectEndpoints.DirectEndpoints, (service) => service.resolve()).pipe(
     Effect.provide(
       DirectEndpoints.layer.pipe(
         Layer.provide(
-          Layer.mergeAll(layerServeConfig, layerTailscaleUp, layerServeProbe(probeStatus)),
+          Layer.mergeAll(
+            layerServeConfig(host, tailscaleServeEnabled),
+            layerTailscaleUp,
+            layerServeProbe(probeStatus),
+          ),
         ),
       ),
     ),
   );
 
+describe("DirectEndpoints loopback discovery", () => {
+  for (const host of ["127.0.0.1", "127.42.0.2", "::1", "[::1]", "localhost"]) {
+    effectIt.effect(`does not enumerate interfaces for ${host}`, () =>
+      Effect.gen(function* () {
+        vi.mocked(NodeOS.networkInterfaces).mockImplementation(() => {
+          throw new Error("interface enumeration denied by sandbox");
+        });
+        expect(yield* resolveWithServe(200, host, false)).toEqual([]);
+        expect(NodeOS.networkInterfaces).not.toHaveBeenCalled();
+      }),
+    );
+  }
+
+  effectIt.effect("still discovers wildcard and explicit LAN endpoints", () =>
+    Effect.gen(function* () {
+      expect(yield* resolveWithServe(200, "0.0.0.0", false)).toEqual([
+        { kind: "lan", httpBaseUrl: "http://192.168.1.10:3773/" },
+        { kind: "tailnet", httpBaseUrl: "http://100.101.102.103:3773/" },
+      ]);
+      expect(yield* resolveWithServe(200, "192.168.1.10", false)).toEqual([
+        { kind: "lan", httpBaseUrl: "http://192.168.1.10:3773/" },
+      ]);
+      expect(NodeOS.networkInterfaces).toHaveBeenCalledTimes(2);
+    }),
+  );
+
+  it("does not swallow interface discovery failures for a wildcard bind", async () => {
+    vi.mocked(NodeOS.networkInterfaces).mockImplementation(() => {
+      throw new Error("interface enumeration denied by sandbox");
+    });
+    await expect(Effect.runPromise(resolveWithServe(200, "0.0.0.0", false))).rejects.toThrow(
+      "interface enumeration denied by sandbox",
+    );
+  });
+});
+
 describe("DirectEndpoints Tailscale Serve", () => {
+  beforeEach(() => {
+    vi.mocked(NodeOS.networkInterfaces).mockImplementation(() => {
+      throw new Error("interface enumeration denied by sandbox");
+    });
+  });
   effectIt.effect("lists the tailnet name once Serve answers for this server", () =>
     Effect.gen(function* () {
       expect(yield* resolveWithServe(200)).toEqual([

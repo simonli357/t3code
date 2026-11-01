@@ -124,7 +124,7 @@ export const make = Effect.gen(function* () {
       ...resolveBoundEndpoints({
         host: config.host,
         port: config.port,
-        interfaces: NodeOS.networkInterfaces(),
+        interfaces: isLoopbackHost(config.host) ? {} : NodeOS.networkInterfaces(),
         onCloudVm: yield* onCloudVm,
       }),
     ];
