@@ -19,6 +19,9 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import type { DeepseekHarnessSettings } from "../settings.ts";
 
 export const DEEPSEEK_HARNESS_DRIVER_KIND = ProviderDriverKind.make("deepseekHarness");
+/** This fork provides the native load/fork and relocation lifecycle T3 uses. */
+export const DEEPSEEK_HARNESS_T3_SOURCE =
+  "https://github.com/simonli357/deepseek-harness/tree/8e02db92bd0cb21e0792338dbfdc24b5e013fb9c";
 /** T3's slug for the harness's current model, whatever the catalog names it. */
 export const DEEPSEEK_HARNESS_DEFAULT_MODEL_SLUG = "deepseek-harness-default";
 /** Threads saved while the API exposed `deepseek-v4-flash` still carry that slug. */
