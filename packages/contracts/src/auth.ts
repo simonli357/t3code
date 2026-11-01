@@ -95,7 +95,7 @@ const authScopeResponseFields = {
   permissions: Schema.optionalKey(ForwardCompatibleArray(AuthEnvironmentScope)),
 };
 
-// Client-only fallback for old servers. Servers never expand grants; empty permissions grant nothing.
+// Old-server client fallback and explicitly recorded V1 imports only; V2 grants stay literal.
 const legacyParents: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>> = {
   [AuthFilesystemReadScope]: AuthOrchestrationReadScope,
   [AuthDiagnosticsReadScope]: AuthOrchestrationReadScope,
@@ -107,6 +107,18 @@ const legacyParents: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>>
   [AuthFilesystemWriteScope]: AuthOrchestrationOperateScope,
   [AuthTerminalReadScope]: AuthTerminalOperateScope,
 };
+
+/** Apply only after proving the grant was imported from V1, never to an ordinary V2 token. */
+export function migrateImportedV1AuthScopes(scopes: ReadonlyArray<AuthEnvironmentScope>) {
+  return [
+    ...new Set([
+      ...scopes,
+      ...Object.entries(legacyParents).flatMap(([permission, parent]) =>
+        scopes.includes(parent) ? [permission as AuthEnvironmentScope] : [],
+      ),
+    ]),
+  ];
+}
 
 /** Keep permission denials decodable by clients with the original scope enum. */
 export function authScopeRequiredResponse(requiredPermission: AuthEnvironmentScope) {

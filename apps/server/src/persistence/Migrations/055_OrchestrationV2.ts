@@ -1,6 +1,8 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import ImportedV1AuthGrants from "./073_ImportedV1AuthGrants.ts";
+
 import ApplicationEventSequenceIndexes from "./OrchestrationV2/ApplicationEventSequenceIndexes.ts";
 import ApplicationEventSource from "./OrchestrationV2/ApplicationEventSource.ts";
 import OrchestrationV2EffectCancellation from "./OrchestrationV2/EffectCancellation.ts";
@@ -15,6 +17,11 @@ import OrchestrationV2ThreadLaunchWorkflows from "./OrchestrationV2/ThreadLaunch
 
 const OrchestrationV2Base = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  // Preserve capabilities only for sessions present before the V1 orchestration migration.
+  yield* ImportedV1AuthGrants;
+  yield* sql`INSERT INTO imported_v1_auth_grants (session_id, scopes, issued_at)
+    SELECT session_id, scopes, issued_at FROM auth_sessions`;
 
   yield* sql`
     CREATE TABLE orchestration_v2_events (

@@ -92,6 +92,11 @@ export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
 });
 export type SetAuthSessionLastConnectedAtInput = typeof SetAuthSessionLastConnectedAtInput.Type;
 
+const ImportedV1AuthGrant = Schema.Struct({
+  scopes: Schema.fromJsonString(AuthEnvironmentScopes),
+  issuedAt: Schema.DateTimeUtcFromString,
+});
+
 export class AuthSessionRepository extends Context.Service<
   AuthSessionRepository,
   {
@@ -107,6 +112,9 @@ export class AuthSessionRepository extends Context.Service<
     readonly getById: (
       input: GetAuthSessionByIdInput,
     ) => Effect.Effect<Option.Option<AuthSessionRecord>, AuthSessionRepositoryError>;
+    readonly getImportedV1Grant: (
+      input: GetAuthSessionByIdInput,
+    ) => Effect.Effect<Option.Option<typeof ImportedV1AuthGrant.Type>, AuthSessionRepositoryError>;
     readonly listActive: (
       input: ListActiveAuthSessionsInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionRecord>, AuthSessionRepositoryError>;
@@ -392,6 +400,27 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const readImportedV1Grant = SqlSchema.findOneOption({
+    Request: GetAuthSessionByIdInput,
+    Result: ImportedV1AuthGrant,
+    execute: ({ sessionId }) => sql`SELECT scopes, issued_at AS "issuedAt"
+      FROM imported_v1_auth_grants WHERE session_id = ${sessionId}`,
+  });
+  const getImportedV1Grant: AuthSessionRepository["Service"]["getImportedV1Grant"] = Effect.fn(
+    "AuthSessionRepository.getImportedV1Grant",
+  )(function* (input) {
+    return yield* readImportedV1Grant(input).pipe(
+      NodeSqliteClient.readOnly,
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.getImportedV1Grant:query",
+          "AuthSessionRepository.getImportedV1Grant:decode",
+          { sessionId: input.sessionId },
+        ),
+      ),
+    );
+  });
+
   const getById: AuthSessionRepository["Service"]["getById"] = (input) =>
     getSessionRowById(input).pipe(
       NodeSqliteClient.readOnly,
@@ -485,6 +514,7 @@ export const make = Effect.gen(function* () {
     createReplacingActive,
     createIfAbsent,
     getById,
+    getImportedV1Grant,
     listActive,
     revoke,
     revokeAllExcept,

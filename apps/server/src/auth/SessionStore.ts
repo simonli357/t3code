@@ -1,5 +1,6 @@
 import {
   AuthSessionId,
+  migrateImportedV1AuthScopes,
   AuthStandardClientScopes,
   AuthEnvironmentScopes,
   type AuthClientMetadata,
@@ -494,6 +495,26 @@ const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const authSessions = yield* AuthSessions.AuthSessionRepository;
+  const resolveImportedScopes = Effect.fn("SessionStore.resolveImportedScopes")(function* (
+    sessionId: AuthSessionId,
+    scopes: ReadonlyArray<AuthEnvironmentScope>,
+    issuedAt: number,
+  ) {
+    const imported = yield* authSessions
+      .getImportedV1Grant({ sessionId })
+      .pipe(
+        Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
+      );
+    if (
+      Option.isNone(imported) ||
+      imported.value.issuedAt.epochMilliseconds !== issuedAt ||
+      imported.value.scopes.length !== scopes.length ||
+      !imported.value.scopes.every((scope) => scopes.includes(scope))
+    )
+      return scopes;
+    return migrateImportedV1AuthScopes(scopes);
+  });
+
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
   const connectedSessionsRef = yield* Ref.make(new Map<AuthSessionId, number>());
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
@@ -834,7 +855,7 @@ const make = Effect.gen(function* () {
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
         subject: claims.sub,
-        scopes: claims.scopes,
+        scopes: yield* resolveImportedScopes(claims.sid, claims.scopes, claims.iat),
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
         ...(claims.plk === 1 ? { peerLink: true as const } : {}),
@@ -947,7 +968,11 @@ const make = Effect.gen(function* () {
       client: toClientMetadata(row.value.client),
       expiresAt: row.value.expiresAt,
       subject: row.value.subject,
-      scopes: row.value.scopes,
+      scopes: yield* resolveImportedScopes(
+        row.value.sessionId,
+        row.value.scopes,
+        row.value.issuedAt.epochMilliseconds,
+      ),
       ...(claims.aud ? { audience: claims.aud } : {}),
       ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
     } satisfies VerifiedWebSocketTicket;

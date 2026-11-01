@@ -261,6 +261,54 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       expect((yield* sessions.verify(uncapped.token)).runtimeModeCeiling).toBeUndefined();
     }).pipe(Effect.provide(layerSessionStore())),
   );
+  it.effect(
+    "preserves only recorded V1 capabilities for session and websocket authentication",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const sql = yield* SqlClient.SqlClient;
+        const legacyScopes = ["orchestration:read", "orchestration:operate"] as const;
+        const imported = yield* sessions.issue({ scopes: legacyScopes });
+        const ordinary = yield* sessions.issue({ scopes: legacyScopes });
+        const readonly = yield* sessions.issue({ scopes: ["orchestration:read"] });
+        yield* sql`INSERT INTO imported_v1_auth_grants (session_id, scopes, issued_at)
+        SELECT session_id, scopes, issued_at FROM auth_sessions
+        WHERE session_id IN (${imported.sessionId}, ${readonly.sessionId})`;
+        const verified = yield* sessions.verify(imported.token);
+        expect(verified.token).toBe(imported.token);
+        expect(verified.scopes).toContain("settings:write");
+        expect(verified.scopes).toContain("providers:manage");
+        expect(verified.scopes).not.toContain("access:write");
+        expect(verified.scopes).not.toContain("terminal:operate");
+        const ticket = yield* sessions.issueWebSocketToken(imported.sessionId);
+        expect((yield* sessions.verifyWebSocketToken(ticket.token)).scopes).toEqual(
+          verified.scopes,
+        );
+        expect((yield* sessions.verify(ordinary.token)).scopes).toEqual(legacyScopes);
+        expect((yield* sessions.verify(readonly.token)).scopes).not.toContain("settings:write");
+        yield* sql`UPDATE imported_v1_auth_grants SET issued_at = '2000-01-01T00:00:00.000Z'
+        WHERE session_id = ${imported.sessionId}`;
+        expect((yield* sessions.verify(imported.token)).scopes).toEqual(legacyScopes);
+        yield* sql`UPDATE imported_v1_auth_grants SET issued_at = (
+        SELECT issued_at FROM auth_sessions WHERE session_id = ${imported.sessionId}
+      ), scopes = '["orchestration:read"]' WHERE session_id = ${imported.sessionId}`;
+        expect((yield* sessions.verify(imported.token)).scopes).toEqual(legacyScopes);
+        yield* sessions.revoke(imported.sessionId);
+        expect((yield* Effect.flip(sessions.verify(imported.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+      }).pipe(
+        Effect.provide(
+          SessionStore.layer.pipe(
+            Layer.provide(ServerSecretStore.layer),
+            Layer.provideMerge(SqlitePersistence.layerMemory),
+            Layer.provide(layerServerEnvironment(EnvironmentId.make("test-import-environment"))),
+            Layer.provide(layerServerConfig()),
+          ),
+        ),
+      ),
+  );
+
   it.effect("keeps recorded scopes unchanged for both token versions", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
