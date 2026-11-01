@@ -674,3 +674,10 @@ Checklist:
 - Build fails with signing error:
   - Retry with secrets removed to confirm unsigned path still works.
   - Re-check certificate/profile names and tenant/client credentials.
+
+## Retaining rollback runtimes
+
+Startup pruning keeps custom builds automatically. To keep any other installed release, create
+an empty `.retain` file inside `<T3 home>/runtime/versions/<version>/`. Remove that marker only when
+the release may be pruned. A trial must use its own T3 home so its settings and runtime selection
+remain separate from the production installation.
