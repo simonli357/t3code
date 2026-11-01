@@ -32,3 +32,14 @@ it("reissues imported context until a V2 run completes", () => {
     }),
   );
 });
+
+it("uses the retained native conversation instead of replaying an imported summary", () => {
+  assert.isFalse(
+    shouldPrepareLegacyImportHandoff({
+      historyOrigin: "v1_import",
+      hasCompletedRun: false,
+      legacyImportItemCount: 10,
+      hasNativeContinuation: true,
+    }),
+  );
+});

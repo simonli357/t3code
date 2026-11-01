@@ -935,9 +935,13 @@ export function shouldPrepareLegacyImportHandoff(input: {
   readonly hasCompletedRun: boolean;
   readonly historyOrigin: OrchestrationV2AppThread["historyOrigin"];
   readonly legacyImportItemCount: number;
+  readonly hasNativeContinuation?: boolean;
 }): boolean {
   return (
-    input.historyOrigin === "v1_import" && !input.hasCompletedRun && input.legacyImportItemCount > 0
+    input.historyOrigin === "v1_import" &&
+    !input.hasCompletedRun &&
+    !input.hasNativeContinuation &&
+    input.legacyImportItemCount > 0
   );
 }
 
@@ -5965,6 +5969,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
         historyOrigin: projection.thread.historyOrigin,
+        hasNativeContinuation: activeProviderThread?.nativeThreadRef?.nativeId != null,
         hasCompletedRun: latestCompletedRun !== undefined,
         legacyImportItemCount: legacyImportItems.length,
       })

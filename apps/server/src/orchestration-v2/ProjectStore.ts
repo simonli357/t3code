@@ -30,6 +30,7 @@ export class ProjectStoreV2Error extends Schema.TaggedError<ProjectStoreV2Error>
 }
 
 export const ProjectRow = Schema.Struct({
+  basePrompt: Schema.optional(Schema.NullOr(Schema.String)),
   projectId: ProjectId,
   title: Schema.String,
   workspaceRoot: Schema.String,
@@ -56,6 +57,7 @@ const ProjectDbRow = Schema.Struct({
 function toShell(row: ProjectRow): OrchestrationProjectShell {
   return {
     id: row.projectId,
+    basePrompt: row.basePrompt ?? null,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity: null,
@@ -112,6 +114,7 @@ export const make = Effect.gen(function* () {
     execute: (request) => sql`
       SELECT
         project_id AS "projectId",
+        base_prompt AS "basePrompt",
         title,
         workspace_root AS "workspaceRoot",
         default_model_selection_json AS "defaultModelSelection",

@@ -443,6 +443,12 @@ const makeCodexAdapter = (capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>) =
           ensureThread: (threadInput) =>
             Effect.gen(function* () {
               const createdAt = yield* DateTime.now;
+              if (threadInput.existingProviderThread?.nativeThreadRef?.nativeId)
+                return {
+                  ...threadInput.existingProviderThread,
+                  providerSessionId: sessionInput.providerSessionId,
+                  status: "idle" as const,
+                };
               const nativeThreadId = `${driver}:${threadInput.threadId}`;
               return {
                 id: ProviderThreadId.make(`provider-thread:${nativeThreadId}`),
@@ -838,9 +844,12 @@ describe("orchestration v2 legacy v1 cutover", () => {
               assert.equal(continued.contextHandoffs.length, 1);
               const handoff = continued.contextHandoffs[0]!;
               assert.equal(handoff.strategy, "manual_context");
-              assert.isAtMost(handoff.summaryText.length, 32_000);
-              assert.include(handoff.summaryText, LATEST_MARKER);
-              assert.notInclude(handoff.summaryText, EARLIEST_MARKER);
+              assert.include(handoff.summaryText, "t3_thread_read");
+              assert.isAbove(handoff.history?.omittedItems ?? 0, 0);
+              assert.include(continued.messages[0]!.text, EARLIEST_MARKER);
+              assert.isTrue(
+                continued.messages.some((message) => message.text.includes(LATEST_MARKER)),
+              );
               const turns = yield* Ref.get(capturedTurns);
               assert.equal(turns.length, 1);
               assert.include(turns[0]!.text, "Context handoff (manual_context):");
@@ -1023,3 +1032,55 @@ describe("orchestration v2 legacy v1 cutover", () => {
       ),
   );
 });
+
+it.live("continues an imported native session without a lossy handoff", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "v1-native-continuation-" });
+      const workspace = yield* checkpointWorkspace("v1-native-continuation");
+      const dbPath = path.join(directory, "state.sqlite");
+      yield* seedV1Database(dbPath, workspace);
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO provider_session_runtime (thread_id,provider_name,provider_instance_id,adapter_key,status,last_seen_at,resume_cursor_json)
+        VALUES (${LONG_THREAD},'codex','codex','codex','ready','2026-01-10T00:00:00Z','{"threadId":"retained-native-session"}')`;
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+      const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+      yield* Effect.gen(function* () {
+        const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make(LONG_THREAD);
+        yield* importer.reconcileShells;
+        yield* importer.ensureTranscript(threadId);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("native-continuation"),
+          threadId,
+          messageId: MessageId.make("native-continuation"),
+          text: "Continue natively",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const projection = yield* waitForIdle(threadId);
+        assert.equal(
+          projection.providerThreads[0]?.nativeThreadRef?.nativeId,
+          "retained-native-session",
+        );
+        assert.isEmpty(projection.contextHandoffs);
+        assert.equal(projection.runs[0]?.status, "completed");
+        assert.isTrue(
+          projection.messages.some((message) => message.text.includes(EARLIEST_MARKER)),
+        );
+        assert.isTrue(projection.messages.some((message) => message.text.includes(LATEST_MARKER)));
+      }).pipe(
+        Effect.provide(
+          layerBoot({ name: "native-continuation", dbPath, workspace, capturedTurns }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);

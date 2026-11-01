@@ -19,18 +19,17 @@ interaction modes, branch or worktree, archive state, settlement state, snooze a
 linked pull request. T3 Code also brings over user and assistant messages, their timestamps, and
 supported attachments. Large histories may appear in stages while the server imports transcripts.
 
-The migration does not recreate the old provider's live session. It also does not convert old run
-records, checkpoints and diffs, tool activity, approval history, or proposed plan history into the
-new format. These items may be absent from a migrated timeline even though the conversation text is
-present.
+Historical tool activity, proposed plans, and checkpoint references are imported as history.
+Old processes and pending approvals are not restarted. Checkpoint files and native provider
+sessions still depend on their original workspace and provider profile being available.
+Unfinished worker assignments become interrupted; send a new assignment to continue them.
 
 ## Continuing a migrated thread
 
-The first new message starts a fresh provider session. T3 Code selects intact user and assistant
-messages using the same [handoff budget](./portable-handoffs.md) as a provider switch. Omitted text
-remains in the thread and can be retrieved by the agent. The migration retains its separate
-32,000-character recovery excerpt; neither that excerpt nor the handoff replaces the full imported
-transcript.
+When a compatible native session is available, the first new message resumes it. Otherwise T3 Code
+starts a new provider session and selects intact messages using the same
+[handoff budget](./portable-handoffs.md) as a provider switch. Omitted text remains in the thread and
+can be retrieved by the agent; the handoff does not replace the full imported transcript.
 
 Before continuing a long or important thread, read the recent transcript and include any older
 requirements the agent still needs in your next message. Starting a new thread and pasting a short

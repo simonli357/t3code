@@ -434,6 +434,7 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
 );
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  isBase: Schema.optional(Schema.Boolean),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,

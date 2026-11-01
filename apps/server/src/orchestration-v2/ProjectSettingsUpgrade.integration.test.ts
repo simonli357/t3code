@@ -28,12 +28,14 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 
 const projectId = ProjectId.make("project:upgrade");
 const icon = { kind: "emoji", emoji: "🦊" } as const;
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const expectedSettings = {
+  base_prompt: "Retain prepared workspace context.",
   default_thread_env_mode: "worktree",
   auto_pull: 1,
   favicon_path: "brand/icon.svg",
@@ -43,7 +45,7 @@ const expectedSettings = {
 const readSettings = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<typeof expectedSettings>`
-    SELECT default_thread_env_mode, auto_pull, favicon_path, project_icon_json
+    SELECT base_prompt, default_thread_env_mode, auto_pull, favicon_path, project_icon_json
     FROM projection_projects
     WHERE project_id = ${projectId}
   `;
@@ -53,6 +55,7 @@ const readSettings = Effect.gen(function* () {
 const seedV1Database = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* runMigrations({ toMigrationInclusive: 54 });
+  yield* sql`ALTER TABLE projection_projects ADD COLUMN base_prompt TEXT`;
   const events = [
     {
       type: "project.created",
@@ -102,6 +105,7 @@ const seedV1Database = Effect.gen(function* () {
       '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', NULL
     )
   `;
+  yield* sql`UPDATE projection_projects SET base_prompt = ${expectedSettings.base_prompt} WHERE project_id = ${projectId}`;
   yield* sql`
     INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
     VALUES ('projection.projects', 2, '2026-01-02T00:00:00.000Z')
@@ -188,6 +192,11 @@ it.live("keeps project settings through the V2 migrations and the first V2 boot"
         assert.deepEqual(yield* readSettings, expectedSettings);
         const project = yield* (yield* ProjectService.ProjectService).getById(projectId);
         assert.equal(project._tag, "Some");
+        const shell = yield* (yield* ProjectStore.make).getShell(projectId);
+        assert.equal(
+          shell._tag === "Some" ? shell.value.basePrompt : null,
+          expectedSettings.base_prompt,
+        );
       }).pipe(Effect.provide(layerRuntime(dbPath)));
     }),
   ).pipe(Effect.provide(NodeServices.layer)),

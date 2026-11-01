@@ -6,6 +6,7 @@ import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, ReceivedProjectIcon } from "./project.ts";
 
 export const OrchestrationProjectShell = Schema.Struct({
+  basePrompt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   id: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
