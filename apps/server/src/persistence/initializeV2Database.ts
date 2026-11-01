@@ -1,5 +1,6 @@
-import * as NodeSqlite from "node:sqlite";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- SQLite snapshot fallback must remove a partial file before page backup.
 import * as NodeFS from "node:fs";
+import * as NodeSqlite from "node:sqlite";
 
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
