@@ -196,6 +196,7 @@ export interface AcpAdapterV2ExtensionContext {
     EffectAcpErrors.AcpError
   >;
   readonly captureProposedPlan: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
+  readonly updatePlan: (update: AcpPlanUpdate) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly lastProposedPlanMarkdown: Effect.Effect<string | undefined>;
 }
 
@@ -6291,6 +6292,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 ),
               requestUserInput,
               captureProposedPlan,
+              updatePlan: (update) =>
+                runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.gen(function* () {
+                    if (yield* Ref.get(stoppedRunQuarantine)) return;
+                    const context = yield* Ref.get(activeTurn);
+                    if (context !== null) yield* emitPlan(context, update);
+                  }),
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new EffectAcpErrors.AcpTransportError({
+                        cause,
+                        detail: "Could not publish the native plan update",
+                      }),
+                  ),
+                  Effect.asVoid,
+                ),
               lastProposedPlanMarkdown,
               finishSubagent: (notice) =>
                 runRuntimeCallbackAtGeneration(
