@@ -1,3 +1,5 @@
+import { AuthEnvironmentScopes, migrateImportedV1AuthScopes } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -15,6 +17,8 @@ import OrchestrationV2ShellIndexes from "./OrchestrationV2/ShellIndexes.ts";
 import OrchestrationV2Subagents from "./OrchestrationV2/Subagents.ts";
 import OrchestrationV2ThreadLaunchWorkflows from "./OrchestrationV2/ThreadLaunchWorkflows.ts";
 
+const decodeScopes = Schema.decodeUnknownEffect(Schema.fromJsonString(AuthEnvironmentScopes));
+
 const OrchestrationV2Base = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -22,6 +26,18 @@ const OrchestrationV2Base = Effect.gen(function* () {
   yield* ImportedV1AuthGrants;
   yield* sql`INSERT INTO imported_v1_auth_grants (session_id, scopes, issued_at)
     SELECT session_id, scopes, issued_at FROM auth_sessions`;
+
+  // These opaque links predate V2. Expand their equivalent capabilities before the
+  // atomic redemption checks, so requested granular scopes work without spending
+  // a rejected link. Later V2 grants never pass through this migration.
+  const links = yield* sql<{ readonly id: string; readonly scopes: string }>`
+    SELECT id, scopes FROM auth_pairing_links WHERE consumed_at IS NULL AND revoked_at IS NULL
+  `;
+  for (const link of links) {
+    const scopes = yield* decodeScopes(link.scopes).pipe(Effect.orDie);
+    yield* sql`UPDATE auth_pairing_links
+      SET scopes = ${JSON.stringify(migrateImportedV1AuthScopes(scopes))} WHERE id = ${link.id}`;
+  }
 
   yield* sql`
     CREATE TABLE orchestration_v2_events (
