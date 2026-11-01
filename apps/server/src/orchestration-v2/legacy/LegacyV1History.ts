@@ -38,7 +38,7 @@ const decodeCursor = Schema.decodeOption(
   Schema.fromJsonString(
     Schema.Struct({
       turnCount: Schema.optionalKey(Schema.Number),
-      turnStartMessageIds: Schema.optionalKey(Schema.Array(Schema.String)),
+      turnStartMessageIds: Schema.optionalKey(Schema.Array(Schema.NullOr(Schema.String))),
       resumeSessionAt: Schema.optionalKey(Schema.String),
     }),
   ),
@@ -135,6 +135,42 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
       return decoded ? [[decoded.messageId, decoded] as const] : [];
     }),
   );
+  const nativeMessageParts =
+    provider?.driver === "opencode"
+      ? yield* sql<{
+          message_id: string;
+          turn_id: string | null;
+        }>`SELECT message_id, turn_id FROM projection_thread_messages WHERE thread_id = ${threadId} AND role = 'assistant'`
+      : [];
+  const openCodeEvidence = new Map<
+    string,
+    { messagePartIds: Set<string>; toolCallIds: Set<string> }
+  >();
+  const evidenceFor = (turnId: string) => {
+    let evidence = openCodeEvidence.get(turnId);
+    if (!evidence) {
+      evidence = { messagePartIds: new Set(), toolCallIds: new Set() };
+      openCodeEvidence.set(turnId, evidence);
+    }
+    return evidence;
+  };
+  for (const message of nativeMessageParts)
+    if (message.turn_id && message.message_id.startsWith("assistant:"))
+      evidenceFor(message.turn_id).messagePartIds.add(
+        message.message_id.slice("assistant:".length).replace(/:segment:\d+$/, ""),
+      );
+  if (provider?.driver === "opencode")
+    for (const activity of activities) {
+      if (!activity.turn_id) continue;
+      const payload = Option.getOrUndefined(decodePayload(activity.payload_json));
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "toolCallId" in payload &&
+        typeof payload.toolCallId === "string"
+      )
+        evidenceFor(activity.turn_id).toolCallIds.add(payload.toolCallId);
+    }
   const lastCheckpointCount = Math.max(0, ...turns.map((turn) => turn.checkpoint_turn_count ?? 0));
   const nodeId = NodeId.make(`migration:v1:history:${threadId}`);
   const scopeId = CheckpointScopeId.make(`migration:v1:checkpoints:${threadId}`);
@@ -296,10 +332,33 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
             ? { nextUserMessageId: cursor.turnStartMessageIds[count] }
             : count === lastCheckpointCount && cursor.resumeSessionAt
               ? { headMessageId: cursor.resumeSessionAt }
-              : undefined
+              : cursor.turnStartMessageIds.every((id) => id === null)
+                ? {
+                    recoverTurnStarts: {
+                      retainedTurnCount: count,
+                      turnCount: lastCheckpointCount,
+                      ...(cursor.resumeSessionAt
+                        ? { sourceHeadMessageId: cursor.resumeSessionAt }
+                        : {}),
+                    },
+                  }
+                : undefined
+          : undefined;
+      const legacyOpenCodeBoundary =
+        matchingProvider?.driver === "opencode" && count !== null && count > 0
+          ? {
+              retainedTurnCount: count,
+              turnCount: lastCheckpointCount,
+              messagePartIds: [
+                ...(openCodeEvidence.get(turn.turn_id ?? "")?.messagePartIds ?? []),
+              ].sort(),
+              toolCallIds: [
+                ...(openCodeEvidence.get(turn.turn_id ?? "")?.toolCallIds ?? []),
+              ].sort(),
+            }
           : undefined;
       const providerTurnId =
-        matchingProvider && (nativeTurnId || legacyClaudeBoundary)
+        matchingProvider && (nativeTurnId || legacyClaudeBoundary || legacyOpenCodeBoundary)
           ? ProviderTurnId.make(`${runId}:provider-turn`)
           : null;
       const status =
@@ -418,6 +477,7 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
               ? { driver: matchingProvider.driver, nativeId: nativeTurnId, strength: "strong" }
               : null,
             ...(legacyClaudeBoundary ? { legacyClaudeBoundary } : {}),
+            ...(legacyOpenCodeBoundary ? { legacyOpenCodeBoundary } : {}),
             historyOrigin: "v1_import",
             ordinal,
             status,

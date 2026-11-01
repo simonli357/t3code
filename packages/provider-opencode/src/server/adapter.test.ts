@@ -2671,3 +2671,176 @@ it.effect.each([false, true])(
       Effect.scoped,
     ),
 );
+
+it.effect.each(["counts", "parts", "tools", "ambiguous", "corrupt-fork"] as const)(
+  "recovers V1 OpenCode native boundaries, continuation and restart: %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const nativeSessionId = "legacy-source";
+      const calls: string[] = [];
+      const message = (id: string, role: string, parentID?: string) => ({
+        info: {
+          id,
+          role,
+          sessionID: nativeSessionId,
+          time: { created: 1 },
+          ...(parentID ? { parentID } : {}),
+        },
+        parts:
+          role === "assistant"
+            ? [
+                {
+                  id: `part-${id}`,
+                  sessionID: nativeSessionId,
+                  messageID: id,
+                  type: mode === "tools" ? "tool" : "text",
+                  callID: `call-${id}`,
+                  text: `content-${id}`,
+                },
+              ]
+            : [],
+      });
+      const source = [
+        message("u1", "user"),
+        message("a1", "assistant", "u1"),
+        message("u2", "user"),
+        message("a2", "assistant", "u2"),
+        message("u3", "user"),
+        message("a3", "assistant", "u3"),
+      ];
+      if (mode === "ambiguous") source.splice(3, 0, message("steer", "user"));
+      if (mode === "parts" || mode === "tools")
+        source.splice(4, 0, message("a2-step", "assistant", "u2"));
+      const sessions = new Map([[nativeSessionId, source]]);
+      let forks = 0;
+      const client = {
+        event: {
+          subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+            const events = asyncEventStream();
+            options.signal?.addEventListener("abort", () => events.close(), { once: true });
+            return { stream: events.stream };
+          },
+        },
+        session: {
+          create: async () => ({ data: { id: nativeSessionId, time: { created: 1, updated: 1 } } }),
+          get: async ({ sessionID }: { sessionID: string }) => ({
+            data: { id: sessionID, time: { created: 1, updated: 1 } },
+          }),
+          messages: async ({ sessionID }: { sessionID: string }) => ({
+            data: sessions.get(sessionID)!,
+          }),
+          fork: async ({ sessionID, messageID }: { sessionID: string; messageID: string }) => {
+            calls.push(messageID);
+            const entries = sessions.get(sessionID)!;
+            const retained = entries.slice(
+              0,
+              entries.findIndex(({ info }) => info.id === messageID),
+            );
+            const forkId = `legacy-fork-${++forks}`;
+            // Native forks may regenerate IDs. The returned IDs must survive restart.
+            sessions.set(
+              forkId,
+              retained.map((entry) => ({
+                ...entry,
+                info: {
+                  ...entry.info,
+                  id: `${entry.info.id}-f${forks}`,
+                  sessionID: forkId,
+                  ...(entry.info.parentID ? { parentID: `${entry.info.parentID}-f${forks}` } : {}),
+                },
+                parts: entry.parts.map((part) => ({
+                  ...part,
+                  id: `${part.id}-f${forks}`,
+                  sessionID: forkId,
+                  messageID: `${part.messageID}-f${forks}`,
+                  ...(mode === "corrupt-fork" ? { text: "wrong native content" } : {}),
+                })),
+              })),
+            );
+            return { data: { id: forkId, time: { created: 1, updated: 1 } } };
+          },
+          update: async () => ({ data: {} }),
+          revert: async () => {
+            throw new Error("Native revert must not rewrite workspace files");
+          },
+        },
+      };
+      const harness = yield* makeOpenCodeRuntimeHarness("legacy-boundary", nativeSessionId, client);
+      const turns = [1, 2, 3].map((ordinal) => ({
+        ...providerTurn({ id: `legacy-${ordinal}`, ordinal, nativeId: null }),
+        providerThreadId: harness.providerThread.id,
+        historyOrigin: "v1_import" as const,
+        legacyOpenCodeBoundary: {
+          retainedTurnCount: ordinal,
+          turnCount: 3,
+          messagePartIds: mode === "parts" ? [`part-a${ordinal}`] : [],
+          toolCallIds: mode === "tools" ? [`call-a${ordinal}`] : [],
+        },
+      }));
+      const target = {
+        type: "provider_turn" as const,
+        checkpointId: CheckpointId.make("legacy-checkpoint"),
+        appRunOrdinal: 2,
+        providerTurn: turns[1]!,
+      };
+      const effect = harness.runtime.rollbackThread({
+        providerThread: harness.providerThread,
+        target,
+        providerThreadTurns: turns,
+      });
+      if (mode === "ambiguous" || mode === "corrupt-fork") {
+        const error = yield* effect.pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterRollbackThreadError");
+        assert.deepEqual(calls, mode === "ambiguous" ? [] : ["u3"]);
+        return;
+      }
+      const first = yield* effect;
+      assert.deepEqual(calls, ["u3"]);
+      const selected = first.providerTurns.find((turn) => turn.id === target.providerTurn.id)!;
+      assert.equal(
+        selected.legacyOpenCodeBoundary?.headMessageId,
+        mode === "parts" || mode === "tools" ? "a2-step-f1" : "a2-f1",
+      );
+      assert.equal(selected.nativeTurnRef?.nativeId, "u2-f1");
+      sessions.get("legacy-fork-1")!.push(message("u4", "user"), message("a4", "assistant", "u4"));
+      const continued = yield* harness.runtime.rollbackThread({
+        providerThread: first.providerThread,
+        target: { ...target, providerTurn: selected },
+        providerThreadTurns: first.providerTurns,
+      });
+      assert.deepEqual(calls, ["u3", "u4"]);
+      const saved = continued.providerTurns.find((turn) => turn.id === selected.id)!;
+      const restarted = yield* makeOpenCodeRuntimeHarness(
+        "legacy-boundary",
+        "legacy-fork-2",
+        client,
+      );
+      const retry = yield* restarted.runtime.rollbackThread({
+        providerThread: continued.providerThread,
+        target: { ...target, providerTurn: saved },
+        providerThreadTurns: continued.providerTurns,
+      });
+      assert.deepEqual(calls, ["u3", "u4"]);
+      assert.equal(
+        retry.providerTurns.find((turn) => turn.id === saved.id)?.legacyOpenCodeBoundary
+          ?.headMessageId,
+        mode === "parts" || mode === "tools" ? "a2-step-f1-f2" : "a2-f1-f2",
+      );
+      const older = retry.providerTurns.find((turn) => turn.ordinal === 1)!;
+      assert.equal(older.legacyOpenCodeBoundary?.headMessageId, "a1-f1-f2");
+      const restoredOlder = yield* restarted.runtime.rollbackThread({
+        providerThread: retry.providerThread,
+        target: { ...target, appRunOrdinal: 1, providerTurn: older },
+        providerThreadTurns: retry.providerTurns,
+      });
+      assert.deepEqual(calls, ["u3", "u4", "u2-f1-f2"]);
+      assert.equal(
+        restoredOlder.providerTurns.find((turn) => turn.ordinal === 1)?.legacyOpenCodeBoundary
+          ?.headMessageId,
+        "a1-f1-f2-f3",
+      );
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+);

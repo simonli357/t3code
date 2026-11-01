@@ -1,3 +1,5 @@
+import { resolveLegacyClaudeBoundary } from "../../provider/legacyClaudeBoundary.ts";
+import { resolveLegacyOpenCodeBoundary } from "@t3tools/provider-opencode/testing";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -65,6 +67,7 @@ import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import * as ServerConfig from "../../config.ts";
 
 interface HistoricalNativeFixture {
+  readonly driver?: "codex" | "claudeAgent" | "opencode";
   readonly history: Ref.Ref<ReadonlyArray<string>>;
   readonly rollbacks: Ref.Ref<ReadonlyArray<{ boundary: string; removed: number }>>;
 }
@@ -435,8 +438,10 @@ const unimplemented = (detail: string) =>
 const makeCodexAdapter = (
   capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>,
   native?: HistoricalNativeFixture,
-) =>
-  ({
+) => {
+  const driver = ProviderDriverKind.make(native?.driver ?? "codex");
+  const instanceId = ProviderInstanceId.make(driver);
+  return {
     instanceId,
     driver,
     getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
@@ -583,31 +588,92 @@ const makeCodexAdapter = (
             Effect.gen(function* () {
               if (!native) return yield* unimplemented("rollbackThread unused in cutover test");
               const history = yield* Ref.get(native.history);
-              const removed = yield* resolveImportedCodexRollbackTurnCount(input, {
-                turns: history.map((id) => ({ id, status: "completed" })),
-              }).pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapter.ProviderAdapterRollbackThreadError({
-                      driver,
-                      providerThreadId: input.providerThread.id,
-                      cause,
-                    }),
-                ),
-              );
               if (input.target.type !== "provider_turn")
                 return yield* unimplemented("A historical target must never become thread_start");
-              const boundary = input.target.providerTurn.nativeTurnRef!.nativeId!;
+              const selected = input.target.providerTurn;
+              const recovered = yield* Effect.try({
+                try: () =>
+                  driver === "claudeAgent"
+                    ? resolveLegacyClaudeBoundary(
+                        history.flatMap((id) => [
+                          {
+                            uuid: `user-${id}`,
+                            type: "user",
+                            parent_tool_use_id: null,
+                            message: { content: "human prompt" },
+                          },
+                          {
+                            uuid: `tool-${id}`,
+                            type: "user",
+                            parent_tool_use_id: null,
+                            message: { content: [{ type: "tool_result" }] },
+                          },
+                          { uuid: id, type: "assistant" },
+                        ]),
+                        selected.nativeTurnRef?.nativeId
+                          ? { headMessageId: selected.nativeTurnRef.nativeId }
+                          : selected.legacyClaudeBoundary!,
+                      )
+                    : driver === "opencode"
+                      ? resolveLegacyOpenCodeBoundary(
+                          history.flatMap((id) => [
+                            { info: { id: `user-${id}`, role: "user" }, parts: [] },
+                            { info: { id, role: "assistant", parentID: `user-${id}` }, parts: [] },
+                          ]),
+                          selected,
+                          input.providerThreadTurns,
+                        ).headMessageId
+                      : selected.nativeTurnRef!.nativeId!,
+                catch: (cause) =>
+                  new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                    driver,
+                    providerThreadId: input.providerThread.id,
+                    cause,
+                  }),
+              });
+              const removed =
+                driver === "codex"
+                  ? yield* resolveImportedCodexRollbackTurnCount(input, {
+                      turns: history.map((id) => ({ id, status: "completed" })),
+                    }).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderAdapter.ProviderAdapterRollbackThreadError({
+                            driver,
+                            providerThreadId: input.providerThread.id,
+                            cause,
+                          }),
+                      ),
+                    )
+                  : history.length - history.indexOf(recovered) - 1;
+              const boundary = recovered;
+              const nativeRef = {
+                driver,
+                nativeId: driver === "opencode" ? `user-${boundary}` : boundary,
+                strength: "strong" as const,
+              };
+              const resolvedTurn = {
+                ...selected,
+                nativeTurnRef: nativeRef,
+                ...(selected.legacyOpenCodeBoundary
+                  ? {
+                      legacyOpenCodeBoundary: {
+                        ...selected.legacyOpenCodeBoundary,
+                        headMessageId: boundary,
+                      },
+                    }
+                  : {}),
+              };
               yield* Ref.update(native.rollbacks, (calls) => [...calls, { boundary, removed }]);
               yield* Ref.set(native.history, history.slice(0, history.length - removed));
               return {
                 providerThread: {
                   ...input.providerThread,
                   providerSessionId: sessionInput.providerSessionId,
-                  nativeConversationHeadRef: input.target.providerTurn.nativeTurnRef,
+                  nativeConversationHeadRef: nativeRef,
                   status: "idle" as const,
                 },
-                providerTurns: [],
+                providerTurns: [resolvedTurn],
                 messages: [],
                 runtimeRequests: [],
               };
@@ -615,7 +681,8 @@ const makeCodexAdapter = (
           forkThread: () => unimplemented("forkThread unused in cutover test"),
         };
       }),
-  }) satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+  } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+};
 
 const waitForIdle = Effect.fn("LegacyV1Cutover.waitForIdle")(function* (threadId: ThreadId) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -684,7 +751,7 @@ const layerBoot = (input: {
       },
     },
     ProviderAdapterRegistry.layerSingle(makeCodexAdapter(input.capturedTurns, input.native)),
-    { databaseLayer: layerDatabase },
+    { databaseLayer: layerDatabase, maxEffectAttempts: 1 },
   );
   const checkpointLayer = CheckpointStore.layer.pipe(
     Layer.provide(
@@ -1157,9 +1224,9 @@ it.live("continues an imported native session without a lossy handoff", () =>
   ),
 );
 
-it.effect(
-  "restores a selected V1 Git checkpoint through commands before continuation, after a V2 turn, and after restart; retains plan implementation links",
-  () =>
+it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
+  "restores %s: a selected V1 Git checkpoint through commands before continuation, after a V2 turn, and after restart; retains plan implementation links",
+  (historicalDriver) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -1171,6 +1238,7 @@ it.effect(
         const dbPath = path.join(stateDir, "state.sqlite");
         yield* seedV1Database(dbPath, workspace);
         const native: HistoricalNativeFixture = {
+          driver: historicalDriver,
           history: yield* Ref.make<ReadonlyArray<string>>([
             "old-native-1",
             "old-native-2",
@@ -1195,14 +1263,26 @@ it.effect(
                 // Other fixture threads are tombstoned so the restored repository has one owner.
                 yield* sql`UPDATE projection_threads SET deleted_at = '2026-01-11T00:00:00Z' WHERE thread_id <> ${threadId}`;
                 yield* sql`UPDATE projection_threads SET worktree_path = ${workspace} WHERE thread_id = ${threadId}`;
+                yield* sql`UPDATE projection_threads SET model_selection_json = ${JSON.stringify({ instanceId: historicalDriver, model: "gpt-5.4" })} WHERE thread_id = ${threadId}`;
+                const cursor =
+                  historicalDriver === "claudeAgent"
+                    ? {
+                        resume: "native-history",
+                        resumeSessionAt: "old-native-3",
+                        turnCount: 3,
+                        turnStartMessageIds: [null, null, null],
+                      }
+                    : historicalDriver === "opencode"
+                      ? { sessionId: "native-history" }
+                      : { threadId: "native-history" };
                 yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, provider_instance_id, adapter_key, status, runtime_mode, resume_cursor_json, last_seen_at)
-            VALUES (${threadId}, 'codex', 'codex', 'codex', 'ready', 'full-access', '{"threadId":"native-history"}', '2026-01-10T00:00:00Z')`;
+            VALUES (${threadId}, ${historicalDriver}, ${historicalDriver}, ${historicalDriver}, 'ready', 'full-access', ${JSON.stringify(cursor)}, '2026-01-10T00:00:00Z')`;
                 for (const index of [5, 6])
                   yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
                   VALUES (${`message:cutover:active:${index}`}, ${threadId}, ${index === 5 ? "user" : "assistant"}, 'third turn', 0, '2026-01-03T00:00:00Z', '2026-01-03T00:01:00Z')`;
                 for (const ordinal of [1, 2, 3]) {
                   yield* sql`INSERT INTO orchestration_events (event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, actor_kind, payload_json, metadata_json, application_event_version)
-                    VALUES (${`legacy-start-${ordinal}`}, 'thread', ${threadId}, ${ordinal}, 'thread.turn-start-requested', '2026-01-01T00:00:00Z', 'user', ${JSON.stringify({ threadId, messageId: `message:cutover:active:${ordinal * 2 - 1}`, modelSelection: { instanceId: "codex", model: "retained-historical-model", options: [{ id: "reasoningEffort", value: "high" }] }, runtimeMode: "approval-required", interactionMode: "plan" })}, '{}', 1)`;
+                    VALUES (${`legacy-start-${ordinal}`}, 'thread', ${threadId}, ${ordinal}, 'thread.turn-start-requested', '2026-01-01T00:00:00Z', 'user', ${JSON.stringify({ threadId, messageId: `message:cutover:active:${ordinal * 2 - 1}`, modelSelection: { instanceId: historicalDriver, model: "retained-historical-model", options: [{ id: "reasoningEffort", value: "high" }] }, runtimeMode: "approval-required", interactionMode: "plan" })}, '{}', 1)`;
                   const ref = `refs/t3/checkpoints/legacy-${ordinal}`;
                   yield* fs.writeFileString(
                     path.join(workspace, "proof.txt"),
@@ -1308,6 +1388,43 @@ it.effect(
                   "historical-3\nexact bytes\n",
                 );
               }
+              if (boot === 1 && historicalDriver !== "codex") {
+                const originalHistory = yield* Ref.get(native.history);
+                yield* Ref.set(native.history, ["unaccounted-native-prompt", ...originalHistory]);
+                const afterSequence = yield* sink.latestSequence();
+                yield* orchestrator.dispatch({
+                  type: "checkpoint.rollback",
+                  commandId: CommandId.make("refuse-ambiguous-native"),
+                  threadId,
+                  checkpointId: target.id,
+                  scopeId: target.scopeId,
+                });
+                yield* worker.drain();
+                yield* sink.stream({ afterSequence }).pipe(
+                  Stream.filter(
+                    (stored) =>
+                      stored.event.type === "thread.metadata-updated" &&
+                      stored.event.payload.rollbackFailure?.requestId === "refuse-ambiguous-native",
+                  ),
+                  Stream.take(1),
+                  Stream.runDrain,
+                );
+                assert.include(
+                  (yield* projections.getThreadProjection(threadId)).thread.rollbackFailure
+                    ?.message ?? "",
+                  "native",
+                );
+                assert.lengthOf(yield* Ref.get(native.rollbacks), 0);
+                assert.equal(
+                  yield* fs.readFileString(path.join(workspace, "proof.txt")),
+                  "historical-3\nexact bytes\n",
+                );
+                assert.deepStrictEqual(yield* Ref.get(native.history), [
+                  "unaccounted-native-prompt",
+                  ...originalHistory,
+                ]);
+                yield* Ref.set(native.history, originalHistory);
+              }
               const restore = (name: string) =>
                 Effect.gen(function* () {
                   const afterSequence = yield* sink.latestSequence();
@@ -1323,7 +1440,8 @@ it.effect(
                     Stream.filter(
                       (stored) =>
                         stored.event.type === "provider-thread.updated" &&
-                        stored.event.payload.nativeConversationHeadRef?.nativeId === "old-native-2",
+                        stored.event.payload.nativeConversationHeadRef?.nativeId ===
+                          (historicalDriver === "opencode" ? "user-old-native-2" : "old-native-2"),
                     ),
                     Stream.take(1),
                     Stream.runDrain,

@@ -1,3 +1,5 @@
+import * as NodeUtil from "node:util";
+import { resolveLegacyOpenCodeBoundary } from "./legacyBoundary.ts";
 import type {
   Event as OpenCodeEvent,
   Message as OpenCodeMessage,
@@ -3578,10 +3580,80 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
               const response = yield* sdkCall("session.messages", { sessionID: sessionId }, () =>
                 client.session.messages({ sessionID: sessionId }),
               );
-              const messages = unwrapData("session.messages", response);
+              const nativeSession = unwrapData(
+                "session.get",
+                yield* sdkCall("session.get", { sessionID: sessionId }, () =>
+                  client.session.get({ sessionID: sessionId }),
+                ),
+              );
+              const entries = unwrapData("session.messages", response);
+              const revertedAt = nativeSession.revert?.messageID;
+              const revertIndex = revertedAt
+                ? entries.findIndex(({ info }) => info.id === revertedAt)
+                : -1;
+              if (revertedAt && revertIndex < 0)
+                return yield* protocolError(
+                  "The OpenCode revert marker is absent from native history.",
+                );
+              const messages = revertIndex < 0 ? entries : entries.slice(0, revertIndex);
+              const imported =
+                rollbackInput.target.type === "provider_turn" &&
+                rollbackInput.target.providerTurn.historyOrigin === "v1_import"
+                  ? rollbackInput.target.providerTurn
+                  : undefined;
+              const recovered = imported
+                ? yield* Effect.try({
+                    try: () =>
+                      resolveLegacyOpenCodeBoundary(
+                        messages,
+                        imported,
+                        rollbackInput.providerThreadTurns,
+                      ),
+                    catch: (cause) => protocolError(String(cause)),
+                  })
+                : undefined;
+              // Resolve older retained checkpoints while their original IDs still
+              // exist. A native fork may remap every message/part ID, not just head.
+              const retainedBoundaries = imported
+                ? rollbackInput.providerThreadTurns.flatMap((turn) => {
+                    if (
+                      turn.historyOrigin !== "v1_import" ||
+                      turn.ordinal > imported.ordinal ||
+                      turn.providerThreadId !== imported.providerThreadId
+                    )
+                      return [];
+                    try {
+                      const boundary =
+                        turn.id === imported.id && recovered
+                          ? recovered
+                          : resolveLegacyOpenCodeBoundary(
+                              messages,
+                              turn,
+                              rollbackInput.providerThreadTurns,
+                            );
+                      return [
+                        {
+                          turn,
+                          headIndex: messages.findIndex(
+                            ({ info }) => info.id === boundary.headMessageId,
+                          ),
+                          userIndex: messages.findIndex(
+                            ({ info }) => info.id === boundary.userMessageId,
+                          ),
+                        },
+                      ];
+                    } catch {
+                      // Missing evidence for another checkpoint must stay unavailable.
+                      return [];
+                    }
+                  })
+                : [];
+              let retainedMessages = messages;
               let boundaryMessageId: string | undefined;
               if (rollbackInput.target.type === "thread_start") {
                 boundaryMessageId = messages.find(({ info }) => info.role === "user")?.info.id;
+              } else if (recovered) {
+                boundaryMessageId = recovered.nextUserMessageId;
               } else {
                 boundaryMessageId = openCodeBoundaryAfterProviderTurn(
                   rollbackInput.providerThreadTurns,
@@ -3616,6 +3688,35 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   return yield* protocolError(
                     "OpenCode did not preserve the requested rewind boundary.",
                   );
+                if (recovered) {
+                  // Fork implementations may remap message IDs. Persist the returned
+                  // head/user IDs so continuation and restart use the retained session.
+                  const retainedHeadId = retained.at(-1)?.info.id;
+                  const retainedUserId = retained.findLast(({ info }) => info.role === "user")?.info
+                    .id;
+                  if (
+                    !retainedHeadId ||
+                    !retainedUserId ||
+                    retained.at(-1)?.info.role !== "assistant" ||
+                    retained.some((entry, index) => {
+                      const original = messages[index];
+                      const content = (parts: ReadonlyArray<OpenCodePart>) =>
+                        parts.map(
+                          ({ id: _id, sessionID: _sessionID, messageID: _messageID, ...part }) =>
+                            part,
+                        );
+                      return (
+                        !original ||
+                        entry.info.role !== original.info.role ||
+                        !NodeUtil.isDeepStrictEqual(content(entry.parts), content(original.parts))
+                      );
+                    })
+                  )
+                    return yield* protocolError(
+                      "OpenCode did not preserve the imported message boundary.",
+                    );
+                }
+                retainedMessages = retained;
                 yield* sdkCall("session.update", { sessionID: fork.id }, () =>
                   client.session.update({
                     sessionID: fork.id,
@@ -3629,13 +3730,43 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                 registerThread(fork, retainedThread, state?.appThread ?? null);
               }
               const snapshot = yield* readSnapshot(retainedThread);
+              const resolvedTurns = retainedBoundaries.flatMap(({ turn, headIndex, userIndex }) => {
+                const head = retainedMessages[headIndex];
+                const user = retainedMessages[userIndex];
+                return head?.info.role === "assistant" && user?.info.role === "user"
+                  ? [
+                      {
+                        ...turn,
+                        nativeTurnRef: providerRef(user.info.id),
+                        legacyOpenCodeBoundary: {
+                          ...turn.legacyOpenCodeBoundary!,
+                          headMessageId: head.info.id,
+                        },
+                      },
+                    ]
+                  : [];
+              });
+              const resolvedTurn = resolvedTurns.find((turn) => turn.id === imported?.id);
+              if (imported && !resolvedTurn)
+                return yield* protocolError("OpenCode lost the selected imported boundary.");
               return {
                 ...snapshot,
+                ...(resolvedTurns.length
+                  ? {
+                      providerTurns: [
+                        ...snapshot.providerTurns.filter(
+                          (turn) => !resolvedTurns.some((resolved) => resolved.id === turn.id),
+                        ),
+                        ...resolvedTurns,
+                      ],
+                    }
+                  : {}),
                 providerThread: {
                   ...snapshot.providerThread,
                   nativeConversationHeadRef:
                     rollbackInput.target.type === "provider_turn"
-                      ? rollbackInput.target.providerTurn.nativeTurnRef
+                      ? (resolvedTurn?.nativeTurnRef ??
+                        rollbackInput.target.providerTurn.nativeTurnRef)
                       : null,
                 },
               };

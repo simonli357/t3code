@@ -679,6 +679,7 @@ it.effect(
         ],
         ["deepseekHarness", { schemaVersion: 1, sessionId: "native-dsh" }, "native-dsh"],
         ["pi", { schemaVersion: 1, sessionId: "native-pi" }, "native-pi"],
+        ["opencode", { schemaVersion: 1, sessionId: "native-opencode" }, "native-opencode"],
       ] as const) {
         const threadId = ThreadId.make(`native-${driver}`);
         yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
@@ -693,6 +694,11 @@ it.effect(
         VALUES (${threadId},'old-turn','completed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'refs/t3/checkpoints/retained','ready','[{"path":"file.ts","kind":"modified","additions":2,"deletions":1}]')`;
         yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at)
           VALUES (${`message-${driver}`},${threadId},'user','Retained message',0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z')`;
+        if (driver === "opencode") {
+          yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,turn_id,role,text,is_streaming,created_at,updated_at)
+            VALUES ('assistant:native-part:segment:1',${threadId},'old-turn','assistant','Retained native output',0,'2026-01-01T00:01:00Z','2026-01-01T00:01:00Z')`;
+          yield* sql`UPDATE projection_thread_activities SET turn_id = 'old-turn' WHERE thread_id = ${threadId}`;
+        }
         yield* sql`UPDATE projection_threads SET is_base = 'true' WHERE thread_id = ${threadId}`;
         if (driver === "claudeAgent")
           yield* sql`INSERT INTO custom_workers (thread_id, owner_id, source_id, plan_json, state) VALUES (${threadId}, 'native-codex', 'native-codex', '{}', 'ready')`;
@@ -739,6 +745,15 @@ it.effect(
           assert.deepStrictEqual(projection.providerTurns[0]?.legacyClaudeBoundary, {
             headMessageId: "head-claude",
           });
+        if (driver === "opencode") {
+          assert.deepStrictEqual(projection.providerTurns[0]?.legacyOpenCodeBoundary, {
+            retainedTurnCount: 1,
+            turnCount: 1,
+            messagePartIds: ["native-part"],
+            toolCallIds: ["call-1"],
+          });
+          assert.isUndefined(projection.checkpoints[0]?.legacyV1?.rollbackUnavailableReason);
+        }
         if (driver === "pi" || driver === "deepseekHarness")
           assert.include(
             projection.checkpoints[0]?.legacyV1?.rollbackUnavailableReason ?? "",
@@ -752,7 +767,7 @@ it.effect(
             kind: "tool.completed",
             tone: "info",
             summary: "Retained output",
-            turnId: null,
+            turnId: driver === "opencode" ? "old-turn" : null,
             payload: { toolCallId: "call-1", result: { text: "entire output" } },
           });
         if (driver === "claudeAgent")

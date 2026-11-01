@@ -269,6 +269,7 @@ export function layerWithRegistry<Error>(
       MigrationError | PlatformError.PlatformError | SqlError
     >;
     readonly runEffectWorker?: boolean;
+    readonly maxEffectAttempts?: number;
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
@@ -511,9 +512,9 @@ export function layerWithRegistry<Error>(
       ),
     ),
   );
-  const layerEffectWorkerProvided = EffectWorker.layer.pipe(
-    Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
-  );
+  const layerEffectWorkerProvided = EffectWorker.layerWithOptions(
+    options.maxEffectAttempts === undefined ? {} : { maxAttempts: options.maxEffectAttempts },
+  ).pipe(Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)));
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
     layerProviderSessionManagerProvided,
