@@ -44,7 +44,7 @@ const requestName = (topic: string, body: unknown) => {
   return named.op ?? named._tag ?? topic;
 };
 
-const layerPeers = (self: EnvironmentId, other: EnvironmentId, network: Network) =>
+export const layerPeers = (self: EnvironmentId, other: EnvironmentId, network: Network) =>
   Layer.mergeAll(
     Layer.mock(PeerLinks.PeerLinks)({
       list: Effect.succeed([{ environmentId: other, label: `Peer ${other}` } as never]),

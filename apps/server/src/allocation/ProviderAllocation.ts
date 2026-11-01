@@ -1,16 +1,17 @@
 import {
   AllocationError,
   AllocationInventory as AllocationInventorySchema,
+  AllocationOperation,
+  AllocationRequest,
+  AllocationResponse,
   AssignmentAssessment,
+  EnvironmentId,
   OrchestratorMcpFailure,
   ProviderDriverKind,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
   type AllocationInventory,
-  type AllocationOperation,
   type AllocationPolicy,
-  type AllocationRequest,
-  type AllocationResponse,
   type AllocationSnapshot,
   type ComputerPlacement,
   type ComputerPlacementProbe,
@@ -69,7 +70,23 @@ const NO_MEASUREMENTS: UsageMeasurementsReport = {
 const decodeInventory = Schema.decodeUnknownEffect(AllocationInventorySchema);
 /** A peer asking only for accounts sends `{}`; a placement read adds what it needs measured. */
 const decodeProbeBody = Schema.decodeUnknownEffect(
-  Schema.Struct({ placement: Schema.optional(ComputerPlacementProbeSchema) }),
+  Schema.Struct({
+    request: Schema.optional(AllocationRequest),
+    placement: Schema.optional(ComputerPlacementProbeSchema),
+  }),
+);
+const decodeOperation = Schema.decodeUnknownEffect(AllocationOperation);
+const decodeResponse = Schema.decodeUnknownEffect(AllocationResponse);
+const Probe = Schema.Struct({
+  state: Schema.Literals(["pending", "running", "terminal", "unknown"]),
+});
+const decodeProbe = Schema.decodeUnknownEffect(Probe);
+const decodeProbeRequest = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    threadId: ThreadId,
+    assignmentId: Schema.String,
+    since: Schema.String,
+  }),
 );
 const REPOSITORY_LOOKUP_TIMEOUT = Duration.seconds(5);
 /** Each linked computer gets this long to describe itself before advice goes on without it. */
@@ -220,7 +237,7 @@ const make = Effect.gen(function* () {
       maxActiveAgentSessions: current.maxActiveAgentSessions,
       environmentLabel: local.label,
       demand,
-      coordinatorEnvironmentId: local.environmentId,
+      coordinatorEnvironmentId: current.allocationCoordinatorEnvironmentId ?? local.environmentId,
       ...(computer ? { computer } : {}),
       ...(checkouts
         ? { projects: checkouts.slice(0, 20).map(({ id, title }) => ({ id, title })) }
@@ -270,6 +287,83 @@ const make = Effect.gen(function* () {
             ),
           ),
       { concurrency: "unbounded" },
+    );
+  });
+
+  const callPeer = (environmentId: string, topic: string, body: unknown) =>
+    Option.isSome(peers)
+      ? peers.value
+          .call(EnvironmentId.make(environmentId), topic, body)
+          .pipe(Effect.mapError(unavailable))
+      : Effect.fail(unavailable());
+
+  // Required execution-host readings gate a start. Other hosts contribute shared-account
+  // demand when available, but an unrelated slow computer must not delay the start.
+  const collect = Effect.fn("ProviderAllocation.collect")(function* (
+    request?: AllocationRequest,
+    executionEnvironmentId = request?.environmentId,
+  ) {
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const linked = Option.isSome(links)
+          ? yield* links.value.list.pipe(Effect.mapError(unavailable))
+          : [];
+        const observed = new Map<string, AllocationInventory>();
+        const read = (environmentId: string) =>
+          callPeer(environmentId, "allocationInventory", request ? { request } : {}).pipe(
+            Effect.flatMap(decodeInventory),
+            Effect.filterOrFail(
+              (result) => result.environmentId === environmentId,
+              () => unavailable(new Error("The computer answered as a different environment.")),
+            ),
+          );
+        if (executionEnvironmentId !== undefined) {
+          for (const peer of linked) {
+            if (peer.environmentId === executionEnvironmentId) continue;
+            yield* read(peer.environmentId).pipe(
+              Effect.tap((result) =>
+                Effect.sync(() => {
+                  observed.set(peer.environmentId, result);
+                }),
+              ),
+              Effect.ignore,
+              Effect.forkScoped({ startImmediately: true }),
+            );
+          }
+        }
+        const own = yield* inventory(request);
+        const missing = (peer: { environmentId: string; label: string }): AllocationInventory => ({
+          environmentId: peer.environmentId,
+          environmentLabel: peer.label,
+          coordinatorEnvironmentId: null,
+          observedAt: own.observedAt,
+          accounts: [],
+          demand: [],
+          complete: false,
+          notices: [`${peer.label}: load unavailable for this decision.`],
+        });
+        if (executionEnvironmentId === undefined) {
+          const remote = yield* Effect.forEach(
+            linked,
+            (peer) => read(peer.environmentId).pipe(Effect.orElseSucceed(() => missing(peer))),
+            { concurrency: "unbounded" },
+          );
+          return [own, ...remote];
+        }
+        if (executionEnvironmentId !== local.environmentId) {
+          if (!linked.some((peer) => peer.environmentId === executionEnvironmentId))
+            return yield* unavailable(
+              new Error(`Execution environment ${executionEnvironmentId} is not linked.`),
+            );
+          const target = yield* read(executionEnvironmentId).pipe(Effect.mapError(unavailable));
+          if (!target.complete)
+            return yield* unavailable(
+              new Error(`Execution environment ${executionEnvironmentId} inventory is incomplete.`),
+            );
+          observed.set(executionEnvironmentId, target);
+        }
+        return [own, ...linked.map((peer) => observed.get(peer.environmentId) ?? missing(peer))];
+      }),
     );
   });
 
@@ -354,6 +448,7 @@ const make = Effect.gen(function* () {
   const probe = Effect.fn("ProviderAllocation.probe")(function* (
     threadId: ThreadId,
     assignmentId: string,
+    since: string,
   ) {
     const failedStart =
       yield* sql`SELECT 1 FROM provider_allocation_failed_starts WHERE assignment_id = ${assignmentId} AND thread_id = ${threadId}`;
@@ -370,6 +465,11 @@ const make = Effect.gen(function* () {
     if (failed.length) return { state: "terminal" as const };
     const thread = yield* threads.getThreadShell(threadId);
     if (thread === null) return { state: "unknown" as const };
+    if (
+      thread.latestRunCompletedAt != null &&
+      DateTime.formatIso(thread.latestRunCompletedAt) >= since
+    )
+      return { state: "terminal" as const };
     return allocationThread(thread).state === "running"
       ? { state: "running" as const }
       : allocationThread(thread).state === "starting"
@@ -383,9 +483,15 @@ const make = Effect.gen(function* () {
       // An unrelated uncertain startup keeps its demand; only a full inspection reconciles it.
       if (assignmentId !== undefined && r.assignmentId !== assignmentId) continue;
       if (r.state !== "starting" && r.state !== "consumed") continue;
-      const state = yield* probe(r.request.threadId, r.assignmentId).pipe(
-        Effect.orElseSucceed(() => ({ state: "unknown" as const })),
-      );
+      const state = yield* (
+        r.request.environmentId === local.environmentId
+          ? probe(r.request.threadId, r.assignmentId, r.createdAt)
+          : callPeer(r.request.environmentId, "allocationProbe", {
+              threadId: r.request.threadId,
+              assignmentId: r.assignmentId,
+              since: r.createdAt,
+            }).pipe(Effect.flatMap(decodeProbe))
+      ).pipe(Effect.orElseSucceed(() => ({ state: "unknown" as const })));
       if (state.state === "terminal" || (state.state === "running" && r.state === "starting")) {
         yield* store.lifecycle(
           {
@@ -435,38 +541,41 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const execute = Effect.fn("ProviderAllocation.execute")(function* (
+  const executeLocal = Effect.fn("ProviderAllocation.executeLocal")(function* (
     operation: AllocationOperation,
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
     const policy = yield* store.policy;
+    const coordinator = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
+      .allocationCoordinatorEnvironmentId;
+    const authorityAvailable =
+      (coordinator === null || coordinator === local.environmentId) &&
+      (policy.coordinatorEnvironmentId === null ||
+        policy.coordinatorEnvironmentId === local.environmentId);
     if (operation._tag === "caps") return { policy };
     if (operation._tag === "placement")
       return { placement: (yield* place(operation.request)).placement };
-    if (operation._tag === "connections")
-      return {
-        connections: {
-          coordinatorEnvironmentId: local.environmentId,
-          environments: [
-            local,
-            ...(Option.isSome(links)
-              ? yield* links.value.list.pipe(Effect.orElseSucceed(() => []))
-              : []
-            ).map((peer) => ({ environmentId: peer.environmentId, label: peer.label })),
-          ],
-        },
-      };
-    if (operation._tag === "connect")
+    if (operation._tag === "connections" || operation._tag === "connect")
       return yield* new AllocationError({
         code: "invalid",
-        detail: "Allocation runs on this computer; linking another coordinator needs peer routing.",
+        detail: "Connect must run on the requesting environment.",
       });
-    if (operation._tag === "policy")
+    if (operation._tag === "policy") {
+      if (!authorityAvailable) return yield* unavailable();
+      if (
+        operation.input.policy.coordinatorEnvironmentId !== null &&
+        operation.input.policy.coordinatorEnvironmentId !== local.environmentId
+      )
+        return yield* new AllocationError({
+          code: "invalid",
+          detail: "Save policies on their configured coordinator.",
+        });
       return {
         policy: yield* store.savePolicy({
           ...operation.input,
           policy: { ...operation.input.policy, coordinatorEnvironmentId: local.environmentId },
         }),
       };
+    }
     if (
       operation._tag === "modelSnapshot" ||
       operation._tag === "modelPolicy" ||
@@ -477,9 +586,13 @@ const make = Effect.gen(function* () {
       const modelPolicy = yield* store.modelPolicy;
       const selecting = operation._tag === "modelPreview" || operation._tag === "modelAllocate";
       yield* reconcile(selecting ? operation.request.assignmentId : undefined);
-      let inventories: AllocationInventory[] = [yield* inventory(undefined)];
-      // A preview may rank accounts on linked computers; a reservation is only ever made here.
-      if (operation._tag === "modelPreview") inventories.push(...(yield* peerInventories()));
+      let inventories = yield* collect(
+        undefined,
+        selecting ? operation.request.environmentId : undefined,
+      );
+      const coordinated =
+        authorityAvailable &&
+        inventories.every((i) => i.complete && i.coordinatorEnvironmentId === local.environmentId);
       if (operation._tag === "modelSnapshot")
         return {
           modelSnapshot: {
@@ -487,10 +600,11 @@ const make = Effect.gen(function* () {
             policies: yield* store.modelPolicies,
             history: yield* store.modelHistory,
             inventories,
-            authorityAvailable: true,
+            authorityAvailable,
           },
         };
-      if (operation._tag === "modelPolicy" || operation._tag === "modelRevert")
+      if (operation._tag === "modelPolicy" || operation._tag === "modelRevert") {
+        if (!coordinated) return yield* unavailable();
         return {
           modelPolicy: yield* store.saveModelPolicy({
             expectedVersion: operation.expectedVersion,
@@ -500,6 +614,8 @@ const make = Effect.gen(function* () {
               : { revertVersion: operation.version }),
           }),
         };
+      }
+      if (operation._tag === "modelAllocate" && !authorityAvailable) return yield* unavailable();
       // Keep the measured profile uncertainty of each eligible family; catalog and quota
       // selection below still uses one shared snapshot.
       const effectiveModelPolicy =
@@ -519,11 +635,16 @@ const make = Effect.gen(function* () {
         inventories,
         retained,
       ).candidates) {
-        const measured = [yield* inventory(candidate.request)];
+        const measured = yield* collect(candidate.request);
         inventories = inventories.map((host) => ({
           ...host,
+          complete:
+            host.complete &&
+            measured.some((i) => i.environmentId === host.environmentId && i.complete),
           accounts: host.accounts.map((account) => {
-            const profile = measured[0]?.accounts.find((a) => a.instanceId === account.instanceId);
+            const profile = measured
+              .find((i) => i.environmentId === host.environmentId)
+              ?.accounts.find((a) => a.instanceId === account.instanceId);
             return profile && account.driver === candidate.request.driver
               ? {
                   ...account,
@@ -539,7 +660,7 @@ const make = Effect.gen(function* () {
           at: yield* now,
           request: operation.request,
           inventories,
-          authorityAvailable: true,
+          authorityAvailable,
           reserve: operation._tag === "modelAllocate",
           expectedPolicyVersion: policy.version,
           expectedModelVersion: modelPolicy.version,
@@ -550,6 +671,7 @@ const make = Effect.gen(function* () {
       };
     }
     if (operation._tag === "lifecycle") {
+      if (!authorityAvailable) return yield* unavailable();
       if (operation.input.action === "start") {
         const held = (yield* store.reservations).find(
           (r) => r.assignmentId === operation.input.assignmentId,
@@ -560,9 +682,9 @@ const make = Effect.gen(function* () {
             at: yield* now,
             policy,
             request,
-            inventories: [yield* inventory(request)],
+            inventories: yield* collect(request),
             reservations: yield* store.reservations,
-            authorityAvailable: true,
+            authorityAvailable,
           });
           if (!decision.selectedInstanceId)
             return yield* new AllocationError({
@@ -594,7 +716,7 @@ const make = Effect.gen(function* () {
     }
     yield* reconcile(operation._tag === "snapshot" ? undefined : operation.request.assignmentId);
     const request = operation._tag === "snapshot" ? undefined : operation.request;
-    const inventories = [yield* inventory(request)];
+    const inventories = yield* collect(request);
     if (operation._tag === "snapshot")
       return {
         snapshot: {
@@ -604,16 +726,17 @@ const make = Effect.gen(function* () {
           inventories,
           reservations: yield* store.reservations,
           history: yield* store.history,
-          authorityAvailable: true,
+          authorityAvailable,
           notices: inventories.flatMap((i) => i.notices),
         } satisfies AllocationSnapshot,
       };
+    if (operation._tag === "allocate" && !authorityAvailable) return yield* unavailable();
     return {
       result: yield* store.allocate({
         at: yield* now,
         request: operation.request,
         inventories,
-        authorityAvailable: true,
+        authorityAvailable,
         reserve: operation._tag === "allocate",
         expectedPolicyVersion: policy.version,
         ...(operation._tag === "preview" && operation.policy
@@ -623,19 +746,106 @@ const make = Effect.gen(function* () {
     };
   });
 
-  if (Option.isSome(peers))
+  const remoteOperation = (id: string, operation: AllocationOperation) =>
+    callPeer(id, "allocation", operation).pipe(
+      Effect.flatMap(decodeResponse),
+      Effect.mapError(unavailable),
+    );
+
+  const execute = Effect.fn("ProviderAllocation.execute")(function* (
+    operation: AllocationOperation,
+  ): Effect.fn.Return<AllocationResponse, AllocationError> {
+    const previous = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
+      .allocationCoordinatorEnvironmentId;
+    if (operation._tag === "connections")
+      return {
+        connections: {
+          coordinatorEnvironmentId: previous,
+          environments: [
+            local,
+            ...(Option.isSome(links)
+              ? yield* links.value.list.pipe(Effect.mapError(unavailable))
+              : []),
+          ].map(({ environmentId, label }) => ({ environmentId, label })),
+        },
+      };
+    if (operation._tag === "connect") {
+      const id = operation.coordinatorEnvironmentId;
+      if (previous === id) return {};
+      yield* store.expireUnused(yield* now);
+      const active = (reservations: ReadonlyArray<{ state: string }>) =>
+        reservations.some((r) => ["reserved", "starting", "consumed"].includes(r.state));
+      if (previous && previous !== id) {
+        const old =
+          previous === local.environmentId
+            ? yield* executeLocal({ _tag: "snapshot" })
+            : yield* remoteOperation(previous, { _tag: "snapshot" });
+        if (!old.snapshot || active(old.snapshot.reservations))
+          return yield* new AllocationError({
+            code: "conflict",
+            detail: "Drain the previous coordinator's reservations before moving authority.",
+          });
+      }
+      if (id !== local.environmentId) {
+        const remote = yield* remoteOperation(id, { _tag: "snapshot" });
+        if (
+          remote.snapshot?.policy.coordinatorEnvironmentId !== id ||
+          !remote.snapshot.authorityAvailable
+        )
+          return yield* new AllocationError({
+            code: "invalid",
+            detail: "Selected peer is not an allocation coordinator.",
+          });
+      }
+      if (active(yield* store.reservations))
+        return yield* new AllocationError({
+          code: "conflict",
+          detail: "Drain active reservations before changing coordinator.",
+        });
+      if (id === local.environmentId) {
+        const policy = yield* store.policy;
+        if (policy.coordinatorEnvironmentId !== id)
+          yield* store.savePolicy({
+            expectedVersion: policy.version,
+            policy: { ...policy, coordinatorEnvironmentId: id },
+          });
+      }
+      yield* settings
+        .updateSettings({ allocationCoordinatorEnvironmentId: id })
+        .pipe(Effect.mapError(unavailable));
+      return {};
+    }
+    // Placement resolves this computer's project IDs and remains advisory even if the coordinator is offline.
+    if (operation._tag === "placement")
+      return { placement: (yield* place(operation.request)).placement };
+    return previous && previous !== local.environmentId
+      ? yield* remoteOperation(previous, operation)
+      : yield* executeLocal(operation);
+  });
+
+  const peerError = (cause: { message: string; detail?: string }) =>
+    new OrchestratorMcpFailure({
+      code: "orchestration_error",
+      message: cause.detail ?? cause.message,
+    });
+  if (Option.isSome(peers)) {
     yield* peers.value.register("allocationInventory", (_from, body) =>
       decodeProbeBody(body).pipe(
-        Effect.flatMap(({ placement }) => inventory(undefined, placement)),
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorMcpFailure({
-              code: "orchestration_error",
-              message: "detail" in cause ? cause.detail : cause.message,
-            }),
-        ),
+        Effect.flatMap(({ request, placement }) => inventory(request, placement)),
+        Effect.mapError(peerError),
       ),
     );
+    // Run locally on the selected authority; a stale or cyclic setting must never forward again.
+    yield* peers.value.register("allocation", (_from, body) =>
+      decodeOperation(body).pipe(Effect.flatMap(executeLocal), Effect.mapError(peerError)),
+    );
+    yield* peers.value.register("allocationProbe", (_from, body) =>
+      decodeProbeRequest(body).pipe(
+        Effect.flatMap(({ threadId, assignmentId, since }) => probe(threadId, assignmentId, since)),
+        Effect.mapError(peerError),
+      ),
+    );
+  }
   return ProviderAllocation.of({ execute, replacement, place });
 });
 

@@ -418,10 +418,14 @@ const make = Effect.gen(function* () {
           .getThreadShell(input.request.threadId)
           .pipe(Effect.mapError(() => invalid("Could not inspect destination session.")));
         if (existing !== null) {
-          const receipt =
-            yield* sql`SELECT 1 FROM provider_allocation_reservations WHERE id = ${input.request.assignmentId} AND thread_id = ${input.request.threadId}`.pipe(
-              Effect.mapError(() => invalid("Could not inspect allocation receipt.")),
-            );
+          // Reservations belong to the configured coordinator. The local creation
+          // command is the durable receipt that this assignment owns this session.
+          const receipt = yield* sql`SELECT 1 FROM orchestration_events
+              WHERE command_id = ${`allocation:${input.request.assignmentId}:create`}
+                AND stream_id = ${input.request.threadId}
+                AND event_type = 'thread.created' AND application_event_version = 2 LIMIT 1`.pipe(
+            Effect.mapError(() => invalid("Could not inspect allocation receipt.")),
+          );
           if (!receipt.length)
             return yield* invalid(
               "This destination already has a session. Fresh allocation cannot replace native identity or an existing assignment.",
