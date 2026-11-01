@@ -125,6 +125,8 @@ export interface Preferences {
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
   readonly threadListWorkingShelfExpanded?: boolean;
+  readonly expandedSessionMasters?: ReadonlyArray<string>;
+  readonly expandedFinishedSessionGroups?: ReadonlyArray<string>;
   readonly threadListFilters?: ThreadListFilters;
   readonly pullRequestListFilters?: PullRequestListPreferences;
   readonly workspaceSelections?: WorkspaceSelections;
@@ -202,6 +204,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
     threadListWorkingShelfExpanded?: boolean;
+    expandedSessionMasters?: ReadonlyArray<string>;
+    expandedFinishedSessionGroups?: ReadonlyArray<string>;
     threadListFilters?: ThreadListFilters;
     pullRequestListFilters?: PullRequestListPreferences;
     workspaceSelections?: WorkspaceSelections;
@@ -347,6 +351,15 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
     preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
   }
+  if (Array.isArray(parsed.expandedSessionMasters))
+    preferences.expandedSessionMasters = parsed.expandedSessionMasters.filter(
+      (value): value is string => typeof value === "string",
+    );
+  if (
+    Array.isArray(parsed.expandedFinishedSessionGroups) &&
+    parsed.expandedFinishedSessionGroups.every((value) => typeof value === "string")
+  )
+    preferences.expandedFinishedSessionGroups = parsed.expandedFinishedSessionGroups;
   if (typeof parsed.threadListWorkingShelfExpanded === "boolean") {
     preferences.threadListWorkingShelfExpanded = parsed.threadListWorkingShelfExpanded;
   }

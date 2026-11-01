@@ -319,7 +319,20 @@ export interface ThreadListV2Layout {
   readonly contentOnlyThreadKeys: ReadonlySet<string>;
 }
 
+export interface ThreadListV2SessionGroupItem {
+  readonly type: "v2-session-group";
+  readonly key: string;
+  readonly groupKey: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly expanded: boolean;
+  readonly finished: number;
+  readonly finishedExpanded: boolean;
+}
 export interface ThreadListV2ThreadListItem {
+  readonly organizationDepth?: number;
+  readonly organizationCaption?: string;
+
   readonly type: "v2-thread";
   readonly key: string;
   readonly item: ThreadListV2Item;
@@ -367,6 +380,7 @@ export interface ThreadListV2SettledShelfListItem {
 }
 
 export type ThreadListV2ListItem =
+  | ThreadListV2SessionGroupItem
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
   | ThreadListV2WorkingShelfListItem
@@ -377,6 +391,7 @@ export function isThreadListV2ListItem(value: {
   readonly type: string;
 }): value is ThreadListV2ListItem {
   return (
+    value.type === "v2-session-group" ||
     value.type === "v2-thread" ||
     value.type === "v2-pending" ||
     value.type === "v2-working-shelf" ||
@@ -391,10 +406,21 @@ export function threadListV2ListItemsAreEqual(
   item: ThreadListV2ListItem,
 ): boolean {
   switch (item.type) {
+    case "v2-session-group":
+      return (
+        previous.type === item.type &&
+        previous.key === item.key &&
+        previous.summary === item.summary &&
+        previous.expanded === item.expanded &&
+        previous.finished === item.finished &&
+        previous.finishedExpanded === item.finishedExpanded
+      );
     case "v2-thread":
       return (
         previous.type === "v2-thread" &&
         previous.key === item.key &&
+        previous.organizationDepth === item.organizationDepth &&
+        previous.organizationCaption === item.organizationCaption &&
         previous.item.thread === item.item.thread &&
         previous.item.variant === item.item.variant &&
         previous.item.snoozed === item.item.snoozed &&

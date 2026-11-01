@@ -1,3 +1,4 @@
+import { SessionGroupHeader } from "./SessionGroupHeader";
 import { useActiveNewTask } from "../../state/active-new-task";
 import { ThreadUndoNotice } from "../home/ThreadUndoNotice";
 import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
@@ -535,11 +536,15 @@ function ThreadNavigationSidebarPane(
           />
         );
       }
+      case "v2-session-group":
+        return <SessionGroupHeader item={item} />;
       case "v2-thread": {
         const thread = item.item.thread;
         const scopeKey = scopedProjectKey(thread.environmentId, thread.projectId);
         return (
           <ThreadListV2Row
+            organizationCaption={item.organizationCaption}
+            organizationDepth={item.organizationDepth}
             onNewThreadOnBranch={props.onNewThreadOnBranch}
             thread={thread}
             variant={item.item.variant}

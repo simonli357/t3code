@@ -1,3 +1,10 @@
+import { selectWorkspaceDetail } from "../features/workspace/workspace-detail-selection";
+import {
+  retainBaseSubmission,
+  openBaseDestination,
+} from "@t3tools/client-runtime/state/base-sessions";
+import { baseSubmissionStorage } from "./base-submissions";
+import { rootNavigationRef } from "../lib/rootNavigation";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import * as Dialog from "../components/ui/Dialog";
 import {
@@ -773,7 +780,9 @@ export function createThreadOutboxDelivery(): {
       serverEnvironment.configValueAtom(queuedMessage.environmentId),
     );
     if (!serverConfig) return false;
-    const settings = resolveQueuedThreadSettings(queuedMessage, thread, serverConfig.providers);
+    const settings = thread.isBase
+      ? thread
+      : resolveQueuedThreadSettings(queuedMessage, thread, serverConfig.providers);
     if (isModelSelectionUnavailable(serverConfig, settings.modelSelection, thread.projectId)) {
       const { title, detail } = describeUnavailableModelSelection(
         serverConfig,
@@ -783,7 +792,7 @@ export function createThreadOutboxDelivery(): {
       return restoreQueuedMessage(queuedMessage, `${title}. ${detail}`);
     }
 
-    if (settings.runtimeMode !== thread.runtimeMode) {
+    if (!thread.isBase && settings.runtimeMode !== thread.runtimeMode) {
       if (!hasAccess()) return true;
       const runtimeResult = await runDeliveryCommand(threadEnvironment.setRuntimeMode, {
         environmentId: queuedMessage.environmentId,
@@ -800,7 +809,7 @@ export function createThreadOutboxDelivery(): {
       }
     }
 
-    if (settings.interactionMode !== thread.interactionMode) {
+    if (!thread.isBase && settings.interactionMode !== thread.interactionMode) {
       if (!hasAccess()) return true;
       const interactionResult = await runDeliveryCommand(threadEnvironment.setInteractionMode, {
         environmentId: queuedMessage.environmentId,
@@ -859,41 +868,96 @@ export function createThreadOutboxDelivery(): {
       );
       return restoreQueuedMessage(persistedMessage, `${title}. ${detail}`);
     }
-    const sendSettings = resolveQueuedThreadSettings(
-      queuedMessage,
-      settings,
-      currentConfig.providers,
-    );
+    const sendSettings = thread.isBase
+      ? thread
+      : resolveQueuedThreadSettings(queuedMessage, settings, currentConfig.providers);
     if (!hasAccess()) return true;
+    const startInput: Parameters<typeof retainBaseSubmission>[1] = {
+      commandId: queuedMessage.commandId,
+      creationSource: "mobile" as const,
+      threadId: queuedMessage.threadId,
+      message: {
+        messageId: queuedMessage.messageId,
+        role: "user" as const,
+        ...serializeComposerMessageForServer(
+          queuedMessage.text,
+          uploadedComposerContext(
+            queuedMessage.context,
+            queuedMessage.attachments,
+            prepared.attachments,
+          ),
+        ),
+        attachments: prepared.attachments,
+      },
+      modelSelection: sendSettings.modelSelection,
+      titleSeed: deriveThreadTitleSeed({
+        text: queuedMessage.text,
+        attachments: queuedMessage.attachments,
+      }),
+      runtimeMode: sendSettings.runtimeMode,
+      interactionMode: sendSettings.interactionMode,
+      createdAt: queuedMessage.createdAt,
+      dispatchMode: queuedMessage.dispatchMode ?? "start",
+    };
+    if (thread.isBase) {
+      const storage = baseSubmissionStorage(
+        `${queuedMessage.environmentId}:${queuedMessage.threadId}`,
+      );
+      try {
+        const input = await retainBaseSubmission(storage, startInput);
+        await openBaseDestination(
+          storage,
+          async () => {
+            const result = await runDeliveryCommand(threadEnvironment.startTurn, {
+              environmentId: queuedMessage.environmentId,
+              input,
+            });
+            const failure = reportCommandFailure(queuedMessage, result, "start-turn");
+            if (failure) throw new Error(failure.message);
+            if (
+              !AsyncResult.isSuccess(result) ||
+              !result.value.threadId ||
+              result.value.threadId === thread.id
+            )
+              throw new Error(
+                "The server did not confirm an independent fork. The saved request is retained.",
+              );
+            return result.value.threadId;
+          },
+          (destination) => {
+            if (!rootNavigationRef.isReady())
+              throw new Error(
+                "Navigation is not ready. Check the saved task to open its existing fork.",
+              );
+            rootNavigationRef.dispatch(
+              selectWorkspaceDetail({
+                name: "Thread",
+                params: {
+                  environmentId: queuedMessage.environmentId,
+                  threadId: destination,
+                },
+              }),
+            );
+          },
+        );
+        const removed = await completeQueuedMessageDelivery(
+          persistedMessage,
+          deliveryRevision,
+          undefined,
+        );
+        if (removed !== "removed") return false;
+        await storage.clear();
+        return true;
+      } catch (error) {
+        return restoreQueuedMessage(
+          persistedMessage,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     const deliveryResult = await runDeliveryCommand(threadEnvironment.startTurn, {
       environmentId: queuedMessage.environmentId,
-      input: {
-        commandId: queuedMessage.commandId,
-        creationSource: "mobile",
-        threadId: queuedMessage.threadId,
-        message: {
-          messageId: queuedMessage.messageId,
-          role: "user",
-          ...serializeComposerMessageForServer(
-            queuedMessage.text,
-            uploadedComposerContext(
-              queuedMessage.context,
-              queuedMessage.attachments,
-              prepared.attachments,
-            ),
-          ),
-          attachments: prepared.attachments,
-        },
-        modelSelection: sendSettings.modelSelection,
-        titleSeed: deriveThreadTitleSeed({
-          text: queuedMessage.text,
-          attachments: queuedMessage.attachments,
-        }),
-        runtimeMode: sendSettings.runtimeMode,
-        interactionMode: sendSettings.interactionMode,
-        createdAt: queuedMessage.createdAt,
-        dispatchMode: queuedMessage.dispatchMode ?? "start",
-      },
+      input: startInput,
     });
     if (AsyncResult.isFailure(deliveryResult) && !hasAccess()) return true;
     const failure = reportCommandFailure(queuedMessage, deliveryResult, "start-turn");

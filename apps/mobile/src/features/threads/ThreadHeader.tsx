@@ -1,4 +1,7 @@
-import { useMemo } from "react";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { sessionRole } from "@t3tools/client-runtime/state/session-organization";
+import { SessionOrganizationSheet } from "./SessionOrganizationSheet";
+import { useMemo, useState } from "react";
 import { AppBar } from "../../components/ui/AppBar";
 import { ScreenHeaderButton } from "../../components/ui/ScreenHeaderButton";
 import type { AppBarAction } from "../../components/ui/AppBar.types";
@@ -10,6 +13,7 @@ import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 
 export function ThreadHeader(
   props: Parameters<typeof useThreadHeaderOptions>[0] & {
+    readonly organizationThread?: EnvironmentThreadShell;
     readonly hasThreadCwd: boolean;
     readonly hasWorkspaceRoot: boolean;
     readonly fileInspectorSupported: boolean;
@@ -23,9 +27,26 @@ export function ThreadHeader(
   const { layout, panes, toggleAuxiliaryPane, composerKeyboardActive } =
     useAdaptiveWorkspaceLayout();
   const { onOpenTerminal, onMergeBack } = props.gitControls;
-  const native = useThreadHeaderOptions(props);
+  const [organizationOpen, setOrganizationOpen] = useState(false);
+  const openOrganization = props.organizationThread ? () => setOrganizationOpen(true) : undefined;
+  const subtitle = props.organizationThread
+    ? [
+        props.organizationThread.isBase ? "Base" : null,
+        sessionRole(props.organizationThread) ?? "Independent",
+        props.subtitle,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : props.subtitle;
+  const native = useThreadHeaderOptions({ ...props, subtitle, onOrganization: openOrganization });
   const androidHeaderActions = useMemo<ReadonlyArray<AppBarAction>>(() => {
     const actions: AppBarAction[] = [];
+    if (openOrganization)
+      actions.push({
+        accessibilityLabel: `Session organization: ${sessionRole(props.organizationThread!)}`,
+        icon: "person.2",
+        onPress: openOrganization,
+      });
     if (props.onReturnToThread) {
       actions.push({
         accessibilityLabel: "Return to chat",
@@ -63,6 +84,8 @@ export function ThreadHeader(
     }
     return actions;
   }, [
+    openOrganization,
+    props.organizationThread,
     props.inspectorMode,
     panes.auxiliaryPaneVisible,
     props.onOpenFilesInspector,
@@ -80,7 +103,7 @@ export function ThreadHeader(
     <>
       <AppBar
         title={props.title}
-        subtitle={props.subtitle}
+        subtitle={subtitle}
         sidebar={native.sidebar}
         options={native.options}
         optionsVersion={native.optionsVersion}
@@ -104,6 +127,12 @@ export function ThreadHeader(
         compact={composerKeyboardActive}
       />
       {native.fallback}
+      {organizationOpen && props.organizationThread && (
+        <SessionOrganizationSheet
+          thread={props.organizationThread}
+          onClose={() => setOrganizationOpen(false)}
+        />
+      )}
     </>
   );
 }

@@ -1,3 +1,21 @@
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import { relativeTime } from "../../lib/time";
+import {
+  buildSessionHierarchy,
+  sessionKey,
+  sessionListRoot,
+  settledWorkerKeys,
+  expandSessionGroups,
+  summarizeSessionWorkers,
+  describeSessionWorkers,
+  describeSessionOwner,
+  sessionOwnerChain,
+  sessionGroupDepth,
+  describeSessionRole,
+} from "@t3tools/client-runtime/state/session-organization";
+import { useSessionGroups } from "./useSessionGroups";
+import { useEnvironments } from "../../state/environments";
+import type { ThreadListV2ListItem } from "./threadListV2";
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { useMemo, useSyncExternalStore } from "react";
@@ -98,9 +116,50 @@ export function useThreadListV2(input: {
     // A search lists only matches, so the shelf would page forever; loaded pages stay.
     visibleCount: input.searchQuery.trim().length === 0 ? input.settledLimit : 0,
   });
+  const groups = useSessionGroups();
+  const { environments } = useEnvironments();
+  const connected = new Set(
+    environments.filter((e) => e.connection.phase === "connected").map((e) => e.environmentId),
+  );
+  const hierarchy = buildSessionHierarchy(
+    threads.filter(
+      (thread) =>
+        (input.environmentId === null || thread.environmentId === input.environmentId) &&
+        (input.projectRefs == null ||
+          input.projectRefs.some(
+            (ref) =>
+              ref.environmentId === thread.environmentId && ref.projectId === thread.projectId,
+          )),
+    ),
+  );
+  const settled = settledWorkerKeys(
+    hierarchy,
+    (thread) =>
+      input.settlementEnvironmentIds.has(thread.environmentId) &&
+      thread.settledOverride === "settled" &&
+      !input.queuedThreadKeys.has(sessionKey(thread)) &&
+      !effectiveSnoozed(thread, { now: input.now }),
+  );
+  const searching = input.searchQuery.trim().length > 0;
+  const bases = threads.filter(
+    (thread) =>
+      thread.isBase &&
+      thread.archivedAt === null &&
+      (input.environmentId === null || thread.environmentId === input.environmentId) &&
+      (input.projectRefs == null ||
+        input.projectRefs.some(
+          (ref) => ref.environmentId === thread.environmentId && ref.projectId === thread.projectId,
+        )),
+  );
   const layout = buildThreadListV2Items({
     pendingOrder: input.pendingOrder,
-    threads: threads.filter((thread) => thread.archivedAt === null),
+    threads: threads.filter(
+      (thread) =>
+        thread.archivedAt === null &&
+        (searching ||
+          (!thread.isBase &&
+            sessionListRoot(hierarchy, sessionKey(thread), settled) === sessionKey(thread))),
+    ),
     environmentId: input.environmentId,
     projectRefs: input.projectRefs,
     searchQuery: input.searchQuery,
@@ -116,7 +175,10 @@ export function useThreadListV2(input: {
     isWorking: inbox.isWorking,
     snoozedShelfExpanded: input.snoozedShelfExpanded,
     settledShelfExpanded: input.settledShelfExpanded,
-    selectedThreadKey: input.selectedThreadKey,
+    selectedThreadKey:
+      input.selectedThreadKey === null
+        ? null
+        : sessionListRoot(hierarchy, input.selectedThreadKey, settled),
     isListedSettled: olderSettledShelf.isListed,
     unloadedSettledCount: olderSettledShelf.unloadedCount(
       threads.filter(
@@ -164,7 +226,145 @@ export function useThreadListV2(input: {
     moveAvailability,
     shelfPreferencesLoading: !input.shelfPreferencesLoaded,
   });
-  return { layout, items, contentOnlyThreadKeys, olderSettledShelf };
+  const organized: ThreadListV2ListItem[] = [];
+  const caption = (thread: (typeof threads)[number]) => {
+    const depth = sessionGroupDepth(hierarchy, sessionKey(thread), settled);
+    const owner = describeSessionOwner(
+      sessionOwnerChain(hierarchy, sessionKey(thread)),
+      (id) => environments.find((e) => e.environmentId === id)?.label ?? null,
+    );
+    return {
+      organizationDepth: depth,
+      organizationCaption: [describeSessionRole(thread, { nested: depth > 0 })?.text, owner?.text]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  };
+  for (const item of items) {
+    if (item.type !== "v2-thread" || searching) {
+      organized.push(item.type === "v2-thread" ? { ...item, ...caption(item.item.thread) } : item);
+      continue;
+    }
+    const root = item.item.thread;
+    const key = sessionKey(root);
+    const rows = expandSessionGroups({
+      roots: [root],
+      hierarchy,
+      expanded: groups.expanded,
+      finishedExpanded: groups.finished,
+      connected,
+      selectedKey: input.selectedThreadKey ?? null,
+      settled,
+    });
+    organized.push({
+      ...item,
+      item: { ...item.item, thread: hierarchy.byKey.get(key) ?? root },
+      ...caption(root),
+    });
+    const appendGroup = (thread: typeof root) => {
+      const groupKey = sessionKey(thread);
+      const summary = summarizeSessionWorkers(hierarchy, groupKey, connected, settled);
+      if (!settled.has(groupKey) && summary.total)
+        organized.push({
+          type: "v2-session-group",
+          key: `group:${groupKey}`,
+          groupKey,
+          title: `Workers of ${thread.title}`,
+          summary: describeSessionWorkers(summary).text,
+          expanded: groups.expanded.has(groupKey),
+          finished: summary.finished,
+          finishedExpanded: groups.finished.has(groupKey),
+        });
+    };
+    appendGroup(root);
+    for (const thread of rows.slice(1)) {
+      organized.push({
+        ...item,
+        key: sessionKey(thread),
+        item: {
+          ...item.item,
+          thread,
+          isLast: false,
+          pinned: thread.pinnedAt != null,
+          wokeAt: null,
+        },
+        hasQueuedMessages: input.queuedThreadKeys.has(sessionKey(thread)),
+        canMoveUp: moveAvailability.get(`${thread.environmentId}:${thread.id}`)?.canMoveUp === true,
+        canMoveDown:
+          moveAvailability.get(`${thread.environmentId}:${thread.id}`)?.canMoveDown === true,
+        timeLabel: relativeTime(thread.updatedAt),
+        ...caption(thread),
+      });
+      appendGroup(thread);
+    }
+  }
+  if (!searching && bases.length) {
+    const baseRoots = bases.filter(
+      (thread) =>
+        groups.expanded.has("base-sessions") ||
+        sessionListRoot(hierarchy, input.selectedThreadKey ?? "", settled) === sessionKey(thread),
+    );
+    const baseItems: ThreadListV2ListItem[] = expandSessionGroups({
+      roots: baseRoots,
+      hierarchy,
+      expanded: groups.expanded,
+      finishedExpanded: groups.finished,
+      connected,
+      selectedKey: input.selectedThreadKey,
+      settled,
+    }).map((thread) => ({
+      type: "v2-thread" as const,
+      key: sessionKey(thread),
+      item: {
+        thread,
+        variant: "card" as const,
+        snoozed: false,
+        pinned: false,
+        wokeAt: null,
+        isLast: false,
+      },
+      snoozeWakeLabelText: undefined,
+      timeLabel: relativeTime(thread.updatedAt),
+      snoozePresetMinute: undefined,
+      showTrailingDivider: false,
+      hasQueuedMessages: false,
+      canMoveUp: false,
+      canMoveDown: false,
+      ...caption(thread),
+    }));
+    for (let i = baseItems.length - 1; i >= 0; i--) {
+      const row = baseItems[i];
+      if (row?.type !== "v2-thread") continue;
+      const thread = row.item.thread;
+      const key = sessionKey(thread);
+      const summary = summarizeSessionWorkers(hierarchy, key, connected, settled);
+      if (!settled.has(key) && summary.total)
+        baseItems.splice(i + 1, 0, {
+          type: "v2-session-group",
+          key: `group:${key}`,
+          groupKey: key,
+          title: `Workers of ${thread.title}`,
+          summary: describeSessionWorkers(summary).text,
+          expanded: groups.expanded.has(key),
+          finished: summary.finished,
+          finishedExpanded: groups.finished.has(key),
+        });
+    }
+    organized.unshift(
+      {
+        type: "v2-session-group",
+        key: "base-sessions",
+        groupKey: "base-sessions",
+        title: "Bases",
+        summary: `${bases.length} prepared bases`,
+        expanded: groups.expanded.has("base-sessions"),
+        finished: 0,
+        finishedExpanded: false,
+      },
+      ...baseItems,
+    );
+  }
+  return { layout, items: organized, contentOnlyThreadKeys, olderSettledShelf };
 }
 
 /** The list's scope per environment: its projects there, or every project. */

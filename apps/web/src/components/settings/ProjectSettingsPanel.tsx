@@ -1,3 +1,4 @@
+import { ProjectBasePromptSettings } from "./ProjectBasePromptSettings";
 import { useComposerMenuState } from "../chat/useComposerMenuState";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -472,6 +473,7 @@ function ProjectDetail({
   return (
     <>
       <SettingsPageContainer className="gap-6">
+        <ProjectBasePromptSettings members={group.memberProjects} />
         <Alert variant="info">
           <InfoIcon aria-hidden />
           <AlertDescription>
