@@ -597,6 +597,9 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   if (limits.unavailable?.reason === "unsupported") {
     return limits.unavailable.message ?? "This account has no subscription limits.";
   }
+  if (limits.unavailable?.reason === "unverified") {
+    return limits.unavailable.message ?? "Could not verify subscription usage source.";
+  }
   if (limits.unavailable?.reason === "probeFailed") {
     return limits.unavailable.message ?? "Could not read limits.";
   }
@@ -672,17 +675,34 @@ export function isUsageLimitsCommand(prompt: string): boolean {
 }
 
 export function hasProviderUsageLimits(
-  driver: ServerProvider["driver"],
+  instanceId: ProviderInstanceId,
   providers: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
 ): boolean {
+  const selected = providers.find((provider) => provider.instanceId === instanceId);
+  if (
+    !selected ||
+    !selected.enabled ||
+    !selected.installed ||
+    !isProviderAvailable(selected) ||
+    selected.usageLimits?.unavailable?.reason === "unsupported" ||
+    selected.usageLimits?.unavailable?.reason === "unverified"
+  )
+    return false;
+  if (selected.usageLimits !== undefined) return true;
+  return sources.some(
+    (source) =>
+      source.accounts.some((account) => account.driver === selected.driver) ||
+      (source.error !== undefined && source.accounts.length === 0),
+  );
+}
+
+/** Instances sharing a driver do not necessarily share a subscription allowance. */
+export function mayReportSubscriptionLimits(provider: ServerProvider): boolean {
   return (
-    providersWithLimits(providers).some((provider) => provider.driver === driver) ||
-    sources.some(
-      (source) =>
-        source.accounts.some((account) => account.driver === driver) ||
-        (source.error !== undefined && source.accounts.length === 0),
-    )
+    provider.usageLimits !== undefined &&
+    provider.usageLimits.unavailable?.reason !== "unsupported" &&
+    provider.usageLimits.unavailable?.reason !== "unverified"
   );
 }
 
@@ -709,7 +729,7 @@ export function withUsageLimitsCommands(
   sources: UsageLimitSourceSnapshots,
 ): ServerProvider[] {
   return providers.map((provider) => {
-    if (!hasProviderUsageLimits(provider.driver, providers, sources)) return provider;
+    if (!hasProviderUsageLimits(provider.instanceId, providers, sources)) return provider;
     const commands = (items: readonly ServerProviderSlashCommand[]) => [
       ...items.filter((command) => command.name !== USAGE_LIMITS_COMMAND.name),
       USAGE_LIMITS_COMMAND,
@@ -736,7 +756,7 @@ export function collectProviderUsageLimits(
   now: number,
 ): UsageLimitsReport | null {
   const selected = providers.find((provider) => provider.instanceId === instanceId);
-  if (!selected || !hasProviderUsageLimits(selected.driver, providers, sources)) return null;
+  if (!selected || !hasProviderUsageLimits(instanceId, providers, sources)) return null;
   const resolveKey = accountKeyResolver([
     ...providers.filter((provider) => provider.enabled).map(nativeReport),
     ...sources.flatMap((source) => source.accounts),
@@ -747,7 +767,12 @@ export function collectProviderUsageLimits(
     { usage: NativeSnapshot; credits: NativeSnapshot | null }
   >();
   for (const provider of providersWithLimits(providers)) {
-    if (provider.driver !== selected.driver || !provider.usageLimits) continue;
+    if (
+      provider.driver !== selected.driver ||
+      !provider.usageLimits ||
+      !mayReportSubscriptionLimits(provider)
+    )
+      continue;
     const snapshot = { provider, limits: provider.usageLimits };
     const key = resolveKey(nativeReport(provider)) ?? `instance:${provider.instanceId}`;
     const previous = nativeByAccount.get(key);

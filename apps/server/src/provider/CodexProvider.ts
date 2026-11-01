@@ -84,12 +84,29 @@ const CODEX_PRESENTATION = {
 
 export interface CodexAppServerProviderSnapshot {
   readonly account: CodexSchema.V2GetAccountResponse;
+  readonly config?: CodexConfigProbe;
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
   readonly models: ReadonlyArray<ServerProviderModel> | undefined;
   readonly serviceTier?: string | undefined;
   readonly skills: ReadonlyArray<ServerProviderSkill>;
 }
+
+/** The subset of Codex's effective config that determines quota provenance. */
+export interface CodexConfigSnapshot {
+  readonly service_tier?: string | null;
+  readonly model_provider?: string | null;
+  readonly model_providers?: Readonly<Record<string, unknown>> | null;
+}
+
+export type CodexConfigProbe =
+  | { readonly kind: "available"; readonly config: CodexConfigSnapshot }
+  | { readonly kind: "unavailable" };
+
+export type CodexUsageSource =
+  | { readonly kind: "subscription" }
+  | { readonly kind: "apiKey"; readonly label: string }
+  | { readonly kind: "unverified"; readonly message: string };
 
 const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
   none: "None",
@@ -163,6 +180,59 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 
 export function codexDefaultReasoningEffortOverride(model: string): "medium" | undefined {
   return codexModelFamily(model) === "gpt-6-astra" ? "medium" : undefined;
+}
+
+function providerConfigName(
+  config: CodexConfigSnapshot | undefined,
+  providerId: string,
+): string | undefined {
+  const provider = config?.model_providers?.[providerId];
+  if (typeof provider !== "object" || provider === null || !("name" in provider)) return undefined;
+  return typeof provider.name === "string" && provider.name.trim().length > 0
+    ? provider.name.trim()
+    : undefined;
+}
+
+function isOpenAiModelProvider(providerId: string): boolean {
+  return providerId === "openai" || providerId === "openai_token_sharing";
+}
+
+/**
+ * Custom model providers can see an unrelated saved ChatGPT login.
+ * Only verified OpenAI configuration may publish that login's subscription quota.
+ * Missing config fails closed; API-key auth remains safe to exclude.
+ */
+export function resolveCodexUsageSource(input: {
+  readonly account: CodexSchema.V2GetAccountResponse["account"];
+  readonly config: CodexConfigProbe;
+}): CodexUsageSource {
+  if (input.config.kind === "unavailable") {
+    if (input.account?.type === "apiKey") {
+      return { kind: "apiKey", label: "OpenAI API Key" };
+    }
+    if (input.account?.type === "amazonBedrock") {
+      return { kind: "apiKey", label: "Amazon Bedrock" };
+    }
+    return {
+      kind: "unverified",
+      message: "Could not verify which model provider Codex is using.",
+    };
+  }
+  const config = input.config.config;
+  const modelProvider = config.model_provider?.trim();
+  if (modelProvider && !isOpenAiModelProvider(modelProvider)) {
+    return {
+      kind: "apiKey",
+      label: `${providerConfigName(config, modelProvider) ?? modelProvider} API key`,
+    };
+  }
+  if (input.account?.type === "apiKey") {
+    return { kind: "apiKey", label: "OpenAI API Key" };
+  }
+  if (input.account?.type === "amazonBedrock") {
+    return { kind: "apiKey", label: "Amazon Bedrock" };
+  }
+  return { kind: "subscription" };
 }
 
 export function mapCodexModelCapabilities(
@@ -534,10 +604,23 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   // Optional discovery must finish before the outer timeout can discard the account result.
   const deadlineMs = spawnedAtMs + CODEX_AUTH_PROBE_TIMEOUT_MS - CODEX_DISCOVERY_MARGIN_MS;
-  const [skillsResponse, models, serviceTier, rateLimits] = yield* Effect.all(
+  // Quota belongs to the effective model provider, not just the CLI's saved login.
+  // Omit cwd so this shared catalog does not inherit the server launch project's config.
+  const config = yield* withCodexDiscoveryDeadline(
+    client.request("config/read", { includeLayers: false }),
+    deadlineMs,
+    CODEX_CONFIG_PROBE_TIMEOUT_MS,
+  ).pipe(
+    Effect.map((response): CodexConfigProbe =>
+      response ? { kind: "available", config: response.config } : { kind: "unavailable" },
+    ),
+    Effect.orElseSucceed(() => ({ kind: "unavailable" }) as const),
+  );
+  const usageSource = resolveCodexUsageSource({ account: accountResponse.account, config });
+  const [skillsResponse, models, rateLimits] = yield* Effect.all(
     [
       withCodexDiscoveryDeadline(client.request("skills/list", { cwds: [input.cwd] }), deadlineMs),
-      accountResponse.account?.type === "chatgpt"
+      accountResponse.account?.type === "chatgpt" && usageSource.kind === "subscription"
         ? requestCodexChatGptModels({
             client,
             codexHome: initialize.codexHome,
@@ -545,19 +628,8 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
             deadlineMs,
           })
         : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
-      // The shared catalog must exclude config from the server's launch project.
-      withCodexDiscoveryDeadline(
-        client.request("config/read", { includeLayers: false }),
-        deadlineMs,
-        CODEX_CONFIG_PROBE_TIMEOUT_MS,
-      ).pipe(
-        Effect.map((response) => response?.config.service_tier ?? undefined),
-        Effect.catch(() => Effect.logDebug("Codex config read failed.").pipe(Effect.as(undefined))),
-      ),
-      // Usage is an enrichment: a failure or a slow answer degrades to "no
-      // usage this probe" rather than costing the account and models.
-      input.skipNativeUsage
-        ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+      input.skipNativeUsage || usageSource.kind !== "subscription"
+        ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined rather than void.
           Effect.succeed(undefined)
         : withCodexDiscoveryDeadline(
             client.request("account/rateLimits/read", null),
@@ -589,7 +661,9 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     ...(rateLimits ? { rateLimits } : {}),
     version,
     models,
-    serviceTier,
+    config,
+    serviceTier:
+      config.kind === "available" ? (config.config.service_tier ?? undefined) : undefined,
     skills: skillsResponse ? parseCodexSkillsListResponse(skillsResponse, input.cwd) : [],
   } satisfies CodexAppServerProviderSnapshot;
 });
@@ -648,18 +722,29 @@ const makePendingCodexProvider = Effect.fn("CodexProvider.makePendingCodexProvid
   });
 });
 
-function accountProbeStatus({ account, rateLimits }: CodexAppServerProviderSnapshot): {
+function accountProbeStatus(
+  { account, rateLimits }: CodexAppServerProviderSnapshot,
+  usageSource: CodexUsageSource,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
 } {
-  const authLabel = codexAccountAuthLabel(account.account);
-  const authEmail = codexAccountEmail(account.account);
+  const authLabel =
+    usageSource.kind === "apiKey" ? usageSource.label : codexAccountAuthLabel(account.account);
+  const authEmail =
+    usageSource.kind === "subscription" ? codexAccountEmail(account.account) : undefined;
   const workspaceId =
-    rateLimits && "accountId" in rateLimits ? rateLimits.accountId?.trim() : undefined;
+    usageSource.kind === "subscription" && rateLimits && "accountId" in rateLimits
+      ? rateLimits.accountId?.trim()
+      : undefined;
   const auth = {
     status: account.account ? ("authenticated" as const) : ("unknown" as const),
-    ...(account.account?.type ? { type: account.account?.type } : {}),
+    ...(usageSource.kind === "apiKey"
+      ? { type: "apiKey" }
+      : account.account?.type
+        ? { type: account.account.type }
+        : {}),
     ...(authLabel ? { label: authLabel } : {}),
     ...(authEmail ? { email: authEmail } : {}),
     ...(workspaceId ? { workspaceId } : {}),
@@ -778,25 +863,35 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   }
 
   const snapshot = probeResult.success.value;
+  const usageSource = resolveCodexUsageSource({
+    account: snapshot.account.account,
+    config: snapshot.config ?? { kind: "unavailable" },
+  });
   const accountStatus = managedAuth
     ? { status: "ready" as const, auth: managedAuth, message: undefined }
-    : accountProbeStatus(snapshot);
+    : accountProbeStatus(snapshot, usageSource);
   const usageLimits =
-    snapshot.account.account?.type === "apiKey"
+    usageSource.kind === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
-      : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
+      : usageSource.kind === "unverified"
         ? makeUnavailableUsageLimits({
             checkedAt,
-            reason: "probeFailed",
-            ...(accountStatus.message ? { message: accountStatus.message } : {}),
-            ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
+            reason: "unverified",
+            message: usageSource.message,
           })
-        : codexRateLimitsToLimits({
-            snapshot: snapshot.rateLimits.snapshot,
-            rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
-            resetCredits: snapshot.rateLimits.resetCredits,
-            checkedAt,
-          });
+        : snapshot.rateLimits === undefined || "failure" in snapshot.rateLimits
+          ? makeUnavailableUsageLimits({
+              checkedAt,
+              reason: "probeFailed",
+              ...(accountStatus.message ? { message: accountStatus.message } : {}),
+              ...(snapshot.rateLimits ? { message: snapshot.rateLimits.failure } : {}),
+            })
+          : codexRateLimitsToLimits({
+              snapshot: snapshot.rateLimits.snapshot,
+              rateLimitsByLimitId: snapshot.rateLimits.rateLimitsByLimitId,
+              resetCredits: snapshot.rateLimits.resetCredits,
+              checkedAt,
+            });
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
