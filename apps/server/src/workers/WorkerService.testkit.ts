@@ -294,6 +294,8 @@ export const layerFor = (world: World) =>
       ProviderRegistryMock.layer([
         provider("codex", "gpt-5.4"),
         provider("claude", "sonnet"),
+        provider("pi", "deepseek/deepseek-flash"),
+        provider("deepseekHarness", "deepseek-official/deepseek-flash"),
       ] as never),
     ),
     Layer.provide(

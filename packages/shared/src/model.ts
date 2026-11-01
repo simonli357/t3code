@@ -14,6 +14,17 @@ import { copySorted } from "./Array.ts";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
+/** Resolve a catalog slug or an unambiguous short name without choosing between providers. */
+export function findCatalogModel<T extends { readonly slug: string }>(
+  models: ReadonlyArray<T>,
+  requested: string,
+): T | undefined {
+  const exact = models.find((model) => model.slug === requested);
+  if (exact) return exact;
+  const matches = models.filter((model) => model.slug.endsWith(`/${requested}`));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 export function modelSelectionCommandType(
   currentInstanceId: ProviderInstanceId,
   selection: ModelSelection,

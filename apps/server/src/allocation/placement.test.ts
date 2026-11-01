@@ -124,6 +124,17 @@ const place = (
 const order = (result: ReturnType<typeof place>) => result.hosts.map((entry) => entry.label);
 
 describe("computer placement", () => {
+  it("matches unique short model names and refuses ambiguous ones", () => {
+    const models = [{ slug: "deepseek-official/deepseek-flash", capabilities: null }];
+    const inspect = (catalog: typeof models) =>
+      place([host("host", { accounts: [account("dsh", { models: catalog })] })], {
+        model: "deepseek-flash",
+      }).hosts[0]!;
+    expect(inspect(models).warnings.join(" ")).not.toContain("No matching provider");
+    expect(
+      inspect([...models, { slug: "other/deepseek-flash", capabilities: null }]).warnings.join(" "),
+    ).toContain("No matching provider");
+  });
   it("lists every computer, ordered by the share left free on the tightest resource", () => {
     const result = place([
       host("busy", { computer: computer({ memory: [2, 16], idle: 0.9 }) }),

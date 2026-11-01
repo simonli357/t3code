@@ -88,6 +88,7 @@ import {
   selectionKey,
 } from "./workerSchemas.ts";
 import { measureWorkingTime, workLine } from "./workingTime.ts";
+import { findCatalogModel } from "@t3tools/shared/model";
 
 const decodeWorkerRenewal = Schema.decodeSync(WorkerRenewalSettings);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -362,7 +363,7 @@ const make = Effect.gen(function* () {
   const checkSelection = Effect.fn(function* (selection: ModelSelection) {
     const providers = yield* catalog.getProviders;
     const instance = providers.find((entry) => entry.instanceId === selection.instanceId);
-    const model = instance?.models.find((entry) => entry.slug === selection.model);
+    const model = findCatalogModel(instance?.models ?? [], selection.model);
     if (
       !instance?.enabled ||
       !instance.installed ||
@@ -385,6 +386,13 @@ const make = Effect.gen(function* () {
           message: `Model ${selection.model} does not support ${option.id}=${option.value}.`,
         });
     }
+  });
+  const canonicalSelection = Effect.fn(function* (selection: ModelSelection) {
+    const instance = (yield* catalog.getProviders).find(
+      (entry) => entry.instanceId === selection.instanceId,
+    );
+    const model = findCatalogModel(instance?.models ?? [], selection.model);
+    return model ? { ...selection, model: model.slug } : selection;
   });
   const checkWorkerAccount = Effect.fn(function* (selection: ModelSelection) {
     if ((yield* settings.getSettings).workerDisabledInstanceIds.includes(selection.instanceId))
@@ -1018,6 +1026,7 @@ const make = Effect.gen(function* () {
     input: typeof SpawnInput.Type,
     options: { readonly forHandoff: boolean },
   ) {
+    input = { ...input, modelSelection: yield* canonicalSelection(input.modelSelection) };
     if (input.threadId === owner || input.threadId === input.sourceThreadId)
       return yield* new WorkerError({ message: "A worker must have its own new thread ID." });
     let worker = yield* workerOf(input.threadId);
@@ -1281,7 +1290,7 @@ const make = Effect.gen(function* () {
         const target = yield* thread(input.threadId);
         const plan = decodePlan(worker.plan_json);
         yield* checkPermissions(owner, target);
-        const selection = input.modelSelection ?? target.modelSelection;
+        const selection = yield* canonicalSelection(input.modelSelection ?? target.modelSelection);
         if (input.modelSelection || selectionKey(selection) !== selectionKey(plan.modelSelection))
           yield* checkWorkerAccount(selection);
         yield* checkSelection(selection);
@@ -1830,7 +1839,10 @@ const make = Effect.gen(function* () {
 
   const handoff = Effect.fn("WorkerService.handoff")(
     function* (owner: ThreadId, rawInput: typeof HandoffInput.Type) {
-      let input = rawInput;
+      let input = {
+        ...rawInput,
+        modelSelection: yield* canonicalSelection(rawInput.modelSelection),
+      };
       if (input.selfFork) {
         if (input.sourceThreadId && input.sourceThreadId !== owner)
           return yield* new WorkerError({
