@@ -72,6 +72,7 @@ export * from "./sessionMoves.ts";
 export * from "./threadPurge.ts";
 export * from "./modelRouting.ts";
 export * from "./sessionHistory.ts";
+export * from "./linkedSessions.ts";
 export * from "./usageMeasurements.ts";
 export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
