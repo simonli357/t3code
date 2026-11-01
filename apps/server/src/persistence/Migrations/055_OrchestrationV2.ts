@@ -18,6 +18,7 @@ import OrchestrationV2Subagents from "./OrchestrationV2/Subagents.ts";
 import OrchestrationV2ThreadLaunchWorkflows from "./OrchestrationV2/ThreadLaunchWorkflows.ts";
 
 const decodeScopes = Schema.decodeUnknownEffect(Schema.fromJsonString(AuthEnvironmentScopes));
+const encodeScopes = Schema.encodeEffect(Schema.fromJsonString(AuthEnvironmentScopes));
 
 const OrchestrationV2Base = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -35,8 +36,11 @@ const OrchestrationV2Base = Effect.gen(function* () {
   `;
   for (const link of links) {
     const scopes = yield* decodeScopes(link.scopes).pipe(Effect.orDie);
+    const migratedScopes = yield* encodeScopes(migrateImportedV1AuthScopes(scopes)).pipe(
+      Effect.orDie,
+    );
     yield* sql`UPDATE auth_pairing_links
-      SET scopes = ${JSON.stringify(migrateImportedV1AuthScopes(scopes))} WHERE id = ${link.id}`;
+      SET scopes = ${migratedScopes} WHERE id = ${link.id}`;
   }
 
   yield* sql`
