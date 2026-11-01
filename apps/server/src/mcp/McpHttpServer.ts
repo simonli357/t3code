@@ -48,6 +48,10 @@ import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import { SessionWorkflowToolkit } from "./toolkits/sessionWorkflow/tools.ts";
+import * as SessionWorkflowHandlers from "./toolkits/sessionWorkflow/handlers.ts";
+import * as SessionWorkflowService from "./SessionWorkflowService.ts";
+import * as SessionMessages from "../orchestration-v2/SessionMessages.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
 import * as AttachmentHandlers from "./toolkits/attachment/handlers.ts";
@@ -1133,6 +1137,11 @@ const layerEnvironmentToolkit = toolkitRegistration(
 
 export const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
 
+export const layerSessionWorkflowToolkit = toolkitRegistration(
+  SessionWorkflowToolkit,
+  SessionWorkflowHandlers.layer,
+).pipe(Layer.provide(SessionWorkflowService.layer.pipe(Layer.provide(SessionMessages.layer))));
+
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
   AttachmentHandlers.layer,
@@ -1179,6 +1188,7 @@ export const layerTools = Layer.mergeAll(
   layerThreadPurgeToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
+  layerSessionWorkflowToolkit,
   layerEnvironmentToolkit,
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,

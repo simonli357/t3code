@@ -1,3 +1,10 @@
+import {
+  LinkedSessionQuery,
+  LinkedSessionQueryResult,
+  LinkedSessionCommand,
+  LinkedSessionCommandResult,
+  LinkedSessionError,
+} from "./linkedSessions.ts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -740,6 +747,22 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
 
 // Agent-facing endpoints that keep their V1 routes, so t3-workflows scripts work on either protocol.
 class EnvironmentAgentReadsHttpApi extends HttpApiGroup.make("agentReads")
+  .add(
+    HttpApiEndpoint.post("linkedSessionQuery", "/api/orchestration/linked-sessions/query", {
+      headers: OptionalBearerHeaders,
+      payload: LinkedSessionQuery,
+      success: LinkedSessionQueryResult,
+      error: [EnvironmentScopeRequiredError, LinkedSessionError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("linkedSessionCommand", "/api/orchestration/linked-sessions/command", {
+      headers: OptionalBearerHeaders,
+      payload: LinkedSessionCommand,
+      success: LinkedSessionCommandResult,
+      error: [EnvironmentScopeRequiredError, LinkedSessionError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.post("moveSession", "/api/orchestration/session-moves", {
       headers: OptionalBearerHeaders,
