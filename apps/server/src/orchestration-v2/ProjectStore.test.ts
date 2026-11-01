@@ -39,6 +39,50 @@ it.layer(ProjectStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemor
           },
         });
 
+        const envelope = {
+          sequence: 2,
+          eventId: EventId.make("prompt-save"),
+          aggregateKind: "project" as const,
+          aggregateId: projectId,
+          occurredAt: "2026-03-24T00:01:00.000Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+        };
+        yield* projects.apply({
+          ...envelope,
+          type: "project.meta-updated",
+          payload: {
+            projectId,
+            basePrompt: "Read project conventions",
+            updatedAt: envelope.occurredAt,
+          },
+        });
+        assert.equal(
+          Option.getOrNull(yield* projects.getShell(projectId))?.basePrompt,
+          "Read project conventions",
+        );
+        yield* projects.apply({
+          ...envelope,
+          sequence: 3,
+          eventId: EventId.make("prompt-preserve"),
+          type: "project.meta-updated",
+          payload: { projectId, title: "Renamed", updatedAt: envelope.occurredAt },
+        });
+        assert.equal(
+          Option.getOrNull(yield* projects.getShell(projectId))?.basePrompt,
+          "Read project conventions",
+        );
+        yield* projects.apply({
+          ...envelope,
+          sequence: 4,
+          eventId: EventId.make("prompt-reset"),
+          type: "project.meta-updated",
+          payload: { projectId, basePrompt: null, updatedAt: envelope.occurredAt },
+        });
+        assert.equal(Option.getOrNull(yield* projects.getShell(projectId))?.basePrompt, null);
+
         const rows = yield* sql<{ readonly defaultModelSelection: string | null }>`
           SELECT default_model_selection_json AS "defaultModelSelection"
           FROM projection_projects

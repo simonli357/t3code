@@ -57,6 +57,7 @@ function makeHarness(
   );
   const layerServerSettings = ServerSettings.layerTest({});
   const layerThreadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
     Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),

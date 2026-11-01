@@ -81,6 +81,7 @@ const layerReceiptsTest = CommandReceiptStore.layer.pipe(
 const layerDispatchChokepointTest =
   (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
     ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -213,6 +214,7 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -290,6 +292,7 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -368,6 +371,7 @@ it.effect("waitForThread settles delegated work on a thread rolled back past its
       completedAt: DateTime.makeUnsafe(1_000),
     } as unknown as OrchestrationV2Run;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -421,6 +425,7 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
     const declined = yield* Deferred.make<void>();
     let pending = true;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -510,6 +515,7 @@ it.effect.each(["live", "no-session", "unsupported-runtime"] as const)(
             }),
       } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
       const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(SqlitePersistence.layerMemory),
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
@@ -567,6 +573,7 @@ it.effect.each([
     const runId = RunId.make("run:thread-management:settle-after-run");
     const dispatched: Array<string> = [];
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({

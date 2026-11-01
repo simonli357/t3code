@@ -522,6 +522,14 @@
     "./provider-clients": {
       "types": "./src/providerClients.ts",
       "default": "./src/providerClients.ts"
+    },
+    "./state/session-organization": {
+      "types": "./src/state/sessionOrganization.ts",
+      "default": "./src/state/sessionOrganization.ts"
+    },
+    "./state/base-sessions": {
+      "types": "./src/state/baseSessions.ts",
+      "default": "./src/state/baseSessions.ts"
     }
   },
   "scripts": {

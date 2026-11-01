@@ -144,6 +144,7 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerServerSettings = ServerSettings.layerTest(options.serverSettings);
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
   const layerThreadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(layerOrchestrator),
     Layer.provide(layerServerSettings),
     Layer.provide(layerReceipts),

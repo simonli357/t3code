@@ -1,3 +1,4 @@
+import { makeSessionOrganizationQuery } from "../workers/SessionOrganizationQuery.ts";
 import { pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
@@ -1450,6 +1451,7 @@ export function threadShellFromProjection(
     id: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
+    isBase: projection.thread.isBase,
     providerInstanceId: projection.thread.providerInstanceId,
     modelSelection: projection.thread.modelSelection,
     runtimeMode: projection.thread.runtimeMode,
@@ -1732,6 +1734,7 @@ function shellFromState(input: {
     id: input.state.thread.id,
     projectId: input.state.thread.projectId,
     title: input.state.thread.title,
+    isBase: input.state.thread.isBase,
     providerInstanceId: input.state.thread.providerInstanceId,
     modelSelection: input.state.thread.modelSelection,
     runtimeMode: input.state.thread.runtimeMode,
@@ -1809,6 +1812,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const readOrganization = yield* makeSessionOrganizationQuery;
 
     const inlineWorkOutput = sql`item.type = 'dynamic_tool' AND (
       item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`}
@@ -6528,7 +6532,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
         ),
       ]);
+      const organizations = yield* readOrganization([...targetThreadIds]);
       return {
+        organizations,
         targetThreadIds,
         threadRows,
         runRows,
@@ -6541,6 +6547,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     });
 
     const decodeShellSnapshot = Effect.fn("ProjectionStore.decodeShellSnapshot")(function* ({
+      organizations,
       targetThreadIds,
       threadRows,
       runRows,
@@ -6584,8 +6591,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return {
         schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
         snapshotSequence: sequenceRows[0]?.snapshot_sequence ?? 0,
-        threads: shells.filter((thread) => thread.archivedAt === null),
-        archivedThreads: shells.filter((thread) => thread.archivedAt !== null),
+        threads: shells
+          .filter((thread) => thread.archivedAt === null)
+          .map((thread) => ({ ...thread, organization: organizations.get(thread.id) })),
+        archivedThreads: shells
+          .filter((thread) => thread.archivedAt !== null)
+          .map((thread) => ({ ...thread, organization: organizations.get(thread.id) })),
       };
     }, Effect.mapError(shellSnapshotReadError));
 
@@ -6749,10 +6760,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             if (state === undefined) {
               return null;
             }
-            return shellFromState({
-              state,
-              visibleItemCount: visibleItemCountForShell({ threadId, statesByThreadId }),
-            });
+            return {
+              ...shellFromState({
+                state,
+                visibleItemCount: visibleItemCountForShell({ threadId, statesByThreadId }),
+              }),
+              organization: (yield* readOrganization([threadId])).get(threadId),
+            };
           }),
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));

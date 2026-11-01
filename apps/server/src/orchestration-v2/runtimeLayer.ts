@@ -248,6 +248,7 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 );
 
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
+  Layer.provide(ProjectStore.layer),
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,

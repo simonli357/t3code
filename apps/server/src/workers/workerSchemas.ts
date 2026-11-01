@@ -184,6 +184,9 @@ export const Plan = Schema.Struct({
   ownerRuntimeMode: Schema.optional(RuntimeMode),
   /** On a master's record of a remote worker: the owner the other computer was last told of. */
   syncedOwnerId: Schema.optional(Schema.String),
+  authorityEnvironmentId: Schema.optional(Schema.String),
+  authorityRevision: Schema.optional(Schema.Number),
+  organizationHosts: Schema.optional(Schema.Array(Schema.String)),
 });
 
 /** A session on a linked computer is addressed as `peer:<environmentId>:<threadId>` wherever a local thread ID goes. */
@@ -217,6 +220,7 @@ export const WorkerPeerRequest = Schema.Union([
   Schema.TaggedStruct("sessionInfo", { threadId: ThreadId }),
   Schema.TaggedStruct("deliver", {
     jobId: TrimmedNonEmptyString,
+    deliveryId: Schema.optional(TrimmedNonEmptyString),
     kind: Schema.Literals(["message", "notice", "done", "blocked"]),
     senderThreadId: ThreadId,
     recipientThreadId: ThreadId,

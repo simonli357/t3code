@@ -215,6 +215,7 @@ describe("orchestrator MCP toolkit", () => {
         const layerOrchestration = Layer.merge(
           layerOrchestrator,
           ThreadManagementService.layer.pipe(
+            Layer.provide(SqlitePersistence.layerMemory),
             Layer.provide(layerOrchestrator),
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(

@@ -286,3 +286,111 @@ it.effect("keeps masters and workers on their own channels", () =>
     assert.include(refused.message, "t3_worker_send");
   }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "transfers a running linked worker, recovers a lost decision reply and releases it without changing its run",
+  () =>
+    Effect.gen(function* () {
+      const { network, a, b } = yield* makePair();
+      const workersA = yield* on(a, WorkerService.WorkerService);
+      const workersB = yield* on(b, WorkerService.WorkerService);
+      const localMaster = ThreadId.make("thread:b-local");
+      yield* on(a, workersA.spawnRemote(master, idB, spawnInput));
+      yield* on(b, setLatestRun(worker, "running"));
+      const before = yield* on(
+        b,
+        Orchestrator.OrchestratorV2.pipe(Effect.flatMap((o) => o.getThreadProjection(worker))),
+      );
+      const relationship = yield* on(b, workersB.readOwnership(worker));
+      assert.equal(relationship.ownerThreadId, master);
+      assert.equal(relationship.ownerEnvironmentId, idA);
+      const input = {
+        clientRequestId: "transfer-running",
+        threadId: worker,
+        ownerThreadId: localMaster,
+        ownerEnvironmentId: idB,
+        expectedOwnerThreadId: master,
+        expectedOwnerEnvironmentId: idA,
+        expectedRevision: relationship.revision,
+      };
+      network.lostReplies.add("organizationFinish");
+      const uncertain = yield* on(a, workersA.changeOwnership(input).pipe(Effect.flip));
+      assert.equal(uncertain.code, "pending");
+      const transferred = yield* on(a, workersA.changeOwnership(input));
+      assert.equal(transferred.ownerThreadId, localMaster);
+      assert.equal(transferred.ownerEnvironmentId, idB);
+      assert.deepEqual(yield* on(a, workersA.changeOwnership(input)), transferred);
+      const after = yield* on(
+        b,
+        Orchestrator.OrchestratorV2.pipe(Effect.flatMap((o) => o.getThreadProjection(worker))),
+      );
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.thread, before.thread);
+      const stale = yield* on(
+        a,
+        workersA.changeOwnership({ ...input, clientRequestId: "stale" }).pipe(Effect.flip),
+      );
+      assert.equal(stale.code, "conflict");
+      yield* on(
+        b,
+        workersB.report(worker, {
+          clientRequestId: "after-transfer",
+          outcome: "done",
+          summary: "Transferred work finished.",
+        }),
+      );
+      yield* on(b, workersB.drain());
+      yield* on(a, workersA.drain());
+      yield* on(b, workersB.drain());
+      assert.equal(
+        (yield* on(b, messagesOf(localMaster))).filter((text) =>
+          text.includes("Transferred work finished."),
+        ).length,
+        1,
+      );
+      assert.isFalse(
+        (yield* on(a, messagesOf(master))).some((text) =>
+          text.includes("Transferred work finished."),
+        ),
+      );
+      const released = yield* on(
+        b,
+        workersB.changeOwnership({
+          clientRequestId: "release",
+          threadId: worker,
+          ownerThreadId: null,
+          expectedOwnerThreadId: localMaster,
+          expectedOwnerEnvironmentId: idB,
+          expectedRevision: transferred.revision,
+        }),
+      );
+      assert.equal(released.ownerThreadId, null);
+      assert.equal((yield* on(b, workersB.readOwnership(worker))).ownerThreadId, null);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("rejects a cross-computer ownership cycle without changing either relationship", () =>
+  Effect.gen(function* () {
+    const { a, b } = yield* makePair();
+    const workersA = yield* on(a, WorkerService.WorkerService);
+    const workersB = yield* on(b, WorkerService.WorkerService);
+    yield* on(a, workersA.spawnRemote(master, idB, spawnInput));
+    const before = yield* on(a, workersA.readOwnership(master));
+    const failure = yield* on(
+      a,
+      workersA
+        .changeOwnership({
+          clientRequestId: "cycle",
+          threadId: master,
+          ownerThreadId: worker,
+          ownerEnvironmentId: idB,
+          expectedOwnerThreadId: null,
+          expectedRevision: before.revision,
+        })
+        .pipe(Effect.flip),
+    );
+    assert.match(failure.message, /cannot own itself|cycle|descendant/i);
+    assert.equal((yield* on(a, workersA.readOwnership(master))).ownerThreadId, null);
+    assert.equal((yield* on(b, workersB.readOwnership(worker))).ownerThreadId, master);
+  }).pipe(Effect.scoped),
+);

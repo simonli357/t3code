@@ -253,6 +253,8 @@ export const make = Effect.gen(function* () {
       workerFreshSessions: true,
       boundedSessionHistory: true,
       providerAllocation: true,
+      sessionOrganization: true,
+      baseSessions: true,
       orchestratorHandoff: true,
       workerReclaim: true,
       workerRetirementWarning: true,
