@@ -1,3 +1,4 @@
+import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
   BaseSessionCreateInput,
   CommandId,
@@ -22,6 +23,20 @@ const isOrchestratorError = Schema.is(Orchestrator.OrchestratorV2Error);
 type Send = Extract<OrchestrationV2Command, { type: "message.dispatch" }>;
 const encode = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2Command));
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(OrchestrationV2Command));
+// Read the old receipt format only; all new execution goes through V2 commands.
+const LegacySubmission = Schema.Struct({
+  type: Schema.Literal("thread.turn.start"),
+  threadId: ThreadId,
+  initializeBase: Schema.optional(Schema.Boolean),
+  sourceProposedPlan: Schema.optional(Schema.Unknown),
+  message: Schema.Struct({
+    messageId: MessageId,
+    text: Schema.String,
+    attachments: Schema.Array(Schema.Unknown),
+    context: Schema.optional(Schema.Unknown),
+  }),
+});
+const decodeLegacy = Schema.decodeUnknownOption(Schema.fromJsonString(LegacySubmission));
 const encodeCreation = Schema.encodeSync(Schema.fromJsonString(BaseSessionCreateInput));
 interface Receipt {
   input_json: string;
@@ -34,6 +49,9 @@ interface Receipt {
 /** Records the destination before dispatch. Every uncertain retry uses the same fork and send IDs. */
 export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
   orchestrator: Orchestrator.OrchestratorV2Shape,
+  ensureTranscript: (
+    threadId: ThreadId,
+  ) => Effect.Effect<void, Orchestrator.OrchestratorV2Error> = () => Effect.void,
 ) {
   const sql = yield* SqlClient.SqlClient;
   const crypto = yield* Crypto.Crypto;
@@ -46,10 +64,95 @@ export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
       commandType: command.type,
       cause,
     });
-  const prepare = Effect.fn("BaseSessions.prepare")(function* (input: Send) {
-    const inputJson = encode(input);
+  const readReceipt = Effect.fn("BaseSessions.readReceipt")(function* (input: Send) {
     const saved =
       (yield* sql<Receipt>`SELECT * FROM base_session_submissions WHERE request_id = ${input.commandId}`)[0];
+    if (!saved || saved.input_json === encode(input)) return saved;
+    const legacy = decodeLegacy(saved.input_json);
+    if (Option.isNone(legacy)) return saved;
+    const previous = legacy.value;
+    if (
+      stableStringify({
+        threadId: previous.threadId,
+        initializeBase: previous.initializeBase,
+        messageId: previous.message.messageId,
+        text: previous.message.text,
+        attachments: previous.message.attachments,
+        context: previous.message.context,
+        sourcePlanRef: previous.sourceProposedPlan,
+      }) !==
+      stableStringify({
+        threadId: input.threadId,
+        initializeBase: input.initializeBase,
+        messageId: input.messageId,
+        text: input.text,
+        attachments: input.attachments,
+        context: input.context,
+        sourcePlanRef: input.sourcePlanRef,
+      })
+    )
+      return yield* reject(
+        input,
+        "This Base submission ID belongs to another message. Retry the saved request.",
+      );
+    const destination = ThreadId.make(saved.thread_id);
+    const prepared = saved.command_json ? decodeLegacy(saved.command_json) : Option.none();
+    if (saved.state === "failed")
+      return yield* reject(
+        input,
+        saved.error ??
+          `The previous Base task failed in ${destination}. Inspect it before discarding the request.`,
+      );
+    if (Option.isNone(prepared))
+      return yield* reject(
+        input,
+        `Native cloning has an uncertain outcome. Inspect retained destination ${destination} before discarding the saved request; no second fork was created.`,
+      );
+    const messageId = prepared.value.message.messageId;
+    let state = saved.state;
+    if (state !== "started") {
+      yield* ensureTranscript(destination);
+      const records = yield* orchestrator.getThreadRecords(destination, ["messages"], {
+        messageIds: [messageId],
+      });
+      const message = records.messages.find((message) => message.id === messageId);
+      if (message) {
+        const runs = message.runId
+          ? (yield* orchestrator.getThreadRecords(destination, ["runs"], {
+              runIds: [message.runId],
+            })).runs
+          : [];
+        if (runs.some((run) => run.status === "completed")) state = "started";
+        else
+          return yield* reject(
+            input,
+            `The previous task already exists in session ${destination}, but its provider acceptance is unconfirmed. Inspect that session before discarding the saved request; it was not sent again.`,
+          );
+      }
+    }
+    const target = state === "started" ? null : yield* orchestrator.getThreadShell(destination);
+    if (state !== "started" && !target)
+      return yield* reject(
+        input,
+        `The retained destination ${destination} is unavailable. Nothing was sent.`,
+      );
+    const command: Send = {
+      ...input,
+      threadId: destination,
+      messageId,
+      commandId: CommandId.make(`base-send:${input.commandId}`),
+      initializeBase: undefined,
+      modelSelection: target?.modelSelection ?? input.modelSelection,
+      dispatchMode: { type: "start_immediately" },
+      deliveryIntent: undefined,
+    };
+    const converted = { ...saved, input_json: encode(input), command_json: encode(command), state };
+    yield* sql`UPDATE base_session_submissions SET input_json = ${converted.input_json}, command_json = ${converted.command_json}, state = ${state} WHERE request_id = ${input.commandId}`;
+    return converted;
+  });
+  const prepare = Effect.fn("BaseSessions.prepare")(function* (input: Send) {
+    const inputJson = encode(input);
+    const saved = yield* readReceipt(input);
     if (saved && saved.input_json !== inputJson)
       return yield* reject(
         input,
@@ -203,8 +306,7 @@ export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
   // Confirmed requests are read-only recovery even if the account was disabled later.
   const policyCommand = Effect.fn("BaseSessions.policyCommand")(
     function* (input: Send) {
-      const saved =
-        (yield* sql<Receipt>`SELECT * FROM base_session_submissions WHERE request_id = ${input.commandId}`)[0];
+      const saved = yield* readReceipt(input);
       if (!saved) return input;
       if (saved.input_json !== encode(input))
         return yield* reject(
@@ -218,6 +320,7 @@ export const makeBaseSessions = Effect.fn("BaseSessions.make")(function* (
     },
     (effect, input) =>
       effect.pipe(
+        lock.withPermit,
         Effect.mapError((cause) => (isOrchestratorError(cause) ? cause : reject(input, cause))),
       ),
   );

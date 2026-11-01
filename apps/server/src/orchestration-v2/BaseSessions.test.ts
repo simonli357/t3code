@@ -54,6 +54,8 @@ function harness() {
   } as unknown as OrchestrationV2ThreadShell;
   const shells = new Map([[baseId, source]]);
   const accepted = new Map<string, OrchestrationV2Command>();
+  const migratedMessages = new Map<ThreadId, Array<{ id: MessageId; runId: RunId }>>();
+  const migratedRuns = new Map<ThreadId, Array<{ id: RunId; status: string }>>();
   let loseForkReply = false,
     loseSendReply = false;
   let acceptance = Effect.void;
@@ -79,12 +81,16 @@ function harness() {
         () =>
           ({
             thread: shells.get(id),
-            runs: [...accepted.values()]
-              .filter((command) => command.type === "message.dispatch" && command.threadId === id)
-              .map((command) => ({
-                id: RunId.make(command.commandId),
-                status: providerFailed ? "failed" : "running",
-              })),
+            messages: migratedMessages.get(id) ?? [],
+            runs: [
+              ...(migratedRuns.get(id) ?? []),
+              ...[...accepted.values()]
+                .filter((command) => command.type === "message.dispatch" && command.threadId === id)
+                .map((command) => ({
+                  id: RunId.make(command.commandId),
+                  status: providerFailed ? "failed" : "running",
+                })),
+            ],
           }) as never,
       ),
     getThreadEventSequence: () => Effect.sync(() => accepted.size),
@@ -139,6 +145,8 @@ function harness() {
     );
   return {
     source,
+    migratedMessages,
+    migratedRuns,
     setAcceptance: (effect: Effect.Effect<void>) => {
       acceptance = effect;
     },
@@ -299,6 +307,70 @@ it.effect(
         assert.equal(after.thread_id, before.thread_id);
         assert.equal(h.shells.size, 2);
         assert.equal(h.accepted.size, 2);
+      }),
+    );
+  },
+);
+
+it.effect.each(["confirmed", "prepared", "completed", "uncertain", "cloning"] as const)(
+  "recovers a migrated V1 %s Base receipt without a second native fork",
+  (scenario) => {
+    const h = harness();
+    return h.run(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const destination = ThreadId.make("v1-independent-fork");
+        const messageId = MessageId.make("base-send:task-request");
+        const runId = RunId.make("v1-run");
+        h.shells.set(destination, { ...h.source, id: destination, isBase: false });
+        const previous = {
+          type: "thread.turn.start",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          message: { messageId: input.messageId, text: input.text, attachments: input.attachments },
+        };
+        const prepared = {
+          ...previous,
+          threadId: destination,
+          commandId: "base-send:task-request",
+          message: { ...previous.message, messageId },
+        };
+        const state =
+          scenario === "confirmed" ? "started" : scenario === "cloning" ? "cloning" : "prepared";
+        yield* sql`INSERT INTO base_session_submissions (request_id,input_json,source_id,thread_id,command_json,state) VALUES (${input.commandId},${JSON.stringify(previous)},${input.threadId},${destination},${scenario === "cloning" ? null : JSON.stringify(prepared)},${state})`;
+        if (scenario === "completed" || scenario === "uncertain") {
+          h.migratedMessages.set(destination, [{ id: messageId, runId }]);
+          h.migratedRuns.set(destination, [
+            { id: runId, status: scenario === "completed" ? "completed" : "interrupted" },
+          ]);
+        }
+        const hydrated: ThreadId[] = [];
+        const bases = yield* makeBaseSessions(yield* Orchestrator.OrchestratorV2, (id) =>
+          Effect.sync(() => {
+            hydrated.push(id);
+          }),
+        );
+        if (scenario === "uncertain" || scenario === "cloning") {
+          const error = yield* Effect.flip(bases.dispatch(input));
+          assert.include(String(error.cause), destination);
+          yield* Effect.flip(bases.dispatch(input));
+          assert.equal(h.accepted.size, 0);
+        } else {
+          const result = yield* bases.dispatch(input);
+          assert.equal(result.threadId, destination);
+          yield* bases.dispatch(input);
+          assert.equal(h.accepted.size, scenario === "prepared" ? 1 : 0);
+          if (scenario === "prepared") {
+            const sent = h.accepted.get("base-send:task-request");
+            assert.equal(sent?.type, "message.dispatch");
+            if (sent?.type === "message.dispatch") assert.equal(sent.messageId, messageId);
+            assert.deepEqual(hydrated, [destination]);
+          }
+        }
+        assert.isFalse([...h.accepted.values()].some((command) => command.type === "thread.fork"));
+        assert.equal(h.source.isBase, true);
+        const changed = yield* Effect.flip(bases.dispatch({ ...input, text: "Changed task" }));
+        assert.include(String(changed.cause), "another message");
       }),
     );
   },

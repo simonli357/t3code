@@ -5500,7 +5500,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const completeSourcePlan = (occurredAt: DateTime.Utc) =>
-      sourcePlan === null
+      // A task can reference its Base's plan without consuming the reusable template.
+      sourcePlan === null ||
+      (sourcePlanProjection?.thread.isBase && sourcePlan.threadId !== command.threadId)
         ? Effect.void
         : emit(
             events,
