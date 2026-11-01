@@ -51,6 +51,7 @@ export interface CreateProjectInput extends CommandMetadata {
 }
 
 export interface UpdateProjectInput extends CommandMetadata {
+  readonly basePrompt?: string | null;
   readonly projectId: ProjectId;
   readonly title?: string;
   readonly workspaceRoot?: string;
@@ -122,6 +123,7 @@ export interface VisitThreadInput extends ThreadCommandInput {
 export type MarkThreadUnreadInput = ThreadCommandInput;
 
 export interface UpdateThreadMetadataInput extends ThreadCommandInput {
+  readonly isBase?: boolean;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecoveryUpdate | null;
   readonly title?: string;
   readonly modelSelection?: ModelSelection;
@@ -162,6 +164,7 @@ interface StartThreadBootstrap {
 }
 
 export interface StartThreadTurnInput extends ThreadCommandInput {
+  readonly initializeBase?: boolean;
   readonly manualContinuationOfRunId?: RunId;
   readonly message: {
     readonly messageId: MessageId;
@@ -360,6 +363,7 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
       ? {}
       : { defaultModelSelection: input.defaultModelSelection }),
     ...(input.autoPull === undefined ? {} : { autoPull: input.autoPull }),
+    ...(input.basePrompt === undefined ? {} : { basePrompt: input.basePrompt }),
     ...(input.projectIcon === undefined ? {} : { projectIcon: input.projectIcon }),
     ...(input.faviconPath === undefined ? {} : { faviconPath: input.faviconPath }),
     ...(input.defaultThreadEnvMode === undefined
@@ -594,6 +598,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
     const commandId = yield* allocateCommandId(input);
     let result = null;
     if (
+      input.isBase !== undefined ||
       input.title !== undefined ||
       input.branch !== undefined ||
       input.worktreePath !== undefined ||
@@ -603,6 +608,7 @@ export const updateThreadMetadata = Effect.fn("EnvironmentCommands.updateThreadM
     ) {
       result = yield* dispatch({
         type: "thread.metadata.update",
+        ...(input.isBase === undefined ? {} : { isBase: input.isBase }),
         ...(input.limitRecovery === undefined ? {} : { limitRecovery: input.limitRecovery }),
         commandId,
         threadId: input.threadId,
@@ -717,6 +723,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
   if (requestedMode === "start") {
     return yield* dispatch({
       type: "message.dispatch",
+      ...(input.initializeBase === undefined ? {} : { initializeBase: input.initializeBase }),
       commandId,
       createdBy: "user",
       creationSource: input.creationSource ?? "web",
@@ -745,6 +752,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       : ({ type: "start_immediately" } as const);
   return yield* dispatch({
     type: "message.dispatch",
+    ...(input.initializeBase === undefined ? {} : { initializeBase: input.initializeBase }),
     commandId,
     createdBy: "user",
     creationSource: input.creationSource ?? "web",

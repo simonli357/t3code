@@ -1,3 +1,8 @@
+import * as EffectOutbox from "./EffectOutbox.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as SqlClient from "effect/sql/SqlClient";
+import { makeBaseSessions } from "./BaseSessions.ts";
+import { BaseSessionCreateInput, BaseSessionError } from "@t3tools/contracts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -359,6 +364,9 @@ export interface ThreadManagementServiceShape {
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
+  readonly createBase: (
+    input: BaseSessionCreateInput,
+  ) => Effect.Effect<Orchestrator.OrchestratorV2DispatchResult, BaseSessionError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<
@@ -612,6 +620,8 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  const bases = yield* makeBaseSessions(orchestrator, ensureProjectionTranscript);
+
   const ensureCommandTranscripts = Effect.fn(
     "orchestrationV2.threadManagement.ensureCommandTranscripts",
   )(function* (command: OrchestrationV2ServerCommand) {
@@ -682,13 +692,22 @@ const make = Effect.gen(function* () {
   const assertDispatchTargetEnabled = (command: OrchestrationV2ServerCommand) => {
     switch (command.type) {
       case "message.dispatch":
-        return orchestrator.getThreadRecords(command.threadId, []).pipe(
-          Effect.flatMap((projection) =>
-            assertProviderInstanceEnabled({
-              projectId: projection.thread.projectId,
-              commandId: command.commandId,
-              instanceId: (command.modelSelection ?? projection.thread.modelSelection).instanceId,
-            }),
+        return bases.policyCommand(command).pipe(
+          Effect.flatMap((target) =>
+            target === null
+              ? Effect.void
+              : orchestrator.getThreadRecords(target.threadId, []).pipe(
+                  Effect.flatMap((projection) =>
+                    assertProviderInstanceEnabled({
+                      projectId: projection.thread.projectId,
+                      commandId: target.commandId,
+                      instanceId: (projection.thread.isBase
+                        ? projection.thread.modelSelection
+                        : (target.modelSelection ?? projection.thread.modelSelection)
+                      ).instanceId,
+                    }),
+                  ),
+                ),
           ),
         );
       case "delegated_task.request":
@@ -709,7 +728,7 @@ const make = Effect.gen(function* () {
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(
       Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+      Effect.andThen(bases.dispatch(command)),
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
@@ -813,10 +832,14 @@ const make = Effect.gen(function* () {
       createdBy: input.createdBy,
       creationSource: input.creationSource,
     });
-    const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
-      messageIds: [input.messageId],
-      turnItemTypes: ["user_message"],
-    });
+    const projection = yield* getProjectThreadRecords(
+      { ...input, threadId: dispatched.threadId ?? input.threadId },
+      ["runs", "messages", "turnItems"],
+      {
+        messageIds: [input.messageId],
+        turnItemTypes: ["user_message"],
+      },
+    );
     const message = projection.messages.find((candidate) => candidate.id === input.messageId);
     const run =
       message?.runId === null || message?.runId === undefined
@@ -1285,6 +1308,21 @@ const make = Effect.gen(function* () {
       );
     }),
     dispatch,
+    createBase: Effect.fn("ThreadManagementService.createBase")((input: BaseSessionCreateInput) =>
+      assertProviderInstanceEnabled({
+        commandId: CommandId.make(`base-create:${input.clientRequestId}:create`),
+        projectId: input.projectId,
+        instanceId: input.modelSelection.instanceId,
+      }).pipe(
+        Effect.andThen(bases.create(input)),
+        Effect.mapError(
+          (cause) =>
+            new BaseSessionError({
+              message: cause instanceof Error ? cause.message : String(cause),
+            }),
+        ),
+      ),
+    ),
     getThreadHistoryPage: Effect.fn("ThreadManagementService.getThreadHistoryPage")(
       function (threadId, cursor, throughEntryId, conversationOnly, workMode) {
         return ensureProjectionTranscript(threadId).pipe(
@@ -1376,9 +1414,12 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
+  | SqlClient.SqlClient
 > = Layer.effect(ThreadManagementService, make).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(NodeCrypto.layer),
+  Layer.provide(EffectOutbox.layer),
 );
 
 export const layerWithLegacyImporter: Layer.Layer<
@@ -1389,4 +1430,9 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
-> = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));
+  | SqlClient.SqlClient
+> = Layer.effect(ThreadManagementService, make).pipe(
+  Layer.provide(ThreadCommandExecutor.layer),
+  Layer.provide(NodeCrypto.layer),
+  Layer.provide(EffectOutbox.layer),
+);

@@ -141,6 +141,7 @@ it.effect("task_cancel ends a delegated child's background native subagent", () 
       const layerOrchestration = Layer.merge(
         layerOrchestrator,
         ThreadManagementService.layer.pipe(
+          Layer.provide(SqlitePersistence.layerMemory),
           Layer.provide(layerOrchestrator),
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(

@@ -1,3 +1,4 @@
+import { SessionOrganization } from "./sessionOrganization.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -224,6 +225,7 @@ export type OrchestrationV2ProviderTurnTokenUsage =
   typeof OrchestrationV2ProviderTurnTokenUsage.Type;
 
 export const OrchestrationV2ContextTransfer = Schema.Struct({
+  nativeOnly: Schema.optional(Schema.Boolean),
   id: ContextTransferId,
   type: OrchestrationV2ContextTransferType,
   sourceThreadId: ThreadId,
@@ -2067,6 +2069,8 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  isBase: Schema.optional(Schema.Boolean),
+  organization: Schema.optional(SessionOrganization),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -3027,6 +3031,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    isBase: Schema.optional(Schema.Boolean),
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),
@@ -3128,6 +3133,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    initializeBase: Schema.optional(Schema.Boolean),
     notification: Schema.optional(OrchestrationV2Notification),
     /** Sends this pending guest message; the server uses the guest's text, not `text`. */
     guestMessageId: Schema.optional(GuestMessageId),
@@ -3281,6 +3287,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.fork"),
+    nativeOnly: Schema.optional(Schema.Boolean),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     sourceThreadId: ThreadId,
@@ -3632,6 +3639,7 @@ export const OrchestrationV2ThreadLaunchResult = Schema.Struct({
 export type OrchestrationV2ThreadLaunchResult = typeof OrchestrationV2ThreadLaunchResult.Type;
 
 export const OrchestrationV2DispatchCommandResult = Schema.Struct({
+  threadId: Schema.optional(ThreadId),
   sequence: NonNegativeInt,
 });
 export type OrchestrationV2DispatchCommandResult = typeof OrchestrationV2DispatchCommandResult.Type;

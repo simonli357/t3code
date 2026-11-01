@@ -167,6 +167,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   boundedSessionHistory: Schema.optionalKey(Schema.Boolean),
   /** Server answers placement and allocation requests (t3_recommend_computer, t3_allocate_account). */
   providerAllocation: Schema.optionalKey(Schema.Boolean),
+  sessionOrganization: Schema.optionalKey(Schema.Boolean),
+  baseSessions: Schema.optionalKey(Schema.Boolean),
   /** Masters can hand off to a successor (t3_orchestrator_handoff). */
   orchestratorHandoff: Schema.optionalKey(Schema.Boolean),
   /** A master can take back workers it handed off (t3_worker_reclaim). */

@@ -3,7 +3,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
-  type OrchestrationV2Command,
+  OrchestrationV2Command,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
   ProviderThreadId,
@@ -23,6 +23,8 @@ import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Schema from "effect/Schema";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -74,22 +76,27 @@ it("stamps authoritative provenance on commands that create threads or messages"
   expect(stamped).not.toHaveProperty("delegatedFrom");
 });
 
+const encodeCommand = Schema.encodeSync(Schema.fromJsonString(OrchestrationV2Command));
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
 );
 
 const layerDispatchChokepointTest =
-  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
+  (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) =>
+  (dispatched: Array<string>, isBase = false) =>
     ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(13),
           getThreadRecords: () =>
             Effect.succeed({
               thread: {
                 id: ThreadId.make("thread:thread-management:chokepoint"),
                 projectId: ProjectId.make("project:thread-management:chokepoint"),
                 deletedAt: null,
+                isBase,
                 modelSelection: {
                   instanceId: ProviderInstanceId.make("codex_work"),
                   model: "test",
@@ -213,6 +220,7 @@ it.effect("waitForThread follows a restart continuation instead of the cut run",
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -290,6 +298,7 @@ it.effect("waitForThread can wait past an ended run for the thread's delegated w
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -368,6 +377,7 @@ it.effect("waitForThread settles delegated work on a thread rolled back past its
       completedAt: DateTime.makeUnsafe(1_000),
     } as unknown as OrchestrationV2Run;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -421,6 +431,7 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
     const declined = yield* Deferred.make<void>();
     let pending = true;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -510,6 +521,7 @@ it.effect.each(["live", "no-session", "unsupported-runtime"] as const)(
             }),
       } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
       const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(SqlitePersistence.layerMemory),
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Orchestrator.OrchestratorV2)({
@@ -567,6 +579,7 @@ it.effect.each([
     const runId = RunId.make("run:thread-management:settle-after-run");
     const dispatched: Array<string> = [];
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -595,4 +608,74 @@ it.effect.each([
 
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
+);
+
+it.effect(
+  "a new Base task cannot bypass its fixed disabled account by selecting another enabled account",
+  () => {
+    const calls: string[] = [];
+    const layerTest = layerDispatchChokepointTest(
+      ServerSettings.layerTest({
+        providerInstances: {
+          [ProviderInstanceId.make("codex_work")]: { driver: "codex", enabled: false },
+          [ProviderInstanceId.make("codex_other")]: { driver: "codex", enabled: true },
+        },
+      }),
+    )(calls, true);
+    return Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const error = yield* Effect.flip(
+        threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("disabled-base-task"),
+          threadId: ThreadId.make("thread:thread-management:chokepoint"),
+          messageId: MessageId.make("task"),
+          text: "task",
+          attachments: [],
+          modelSelection: { instanceId: ProviderInstanceId.make("codex_other"), model: "test" },
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        }),
+      );
+      expect(error).toBeInstanceOf(
+        ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+      );
+      expect(calls).toEqual([]);
+    }).pipe(Effect.provide(layerTest));
+  },
+);
+
+it.effect(
+  "a confirmed Base task recovers its destination after account disable without sending again",
+  () => {
+    const calls: string[] = [];
+    const layerTest = layerDispatchChokepointTest(
+      ServerSettings.layerTest({
+        providerInstances: {
+          [ProviderInstanceId.make("codex_work")]: { driver: "codex", enabled: false },
+        },
+      }),
+    )(calls, true);
+    return Effect.gen(function* () {
+      const input: OrchestrationV2Command = {
+        type: "message.dispatch",
+        commandId: CommandId.make("confirmed-base-task"),
+        threadId: ThreadId.make("thread:thread-management:chokepoint"),
+        messageId: MessageId.make("task"),
+        text: "task",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      };
+      const destination = ThreadId.make("saved-independent-fork");
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO base_session_submissions (request_id,input_json,source_id,thread_id,command_json,state) VALUES (${input.commandId},${encodeCommand(input)},${input.threadId},${destination},${encodeCommand({ ...input, commandId: CommandId.make("base-send:confirmed-base-task"), threadId: destination })},'started')`;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const result = yield* threads.dispatch(input);
+      expect(result.threadId).toBe(destination);
+      expect(calls).toEqual([]);
+    }).pipe(Effect.provide(Layer.mergeAll(layerTest, SqlitePersistence.layerMemory)));
+  },
 );

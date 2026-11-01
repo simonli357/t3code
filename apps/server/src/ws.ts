@@ -1,7 +1,9 @@
+import { readWorkflowBases } from "./project/WorkflowBases.ts";
+import * as WorkerService from "./workers/WorkerService.ts";
 import * as AllocationAssignments from "./allocation/AllocationAssignments.ts";
 import * as ProviderAllocation from "./allocation/ProviderAllocation.ts";
 import * as SessionMoves from "./moves/SessionMoves.ts";
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import { SessionOwnershipError, OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -1342,6 +1344,9 @@ export const layerWsRpc = (
       const allocation = yield* ProviderAllocation.ProviderAllocation;
       const allocationAssignments = yield* AllocationAssignments.AllocationAssignments;
       const sessionMoves = yield* SessionMoves.SessionMoves;
+      const workers = yield* Effect.serviceOption(WorkerService.WorkerService);
+      const baseConfigurationContext =
+        yield* Effect.context<Effect.Services<ReturnType<typeof readWorkflowBases>>>();
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -1905,7 +1910,10 @@ export const layerWsRpc = (
                   Effect.tap((result) =>
                     result.replayed ? Effect.void : recordClientCommandAnalytics(command),
                   ),
-                  Effect.map((result) => ({ sequence: result.sequence })),
+                  Effect.map((result) => ({
+                    sequence: result.sequence,
+                    threadId: result.threadId,
+                  })),
                   Effect.mapError((cause) => {
                     const detail = userFacingDispatchErrorMessage(cause);
                     return new OrchestrationV2DispatchCommandError({
@@ -2508,6 +2516,25 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.providerAllocation]: (input) => allocation.execute(input),
         [WS_METHODS.providerAllocationStart]: (input) => allocationAssignments.start(input),
+        [WS_METHODS.baseSessionsCreate]: (input) => threadManagement.createBase(input),
+        [WS_METHODS.baseSessionsConfiguration]: (input) =>
+          readWorkflowBases(input.projectId).pipe(Effect.provide(baseConfigurationContext)),
+        [WS_METHODS.sessionOwnershipRead]: (input) =>
+          Option.isSome(workers)
+            ? workers.value.readOwnership(input.threadId, input.threadEnvironmentId)
+            : Effect.fail(
+                new SessionOwnershipError({
+                  message: "Session ownership is unavailable on this server.",
+                }),
+              ),
+        [WS_METHODS.sessionOwnershipChange]: (input) =>
+          Option.isSome(workers)
+            ? workers.value.changeOwnership(input)
+            : Effect.fail(
+                new SessionOwnershipError({
+                  message: "Session ownership is unavailable on this server.",
+                }),
+              ),
         [WS_METHODS.sessionMovesRequest]: (input) => sessionMoves.request(input),
         [WS_METHODS.sessionMovesStatus]: (input) => sessionMoves.status(input),
         [WS_METHODS.serverUpdateSettings]:

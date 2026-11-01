@@ -1,3 +1,4 @@
+import { ProjectBasePromptSettings } from "./components/ProjectBasePromptSettings";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
@@ -251,6 +252,7 @@ function ProjectOverviewContent(props: {
 
   return (
     <>
+      <ProjectBasePromptSettings members={props.members} />
       <View className="flex-row items-center gap-4 px-2">
         <ProjectFavicon
           environmentId={representative.environmentId}

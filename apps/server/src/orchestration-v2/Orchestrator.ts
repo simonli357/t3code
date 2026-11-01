@@ -310,6 +310,7 @@ export const OrchestratorV2Error = Schema.Union([
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
 export interface OrchestratorV2DispatchResult {
+  readonly threadId?: ThreadId;
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
   /** The command id was already accepted; analytics skip it. */
@@ -3398,6 +3399,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title }),
+            ...(command.isBase === undefined ? {} : { isBase: command.isBase }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
@@ -3448,7 +3450,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : command.regenerateTitle === false || command.title !== undefined
                 ? { titleRegeneration: null }
                 : {}),
-            updatedAt: now,
+            // Empty updates invalidate SQL-derived shell organization without moving its activity order.
+            updatedAt: [
+              command.title,
+              command.isBase,
+              command.regenerateTitle,
+              command.branch,
+              command.worktreePath,
+              command.limitRecovery,
+              command.linkedPullRequest,
+            ].some((value) => value !== undefined)
+              ? now
+              : thread.updatedAt,
           };
         }
         case "thread.pull-request.link":
@@ -4131,6 +4144,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // The source is unlocked; validate the modes copied here, not an earlier read.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
 
+    if (
+      command.nativeOnly &&
+      sourceProjection.runs.some((run) =>
+        ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
+      )
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "The Base is busy. Wait for its work to finish before sending a task.",
+      });
+    }
     const sourceRun = runForSourcePoint(sourceProjection, command.sourcePoint);
 
     if (sourceRun === null) {
@@ -4190,7 +4215,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       threadId: command.targetThreadId,
       providerInstanceId: sourceRun.providerInstanceId,
       occurredAt: now,
-      payload: transfer,
+      payload: { ...transfer, nativeOnly: command.nativeOnly },
     });
   });
 
@@ -5475,7 +5500,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const completeSourcePlan = (occurredAt: DateTime.Utc) =>
-      sourcePlan === null
+      // A task can reference its Base's plan without consuming the reusable template.
+      sourcePlan === null ||
+      (sourcePlanProjection?.thread.isBase && sourcePlan.threadId !== command.threadId)
         ? Effect.void
         : emit(
             events,
@@ -6394,6 +6421,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               fromSpecificTurn: sourceRun !== null,
             }),
           );
+    if (pendingForkTransfer?.nativeOnly && forkExecution !== "native_fork") {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "This Base requires a native context fork. The provider cannot fork its saved context; nothing was sent.",
+      });
+    }
     const canResolveForkNatively = forkExecution === "native_fork";
     const requiresPortableFork = forkExecution === "portable_context";
 

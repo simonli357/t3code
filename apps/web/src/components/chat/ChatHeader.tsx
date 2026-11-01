@@ -1,3 +1,4 @@
+import { ChatSessionRole } from "../SessionRoleLabel";
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
@@ -346,6 +347,7 @@ export const ChatHeader = memo(function ChatHeader({
             </WorkspaceBreadcrumbSeparator>
           </>
         ) : null}
+        <ChatSessionRole threadRef={activeThreadRef} />
         <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
           {renamingTitle !== null ? (
             <input

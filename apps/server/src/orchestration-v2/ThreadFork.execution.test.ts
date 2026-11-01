@@ -395,11 +395,13 @@ it.effect.each(forkCases)(
 );
 
 it.effect.each([
-  { execution: "portable_context", rejected: true },
-  { execution: "native_fork", rejected: false },
+  { execution: "portable_context", rejected: true, nativeOnly: false },
+  { execution: "native_fork", rejected: false, nativeOnly: false },
+  { execution: "portable_context", rejected: true, nativeOnly: true },
+  { execution: "native_fork", rejected: false, nativeOnly: true },
 ] as const)(
-  "a $execution fork's first /compact is rejected only when no history reaches it: $rejected",
-  ({ execution, rejected }) => {
+  "a $execution fork (native-only: $nativeOnly) refuses unavailable context and keeps its source unchanged",
+  ({ execution, rejected, nativeOnly }) => {
     const opened: Array<ProviderInstanceId> = [];
     const adapter = (driverName: "claudeAgent" | "codex") => {
       const driver = ProviderDriverKind.make(driverName);
@@ -559,7 +561,15 @@ it.effect.each([
         ],
       });
       yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("fork-base-designate"),
+        threadId: sourceThreadId,
+        isBase: true,
+      });
+      const original = yield* orchestrator.getThreadProjection(sourceThreadId);
+      yield* orchestrator.dispatch({
         type: "thread.fork",
+        nativeOnly,
         commandId: CommandId.make("fork-compact-fork"),
         sourceThreadId,
         targetThreadId,
@@ -567,7 +577,8 @@ it.effect.each([
         createdBy: "user",
         creationSource: "web",
       });
-      yield* orchestrator.dispatch({
+      assert.equal((yield* orchestrator.getThreadShell(targetThreadId))?.isBase, false);
+      const dispatch = orchestrator.dispatch({
         type: "message.dispatch",
         commandId: CommandId.make("fork-compact-compact"),
         threadId: targetThreadId,
@@ -579,7 +590,20 @@ it.effect.each([
         createdBy: "user",
         creationSource: "web",
       });
+      if (nativeOnly && execution === "portable_context") {
+        const error = yield* Effect.flip(dispatch);
+        assert.equal(error._tag, "OrchestratorDispatchError");
+        assert.isEmpty(opened);
+        const after = yield* orchestrator.getThreadProjection(sourceThreadId);
+        // Fork lineage is recorded on both ends; source conversation, runs and native references stay unchanged.
+        assert.deepEqual({ ...after, contextTransfers: [] }, { ...original, contextTransfers: [] });
+        return;
+      }
+      yield* dispatch;
       yield* worker.drain();
+      const after = yield* orchestrator.getThreadProjection(sourceThreadId);
+      // Fork lineage is recorded on both ends; source conversation, runs and native references stay unchanged.
+      assert.deepEqual({ ...after, contextTransfers: [] }, { ...original, contextTransfers: [] });
 
       const projection = yield* orchestrator.getThreadProjection(targetThreadId);
       if (execution === "portable_context") {

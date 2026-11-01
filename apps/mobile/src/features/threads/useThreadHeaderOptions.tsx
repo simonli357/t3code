@@ -16,6 +16,7 @@ import {
 type NativeHeaderItems = ReadonlyArray<Record<string, unknown>>;
 
 export function useThreadHeaderOptions(props: {
+  readonly onOrganization?: (() => void) | undefined;
   readonly title: string;
   readonly subtitle: string;
   readonly headerColor: string;
@@ -88,8 +89,22 @@ export function useThreadHeaderOptions(props: {
         ? undefined
         : () => compactHomeHeaderItems,
     // The workspace navigator adds compose to the Duo detail column's bar.
-    unstable_headerRightItems: () =>
-      usesDuoHeader || layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems,
+    unstable_headerRightItems: () => [
+      ...(props.onOrganization
+        ? [
+            withNativeGlassHeaderItem({
+              accessibilityLabel: "Session organization and Base controls",
+              identifier: "thread-organization",
+              icon: { name: "person.2", type: "sfSymbol" as const },
+              onPress: props.onOrganization,
+              type: "button" as const,
+            }),
+          ]
+        : []),
+      ...(usesDuoHeader || layout.usesSplitView
+        ? threadCenterHeaderItems
+        : compactRightHeaderItems),
+    ],
     unstable_headerToolbarItems: () => [],
     unstable_headerSubtitle: props.usesNativeHeaderGlass ? props.subtitle : undefined,
     contentStyle: undefined,
@@ -100,6 +115,7 @@ export function useThreadHeaderOptions(props: {
     // Factories re-read only on version changes; include displayed items and hidden callback state such as default refs.
     optionsVersion: [
       splitLeftHeaderItems,
+      props.onOrganization,
       threadCenterHeaderItems,
       compactRightHeaderItems,
       usesDuoHeader,

@@ -1,4 +1,16 @@
 import {
+  BaseSessionCreateInput,
+  BaseSessionConfigurationInput,
+  BaseSessionConfiguration,
+  BaseSessionError,
+} from "./baseSessions.ts";
+import {
+  SessionOwnershipInput,
+  SessionOwnershipReadInput,
+  SessionOwnershipResult,
+  SessionOwnershipError,
+} from "./sessionOrganization.ts";
+import {
   SessionMoveError,
   SessionMoveInput,
   SessionMoveResult,
@@ -525,6 +537,10 @@ export const WS_METHODS = {
   serverUpdateSettings: "server.updateSettings",
   providerAllocation: "providerAllocation.execute",
   providerAllocationStart: "providerAllocation.start",
+  baseSessionsCreate: "baseSessions.create",
+  baseSessionsConfiguration: "baseSessions.configuration",
+  sessionOwnershipRead: "sessionOwnership.read",
+  sessionOwnershipChange: "sessionOwnership.change",
   sessionMovesRequest: "sessionMoves.request",
   sessionMovesStatus: "sessionMoves.status",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -836,6 +852,27 @@ const WsProviderAllocationStartRpc = Rpc.make(WS_METHODS.providerAllocationStart
   payload: AllocationStart,
   success: AllocationStartResult,
   error: Schema.Union([AllocationError, EnvironmentAuthorizationError]),
+});
+
+const WsBaseSessionsCreateRpc = Rpc.make(WS_METHODS.baseSessionsCreate, {
+  payload: BaseSessionCreateInput,
+  success: OrchestrationV2RpcSchemas.dispatchCommand.output,
+  error: Schema.Union([BaseSessionError, EnvironmentAuthorizationError]),
+});
+const WsBaseSessionsConfigurationRpc = Rpc.make(WS_METHODS.baseSessionsConfiguration, {
+  payload: BaseSessionConfigurationInput,
+  success: BaseSessionConfiguration,
+  error: Schema.Union([BaseSessionError, EnvironmentAuthorizationError]),
+});
+const WsSessionOwnershipReadRpc = Rpc.make(WS_METHODS.sessionOwnershipRead, {
+  payload: SessionOwnershipReadInput,
+  success: SessionOwnershipResult,
+  error: Schema.Union([SessionOwnershipError, EnvironmentAuthorizationError]),
+});
+const WsSessionOwnershipChangeRpc = Rpc.make(WS_METHODS.sessionOwnershipChange, {
+  payload: SessionOwnershipInput,
+  success: SessionOwnershipResult,
+  error: Schema.Union([SessionOwnershipError, EnvironmentAuthorizationError]),
 });
 
 const WsSessionMovesRequestRpc = Rpc.make(WS_METHODS.sessionMovesRequest, {
@@ -2025,6 +2062,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsProviderAllocationRpc,
   WsProviderAllocationStartRpc,
+  WsBaseSessionsCreateRpc,
+  WsBaseSessionsConfigurationRpc,
+  WsSessionOwnershipReadRpc,
+  WsSessionOwnershipChangeRpc,
   WsSessionMovesRequestRpc,
   WsSessionMovesStatusRpc,
   WsPeerLinksListRpc,

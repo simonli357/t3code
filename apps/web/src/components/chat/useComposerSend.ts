@@ -1,4 +1,10 @@
 import {
+  retainBaseSubmission,
+  preparedBaseIsBusy,
+  openBaseDestination,
+} from "@t3tools/client-runtime/state/base-sessions";
+import { CommandId } from "@t3tools/contracts";
+import {
   mergeDirectPreviewAnnotation,
   resolveBackgroundDraftWorkspaceOptions,
   shouldDockDraftHeroForSubmission,
@@ -59,7 +65,7 @@ import {
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
 import { type ChatMessage } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { newMessageId, newThreadId } from "~/lib/utils";
+import { newMessageId, newThreadId, randomUUID } from "~/lib/utils";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
@@ -443,6 +449,13 @@ export function useComposerSend(input: ComposerSendInput) {
       notifyDirectAnnotationAttached();
       return;
     }
+    if (preparedBaseIsBusy(activeThread)) {
+      setThreadError(
+        activeThread.id,
+        "The Base is busy. Wait for its work to finish before sending a task or refreshing it.",
+      );
+      return;
+    }
     if (needsLoadBalancing) {
       const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
       toastManager.add({
@@ -656,6 +669,7 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
     if (
+      !activeThread.isBase &&
       !directAnnotation &&
       sendInteractionModeEnabled &&
       showPlanFollowUpPrompt &&
@@ -1107,6 +1121,66 @@ export function useComposerSend(input: ComposerSendInput) {
       attachments: composerAttachmentsSnapshot,
       usesAttachmentUploads: turnUsesAttachmentUploads,
     });
+    if (activeThread.isBase) {
+      const key = `t3code:base-submission:${environmentId}:${threadIdForSend}`;
+      const storage = {
+        read: async () => localStorage.getItem(key),
+        write: async (value: string) => {
+          localStorage.setItem(key, value);
+        },
+        clear: async () => {
+          localStorage.removeItem(key);
+        },
+      };
+      try {
+        const attachments = await turnAttachmentsPromise;
+        const context = buildOutgoingMessageContext(
+          boundAttachmentIds(attachments, composerAttachmentsSnapshot),
+        );
+        const input = await retainBaseSubmission(storage, {
+          commandId: CommandId.make(randomUUID()),
+          createdAt: messageCreatedAt,
+          threadId: threadIdForSend,
+          message: {
+            messageId: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            attachments,
+            ...(context ? { context } : {}),
+          },
+          modelSelection: activeThread.modelSelection,
+          runtimeMode: activeThread.runtimeMode,
+          interactionMode: activeThread.interactionMode,
+        });
+        await openBaseDestination(
+          storage,
+          async () => {
+            const result = await startThreadTurn({ environmentId, input });
+            if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+            if (!result.value.threadId || result.value.threadId === threadIdForSend)
+              throw new Error(
+                "The server did not confirm an independent fork. The draft is retained.",
+              );
+            return result.value.threadId;
+          },
+          (destination) =>
+            navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(scopeThreadRef(environmentId, destination)),
+            }),
+        );
+        promptRef.current = "";
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        await storage.clear();
+      } catch (error) {
+        setThreadError(threadIdForSend, error instanceof Error ? error.message : String(error));
+      } finally {
+        sendInFlightRef.current = false;
+        resetLocalDispatch();
+      }
+      return;
+    }
     if (multipleModelSelections !== null) {
       await sendToMultipleModels({
         threadId: threadIdForSend,

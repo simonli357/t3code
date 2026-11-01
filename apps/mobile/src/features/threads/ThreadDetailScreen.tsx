@@ -1,3 +1,4 @@
+import { preparedBaseIsBusy } from "@t3tools/client-runtime/state/base-sessions";
 import { useOpenThreadInspector } from "./thread-inspector-navigation";
 import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
@@ -1090,6 +1091,13 @@ function ThreadDetailBody(props: ThreadDetailScreenProps) {
     followUp?: ActiveTurnComposerAction,
     stillSendable?: () => boolean,
   ) => {
+    if (preparedBaseIsBusy(props.selectedThread)) {
+      Dialog.alert(
+        "Base is busy",
+        "Wait for its work to finish before sending a task or refreshing it.",
+      );
+      return null;
+    }
     const scope = threadScope.current.signal;
     const targetThreadKey = selectedThreadKey;
     const hasUserMessage = selectedThreadFeed.some(

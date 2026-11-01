@@ -1,3 +1,4 @@
+import { SessionOrganizationSheet } from "./SessionOrganizationSheet";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
@@ -577,6 +578,8 @@ export const ThreadListV2PendingRow = memo(function ThreadListV2PendingRow(props
 });
 
 export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
+  readonly organizationCaption?: string | undefined;
+  readonly organizationDepth?: number | undefined;
   readonly thread: EnvironmentThreadShell;
   readonly variant: "card" | "slim";
   readonly hasQueuedMessages?: boolean;
@@ -661,6 +664,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const pinnedRow = props.pinned === true;
   const dormant = useSwipeRowDormant(props.activationKey);
 
+  const [organizationOpen, setOrganizationOpen] = useState(false);
   const selectThread = () => onSelectThread(thread);
   const { providerDrivers, providerIconUrl } = useMemo(() => {
     const provider = props.providers?.find(
@@ -842,6 +846,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const canTurnIntoProject = canTurnThreadIntoProject(thread);
   const titleMenuItems = useMemo<MenuAction[]>(
     () => [
+      { id: "organization", title: "Session organization and Base", image: "person.2" },
       { id: "rename", title: "Rename", image: "square.and.pencil" },
       ...buildThreadTitleRegenerationMenuItems({
         supported: props.titleRegenerationSupported,
@@ -927,6 +932,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   );
   const handleMenuAction = useCallback(
     ({ nativeEvent }: { readonly nativeEvent: { readonly event: string } }) => {
+      if (nativeEvent.event === "organization") setOrganizationOpen(true);
       if (nativeEvent.event === "new-thread-on-branch") onNewThreadOnBranch(thread);
       if (nativeEvent.event === "settle") handleSettle();
       if (nativeEvent.event === "unsettle") handleUnsettle();
@@ -1059,6 +1065,17 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const titleTextInset = props.project ? projectIconSize + 8 : 0;
   const cardContent = (
     <>
+      {props.organizationCaption && (
+        <Text
+          className="text-xs text-foreground-muted"
+          style={{ paddingLeft: Math.min(props.organizationDepth ?? 0, 3) * 12 }}
+        >
+          {props.organizationCaption}
+        </Text>
+      )}
+      {organizationOpen && (
+        <SessionOrganizationSheet thread={thread} onClose={() => setOrganizationOpen(false)} />
+      )}
       <View className="flex-row items-start gap-2">
         {props.project ? (
           <View className="justify-center" style={{ height: titleLineHeight }}>

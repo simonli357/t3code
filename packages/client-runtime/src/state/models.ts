@@ -135,6 +135,8 @@ function threadRunStatusIsActive(status: ThreadRuntimeSummary["status"]): boolea
 }
 
 export interface EnvironmentThreadShell {
+  readonly isBase?: boolean;
+  readonly organization?: OrchestrationV2ThreadShell["organization"];
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly projectId: ProjectId;
@@ -352,6 +354,8 @@ export function presentThreadShell(
           },
     deletedAt: nullableIso(thread.deletedAt),
     source: thread,
+    ...(thread.isBase === undefined ? {} : { isBase: thread.isBase }),
+    ...(thread.organization === undefined ? {} : { organization: thread.organization }),
   };
 }
 

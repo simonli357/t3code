@@ -542,58 +542,96 @@ it.effect(
     }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("implements a proposed plan that the command projection leaves out", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const threadId = ThreadId.make("thread:implement-plan");
-    const planId = PlanId.make("plan:implement-plan");
-    const now = yield* DateTime.now;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make("create-implement-plan"),
-      threadId,
-      projectId: ProjectId.make("project:implement-plan"),
-      title: "Plan",
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "plan",
-      branch: null,
-      worktreePath: null,
-      createdBy: "user",
-      creationSource: "web",
-    });
-    yield* projections.apply({
-      id: EventId.make("plan:implement-plan"),
-      type: "plan.updated",
-      threadId,
-      occurredAt: now,
-      payload: {
-        id: planId,
+it.effect.each([
+  { isBase: false, separateTask: false },
+  { isBase: true, separateTask: true },
+  { isBase: true, separateTask: false },
+])(
+  "implements a plan while preserving a separate Base source (base=$isBase, separate=$separateTask)",
+  ({ isBase, separateTask }) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread:implement-plan");
+      const planId = PlanId.make("plan:implement-plan");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-implement-plan"),
         threadId,
-        runId: null,
-        nodeId: NodeId.make("node:implement-plan"),
-        kind: "proposed_plan",
-        status: "active",
-        markdown: "# Plan\n\n1. Do the thing.",
-      },
-    });
+        projectId: ProjectId.make("project:implement-plan"),
+        title: "Plan",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "plan",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      if (isBase)
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("designate-plan-base"),
+          threadId,
+          isBase: true,
+        });
+      const destination = separateTask ? ThreadId.make("separate-plan-task") : threadId;
+      if (separateTask)
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-plan-task"),
+          threadId: destination,
+          projectId: ProjectId.make("project:implement-plan"),
+          title: "Task",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      const before = yield* projections.getThread(threadId);
+      yield* projections.apply({
+        id: EventId.make("plan:implement-plan"),
+        type: "plan.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: planId,
+          threadId,
+          runId: null,
+          nodeId: NodeId.make("node:implement-plan"),
+          kind: "proposed_plan",
+          status: "active",
+          markdown: "# Plan\n\n1. Do the thing.",
+        },
+      });
 
-    yield* orchestrator.dispatch({
-      type: "message.dispatch",
-      commandId: CommandId.make("implement-plan"),
-      threadId,
-      messageId: MessageId.make("implement-plan-input"),
-      text: "Implement the plan.",
-      attachments: [],
-      sourcePlanRef: { threadId, planId },
-      dispatchMode: { type: "defer_start" },
-      createdBy: "user",
-      creationSource: "web",
-    });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("implement-plan"),
+        threadId: destination,
+        messageId: MessageId.make("implement-plan-input"),
+        text: "Implement the plan.",
+        attachments: [],
+        sourcePlanRef: { threadId, planId },
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
 
-    assert.equal((yield* projections.getPlan(threadId, planId))?.status, "completed");
-  }).pipe(Effect.provide(layerTest)),
+      assert.equal(
+        (yield* projections.getPlan(threadId, planId))?.status,
+        separateTask ? "active" : "completed",
+      );
+      if (separateTask) {
+        assert.deepEqual(yield* projections.getThread(threadId), before);
+        const records = yield* projections.getThreadRecords(destination, ["runs"]);
+        assert.deepEqual(records.runs[0]?.sourcePlanRef, { threadId, planId });
+      }
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("settles only the stopped run's background work, once", () =>
