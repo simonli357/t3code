@@ -592,6 +592,10 @@ const selectUnusedRuntimes = Effect.fn("cloud.pinned_runtime.select_unused")(fun
       continue;
     }
     const target = path.join(versionsDir, `${PINNED_RUNTIME_PRUNED_PREFIX}${version}`);
+    // A retained interrupted removal may coexist with a reinstalled version. Do not
+    // erase it while making room for the next prune's rename.
+    if (!pruned.has(target) && (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => true))))
+      continue;
     // Renaming first means an interrupted removal never leaves a partial tree that still carries
     // its sentinel and would pass for a complete install.
     yield* fs.remove(target, { recursive: true, force: true }).pipe(

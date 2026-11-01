@@ -354,6 +354,7 @@ it.layer(NodeServices.layer)("prunePinnedRuntimes", (it) => {
         const fallback = "0.0.45+custom.52.git.c7227e08e672";
         const { baseDir, versionsDir, install } = yield* setup([
           fallback,
+          "0.1.3",
           "0.1.4",
           "0.1.5",
           "0.1.6",
@@ -374,6 +375,7 @@ it.layer(NodeServices.layer)("prunePinnedRuntimes", (it) => {
         assert.deepEqual((yield* fs.readDirectory(versionsDir)).toSorted(), [
           ".pruned-0.1.3",
           fallback,
+          "0.1.3",
           "0.1.4",
           "0.1.6",
         ]);
