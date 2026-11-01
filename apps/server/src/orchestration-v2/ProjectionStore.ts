@@ -1,3 +1,8 @@
+import {
+  isLegacyProviderRange,
+  mergeLegacyProviderRange,
+  laterActivityTime,
+} from "@t3tools/shared/orchestrationV2Projection";
 import { makeSessionOrganizationQuery } from "../workers/SessionOrganizationQuery.ts";
 import { pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
@@ -718,7 +723,7 @@ export function emptyProjection(
     contextHandoffs: [],
     contextTransfers: [],
     visibleTurnItems: [],
-    updatedAt: event.occurredAt,
+    updatedAt: event.payload.updatedAt,
   };
 }
 
@@ -739,9 +744,9 @@ export function applyToProjection(
     ...projection,
     thread: {
       ...projection.thread,
-      updatedAt: event.occurredAt,
+      updatedAt: laterActivityTime(projection.thread.updatedAt, event.occurredAt),
     },
-    updatedAt: event.occurredAt,
+    updatedAt: laterActivityTime(projection.updatedAt, event.occurredAt),
   };
 
   switch (event.type) {
@@ -771,6 +776,7 @@ export function applyToProjection(
       return {
         ...base,
         thread: event.payload,
+        updatedAt: event.payload.updatedAt,
       };
     // Reordering and PR refreshes preserve the orchestrator's activity timestamp.
     case "thread.active-reordered":
@@ -850,13 +856,22 @@ export function applyToProjection(
         ...base,
         thread:
           event.payload.appThreadId === base.thread.id &&
+          !isLegacyProviderRange(event) &&
           !isQueuedProviderThreadPlaceholder(event.payload)
             ? {
                 ...base.thread,
                 activeProviderThreadId: event.payload.id,
               }
             : base.thread,
-        providerThreads: upsertById(base.providerThreads, event.payload),
+        providerThreads: upsertById(
+          base.providerThreads,
+          isLegacyProviderRange(event)
+            ? mergeLegacyProviderRange(
+                base.providerThreads.find((thread) => thread.id === event.payload.id),
+                event.payload,
+              )
+            : event.payload,
+        ),
       };
     case "provider-turn.updated":
       return {
@@ -2197,7 +2212,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               break;
             }
             case "provider-thread.updated": {
-              const payloadJson = yield* encodeProviderThreadPayload(event.payload);
+              const historicalRange = isLegacyProviderRange(event);
+              const existingRows = historicalRange
+                ? yield* sql<PayloadRow>`
+                SELECT payload_json FROM orchestration_v2_projection_provider_threads
+                WHERE provider_thread_id = ${event.payload.id} LIMIT 1
+              `
+                : [];
+              const providerThread =
+                historicalRange && existingRows[0]
+                  ? mergeLegacyProviderRange(
+                      yield* decodeProviderThreadPayload(existingRows[0].payload_json),
+                      event.payload,
+                    )
+                  : event.payload;
+              const payloadJson = yield* encodeProviderThreadPayload(providerThread);
               const payload = parseEncodedPayload(payloadJson);
               yield* sql`
               INSERT INTO orchestration_v2_projection_provider_threads (
@@ -2215,16 +2244,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json
               )
               VALUES (
-                ${event.payload.id},
-                ${event.payload.appThreadId},
-                ${event.payload.ownerNodeId},
-                ${event.payload.providerInstanceId},
-                ${event.payload.driver},
-                ${event.payload.providerInstanceId},
-                ${event.payload.providerSessionId},
-                ${event.payload.status},
-                ${event.payload.firstRunOrdinal},
-                ${event.payload.lastRunOrdinal},
+                ${providerThread.id},
+                ${providerThread.appThreadId},
+                ${providerThread.ownerNodeId},
+                ${providerThread.providerInstanceId},
+                ${providerThread.driver},
+                ${providerThread.providerInstanceId},
+                ${providerThread.providerSessionId},
+                ${providerThread.status},
+                ${providerThread.firstRunOrdinal},
+                ${providerThread.lastRunOrdinal},
                 ${stringField(payload, "updatedAt")},
                 ${payloadJson}
               )
@@ -2243,13 +2272,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 payload_json = excluded.payload_json
             `;
               if (
-                event.payload.appThreadId !== null &&
-                !isQueuedProviderThreadPlaceholder(event.payload)
+                !historicalRange &&
+                providerThread.appThreadId !== null &&
+                !isQueuedProviderThreadPlaceholder(providerThread)
               ) {
                 const threadRows = yield* sql<PayloadRow>`
                 SELECT payload_json
                 FROM orchestration_v2_projection_threads
-                WHERE thread_id = ${event.payload.appThreadId}
+                WHERE thread_id = ${providerThread.appThreadId}
                 LIMIT 1
               `;
                 const threadRow = threadRows[0];
@@ -2257,17 +2287,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   const thread = yield* decodeThreadPayload(threadRow.payload_json);
                   const updatedThread = {
                     ...thread,
-                    activeProviderThreadId: event.payload.id,
-                    updatedAt: event.payload.updatedAt,
+                    activeProviderThreadId: providerThread.id,
                   };
                   const updatedThreadPayloadJson = yield* encodeThreadPayload(updatedThread);
                   yield* sql`
                   UPDATE orchestration_v2_projection_threads
                   SET
-                    active_provider_thread_id = ${event.payload.id},
+                    active_provider_thread_id = ${providerThread.id},
                     updated_at = ${stringField(parseEncodedPayload(updatedThreadPayloadJson), "updatedAt")},
                     payload_json = ${updatedThreadPayloadJson}
-                  WHERE thread_id = ${event.payload.appThreadId}
+                  WHERE thread_id = ${providerThread.appThreadId}
                 `;
                 }
               }
@@ -2683,6 +2712,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               updated_at = ${updatedAt},
               payload_json = json_set(payload_json, '$.updatedAt', ${updatedAt})
             WHERE thread_id = ${event.threadId}
+              AND julianday(updated_at) < julianday(${updatedAt})
           `;
           }
         },

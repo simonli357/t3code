@@ -1,3 +1,8 @@
+import {
+  isLegacyProviderRange,
+  mergeLegacyProviderRange,
+  laterActivityTime,
+} from "@t3tools/shared/orchestrationV2Projection";
 import { applyThreadPullRequestLinkUpdate } from "../threadPullRequests.ts";
 import type {
   OrchestrationV2DomainEvent,
@@ -265,11 +270,14 @@ export function applyOrchestrationV2ProjectionEvent(
 
   const partialTimeline = options?.partialTimeline === true;
   const latestLocalTurnOrdinal = options?.latestLocalTurnOrdinal;
-  const base = { ...projection, updatedAt: event.occurredAt };
+  const base = {
+    ...projection,
+    updatedAt: laterActivityTime(projection.updatedAt, event.occurredAt),
+  };
   switch (event.type) {
     case "thread.pull-request-link-updated":
       return {
-        ...base,
+        ...projection,
         thread: applyThreadPullRequestLinkUpdate(projection.thread, event.payload),
       };
     case "thread.created":
@@ -292,7 +300,7 @@ export function applyOrchestrationV2ProjectionEvent(
     case "thread.model-selection-updated":
     case "thread.provider-switched":
     case "thread.guest-share-updated":
-      return { ...base, thread: event.payload };
+      return { ...base, thread: event.payload, updatedAt: event.payload.updatedAt };
     // Visited tracking is read state, not activity: skip the updatedAt bump.
     case "thread.visited":
     case "thread.marked-unread":
@@ -346,7 +354,18 @@ export function applyOrchestrationV2ProjectionEvent(
         ),
       };
     case "provider-thread.updated":
-      return { ...base, providerThreads: upsertEntity(base.providerThreads, event.payload) };
+      return {
+        ...base,
+        providerThreads: upsertEntity(
+          base.providerThreads,
+          isLegacyProviderRange(event)
+            ? mergeLegacyProviderRange(
+                base.providerThreads.find((thread) => thread.id === event.payload.id),
+                event.payload,
+              )
+            : event.payload,
+        ),
+      };
     case "provider-turn.updated":
       return {
         ...base,

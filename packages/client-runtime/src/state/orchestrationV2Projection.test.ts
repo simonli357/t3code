@@ -6,8 +6,10 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
   MessageId,
+  EventId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   NodeId,
   ProviderThreadId,
   ProviderTurnId,
@@ -717,4 +719,82 @@ it("restores deduped bodies from the records it already holds, also in a partial
     event("subagent.updated", { ...subagent, prompt: "", promptOmitted: true, progress: "step 2" }),
   );
   expect(progressed?.subagents).toEqual([{ ...subagent, progress: "step 2" }]);
+});
+
+it("preserves live activity and provider state while applying late legacy hydration", () => {
+  const old = DateTime.makeUnsafe("2026-10-23T21:09:52.575Z");
+  const recent = DateTime.makeUnsafe("2026-11-01T09:18:43.898Z");
+  const binding = {
+    id: ProviderThreadId.make("historical-binding"),
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerSessionId: null,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: ProviderDriverKind.make("codex"),
+      nativeId: "new-head",
+      strength: "strong" as const,
+    },
+    nativeConversationHeadRef: null,
+    status: "active" as const,
+    firstRunOrdinal: 5,
+    lastRunOrdinal: 8,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: old,
+    updatedAt: recent,
+  };
+  const projection = {
+    ...emptyProjection,
+    updatedAt: recent,
+    thread: {
+      ...emptyProjection.thread,
+      updatedAt: recent,
+      title: "Concurrent edit",
+      activeProviderThreadId: ProviderThreadId.make("current-binding"),
+    },
+    providerThreads: [binding],
+  };
+  const range: OrchestrationV2DomainEvent = {
+    id: EventId.make(`migration:v1:history:${threadId}:provider-range`),
+    type: "provider-thread.updated",
+    threadId,
+    occurredAt: old,
+    payload: {
+      ...binding,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 4,
+      updatedAt: old,
+      nativeThreadRef: { ...binding.nativeThreadRef, nativeId: "old-head" },
+    },
+  };
+  const afterRange = applyOrchestrationV2ProjectionEvent(projection, range)!;
+  const afterItem = applyOrchestrationV2ProjectionEvent(afterRange, {
+    id: EventId.make("historical-item"),
+    type: "turn-item.updated",
+    threadId,
+    occurredAt: old,
+    payload: { ...commandItem("old-command", "synthetic", 1), updatedAt: old },
+  })!;
+  expect(afterItem.updatedAt).toEqual(recent);
+  expect(afterItem.thread).toEqual(projection.thread);
+  expect(afterItem.providerThreads).toEqual([{ ...binding, firstRunOrdinal: 1 }]);
+  for (const type of [
+    "thread.active-reordered",
+    "thread.pull-request-synced",
+    "thread.visited",
+    "thread.marked-unread",
+  ] as const) {
+    const changed = applyOrchestrationV2ProjectionEvent(afterItem, {
+      id: EventId.make(type),
+      type,
+      threadId,
+      occurredAt: DateTime.add(recent, { minutes: 5 }),
+      payload: afterItem.thread,
+    })!;
+    expect(changed.updatedAt).toEqual(recent);
+    expect(changed.thread.updatedAt).toEqual(recent);
+  }
 });

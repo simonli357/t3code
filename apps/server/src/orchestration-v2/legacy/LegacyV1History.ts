@@ -111,12 +111,19 @@ export const readHistoryEvents = Effect.fn("LegacyV1History.read")(function* (
   if (!thread) return [];
   const appRow = (yield* sql<{
     payload_json: string;
-  }>`SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`)[0];
+  }>`SELECT payload_json FROM orchestration_events
+     WHERE event_id = ${`migration:v1:thread:${threadId}:created`}
+       AND application_event_version = 2`)[0];
   if (!appRow) return [];
   const app = yield* decodeApp(appRow.payload_json);
+  // Hydration can race a provider switch. Historical turns belong to the original
+  // imported binding, never whichever account/provider happens to be active now.
   const providerRow = (yield* sql<{
     payload_json: string;
-  }>`SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${app.activeProviderThreadId}`)[0];
+  }>`SELECT provider.payload_json FROM orchestration_v2_projection_provider_threads provider
+     JOIN orchestration_events imported ON provider.provider_thread_id = json_extract(imported.payload_json, '$.id')
+     WHERE imported.event_id = ${`migration:v1:thread:${threadId}:native`}
+       AND imported.application_event_version = 2`)[0];
   const provider = providerRow ? yield* decodeProvider(providerRow.payload_json) : undefined;
   const cursorRow = (yield* sql<{
     resume_cursor_json: string;

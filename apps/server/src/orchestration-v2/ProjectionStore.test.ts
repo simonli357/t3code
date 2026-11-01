@@ -11,6 +11,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadHistoryPage,
+  type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShellSnapshot,
   NodeId,
   PlanId,
@@ -823,7 +824,21 @@ const commandReadsSkipSettledLeafNodes = Effect.gen(function* () {
 });
 
 const backgroundThreadUpdatesKeepTimestamp = Effect.gen(function* () {
-  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const persisted = yield* ProjectionStore.ProjectionStoreV2;
+  let replay: OrchestrationV2ThreadProjection | undefined;
+  const store = {
+    ...persisted,
+    apply: (event: Parameters<typeof persisted.apply>[0]) =>
+      persisted.apply(event).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (replay) replay = ProjectionStore.applyToProjection(replay, event);
+            else if (event.type === "thread.created")
+              replay = ProjectionStore.emptyProjection(event);
+          }),
+        ),
+      ),
+  };
   const createdAt = DateTime.makeUnsafe("2026-10-06T14:00:00.000Z");
   const threadId = ThreadId.make("thread:background-updates");
   const thread = {
@@ -865,6 +880,8 @@ const backgroundThreadUpdatesKeepTimestamp = Effect.gen(function* () {
     assert.deepEqual(thread.updatedAt, createdAt);
     assert.deepEqual(shell?.updatedAt, createdAt);
     assert.deepEqual(listed?.updatedAt, createdAt);
+    assert.deepEqual(replay?.thread, projection.thread);
+    assert.deepEqual(replay?.updatedAt, createdAt);
     return projection;
   });
   const link = {
@@ -921,6 +938,21 @@ const backgroundThreadUpdatesKeepTimestamp = Effect.gen(function* () {
   assert.deepEqual(reordered.updatedAt, createdAt);
   assert.equal(reordered.thread.activeOrderKey, "a");
 
+  for (const type of ["thread.visited", "thread.marked-unread"] as const) {
+    const current = yield* store.getThread(threadId);
+    yield* store.apply({
+      id: EventId.make(`event:background-updates:${type}`),
+      type,
+      threadId,
+      occurredAt: DateTime.add(createdAt, { minutes: 51 }),
+      payload: {
+        ...current,
+        lastVisitedAt: type === "thread.visited" ? DateTime.add(createdAt, { minutes: 51 }) : null,
+      },
+    });
+    yield* readActivity;
+  }
+
   // An already-unpinned thread keeps its activity time even when replay's envelope advances.
   yield* store.apply({
     id: EventId.make("event:background-updates:already-unpinned"),
@@ -928,6 +960,33 @@ const backgroundThreadUpdatesKeepTimestamp = Effect.gen(function* () {
     threadId,
     occurredAt: DateTime.add(createdAt, { minutes: 55 }),
     payload: { ...reordered.thread, pinnedAt: null, pinOrderKey: null },
+  });
+  yield* readActivity;
+
+  // A delayed binding update carries two old clocks: neither may lower activity.
+  const old = DateTime.add(createdAt, { minutes: -10 });
+  yield* store.apply({
+    id: EventId.make("event:background-updates:late-binding"),
+    type: "provider-thread.updated",
+    threadId,
+    occurredAt: old,
+    payload: {
+      id: ProviderThreadId.make("late-binding"),
+      driver,
+      providerInstanceId,
+      providerSessionId: null,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: { driver, nativeId: "native-late", strength: "strong" },
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: old,
+      updatedAt: DateTime.add(old, { minutes: -10 }),
+    },
   });
   yield* readActivity;
 });

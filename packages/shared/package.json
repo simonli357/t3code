@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./orchestrationV2Projection": {
+      "types": "./src/orchestrationV2Projection.ts",
+      "import": "./src/orchestrationV2Projection.ts"
+    },
     "./workerMessages": {
       "types": "./src/workerMessages.ts",
       "import": "./src/workerMessages.ts"
