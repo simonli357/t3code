@@ -526,3 +526,98 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it.effect("preserves V1 peer identities and credentials as inactive transition records", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const source =
+        '{"peers":[{"environmentId":"legacy-peer","label":"Previous computer","url":"http://127.0.0.1:9","token":"fixture-only-legacy-token"}]}';
+      const secrets = Layer.effect(
+        ServerSecretStore.ServerSecretStore,
+        Effect.gen(function* () {
+          const store = yield* ServerSecretStore.make;
+          yield* store
+            .set("peer-environments", new TextEncoder().encode(source))
+            .pipe(Effect.orDie);
+          return store;
+        }),
+      );
+      const a = yield* makeA(laptop, secrets);
+      const links = yield* a.links.list;
+      expect(links).toHaveLength(1);
+      expect(links[0]).toMatchObject({
+        environmentId: "legacy-peer",
+        label: "Previous computer",
+        urls: ["http://127.0.0.1:9"],
+        status: "expired",
+      });
+      expect(links[0]?.lastError).toContain("validated V2 transition");
+      const rows = yield* a.sql<{
+        fenced: number;
+        secret_name: string;
+      }>`SELECT fenced, secret_name FROM peer_environment_links`;
+      expect(rows[0]?.fenced).toBe(0);
+      expect((yield* a.links.resolve(links[0]!.environmentId).pipe(Effect.flip)).reason).toBe(
+        "expired",
+      );
+      // The source is still available to the deterministic transition tool and V1 rollback.
+      const stored = yield* a.sql`SELECT environment_id FROM peer_environment_links`;
+      expect(stored).toEqual([{ environment_id: "legacy-peer" }]);
+      yield* a.links.unlink(links[0]!.environmentId);
+      expect(yield* a.links.list).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect(
+  "transitions a retained V1 peer only after validating its identity and new fenced credential",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const b = yield* serveB(box);
+        const source = JSON.stringify({
+          peers: [
+            {
+              environmentId: box.environmentId,
+              label: box.label,
+              url: b.url,
+              token: "fixture-only-v1-token",
+            },
+          ],
+        });
+        const stores = yield* Ref.make<
+          Option.Option<ServerSecretStore.ServerSecretStore["Service"]>
+        >(Option.none());
+        const secrets = Layer.effect(
+          ServerSecretStore.ServerSecretStore,
+          Effect.gen(function* () {
+            const store = yield* ServerSecretStore.make;
+            yield* store
+              .set("peer-environments", new TextEncoder().encode(source))
+              .pipe(Effect.orDie);
+            yield* Ref.set(stores, Option.some(store));
+            return store;
+          }),
+        );
+        const a = yield* makeA(laptop, secrets);
+        const pairing = yield* b.auth.issuePairingCredential();
+        const linked = yield* a.links.link({
+          url: b.url,
+          expectedEnvironmentId: box.environmentId,
+          expectedLabel: box.label,
+          pairingCode: pairing.credential,
+          access: "full-access",
+        });
+        expect(linked.environmentId).toBe(box.environmentId);
+        expect(yield* probe(a)).toMatchObject({ modes: "full-access/default" });
+        const store = Option.getOrThrow(yield* Ref.get(stores));
+        expect(
+          new TextDecoder().decode(Option.getOrThrow(yield* store.get("peer-environments"))),
+        ).toBe(source);
+        expect(yield* a.links.list).toHaveLength(1);
+        expect(
+          (yield* a.sql<{ fenced: number }>`SELECT fenced FROM peer_environment_links`)[0]?.fenced,
+        ).toBe(1);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
