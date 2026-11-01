@@ -262,6 +262,7 @@ import {
 } from "../files/filePath";
 import { waitForThreadShellReady } from "./threadForkNavigation";
 import { resolveUserMessageIntentBadge } from "./userMessageIntentBadge";
+import { isMasterInstruction } from "@t3tools/shared/workerMessages";
 import { fileChipClipboardPath, fileChipMenu, resolveFileChipTarget } from "./fileChipMenu";
 import { useFileChipShare } from "./useFileChipShare";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
@@ -1014,6 +1015,20 @@ function useMarkdownStyles(): MarkdownStyleSets {
   };
 }
 
+function MasterInstructionHeader(props: {
+  readonly environmentId: EnvironmentId;
+  readonly senderThreadId?: ThreadId;
+}) {
+  const senderShell = useQuietThreadShell(
+    props.senderThreadId ? scopeThreadRef(props.environmentId, props.senderThreadId) : null,
+  );
+  return (
+    <Text className="px-3.5 pt-2.5 font-t3-medium text-xs text-user-bubble-foreground-muted">
+      From master: {senderShell?.title.trim() || "Master"}
+    </Text>
+  );
+}
+
 /** Messages from other agents fold to one line so the user's own messages stay easy to find. */
 function AgentMessageFoldHeader(props: {
   readonly environmentId: EnvironmentId;
@@ -1579,7 +1594,9 @@ function renderFeedEntry(
     }
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
-      const foldRowId = presentation.attribution === "agent" ? `agent:${message.id}` : null;
+      const masterInstruction = isMasterInstruction(message);
+      const foldRowId =
+        presentation.attribution === "agent" && !masterInstruction ? `agent:${message.id}` : null;
       const foldExpanded = foldRowId !== null && (props.expandedWorkRows[foldRowId] ?? false);
       const bubbleBodyVisible = foldRowId === null || foldExpanded;
       const intentBadge = resolveUserMessageIntentBadge(message.inputIntent);
@@ -1624,6 +1641,12 @@ function renderFeedEntry(
             }}
           >
             {presentation.attribution === "guest" ? <GuestBubbleTint /> : null}
+            {masterInstruction ? (
+              <MasterInstructionHeader
+                environmentId={props.environmentId}
+                senderThreadId={message.senderThreadId}
+              />
+            ) : null}
             {foldRowId !== null ? (
               <AgentMessageFoldHeader
                 environmentId={props.environmentId}

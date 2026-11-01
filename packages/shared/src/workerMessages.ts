@@ -18,6 +18,14 @@ const MASTER_MESSAGE_TIME = new Intl.DateTimeFormat("en-GB", {
   minute: "2-digit",
   hourCycle: "h23",
 });
+
+/** A durable worker assignment keeps its author and full instruction visible in every client. */
+export function isMasterInstruction(message: {
+  readonly id: string;
+  readonly role: string;
+}): boolean {
+  return message.role === "user" && MASTER_MESSAGE_ID.test(message.id);
+}
 // Reports, notices, digests and peer messages have their own named job kinds.
 const DELIVERED_MESSAGE_ID = /^worker-job:(?:report|notice|digest|message|peer):/;
 
@@ -315,7 +323,7 @@ export function presentWorkerMessage(
 ): WorkerMessageView | null {
   const { text } = message;
   if (message.role !== "user") return null;
-  if (MASTER_MESSAGE_ID.test(message.id)) {
+  if (isMasterInstruction(message)) {
     const timestamp = message.createdAt ? Date.parse(message.createdAt) : Number.NaN;
     const time = Number.isFinite(timestamp) ? MASTER_MESSAGE_TIME.format(timestamp) : null;
     return {

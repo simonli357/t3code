@@ -1,4 +1,9 @@
 import { parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import {
+  isMasterInstruction,
+  presentWorkerMessage,
+  workerMessagePreview,
+} from "@t3tools/shared/workerMessages";
 import type { Nodes } from "mdast";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -23,10 +28,13 @@ export function deriveTimelineMinimapItems(
       continue;
     }
 
+    const masterInstruction = isMasterInstruction(row.message)
+      ? presentWorkerMessage(row.message)
+      : null;
     items.push({
       id: row.id,
       rowIndex: index,
-      userText: row.message.text,
+      userText: masterInstruction ? workerMessagePreview(masterInstruction) : row.message.text,
       assistantText: resolveFinalAssistantTextForTurn(rows, index),
     });
   }
