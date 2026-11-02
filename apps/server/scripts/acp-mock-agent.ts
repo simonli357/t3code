@@ -15,6 +15,7 @@ import type * as AcpSchema from "effect-acp/schema";
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
 const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
+const deepseekProfile = process.env.T3_ACP_DEEPSEEK === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -118,6 +119,28 @@ process.once("exit", (code) => {
 });
 
 function configOptions(): ReadonlyArray<AcpSchema.SessionConfigOption> {
+  if (deepseekProfile) {
+    return [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select",
+        currentValue: '["deepseek-official","deepseek-flash"]',
+        options: [{ value: '["deepseek-official","deepseek-flash"]', name: "DeepSeek V4.1 Flash" }],
+      },
+      {
+        id: "reasoning_effort",
+        name: "Reasoning",
+        type: "select",
+        currentValue: currentReasoning,
+        options: [
+          { value: "low", name: "Low" },
+          { value: "max", name: "Max" },
+        ],
+      },
+    ];
+  }
   if (antigravityProfile) {
     return [
       {
@@ -354,6 +377,14 @@ const grokAcpModels: ReadonlyArray<AcpSchema.ModelInfo> = [
 ];
 
 function modelState(): AcpSchema.SessionModelState {
+  if (deepseekProfile) {
+    return {
+      currentModelId: '["deepseek-official","deepseek-flash"]',
+      availableModels: [
+        { modelId: '["deepseek-official","deepseek-flash"]', name: "DeepSeek V4.1 Flash" },
+      ],
+    };
+  }
   if (antigravityProfile) {
     return { currentModelId, availableModels: antigravityModels };
   }
@@ -573,7 +604,10 @@ const program = Effect.gen(function* () {
       if (request.configId === "model" && typeof request.value === "string") {
         currentModelId = request.value;
       }
-      if (request.configId === "reasoning" && typeof request.value === "string") {
+      if (
+        (request.configId === "reasoning" || request.configId === "reasoning_effort") &&
+        typeof request.value === "string"
+      ) {
         currentReasoning = request.value;
       }
       if (request.configId === "context" && typeof request.value === "string") {

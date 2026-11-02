@@ -6117,3 +6117,81 @@ describe("current global instructions across provider instances", () => {
     });
   }
 });
+
+for (const [driver, id, model] of [
+  ["codex", "deepseek_codex", "deepseek-flash"],
+  ["deepseekHarness", "deepseekHarness", "deepseek-official/deepseek-flash"],
+  ["pi", "pi", "deepseek/deepseek-flash"],
+] as const) {
+  const instanceId = ProviderInstanceId.make(id);
+  const fake = makeFakeCodexAdapter(ProviderDriverKind.make(driver));
+  const test = makeProviderServiceLayer({
+    registry: makeStaticInstanceRegistry([[instanceId, fake.adapter]]),
+  });
+  test.layer(`DeepSeek policy through ${driver}`, (it) => {
+    it.effect(
+      "blocks Pro before startup and pins Flash start, continuation and resumed sessions to max",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const threadId = ThreadId.make(`deepseek-policy-${driver}`);
+          const start = {
+            threadId,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access" as const,
+            cwd: process.cwd(),
+          };
+          const failure = yield* Effect.flip(
+            service.startSession(threadId, {
+              ...start,
+              modelSelection: createModelSelection(instanceId, "deepseek-v4-pro"),
+            }),
+          );
+          assert.instanceOf(failure, ProviderValidationError);
+          assert.equal(fake.startSession.mock.calls.length, 0);
+          yield* service.startSession(threadId, {
+            ...start,
+            modelSelection: {
+              instanceId,
+              model,
+              options: [{ id: "reasoningEffort", value: "low" }],
+            },
+          });
+          const wanted = [
+            {
+              id: driver === "deepseekHarness" ? "reasoning_effort" : "reasoningEffort",
+              value: "max",
+            },
+          ];
+          assert.deepStrictEqual(
+            fake.startSession.mock.calls.at(-1)?.[0].modelSelection?.options,
+            wanted,
+          );
+          yield* service.sendTurn({ threadId, input: "Continue" });
+          assert.deepStrictEqual(
+            fake.sendTurn.mock.calls.at(-1)?.[0].modelSelection?.options,
+            wanted,
+          );
+          const calls = fake.sendTurn.mock.calls.length;
+          yield* Effect.flip(
+            service.sendTurn({
+              threadId,
+              input: "No Pro",
+              modelSelection: createModelSelection(instanceId, "deepseek-v4-pro"),
+            }),
+          );
+          assert.equal(fake.sendTurn.mock.calls.length, calls);
+          yield* fake.adapter.stopSession(threadId);
+          yield* service.sendTurn({ threadId, input: "Recover" });
+          assert.deepStrictEqual(
+            fake.startSession.mock.calls.at(-1)?.[0].modelSelection?.options,
+            wanted,
+          );
+          assert.deepStrictEqual(
+            fake.sendTurn.mock.calls.at(-1)?.[0].modelSelection?.options,
+            wanted,
+          );
+        }),
+    );
+  });
+}

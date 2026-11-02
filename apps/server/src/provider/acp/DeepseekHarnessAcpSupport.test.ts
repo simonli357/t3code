@@ -104,3 +104,30 @@ it.effect("resumes a thread saved with the retired Flash slug on the live model 
     expect(selectedModels).toEqual(['["deepseek-official","deepseek-flash"]']);
   }),
 );
+
+it.effect("refuses a missing Flash model instead of silently using the native Pro default", () =>
+  Effect.gen(function* () {
+    const pro = '["deepseek-official","deepseek-v4-pro"]';
+    const options: ReadonlyArray<EffectAcpSchema.SessionConfigOption> = [
+      {
+        id: "model",
+        name: "Model",
+        type: "select",
+        currentValue: pro,
+        options: [{ value: pro, name: "Pro" }],
+      },
+    ];
+    const error = yield* Effect.flip(
+      applyDeepseekHarnessModelSelection({
+        runtime: {
+          getConfigOptions: Effect.succeed(options),
+          setModel: () => Effect.die("Must refuse before selecting a model"),
+          setConfigOption: () => Effect.die("Must refuse before changing reasoning"),
+        },
+        model: "deepseek-flash",
+        mapError: (cause) => cause,
+      }),
+    );
+    expect(error.message).toContain("not available");
+  }),
+);

@@ -1,14 +1,14 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ChatAttachment, ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
+import type { ChatAttachment, ModelSelection } from "@t3tools/contracts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
-import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
+import { enforceDeepseekModelSelection } from "../provider/deepseekPolicy.ts";
 
 export interface CommitMessageGenerationInput {
   cwd: string;
@@ -118,16 +118,27 @@ type TextGenerationOp =
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
   operation: TextGenerationOp,
-  instanceId: ProviderInstanceId,
-): Effect.Effect<ProviderInstance["textGeneration"], TextGenerationError> =>
-  registry.getInstance(instanceId).pipe(
+  modelSelection: ModelSelection,
+) =>
+  registry.getInstance(modelSelection.instanceId).pipe(
     Effect.flatMap((instance) =>
       instance
-        ? Effect.succeed(instance.textGeneration)
+        ? enforceDeepseekModelSelection(
+            instance.driverKind,
+            instance.instanceId,
+            modelSelection,
+            operation,
+          ).pipe(
+            Effect.map((selection) => ({
+              textGeneration: instance.textGeneration,
+              modelSelection: selection ?? modelSelection,
+            })),
+            Effect.mapError((cause) => new TextGenerationError({ operation, detail: cause.issue })),
+          )
         : Effect.fail(
             new TextGenerationError({
               operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
+              detail: `No provider instance registered for id '${modelSelection.instanceId}'.`,
             }),
           ),
     ),
@@ -139,20 +150,26 @@ export const make = Effect.gen(function* () {
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   return TextGeneration.of({
     generateCommitMessage: (input) =>
-      resolveInstance(registry, "generateCommitMessage", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateCommitMessage(input)),
+      resolveInstance(registry, "generateCommitMessage", input.modelSelection).pipe(
+        Effect.flatMap(({ textGeneration, modelSelection }) =>
+          textGeneration.generateCommitMessage({ ...input, modelSelection }),
+        ),
       ),
     generatePrContent: (input) =>
-      resolveInstance(registry, "generatePrContent", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generatePrContent(input)),
+      resolveInstance(registry, "generatePrContent", input.modelSelection).pipe(
+        Effect.flatMap(({ textGeneration, modelSelection }) =>
+          textGeneration.generatePrContent({ ...input, modelSelection }),
+        ),
       ),
     generateBranchName: (input) =>
-      resolveInstance(registry, "generateBranchName", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateBranchName(input)),
+      resolveInstance(registry, "generateBranchName", input.modelSelection).pipe(
+        Effect.flatMap(({ textGeneration, modelSelection }) =>
+          textGeneration.generateBranchName({ ...input, modelSelection }),
+        ),
       ),
     generateThreadTitle: (input) =>
-      resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) =>
+      resolveInstance(registry, "generateThreadTitle", input.modelSelection).pipe(
+        Effect.flatMap(({ textGeneration, modelSelection }) =>
           Effect.gen(function* () {
             const linkedContext =
               input.linkedContext ??
@@ -162,7 +179,11 @@ export const make = Effect.gen(function* () {
                   sourceControl,
                 ),
               ));
-            return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
+            return yield* textGeneration.generateThreadTitle({
+              ...input,
+              linkedContext,
+              modelSelection,
+            });
           }),
         ),
       ),

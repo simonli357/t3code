@@ -41,7 +41,9 @@ import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCi
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { isDeepseekModel } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { enforceDeepseekModelSelection } from "../deepseekPolicy.ts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -1419,7 +1421,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
 
       const cwd = input.cwd ?? readPersistedCwd(input.binding.runtimePayload);
-      const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const persistedModelSelection = yield* enforceDeepseekModelSelection(
+        input.binding.provider,
+        bindingInstanceId,
+        readPersistedModelSelection(input.binding.runtimePayload),
+        input.operation,
+      );
       const workspace = yield* workspaceLaunch(input.binding.threadId, bindingInstanceId, cwd);
 
       yield* assertWorkspaceExists(input.binding.threadId, cwd);
@@ -1588,6 +1595,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ...validated,
           threadId,
           provider: resolvedProvider,
+          modelSelection: yield* enforceDeepseekModelSelection(
+            resolvedProvider,
+            resolvedInstanceId,
+            validated.modelSelection,
+            "ProviderService.startSession",
+          ),
         };
         if (!instanceInfo.enabled) {
           return yield* toValidationError(
@@ -1874,6 +1887,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.sendTurn",
         allowRecovery: false,
       });
+      const savedBinding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      const modelSelection = yield* enforceDeepseekModelSelection(
+        routed.adapter.provider,
+        routed.instanceId,
+        input.modelSelection ?? readPersistedModelSelection(savedBinding?.runtimePayload),
+        "ProviderService.sendTurn",
+      );
+      if (
+        modelSelection &&
+        isDeepseekModel(routed.adapter.provider, routed.instanceId, modelSelection.model)
+      ) {
+        input.modelSelection = modelSelection;
+      }
       if (
         input.continuation === true &&
         !input.input &&
@@ -2075,6 +2101,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.compactThread",
         allowRecovery: true,
       });
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      const requestedModelSelection =
+        modelSelection ?? readPersistedModelSelection(binding?.runtimePayload);
+      if (
+        isDeepseekModel(routed.adapter.provider, routed.instanceId, requestedModelSelection?.model)
+      ) {
+        modelSelection = yield* enforceDeepseekModelSelection(
+          routed.adapter.provider,
+          routed.instanceId,
+          requestedModelSelection,
+          "ProviderService.compactThread",
+        );
+      }
       yield* Effect.annotateCurrentSpan({
         "provider.operation": "compact-thread",
         "provider.kind": routed.adapter.provider,

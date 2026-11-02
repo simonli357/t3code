@@ -1,3 +1,4 @@
+import { isAllowedDeepseekModel } from "@t3tools/shared/model";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL,
@@ -100,7 +101,7 @@ function appendUnavailableDynamicModelSelection(
 ): AppModelOption[] {
   if (provider !== "opencode" && provider !== "antigravity") return options;
   const slug = normalizeCustomModelSlug(selectedModel);
-  if (!slug) return options;
+  if (!slug || !isAllowedDeepseekModel(provider, provider, slug)) return options;
   if (provider === "antigravity" && slug === ANTIGRAVITY_DEFAULT_MODEL) return options;
 
   // A model that exists in the raw catalog can be absent from `options`
@@ -216,7 +217,9 @@ function getAppModelOptions(
 
   const preferences = readInstanceModelPreferences(settings, defaultInstanceId);
   return appendUnavailableDynamicModelSelection(
-    applyInstanceModelPreferences(options, preferences),
+    applyInstanceModelPreferences(options, preferences).filter((option) =>
+      isAllowedDeepseekModel(provider, defaultInstanceId, option.slug),
+    ),
     rawModels,
     provider,
     selectedModel,
@@ -264,7 +267,9 @@ export function getAppModelOptionsForInstance(
 
   const preferences = readInstanceModelPreferences(settings, entry.instanceId);
   return appendUnavailableDynamicModelSelection(
-    applyInstanceModelPreferences(options, preferences),
+    applyInstanceModelPreferences(options, preferences).filter((option) =>
+      isAllowedDeepseekModel(entry.driverKind, entry.instanceId, option.slug),
+    ),
     entry.models,
     entry.driverKind,
     selectedModel,
@@ -314,6 +319,7 @@ export function resolveAppModelSelectionForInstance(
     const hiddenModels = readInstanceModelPreferences(settings, entry.instanceId).hiddenModels;
     if (
       unavailableSelection &&
+      isAllowedDeepseekModel(entry.driverKind, entry.instanceId, unavailableSelection) &&
       !hiddenModels.includes(unavailableSelection) &&
       resolveSelectableModel(entry.driverKind, selectedModel, entry.models) === null &&
       (entry.driverKind !== "antigravity" || unavailableSelection !== ANTIGRAVITY_DEFAULT_MODEL)

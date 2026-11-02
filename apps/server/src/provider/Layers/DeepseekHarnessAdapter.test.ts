@@ -46,6 +46,7 @@ it.effect("forwards T3 MCP and filters DeepSeek Harness load replay", () => {
       directory,
       name: "fake-dsh",
       env: {
+        T3_ACP_DEEPSEEK: "1",
         T3_ACP_EMIT_LOAD_REPLAY: "1",
         T3_ACP_REQUEST_LOG_PATH: requestLogPath,
       },

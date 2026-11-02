@@ -105,3 +105,48 @@ describe("applyPiModelSelection", () => {
     }),
   );
 });
+
+it.effect("blocks a Pro default alias and always requests max for DeepSeek Flash", () =>
+  Effect.gen(function* () {
+    const calls: Array<readonly [string, string]> = [];
+    const pro = "deepseek/deepseek-v4-pro";
+    const flash = "deepseek/deepseek-flash";
+    const options = [
+      {
+        ...modelOption,
+        currentValue: pro,
+        options: [
+          { value: pro, name: "Pro" },
+          { value: flash, name: "Flash" },
+        ],
+      },
+      { ...thoughtLevel, options: [{ value: "max", name: "Max" }] },
+    ];
+    const runtime = {
+      getConfigOptions: Effect.succeed(options),
+      setModel: (value: string) =>
+        Effect.sync(() => {
+          calls.push(["model", value]);
+        }),
+      setConfigOption: (id: string, value: string | boolean) =>
+        Effect.sync(() => {
+          calls.push([id, String(value)]);
+          return { configOptions: options };
+        }),
+    };
+    yield* Effect.flip(
+      applyPiModelSelection({ runtime, model: "pi-default", mapError: (cause) => cause }),
+    );
+    expect(calls).toEqual([]);
+    yield* applyPiModelSelection({
+      runtime,
+      model: flash,
+      reasoningEffort: "low",
+      mapError: (cause) => cause,
+    });
+    expect(calls).toEqual([
+      ["model", flash],
+      ["thought_level", "max"],
+    ]);
+  }),
+);

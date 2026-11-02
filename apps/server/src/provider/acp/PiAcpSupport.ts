@@ -1,5 +1,6 @@
 import { PI_DEFAULT_MODEL, ProviderDriverKind, type PiSettings } from "@t3tools/contracts";
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
+import { isAllowedDeepseekModel, isDeepseekModel } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -134,19 +135,41 @@ export const applyPiModelSelection = Effect.fn("applyPiModelSelection")(function
 }): Effect.fn.Return<string | undefined, E> {
   const options = yield* input.runtime.getConfigOptions;
   const option = piModelOption(options, input.model);
+  const deepseek = isDeepseekModel("pi", "pi", option ?? input.model ?? undefined);
+  if (deepseek && (option === undefined || !isAllowedDeepseekModel("pi", "pi", option))) {
+    return yield* Effect.fail(
+      input.mapError(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32602,
+          errorMessage: "DeepSeek is restricted to V4.1 Flash with max reasoning.",
+        }),
+      ),
+    );
+  }
   if (option !== undefined) {
     yield* input.runtime.setModel(option).pipe(Effect.mapError(input.mapError));
   }
-  if (input.reasoningEffort !== undefined) {
+  const reasoningEffort = deepseek ? "max" : input.reasoningEffort;
+  if (reasoningEffort !== undefined) {
     const thoughtLevel = options.find(
       (candidate) =>
         candidate.id === PI_THOUGHT_LEVEL_CONFIG_ID ||
         candidate.id === "reasoning_effort" ||
         candidate.id === "reasoningEffort",
     );
+    if (deepseek && thoughtLevel?.type !== "select") {
+      return yield* Effect.fail(
+        input.mapError(
+          new EffectAcpErrors.AcpRequestError({
+            code: -32602,
+            errorMessage: "DeepSeek max reasoning is unavailable in this Pi session.",
+          }),
+        ),
+      );
+    }
     if (thoughtLevel?.type === "select") {
       yield* input.runtime
-        .setConfigOption(thoughtLevel.id, input.reasoningEffort)
+        .setConfigOption(thoughtLevel.id, reasoningEffort)
         .pipe(Effect.mapError(input.mapError));
     }
   }

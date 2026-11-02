@@ -42,6 +42,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ModelManifest from "../ModelManifest.ts";
 import { applyProviderCompatibility } from "../providerCompatibility.ts";
+import { restrictDeepseekProvider } from "../deepseekPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderRegistry, type ProviderRegistryShape } from "../Services/ProviderRegistry.ts";
@@ -156,9 +157,7 @@ const mergeProviderModels = (
       .filter((model) => !model.isCustom)
       .flatMap((model) => model.aliases ?? []),
   );
-  const withoutShadowedCatalogAliases = (
-    models: ReadonlyArray<ServerProvider["models"][number]>,
-  ) =>
+  const withoutShadowedCatalogAliases = (models: ReadonlyArray<ServerProvider["models"][number]>) =>
     models.filter((model) => model.isCustom || !catalogAliasSlugs.has(model.slug));
 
   if (shouldRetainMissingModels && nextModels.length === 0 && retainablePreviousModels.length > 0) {
@@ -385,7 +384,7 @@ export const ProviderRegistryLive = Layer.effect(
       manifest: ModelManifest.ModelManifestData,
     ) =>
       applyProviderCompatibility(
-        provider,
+        restrictDeepseekProvider(provider),
         manifest.compatibility,
         ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
       );

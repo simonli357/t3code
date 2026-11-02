@@ -4,6 +4,7 @@ import type {
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
+  isAllowedDeepseekModel,
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
@@ -102,6 +103,7 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
+  if (!isAllowedDeepseekModel(driver ?? "", selection.instanceId, selection.model)) return null;
   if (driver === "antigravity") {
     return selection;
   }
@@ -231,7 +233,9 @@ export function buildModelOptions(
     }
   }
 
-  return [...options.values()];
+  return [...options.values()].filter((option) =>
+    isAllowedDeepseekModel(option.providerDriver, option.providerKey, option.selection.model),
+  );
 }
 
 export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {

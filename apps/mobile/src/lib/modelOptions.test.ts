@@ -409,3 +409,11 @@ describe("mobile model options", () => {
     ).toBeNull();
   });
 });
+
+it("does not resurrect a saved DeepSeek Pro model absent from the catalog", () => {
+  const selection = {
+    instanceId: ProviderInstanceId.make("pi"),
+    model: "deepseek/deepseek-v4-pro",
+  };
+  expect(buildModelOptions(null, selection)).toEqual([]);
+});

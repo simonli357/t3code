@@ -13,6 +13,60 @@ import * as Schema from "effect/Schema";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
+/** The custom build permits DeepSeek V4.1 Flash only, across its harnesses. */
+export function isDeepseekModel(driver: string, instanceId: string, model?: string): boolean {
+  return (
+    driver === "deepseekHarness" ||
+    instanceId.startsWith("deepseek") ||
+    /(^|\/)deepseek(?:[-/]|$)/i.test(model ?? "")
+  );
+}
+
+export function isAllowedDeepseekModel(
+  driver: string,
+  instanceId: string,
+  model?: string,
+): boolean {
+  if (!isDeepseekModel(driver, instanceId, model)) return true;
+  const slug = model?.split("/").at(-1);
+  return (
+    slug === undefined ||
+    slug === "deepseek-flash" ||
+    slug === "deepseek-v4-flash" ||
+    (driver === "deepseekHarness" && slug === "deepseek-harness-default")
+  );
+}
+
+export const deepseekReasoningOptionId = (driver: string) =>
+  driver === "deepseekHarness"
+    ? "reasoning_effort"
+    : driver === "opencode"
+      ? "variant"
+      : "reasoningEffort";
+
+/** Pin omitted or previously saved reasoning settings when starting the next turn. */
+export function pinDeepseekModelSelection(
+  driver: string,
+  instanceId: ProviderInstanceId,
+  selection: ModelSelection | undefined,
+): ModelSelection | undefined {
+  if (!isDeepseekModel(driver, instanceId, selection?.model)) return selection;
+  const model = selection?.model?.replace(/deepseek-v4-flash$/, "deepseek-flash");
+  return {
+    instanceId,
+    model: !model || model === "deepseek-harness-default" ? "deepseek-flash" : model,
+    options: [
+      ...(selection?.options ?? []).filter(
+        (option) =>
+          !["reasoningEffort", "reasoning_effort", "thought_level", "effort", "variant"].includes(
+            option.id,
+          ),
+      ),
+      { id: deepseekReasoningOptionId(driver), value: "max" },
+    ],
+  };
+}
+
 export interface SelectableModelOption {
   slug: string;
   name: string;

@@ -177,3 +177,46 @@ describe("TextGeneration.make", () => {
     }),
   );
 });
+
+it.effect("pins DeepSeek generated text to Flash max and refuses Pro", () =>
+  Effect.gen(function* () {
+    const instanceId = ProviderInstanceId.make("deepseek_codex");
+    const selections: unknown[] = [];
+    const instance = makeStubInstance(
+      instanceId,
+      makeStubTextGeneration({
+        generateBranchName: (input) => {
+          selections.push(input.modelSelection);
+          return Effect.succeed({ branch: "example" });
+        },
+      }),
+    );
+    const service = yield* TextGeneration.make.pipe(
+      Effect.provideService(
+        ProviderInstanceRegistry.ProviderInstanceRegistry,
+        makeStubRegistry([instance]),
+      ),
+      Effect.provide(
+        Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+          resolveLink: () => Effect.die("No links in this request"),
+        }),
+      ),
+    );
+    yield* service.generateBranchName({
+      cwd: process.cwd(),
+      message: "branch",
+      modelSelection: createModelSelection(instanceId, "deepseek-flash"),
+    });
+    expect(selections).toEqual([
+      { instanceId, model: "deepseek-flash", options: [{ id: "reasoningEffort", value: "max" }] },
+    ]);
+    yield* Effect.flip(
+      service.generateBranchName({
+        cwd: process.cwd(),
+        message: "branch",
+        modelSelection: createModelSelection(instanceId, "deepseek-v4-pro"),
+      }),
+    );
+    expect(selections).toHaveLength(1);
+  }),
+);

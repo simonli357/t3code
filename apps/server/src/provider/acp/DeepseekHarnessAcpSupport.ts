@@ -1,4 +1,5 @@
 import { type DeepseekHarnessSettings, type RuntimeMode } from "@t3tools/contracts";
+import { isAllowedDeepseekModel } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
@@ -115,15 +116,34 @@ export const applyDeepseekHarnessModelSelection = Effect.fn("applyDeepseekHarnes
     readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
   }): Effect.fn.Return<string | undefined, E> {
     const options = yield* input.runtime.getConfigOptions;
-    const option = deepseekHarnessModelOption(options, input.model);
+    const option = deepseekHarnessModelOption(
+      options,
+      !input.model || input.model === "deepseek-harness-default" ? "deepseek-flash" : input.model,
+    );
+    if (
+      option === undefined ||
+      !isAllowedDeepseekModel(
+        "deepseekHarness",
+        "deepseekHarness",
+        deepseekHarnessModelSlug(option),
+      )
+    ) {
+      return yield* Effect.fail(
+        input.mapError(
+          new EffectAcpErrors.AcpRequestError({
+            code: -32602,
+            errorMessage:
+              "DeepSeek requires V4.1 Flash with max reasoning; that model is not available for this request.",
+          }),
+        ),
+      );
+    }
     if (option !== undefined) {
       yield* input.runtime.setModel(option).pipe(Effect.mapError(input.mapError));
     }
-    if (input.reasoningEffort !== undefined) {
-      yield* input.runtime
-        .setConfigOption("reasoning_effort", input.reasoningEffort)
-        .pipe(Effect.mapError(input.mapError));
-    }
+    yield* input.runtime
+      .setConfigOption("reasoning_effort", "max")
+      .pipe(Effect.mapError(input.mapError));
     return option === undefined ? undefined : deepseekHarnessModelSlug(option);
   },
 );

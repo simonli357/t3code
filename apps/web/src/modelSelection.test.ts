@@ -914,3 +914,21 @@ describe("resolvePlanAgentHealPatch", () => {
     ).toEqual({ sourceControlWriterModelSelection: healed });
   });
 });
+
+it("keeps disabled DeepSeek custom models out of the picker", () => {
+  const settings: UnifiedSettings = {
+    ...DEFAULT_UNIFIED_SETTINGS,
+    providerInstances: {
+      [ProviderInstanceId.make("deepseek_codex")]: {
+        driver: ProviderDriverKind.make("codex"),
+        config: { customModels: [{ slug: "deepseek-v4-pro", name: "Pro" }] },
+      },
+    },
+  };
+  const entry = deriveProviderInstanceEntries([
+    provider({ instanceId: "deepseek_codex", models: ["deepseek-flash", "deepseek-v4-pro"] }),
+  ])[0]!;
+  expect(
+    getAppModelOptionsForInstance(settings, entry, "deepseek-v4-pro").map((option) => option.slug),
+  ).toEqual(["deepseek-flash"]);
+});
