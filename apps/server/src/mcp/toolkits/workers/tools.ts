@@ -209,10 +209,8 @@ export const handlers = WorkersToolkit.toLayer(
       t3_worker_report: (input) => owner.pipe(Effect.flatMap((id) => service.report(id, input))),
       t3_session_ownership_read: ({ threadId, threadEnvironmentId }) =>
         service.readOwnership(threadId, threadEnvironmentId),
-      t3_session_ownership: ({ userRequest, ...input }) =>
-        owner.pipe(
-          Effect.flatMap((threadId) => service.changeOwnership(input, { threadId, userRequest })),
-        ),
+      t3_session_ownership: ({ userRequest: _legacyUserRequest, ...input }) =>
+        owner.pipe(Effect.flatMap((threadId) => service.changeOwnership(input, { threadId }))),
       t3_worker_reclaim: (input) => owner.pipe(Effect.flatMap((id) => service.reclaim(id, input))),
       t3_worker_spawn: (input) => owner.pipe(Effect.flatMap((id) => assignments.spawn(id, input))),
       t3_worker_list: () => owner.pipe(Effect.flatMap((id) => service.list(id))),
