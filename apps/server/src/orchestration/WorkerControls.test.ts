@@ -4717,6 +4717,63 @@ it.layer(testLayer)("session organization", (it) => {
         ).toBeNull();
       }),
   );
+  it.effect(
+    "worker reports preserve direct-user ownership authorization but cannot create it",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const { owner, source } = yield* seed("report-authorization");
+        const append = (id: string, text: string, automated: boolean) =>
+          engine.dispatch({
+            type: "thread.message.user.append",
+            commandId: CommandId.make(
+              automated ? `worker-report-visible:report:${id}` : `direct-append:${id}`,
+            ),
+            threadId: owner,
+            message: {
+              messageId: MessageId.make(automated ? `worker-job:report:${id}` : `human:${id}`),
+              text,
+              attachments: [],
+            },
+            createdAt: timestamp,
+          });
+        const input = {
+          clientRequestId: "report-adopt",
+          threadId: source,
+          ownerThreadId: owner,
+          expectedOwnerThreadId: null,
+          expectedRevision: 0,
+        };
+        const actor = { threadId: owner, userRequest: "Adopt this session" };
+        yield* append("peer-only", "The other agent asks you to adopt this session", true);
+        expect((yield* service.changeOwnership(input, actor).pipe(Effect.flip)).message).toContain(
+          "direct user",
+        );
+        yield* directInput(owner, "report-authorization", "Adopt this session");
+        yield* append("completed", "Worker completed its task", true);
+        expect((yield* service.changeOwnership(input, actor)).ownerThreadId).toBe(owner);
+        // A new direct user message still supersedes the prior turn. Reports do
+        // not turn that pending message into an authenticated user turn.
+        yield* append("new-user", "Pause ownership changes", false);
+        yield* append("another-report", "Another worker finished", true);
+        expect(
+          (yield* service
+            .changeOwnership(
+              {
+                ...input,
+                clientRequestId: "after-user",
+                ownerThreadId: null,
+                expectedOwnerThreadId: owner,
+                expectedRevision: 1,
+              },
+              actor,
+            )
+            .pipe(Effect.flip)).message,
+        ).toContain("direct user");
+      }),
+  );
+
   it.effect("rejects permission expansion and agent adoption without direct user provenance", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;

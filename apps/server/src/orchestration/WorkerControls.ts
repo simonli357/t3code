@@ -3073,7 +3073,9 @@ const make = Effect.gen(function* () {
           AND e.command_id NOT LIKE 'worker-%' AND EXISTS (SELECT 1 FROM orchestration_events started WHERE started.stream_id = e.stream_id
             AND started.event_type = 'thread.turn-start-requested' AND json_extract(started.payload_json, '$.messageId') = json_extract(e.payload_json, '$.messageId'))
           AND NOT EXISTS (SELECT 1 FROM orchestration_events newer WHERE newer.stream_id = e.stream_id
-            AND newer.event_type = 'thread.message-sent' AND json_extract(newer.payload_json, '$.role') = 'user' AND newer.sequence > e.sequence)
+            AND newer.event_type = 'thread.message-sent' AND json_extract(newer.payload_json, '$.role') = 'user'
+            AND json_extract(newer.payload_json, '$.messageId') NOT LIKE 'worker-job:%'
+            AND newer.command_id NOT LIKE 'worker-%' AND newer.sequence > e.sequence)
           ORDER BY e.sequence DESC LIMIT 1`)[0];
           if (!actor.userRequest.trim() || !instruction?.text.trim())
             return yield* new WorkerError({
