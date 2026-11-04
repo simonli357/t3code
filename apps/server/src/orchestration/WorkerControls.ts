@@ -135,13 +135,13 @@ export const SessionMessageResult = Schema.Struct({
 export const ReclaimInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
   workerThreadIds: Schema.Array(ThreadId).check(Schema.isMinLength(1), Schema.isMaxLength(50)),
-  /** Exact quote from the latest direct user message requesting this reclaim. */
-  userRequest: TrimmedNonEmptyString.check(Schema.isMaxLength(4000)),
+  /** Ignored legacy field retained for older callers. */
+  userRequest: Schema.optional(Schema.String),
 });
 export const ReclaimResult = Schema.Struct({
   ownerThreadId: ThreadId,
   workerThreadIds: Schema.Array(ThreadId),
-  userMessageId: MessageId,
+  userMessageId: Schema.NullOr(MessageId),
 });
 export const ReportInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
@@ -354,12 +354,6 @@ type OrganizationTransaction = {
   result_json: string | null;
   error: string | null;
 };
-const decodeOwnershipAuthorization = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(Schema.Struct({ input: SessionOwnershipInput })),
-);
-const decodeAuthorizationProof = Schema.decodeUnknownEffect(
-  Schema.Struct({ authorized: Schema.Boolean }),
-);
 const decodeOrganizationSnapshot = Schema.decodeUnknownSync(OrganizationSnapshot);
 const decodeOrganizationPatch = Schema.decodeUnknownSync(Schema.fromJsonString(OrganizationPatch));
 const decodeOrganizationDecision = Schema.decodeUnknownSync(OrganizationDecision);
@@ -462,11 +456,6 @@ export const PeerRequest = Schema.TaggedUnion({
   organizationReserve: { id: Schema.String },
   organizationDecision: { id: Schema.String },
   organizationFinish: { id: Schema.String, release: Schema.optional(Schema.Boolean) },
-  organizationAuthorized: {
-    id: Schema.String,
-    input: SessionOwnershipInput,
-    actor: SessionAddress,
-  },
   organizationChange: {
     executionAuthority: Schema.optional(Schema.Boolean),
     input: SessionOwnershipInput,
@@ -529,7 +518,7 @@ export class WorkerControls extends Context.Service<
     ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
     readonly changeOwnership: (
       input: typeof SessionOwnershipInput.Type,
-      actor?: { readonly threadId: ThreadId; readonly userRequest: string },
+      actor?: { readonly threadId: ThreadId; readonly userRequest?: string },
     ) => Effect.Effect<typeof SessionOwnershipResult.Type, SessionOwnershipError>;
     readonly withCoordinationLock: <A, E>(
       effect: Effect.Effect<A, E>,
@@ -3034,7 +3023,7 @@ const make = Effect.gen(function* () {
   const changeOwnership = Effect.fn("WorkerControls.changeOwnership")(
     function* (
       input: typeof SessionOwnershipInput.Type,
-      actor?: { readonly threadId: ThreadId; readonly userRequest: string },
+      actor?: { readonly threadId: ThreadId; readonly userRequest?: string },
     ) {
       const local = (yield* peers.localEnvironment).environmentId;
       const legacy = (yield* sql<{
@@ -3054,45 +3043,7 @@ const make = Effect.gen(function* () {
           previousOwnerEnvironmentId: result.previousOwnerThreadId ? local : null,
         };
       }
-      if (actor) {
-        const authorizationId = `ownership-authorized:${actor.threadId}:${input.clientRequestId}`;
-        const authorized = (yield* sql<{
-          request_json: string;
-        }>`SELECT request_json FROM custom_session_ownership_changes WHERE id = ${authorizationId}`)[0];
-        const authorizedRequest = encodeUnknown({ input, actor });
-        if (authorized && authorized.request_json !== authorizedRequest)
-          return yield* new WorkerError({
-            message: "This request ID belongs to different ownership instructions.",
-          });
-        if (!authorized) {
-          const instruction = (yield* sql<{
-            text: string;
-          }>`SELECT json_extract(e.payload_json, '$.text') AS text
-          FROM orchestration_events e WHERE e.stream_id = ${actor.threadId} AND e.event_type = 'thread.message-sent'
-          AND json_extract(e.payload_json, '$.role') = 'user' AND json_extract(e.payload_json, '$.messageId') NOT LIKE 'worker-job:%'
-          AND e.command_id NOT LIKE 'worker-%' AND EXISTS (SELECT 1 FROM orchestration_events started WHERE started.stream_id = e.stream_id
-            AND started.event_type = 'thread.turn-start-requested' AND json_extract(started.payload_json, '$.messageId') = json_extract(e.payload_json, '$.messageId'))
-          AND NOT EXISTS (SELECT 1 FROM orchestration_events newer WHERE newer.stream_id = e.stream_id
-            AND newer.event_type = 'thread.message-sent' AND json_extract(newer.payload_json, '$.role') = 'user'
-            AND json_extract(newer.payload_json, '$.messageId') NOT LIKE 'worker-job:%'
-            AND newer.command_id NOT LIKE 'worker-%' AND newer.sequence > e.sequence)
-          ORDER BY e.sequence DESC LIMIT 1`)[0];
-          if (!actor.userRequest.trim() || !instruction?.text.trim())
-            return yield* new WorkerError({
-              message:
-                "Changing ownership requires a direct user instruction in this session. Peer messages and inherited instructions cannot authorize adoption.",
-            });
-          yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json, announced)
-          VALUES (${authorizationId}, ${authorizedRequest}, '{}', 1) ON CONFLICT DO NOTHING`;
-          const storedAuthorization = (yield* sql<{
-            request_json: string;
-          }>`SELECT request_json FROM custom_session_ownership_changes WHERE id = ${authorizationId}`)[0];
-          if (storedAuthorization?.request_json !== authorizedRequest)
-            return yield* new WorkerError({
-              message: "This request ID belongs to different ownership instructions.",
-            });
-        }
-      }
+      if (actor) yield* thread(actor.threadId);
       const snapshot = yield* canonicalOrganization(input.threadId, input.threadEnvironmentId);
       const verifiedActor = actor ? { environmentId: local, threadId: actor.threadId } : undefined;
       const scopedInput = {
@@ -3153,24 +3104,6 @@ const make = Effect.gen(function* () {
         return yield* new WorkerError({
           message: "Only a former master can reclaim workers it previously handed off.",
         });
-      // Agent messages are also rendered with role=user; their reserved message
-      // IDs must never count as the user's permission to reverse a handoff.
-      const instruction = (yield* sql<{ message_id: string; text: string }>`SELECT
-        json_extract(payload_json, '$.messageId') AS message_id,
-        json_extract(payload_json, '$.text') AS text
-      FROM orchestration_events WHERE stream_id = ${owner} AND event_type = 'thread.message-sent'
-        AND json_extract(payload_json, '$.role') = 'user'
-        AND json_extract(payload_json, '$.messageId') NOT LIKE 'worker-job:%'
-        AND command_id NOT LIKE 'worker-%' AND sequence > ${authority.retired_sequence}
-        AND EXISTS (SELECT 1 FROM orchestration_events started
-          WHERE started.stream_id = ${owner} AND started.event_type = 'thread.turn-start-requested'
-            AND json_extract(started.payload_json, '$.messageId') = json_extract(orchestration_events.payload_json, '$.messageId'))
-      ORDER BY sequence DESC LIMIT 1`)[0];
-      if (!instruction || !instruction.text.includes(input.userRequest))
-        return yield* new WorkerError({
-          message:
-            "Reclaim requires an exact quote from a new direct user instruction in this retired session. Peer messages and inherited prompts do not authorize reclaim.",
-        });
       const selected: Worker[] = [];
       for (const workerId of ids) {
         const record =
@@ -3207,7 +3140,7 @@ const make = Effect.gen(function* () {
       const result = {
         ownerThreadId: owner,
         workerThreadIds: ids,
-        userMessageId: MessageId.make(instruction.message_id),
+        userMessageId: null,
       };
       const local = (yield* peers.localEnvironment).environmentId;
       const inputs: Array<typeof SessionOwnershipInput.Type> = [];
@@ -3238,13 +3171,13 @@ const make = Effect.gen(function* () {
     input: typeof ReclaimInput.Type,
   ) {
     const plan = yield* prepareReclaim(owner, input);
-    // User provenance and handoff history were checked before persisting this
+    // Handoff history and runtime permissions were checked before persisting this
     // plan. Each member now uses the same fenced transition as the UI/MCP editor.
     for (const change of plan.inputs) yield* changeOwnership(change);
     yield* Effect.gen(function* () {
       yield* sql`UPDATE custom_orchestrator_authority SET active = 1, revision = revision + 1 WHERE thread_id = ${owner}`;
       yield* sql`INSERT INTO custom_worker_reclaims (id, owner_id, request_json, user_message_id, result_json)
-        VALUES (${`reclaim:${owner}:${input.clientRequestId}`}, ${owner}, ${encodeUnknown({ ...input, workerThreadIds: [...new Set(input.workerThreadIds)].sort() })}, ${plan.result.userMessageId}, ${encodeUnknown(plan.result)}) ON CONFLICT DO NOTHING`;
+        VALUES (${`reclaim:${owner}:${input.clientRequestId}`}, ${owner}, ${encodeUnknown({ ...input, workerThreadIds: [...new Set(input.workerThreadIds)].sort() })}, ${plan.result.userMessageId ?? ""}, ${encodeUnknown(plan.result)}) ON CONFLICT DO NOTHING`;
     }).pipe(sql.withTransaction, lock.withPermit);
     return plan.result;
   }, Effect.mapError(failure));
@@ -3984,27 +3917,6 @@ const make = Effect.gen(function* () {
       case "organizationFinish":
         yield* finishOrganization(from, request.id, request.release);
         return { finished: true };
-      case "organizationAuthorized": {
-        const local = (yield* peers.localEnvironment).environmentId;
-        if (request.actor.environmentId !== local) return { authorized: false };
-        const row = (yield* sql<{
-          request_json: string;
-        }>`SELECT request_json FROM custom_session_ownership_changes
-          WHERE id = ${`ownership-authorized:${request.actor.threadId}:${request.id}`}`)[0];
-        if (!row) return { authorized: false };
-        const saved = yield* decodeOwnershipAuthorization(row.request_json);
-        const normalized = {
-          ...saved.input,
-          ownerEnvironmentId: saved.input.ownerEnvironmentId ?? local,
-          expectedOwnerEnvironmentId: saved.input.expectedOwnerEnvironmentId ?? local,
-        };
-        return {
-          authorized:
-            Object.entries(normalized).every(
-              ([key, value]) => request.input[key as keyof typeof request.input] === value,
-            ) && Object.keys(request.input).every((key) => key in normalized),
-        };
-      }
       case "organizationChange": {
         if (request.executionAuthority !== true)
           return yield* new WorkerError({
@@ -4016,19 +3928,6 @@ const make = Effect.gen(function* () {
           return yield* new WorkerError({
             message: "A peer cannot impersonate another environment's session.",
           });
-        if (request.actor) {
-          const proof = yield* peers.call(from, {
-            _tag: "organizationAuthorized",
-            id: request.input.clientRequestId,
-            input: request.input,
-            actor: request.actor,
-          });
-          const verified = yield* decodeAuthorizationProof(proof);
-          if (!verified.authorized)
-            return yield* new WorkerError({
-              message: "A direct user instruction must authorize this ownership change.",
-            });
-        }
         return yield* coordinateOwnership(request.input, request.actor).pipe(
           Effect.map((result) => ({ ok: true, result })),
           Effect.catch((cause) =>

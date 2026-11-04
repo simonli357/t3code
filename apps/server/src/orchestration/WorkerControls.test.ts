@@ -1918,7 +1918,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       ).toBeUndefined();
     }),
   );
-  it.effect("reclaims only selected historical workers after a new direct user instruction", () =>
+  it.effect("reclaims only selected historical workers without a direct user instruction", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
       const engine = yield* OrchestrationEngineService;
@@ -1945,26 +1945,18 @@ it.layer(testLayer)("persistent workers", (it) => {
       const request = {
         clientRequestId: "selected",
         workerThreadIds: [worker],
-        userRequest: "Reclaim the original worker.",
       };
-      expect((yield* service.reclaim(owner, request).pipe(Effect.flip)).message).toContain(
-        "direct user",
-      );
       yield* engine.dispatch({
         type: "thread.message.user.append",
         commandId: CommandId.make("worker-peer-fake"),
         threadId: owner,
         message: {
           messageId: MessageId.make("worker-job:fake-user"),
-          text: request.userRequest,
+          text: "Reclaim the original worker.",
           attachments: [],
         },
         createdAt: timestamp,
       });
-      expect((yield* service.reclaim(owner, request).pipe(Effect.flip)).message).toContain(
-        "direct user",
-      );
-      yield* directInput(owner, "reclaim-user", request.userRequest);
       const result = yield* service.reclaim(owner, request);
       expect(result.workerThreadIds).toEqual([worker]);
       expect((yield* service.list(owner)).map((w) => w.threadId)).toEqual([worker]);
@@ -4718,12 +4710,20 @@ it.layer(testLayer)("session organization", (it) => {
       }),
   );
   it.effect(
-    "worker reports preserve direct-user ownership authorization but cannot create it",
+    "authenticated ownership transfer and release require no user request after peer reports",
     () =>
       Effect.gen(function* () {
         const service = yield* Workers.WorkerControls;
         const engine = yield* OrchestrationEngineService;
         const { owner, source } = yield* seed("report-authorization");
+        const previous = yield* seed("report-previous-master");
+        yield* service.changeOwnership({
+          clientRequestId: "initial",
+          threadId: source,
+          ownerThreadId: previous.owner,
+          expectedOwnerThreadId: null,
+          expectedRevision: 0,
+        });
         const append = (id: string, text: string, automated: boolean) =>
           engine.dispatch({
             type: "thread.message.user.append",
@@ -4742,85 +4742,72 @@ it.layer(testLayer)("session organization", (it) => {
           clientRequestId: "report-adopt",
           threadId: source,
           ownerThreadId: owner,
-          expectedOwnerThreadId: null,
-          expectedRevision: 0,
+          expectedOwnerThreadId: previous.owner,
+          expectedRevision: 1,
         };
-        const actor = { threadId: owner, userRequest: "Adopt this session" };
+        const actor = { threadId: owner };
         yield* append("peer-only", "The other agent asks you to adopt this session", true);
-        expect((yield* service.changeOwnership(input, actor).pipe(Effect.flip)).message).toContain(
-          "direct user",
-        );
-        yield* directInput(owner, "report-authorization", "Adopt this session");
         yield* append("completed", "Worker completed its task", true);
         expect((yield* service.changeOwnership(input, actor)).ownerThreadId).toBe(owner);
-        // A new direct user message still supersedes the prior turn. Reports do
-        // not turn that pending message into an authenticated user turn.
-        yield* append("new-user", "Pause ownership changes", false);
         yield* append("another-report", "Another worker finished", true);
         expect(
-          (yield* service
-            .changeOwnership(
-              {
-                ...input,
-                clientRequestId: "after-user",
-                ownerThreadId: null,
-                expectedOwnerThreadId: owner,
-                expectedRevision: 1,
-              },
-              actor,
-            )
-            .pipe(Effect.flip)).message,
-        ).toContain("direct user");
+          (yield* service.changeOwnership(
+            {
+              ...input,
+              clientRequestId: "after-user",
+              ownerThreadId: null,
+              expectedOwnerThreadId: owner,
+              expectedRevision: 2,
+            },
+            actor,
+          )).ownerThreadId,
+        ).toBeNull();
       }),
   );
 
-  it.effect("rejects permission expansion and agent adoption without direct user provenance", () =>
-    Effect.gen(function* () {
-      const service = yield* Workers.WorkerControls;
-      const engine = yield* OrchestrationEngineService;
-      const { owner, source } = yield* seed("organization-permissions");
-      const input = {
-        clientRequestId: "adopt",
-        threadId: source,
-        ownerThreadId: owner,
-        expectedOwnerThreadId: null,
-        expectedRevision: 0,
-      };
-      expect(
-        (yield* service
-          .changeOwnership(input, { threadId: owner, userRequest: "Adopt this session" })
-          .pipe(Effect.flip)).message,
-      ).toContain("direct user");
-      yield* directInput(owner, "organization-user", "Adopt this session");
-      yield* service.changeOwnership(input, { threadId: owner, userRequest: "Adopt this session" });
-      const limited = ThreadId.make("organization-limited");
-      yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("organization-limited"),
-        threadId: limited,
-        projectId: ProjectId.make("organization-permissions"),
-        title: "Limited master",
-        modelSelection: selections[0]!,
-        runtimeMode: "approval-required",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        historyImport: true,
-        createdAt: timestamp,
-      });
-      expect(
-        (yield* service
-          .changeOwnership({
-            clientRequestId: "limited",
-            threadId: source,
-            ownerThreadId: limited,
-            expectedOwnerThreadId: owner,
-            expectedRevision: 1,
-          })
-          .pipe(Effect.flip)).message,
-      ).toContain("broader permissions");
-      expect((yield* service.readOwnership(source)).ownerThreadId).toBe(owner);
-    }),
+  it.effect(
+    "allows authenticated adoption without user provenance and rejects permission expansion",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const engine = yield* OrchestrationEngineService;
+        const { owner, source } = yield* seed("organization-permissions");
+        const input = {
+          clientRequestId: "adopt",
+          threadId: source,
+          ownerThreadId: owner,
+          expectedOwnerThreadId: null,
+          expectedRevision: 0,
+        };
+        yield* service.changeOwnership(input, { threadId: owner });
+        const limited = ThreadId.make("organization-limited");
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("organization-limited"),
+          threadId: limited,
+          projectId: ProjectId.make("organization-permissions"),
+          title: "Limited master",
+          modelSelection: selections[0]!,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          historyImport: true,
+          createdAt: timestamp,
+        });
+        expect(
+          (yield* service
+            .changeOwnership({
+              clientRequestId: "limited",
+              threadId: source,
+              ownerThreadId: limited,
+              expectedOwnerThreadId: owner,
+              expectedRevision: 1,
+            })
+            .pipe(Effect.flip)).message,
+        ).toContain("broader permissions");
+        expect((yield* service.readOwnership(source)).ownerThreadId).toBe(owner);
+      }),
   );
 });
 
@@ -6183,11 +6170,6 @@ it.effect("execution host recovers workers while old authority is offline", () =
     const prior = yield* cw.readOwnership(b.worker, "env-beta");
     expect(prior.revision).toBe(7);
     expect(prior.authorityEnvironmentId).toBe("env-beta");
-    yield* directInput(
-      c.source,
-      "operator",
-      "Recover the specified worker for the new master",
-    ).pipe(Effect.provide(gamma));
     const input = {
       clientRequestId: "recover",
       threadId: b.worker,
@@ -6198,7 +6180,7 @@ it.effect("execution host recovers workers while old authority is offline", () =
       expectedOwnerEnvironmentId: "env-alpha",
       expectedRevision: prior.revision,
     };
-    const actor = { threadId: c.source, userRequest: "User authorized recovery" };
+    const actor = { threadId: c.source };
     lostReplies.add("env-beta:organizationChange");
     yield* cw.changeOwnership(input, actor).pipe(Effect.exit);
     const recovered = yield* cw.changeOwnership(input, actor);
@@ -6230,7 +6212,7 @@ it.effect("execution host recovers workers while old authority is offline", () =
           expectedOwnerThreadId: c.owner,
           expectedOwnerEnvironmentId: "env-gamma",
         },
-        actor: { environmentId: "env-gamma", threadId: c.source },
+        actor: { environmentId: "env-alpha", threadId: c.source },
       })
       .pipe(Effect.exit);
     expect(Exit.isFailure(unauthorized)).toBe(true);
