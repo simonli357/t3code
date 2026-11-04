@@ -84,7 +84,7 @@ const message = Tool.make("t3_session_send", {
 });
 const ownershipRead = Tool.make("t3_session_ownership_read", {
   description:
-    "Read a session's current master and revision before an explicitly requested assignment, transfer or release. Call on the current master's computer, or the session's computer if independent. Read-only; does not adopt or wake the session.",
+    "Read a session's current master and revision before assignment, transfer or release. Resolves through the execution host; the former master's computer need not be online. Read-only; does not adopt or wake the session.",
   parameters: SessionOwnershipReadInput,
   success: SessionOwnershipResult,
   failure: SessionOwnershipError,
