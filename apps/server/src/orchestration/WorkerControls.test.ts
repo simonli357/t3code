@@ -4786,7 +4786,7 @@ it.effect(
       expect((yield* alphaWorkers.changeOwnership(transferInput).pipe(Effect.flip)).code).toBe(
         "pending",
       );
-      expect((yield* alphaWorkers.readOwnership(b.worker)).ownerThreadId).toBe(a.owner);
+      expect((yield* alphaWorkers.readOwnership(b.worker).pipe(Effect.flip)).code).toBe("pending");
       offline.delete("env-beta");
       yield* alphaWorkers.changeOwnership(transferInput);
       yield* alphaWorkers.drain();
@@ -5014,13 +5014,12 @@ it.effect("nested renewal retains a remote parent and children across retry", ()
     offline.add("env-alpha");
     yield* bw.handoff(b.worker, input);
     yield* bw.drain();
-    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("error");
-    expect((yield* bw.readOwnership(child)).ownerThreadId).toBe(b.worker);
+    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("completed");
+    expect((yield* bw.readOwnership(child)).ownerThreadId).toBe(successor);
     offline.delete("env-alpha");
-    lostReplies.add("env-alpha:organizationRenew");
     yield* bw.handoff(b.worker, input);
     yield* bw.drain();
-    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("error");
+    expect((yield* bw.handoffStatus(b.worker, { threadId: successor })).state).toBe("completed");
     const restarted = yield* Workers.WorkerControls.pipe(
       Effect.provide(Workers.layer),
       Effect.provide(beta),
@@ -5168,12 +5167,12 @@ it.effect(
               ownerEnvironmentId: "env-alpha",
               expectedOwnerThreadId: c.owner,
               expectedOwnerEnvironmentId: "env-gamma",
-              expectedRevision: assigned.revision + 1,
+              expectedRevision: assigned.revision,
             },
             { threadId: a.owner, userRequest: instruction },
           )
           .pipe(Effect.flip)).message,
-      ).toContain("current master");
+      ).toContain("relationship changed");
       expect((yield* cw.list(c.owner)).map((worker) => worker.threadId)).toEqual([b.source]);
     }).pipe(Effect.scoped),
 );
@@ -6093,4 +6092,152 @@ it.effect(
       yield* service.drain();
       expect((yield* service.list(owner)).find((w) => w.threadId === worker)?.error).toBeNull();
     }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("execution host recovers workers while old authority is offline", () =>
+  Effect.gen(function* () {
+    const {
+      alpha,
+      beta,
+      gamma,
+      alphaWorkers: aw,
+      betaWorkers: bw,
+      gammaWorkers: cw,
+      betaSnapshots,
+      gammaSnapshots,
+      messages,
+    } = yield* linkedPair;
+    const a = yield* seed("recover-a").pipe(Effect.provide(alpha));
+    const b = yield* seed("recover-b").pipe(Effect.provide(beta));
+    const c = yield* seed("recover-c").pipe(Effect.provide(gamma));
+    yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+    yield* session(b.worker, "running", "preserved-active").pipe(Effect.provide(beta));
+    const before = Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.worker));
+    yield* aw.control(a.owner, { threadId: b.worker, notifications: false });
+    yield* bw.report(b.worker, {
+      clientRequestId: "pending",
+      outcome: "done",
+      summary: "Preserved report",
+    });
+    // Legacy synchronization persisted its revision in the plan only.
+    const executionSql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+    yield* executionSql`UPDATE custom_workers SET plan_json = json_set(plan_json, '$.authorityEnvironmentId', 'env-alpha', '$.authorityRevision', 7) WHERE thread_id = ${b.worker}`;
+    offline.add("env-alpha");
+    const prior = yield* cw.readOwnership(b.worker, "env-beta");
+    expect(prior.revision).toBe(7);
+    expect(prior.authorityEnvironmentId).toBe("env-beta");
+    yield* directInput(
+      c.source,
+      "operator",
+      "Recover the specified worker for the new master",
+    ).pipe(Effect.provide(gamma));
+    const input = {
+      clientRequestId: "recover",
+      threadId: b.worker,
+      threadEnvironmentId: "env-beta",
+      ownerThreadId: c.owner,
+      ownerEnvironmentId: "env-gamma",
+      expectedOwnerThreadId: a.owner,
+      expectedOwnerEnvironmentId: "env-alpha",
+      expectedRevision: prior.revision,
+    };
+    const actor = { threadId: c.source, userRequest: "User authorized recovery" };
+    lostReplies.add("env-beta:organizationChange");
+    yield* cw.changeOwnership(input, actor).pipe(Effect.exit);
+    const recovered = yield* cw.changeOwnership(input, actor);
+    expect(recovered.ownerThreadId).toBe(c.owner);
+    expect(yield* cw.changeOwnership(input, actor)).toEqual(recovered);
+    expect((yield* bw.readOwnership(b.worker)).ownerThreadId).toBe(c.owner);
+    const after = Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.worker));
+    expect(after.session).toEqual(before.session);
+    expect(after.messages).toEqual(before.messages);
+    expect(
+      (yield* bw
+        .changeOwnership({ ...input, clientRequestId: "stale", ownerThreadId: a.owner })
+        .pipe(Effect.flip)).code,
+    ).toBe("conflict");
+    yield* cw.control(c.owner, { threadId: b.worker, notifications: true });
+    yield* bw.drain();
+    yield* cw.drain();
+    expect(
+      (yield* messages(gammaSnapshots, c.owner)).filter((t) => t.includes("Preserved report")),
+    ).toHaveLength(1);
+    const unauthorized = yield* bw
+      .receive("env-gamma", {
+        _tag: "organizationChange",
+        input: {
+          ...input,
+          clientRequestId: "forged",
+          expectedRevision: recovered.revision,
+          expectedOwnerThreadId: c.owner,
+          expectedOwnerEnvironmentId: "env-gamma",
+        },
+        actor: { environmentId: "env-gamma", threadId: c.source },
+      })
+      .pipe(Effect.exit);
+    expect(Exit.isFailure(unauthorized)).toBe(true);
+    offline.delete("env-alpha");
+    yield* aw.drain();
+    const staleSync = yield* bw
+      .receive("env-alpha", { _tag: "synchronizeOwnership", threadId: b.worker })
+      .pipe(Effect.exit);
+    expect(Exit.isFailure(staleSync)).toBe(true);
+    yield* bw.report(b.worker, {
+      clientRequestId: "after-reconnect",
+      outcome: "done",
+      summary: "New owner only",
+    });
+    yield* bw.drain();
+    yield* cw.drain();
+    yield* aw.drain();
+    expect(
+      (yield* messages(gammaSnapshots, c.owner)).filter((t) => t.includes("New owner only")),
+    ).toHaveLength(1);
+    expect((yield* aw.readOwnership(b.worker)).ownerThreadId).toBe(c.owner);
+    expect(
+      (yield* aw
+        .send(a.owner, { threadId: b.worker, clientRequestId: "old", prompt: "stale" })
+        .pipe(Effect.flip)).message,
+    ).toMatch(/not.*(owned|master)/);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("concurrent recovery requests serialize at execution and reject the stale revision", () =>
+  Effect.gen(function* () {
+    const {
+      alpha,
+      beta,
+      gamma,
+      alphaWorkers: aw,
+      betaWorkers: bw,
+      gammaWorkers: cw,
+    } = yield* linkedPair;
+    const a = yield* seed("race-recovery-a").pipe(Effect.provide(alpha));
+    const b = yield* seed("race-recovery-b").pipe(Effect.provide(beta));
+    const c = yield* seed("race-recovery-c").pipe(Effect.provide(gamma));
+    yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+    offline.add("env-alpha");
+    const input = {
+      threadId: b.worker,
+      threadEnvironmentId: "env-beta",
+      ownerEnvironmentId: "env-gamma",
+      expectedOwnerThreadId: a.owner,
+      expectedOwnerEnvironmentId: "env-alpha",
+      expectedRevision: 0,
+    };
+    const results = yield* Effect.all(
+      [
+        cw
+          .changeOwnership({ ...input, clientRequestId: "race-one", ownerThreadId: c.owner })
+          .pipe(Effect.exit),
+        cw
+          .changeOwnership({ ...input, clientRequestId: "race-two", ownerThreadId: c.source })
+          .pipe(Effect.exit),
+      ],
+      { concurrency: "unbounded" },
+    );
+    expect(results.filter(Exit.isSuccess)).toHaveLength(1);
+    expect(results.filter(Exit.isFailure)).toHaveLength(1);
+    expect((yield* bw.readOwnership(b.worker)).revision).toBe(1);
+  }).pipe(Effect.scoped),
 );

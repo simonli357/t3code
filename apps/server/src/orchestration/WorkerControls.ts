@@ -353,6 +353,12 @@ type OrganizationTransaction = {
   result_json: string | null;
   error: string | null;
 };
+const decodeOwnershipAuthorization = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ input: SessionOwnershipInput })),
+);
+const decodeAuthorizationProof = Schema.decodeUnknownEffect(
+  Schema.Struct({ authorized: Schema.Boolean }),
+);
 const decodeOrganizationSnapshot = Schema.decodeUnknownSync(OrganizationSnapshot);
 const decodeOrganizationPatch = Schema.decodeUnknownSync(Schema.fromJsonString(OrganizationPatch));
 const decodeOrganizationDecision = Schema.decodeUnknownSync(OrganizationDecision);
@@ -455,6 +461,11 @@ export const PeerRequest = Schema.TaggedUnion({
   organizationReserve: { id: Schema.String },
   organizationDecision: { id: Schema.String },
   organizationFinish: { id: Schema.String, release: Schema.optional(Schema.Boolean) },
+  organizationAuthorized: {
+    id: Schema.String,
+    input: SessionOwnershipInput,
+    actor: SessionAddress,
+  },
   organizationChange: {
     input: SessionOwnershipInput,
     actor: Schema.optional(SessionAddress),
@@ -972,7 +983,7 @@ const make = Effect.gen(function* () {
       const canonical = yield* canonicalOrganization(ThreadId.make(id));
       if (localId(canonical.owner, local) !== owner)
         return yield* new WorkerError({
-          message: "This caller is not the worker's current master.",
+          message: "This is not a worker owned by this master.",
         });
     }
     return rows[0];
@@ -1514,7 +1525,36 @@ const make = Effect.gen(function* () {
     yield* refreshJobs();
     yield* processRenewals();
     if (!(yield* sql`SELECT 1 FROM custom_ownership_reservation`).length) yield* processHandoffs();
-    const held = yield* batchDoneReports();
+    // Refresh historical master copies before forming digests or dispatching
+    // pending reports. An offline execution host cannot authorize stale delivery.
+    const staleReports = new Set<string>();
+    const remoteWorkers =
+      yield* sql<Worker>`SELECT w.* FROM custom_workers w WHERE w.state = 'remote' AND EXISTS (
+        SELECT 1 FROM custom_worker_jobs j WHERE j.state = 'queued'
+          AND ((j.worker_id = w.thread_id AND j.kind IN ('notice', 'done', 'blocked'))
+            OR (j.id LIKE 'digest:%' AND instr(j.prompt, 'Worker: ' || w.thread_id || char(10)) > 0)))`;
+    for (const record of remoteWorkers) {
+      const refreshed = yield* Effect.gen(function* () {
+        const snapshot = yield* canonicalOrganization(ThreadId.make(record.thread_id));
+        yield* applyOrganization({
+          snapshot,
+          owner: snapshot.owner,
+          ownerRuntimeMode: snapshot.plan.ownerRuntimeMode,
+          hosts: [
+            ...new Set([
+              ...(snapshot.plan.organizationHosts ?? []),
+              (yield* peers.localEnvironment).environmentId,
+            ]),
+          ],
+          revision: snapshot.revision,
+        }).pipe(sql.withTransaction);
+      }).pipe(
+        Effect.as(true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+      if (!refreshed) staleReports.add(record.thread_id);
+    }
+    const held = staleReports.size ? new Set<string>() : yield* batchDoneReports();
     // Old builds queued turn completions as assignment completions. Retire
     // only those undelivered automatic notices; retain input/error notices.
     yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled'
@@ -1529,6 +1569,8 @@ const make = Effect.gen(function* () {
     const unreachable = new Set<string>();
     for (const job of jobs) {
       if (blocked.has(job.target_id) || held.has(job.id)) continue;
+      if (staleReports.has(job.worker_id) && ["done", "blocked", "notice"].includes(job.kind))
+        continue;
       if (
         ["done", "blocked", "notice"].includes(job.kind) &&
         (yield* sql`SELECT 1 FROM custom_ownership_reservation`).length
@@ -2265,10 +2307,20 @@ const make = Effect.gen(function* () {
     return true;
   }, Effect.mapError(failure));
   const list = Effect.fn("WorkerControls.list")(function* (owner: ThreadId) {
-    return yield* Effect.forEach(
-      yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${owner} ORDER BY rowid`,
-      (worker) => (worker.state === "remote" ? describeRemote(owner, worker) : describe(worker)),
-    );
+    const workers =
+      yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${owner} ORDER BY rowid`;
+    const current = [];
+    const local = (yield* peers.localEnvironment).environmentId;
+    for (const worker of workers) {
+      if (worker.state === "remote") {
+        const ownership = yield* canonicalOrganization(ThreadId.make(worker.thread_id)).pipe(
+          Effect.option,
+        );
+        if (Option.isSome(ownership) && localId(ownership.value.owner, local) !== owner) continue;
+        current.push(yield* describeRemote(owner, worker));
+      } else current.push(yield* describe(worker));
+    }
+    return current;
   }, Effect.mapError(failure));
   const read = Effect.fn("WorkerControls.read")(function* (
     owner: ThreadId,
@@ -2522,18 +2574,18 @@ const make = Effect.gen(function* () {
           interactionMode: target!.interactionMode,
           prompt: "Existing session assignment",
         };
-    const authority =
-      plan.authorityEnvironmentId ??
-      (!plan.organizationHosts && record?.state !== "remote"
-        ? parsePeerRef(record?.owner_id ?? null)?.environmentId
-        : undefined) ??
-      local;
+    // The native execution host serializes ownership, including legacy workers
+    // whose former master used to be their authority.
+    const authority = record?.state === "remote" ? plan.environmentId! : local;
     return {
       threadId,
       authority,
       execution: record?.state === "remote" ? plan.environmentId! : local,
       owner: address(record?.owner_id ?? null, local),
-      revision: (yield* authorityOf(threadId))?.revision ?? 0,
+      revision: Math.max(
+        (yield* authorityOf(threadId))?.revision ?? 0,
+        plan.authorityRevision ?? 0,
+      ),
       plan: target ? { ...plan, runtimeMode: target.runtimeMode } : plan,
       hasChildren:
         (yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${threadId} LIMIT 1`).length > 0,
@@ -2659,6 +2711,11 @@ const make = Effect.gen(function* () {
     const local = (yield* peers.localEnvironment).environmentId;
     if (!patch.hosts.includes(local)) return;
     const { snapshot } = patch;
+    if (snapshot.authority !== snapshot.execution)
+      return yield* new WorkerError({
+        code: "conflict",
+        message: "Ownership decisions must come from the execution host.",
+      });
     const record =
       (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${snapshot.threadId}`)[0];
     if (record && (decodePlan(record.plan_json).authorityRevision ?? -1) >= patch.revision) return;
@@ -2762,7 +2819,9 @@ const make = Effect.gen(function* () {
       });
     if (prior?.result_json) {
       yield* recoverOrganization(id);
-      return decodeOwnershipResult(prior.result_json);
+      const result = decodeOwnershipResult(prior.result_json);
+      yield* queueOwnershipSync([result.threadId]);
+      return result;
     }
     yield* sql`INSERT INTO custom_ownership_transactions (id, request_json, state) VALUES (${id}, ${request}, 'preparing') ON CONFLICT DO NOTHING`;
     const participants = new Set(prior ? decodeHosts(prior.participants_json) : []);
@@ -2815,22 +2874,7 @@ const make = Effect.gen(function* () {
           message:
             "This relationship changed. Its current owner has been refreshed; review and retry.",
         });
-      if (
-        actor &&
-        encodeUnknown(actor) !== encodeUnknown(snapshot.owner) &&
-        !(actor.threadId === snapshot.threadId && actor.environmentId === snapshot.execution) &&
-        !(snapshot.owner === null && encodeUnknown(actor) === encodeUnknown(owner))
-      )
-        return yield* new WorkerError({
-          message: "Only the worker or its current master can change an existing relationship.",
-        });
-      const hosts = new Set([
-        local,
-        snapshot.execution,
-        ...(snapshot.plan.organizationHosts ?? []),
-        ...(snapshot.owner ? [snapshot.owner.environmentId] : []),
-        ...(owner ? [owner.environmentId] : []),
-      ]);
+      const hosts = new Set([local, snapshot.execution, ...(owner ? [owner.environmentId] : [])]);
       for (const host of hosts) {
         yield* reserve(host);
         if (host === local) yield* acceptOrganization(snapshot);
@@ -2886,15 +2930,23 @@ const make = Effect.gen(function* () {
         snapshot,
         owner,
         ownerRuntimeMode,
-        hosts: [...hosts],
+        hosts: [
+          ...new Set([
+            ...hosts,
+            ...(snapshot.plan.organizationHosts ?? []),
+            ...(snapshot.owner ? [snapshot.owner.environmentId] : []),
+          ]),
+        ],
         revision,
       };
       const result = organizationResult(snapshot, owner, revision);
       yield* Effect.gen(function* () {
         yield* applyOrganization(patch);
         yield* sql`UPDATE custom_ownership_transactions SET state = 'committed', patch_json = ${encodeUnknown(patch)}, result_json = ${encodeUnknown(result)} WHERE id = ${id}`;
+        yield* queueOwnershipSync([snapshot.threadId]);
       }).pipe(sql.withTransaction, lock.withPermit);
       yield* recoverOrganization(id);
+      yield* queueOwnershipSync([snapshot.threadId]);
       return result;
     }).pipe(
       Effect.catch((cause) =>
@@ -2978,11 +3030,13 @@ const make = Effect.gen(function* () {
           AND json_extract(e.payload_json, '$.role') = 'user' AND json_extract(e.payload_json, '$.messageId') NOT LIKE 'worker-job:%'
           AND e.command_id NOT LIKE 'worker-%' AND EXISTS (SELECT 1 FROM orchestration_events started WHERE started.stream_id = e.stream_id
             AND started.event_type = 'thread.turn-start-requested' AND json_extract(started.payload_json, '$.messageId') = json_extract(e.payload_json, '$.messageId'))
+          AND NOT EXISTS (SELECT 1 FROM orchestration_events newer WHERE newer.stream_id = e.stream_id
+            AND newer.event_type = 'thread.message-sent' AND json_extract(newer.payload_json, '$.role') = 'user' AND newer.sequence > e.sequence)
           ORDER BY e.sequence DESC LIMIT 1`)[0];
-          if (!actor.userRequest.trim() || !instruction?.text.includes(actor.userRequest))
+          if (!actor.userRequest.trim() || !instruction?.text.trim())
             return yield* new WorkerError({
               message:
-                "Changing ownership requires an exact quote from the latest direct user instruction. Peer messages and inherited instructions cannot authorize adoption.",
+                "Changing ownership requires a direct user instruction in this session. Peer messages and inherited instructions cannot authorize adoption.",
             });
           yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json, announced)
           VALUES (${authorizationId}, ${authorizedRequest}, '{}', 1) ON CONFLICT DO NOTHING`;
@@ -3576,10 +3630,10 @@ const make = Effect.gen(function* () {
         yield* spawn(row.owner_id, parent, input, true, automatic ? parent : undefined);
         if (automatic && !row.ownership_started && !(yield* automaticAllowed)) return;
         const local = (yield* peers.localEnvironment).environmentId;
-        const parentAuthority = parentRecord
-          ? (decodePlan(parentRecord.plan_json).authorityEnvironmentId ??
-            parsePeerRef(parentRecord.owner_id)?.environmentId)
-          : undefined;
+        const parentAuthority =
+          parentRecord?.state === "remote"
+            ? decodePlan(parentRecord.plan_json).environmentId
+            : undefined;
         if (parentAuthority && parentAuthority !== local)
           yield* sql`UPDATE custom_orchestrator_handoffs SET ownership_started = 1 WHERE thread_id = ${row.thread_id}`;
         const renewedParent =
@@ -3596,7 +3650,8 @@ const make = Effect.gen(function* () {
           yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
         const transferred = workers.map((worker) => worker.thread_id);
         for (const child of workers) {
-          const authority = decodePlan(child.plan_json).authorityEnvironmentId;
+          const authority =
+            child.state === "remote" ? decodePlan(child.plan_json).environmentId : local;
           if (authority && authority !== local) {
             yield* sql`UPDATE custom_orchestrator_handoffs SET ownership_started = 1 WHERE thread_id = ${row.thread_id}`;
             const updated = yield* peers
@@ -3654,14 +3709,20 @@ const make = Effect.gen(function* () {
                   ownerRuntimeMode: renewedParent.plan.ownerRuntimeMode,
                 })} WHERE thread_id = ${row.thread_id}`;
               }
-              if (!renewedParent && decodePlan(parentRecord.plan_json).organizationHosts) {
+              if (!renewedParent) {
                 const successor = yield* inspectOrganization(ThreadId.make(row.thread_id));
                 const owner = address(parentRecord.owner_id, local);
                 yield* applyOrganization({
                   snapshot: { ...successor, authority: local, execution: local },
                   owner,
                   ownerRuntimeMode: decodePlan(parentRecord.plan_json).ownerRuntimeMode,
-                  hosts: decodePlan(parentRecord.plan_json).organizationHosts!,
+                  hosts: [
+                    ...new Set([
+                      local,
+                      ...(decodePlan(parentRecord.plan_json).organizationHosts ?? []),
+                      ...(owner ? [owner.environmentId] : []),
+                    ]),
+                  ],
                   revision: 1,
                 });
                 yield* queueOwnershipSync([row.thread_id]);
@@ -3843,8 +3904,7 @@ const make = Effect.gen(function* () {
           snapshot.authority !== from ||
           !snapshot.plan.organizationHosts?.includes(local) ||
           (current &&
-            (decodePlan(current.plan_json).authorityEnvironmentId ??
-              parsePeerRef(current.owner_id)?.environmentId) !== from)
+            (current.state !== "remote" || decodePlan(current.plan_json).environmentId !== from))
         )
           return yield* new WorkerError({
             message: "This computer is not the current ownership authority.",
@@ -3878,11 +3938,45 @@ const make = Effect.gen(function* () {
       case "organizationFinish":
         yield* finishOrganization(from, request.id, request.release);
         return { finished: true };
+      case "organizationAuthorized": {
+        const local = (yield* peers.localEnvironment).environmentId;
+        if (request.actor.environmentId !== local) return { authorized: false };
+        const row = (yield* sql<{
+          request_json: string;
+        }>`SELECT request_json FROM custom_session_ownership_changes
+          WHERE id = ${`ownership-authorized:${request.actor.threadId}:${request.id}`}`)[0];
+        if (!row) return { authorized: false };
+        const saved = yield* decodeOwnershipAuthorization(row.request_json);
+        const normalized = {
+          ...saved.input,
+          ownerEnvironmentId: saved.input.ownerEnvironmentId ?? local,
+          expectedOwnerEnvironmentId: saved.input.expectedOwnerEnvironmentId ?? local,
+        };
+        return {
+          authorized:
+            Object.entries(normalized).every(
+              ([key, value]) => request.input[key as keyof typeof request.input] === value,
+            ) && Object.keys(request.input).every((key) => key in normalized),
+        };
+      }
       case "organizationChange": {
         if (request.actor && request.actor.environmentId !== from)
           return yield* new WorkerError({
             message: "A peer cannot impersonate another environment's session.",
           });
+        if (request.actor) {
+          const proof = yield* peers.call(from, {
+            _tag: "organizationAuthorized",
+            id: request.input.clientRequestId,
+            input: request.input,
+            actor: request.actor,
+          });
+          const verified = yield* decodeAuthorizationProof(proof);
+          if (!verified.authorized)
+            return yield* new WorkerError({
+              message: "A direct user instruction must authorize this ownership change.",
+            });
+        }
         return yield* coordinateOwnership(request.input, request.actor).pipe(
           Effect.map((result) => ({ ok: true, result })),
           Effect.catch((cause) =>
@@ -3903,6 +3997,8 @@ const make = Effect.gen(function* () {
           (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.threadId}`)[0];
         if (
           !record ||
+          decodePlan(record.plan_json).authorityEnvironmentId ===
+            (yield* peers.localEnvironment).environmentId ||
           (parsePeerRef(record.owner_id)?.environmentId !== from &&
             decodePlan(record.plan_json).authorityEnvironmentId !== from)
         )
@@ -4074,7 +4170,10 @@ const make = Effect.gen(function* () {
               message: `No master here owns worker ${request.senderThreadId} in ${label}.`,
             });
           // The record's current owner, so a report reaches a handoff successor.
-          target = record.owner_id ?? record.thread_id;
+          const canonical = yield* canonicalOrganization(ThreadId.make(record.thread_id));
+          target =
+            localId(canonical.owner, (yield* peers.localEnvironment).environmentId) ??
+            record.thread_id;
           sender = record.thread_id;
           const existing = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`)[0];
           if (
@@ -4149,7 +4248,7 @@ const make = Effect.gen(function* () {
           currentOwner.threadId !== request.owner.threadId
         )
           return yield* new WorkerError({
-            message: "This caller is not the worker's current master.",
+            message: "This is not a worker owned by this master.",
           });
         const currentOwnerId = peerRef(effectiveFrom, request.owner.threadId);
         if (worker.owner_id !== currentOwnerId) {
