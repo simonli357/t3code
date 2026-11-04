@@ -6165,6 +6165,7 @@ it.effect("execution host recovers workers while old authority is offline", () =
     const unauthorized = yield* bw
       .receive("env-gamma", {
         _tag: "organizationChange",
+        executionAuthority: true,
         input: {
           ...input,
           clientRequestId: "forged",
@@ -6240,4 +6241,271 @@ it.effect("concurrent recovery requests serialize at execution and reject the st
     expect(results.filter(Exit.isFailure)).toHaveLength(1);
     expect((yield* bw.readOwnership(b.worker)).revision).toBe(1);
   }).pipe(Effect.scoped),
+);
+
+// These envelopes and durable rows replay the protocol in c6fbc3c635
+// (organizationReserve/Decision/Finish, synchronizeOwnership and worker).
+// The former coordinator is deliberately a legacy protocol responder, not aw.
+it.effect("legacy master wire protocol cannot undo recovery or control the running worker", () =>
+  Effect.gen(function* () {
+    const {
+      alpha,
+      beta,
+      gamma,
+      alphaWorkers: aw,
+      betaWorkers: bw,
+      gammaWorkers: cw,
+      betaSnapshots,
+      gammaSnapshots,
+      messages,
+    } = yield* linkedPair;
+    const a = yield* seed("legacy-wire-a").pipe(Effect.provide(alpha));
+    const b = yield* seed("legacy-wire-b").pipe(Effect.provide(beta));
+    const c = yield* seed("legacy-wire-c").pipe(Effect.provide(gamma));
+    yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+    const sql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+    yield* sql`UPDATE custom_workers SET plan_json = json_remove(plan_json, '$.authorityEnvironmentId', '$.authorityRevision', '$.organizationHosts', '$.environmentId') WHERE thread_id = ${b.worker}`;
+    yield* session(b.worker, "running", "legacy-active").pipe(Effect.provide(beta));
+    const before = Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.worker));
+    yield* bw.control(ThreadId.make(`peer:env-alpha:${a.owner}`), {
+      threadId: b.worker,
+      notifications: false,
+    });
+    for (const outcome of ["blocked", "done"] as const)
+      yield* bw.report(b.worker, {
+        clientRequestId: `legacy-${outcome}`,
+        outcome,
+        summary: `Legacy queued ${outcome}`,
+      });
+    offline.add("env-alpha");
+    const input = {
+      clientRequestId: "legacy-recovery",
+      threadId: b.worker,
+      threadEnvironmentId: "env-beta",
+      ownerThreadId: c.owner,
+      ownerEnvironmentId: "env-gamma",
+      expectedOwnerThreadId: a.owner,
+      expectedOwnerEnvironmentId: "env-alpha",
+      expectedRevision: 0,
+    };
+    yield* cw.changeOwnership(input);
+    offline.delete("env-alpha");
+    const legacySnapshot = {
+      threadId: b.worker,
+      execution: "env-beta",
+      authority: "env-alpha",
+      owner: { environmentId: "env-alpha", threadId: a.owner },
+      revision: 500,
+      plan: { ...b.input, runtimeMode: "full-access", interactionMode: "default" },
+      hasChildren: false,
+    };
+    let legacyState = "preparing";
+    peerHandlers.set("env-alpha", (_from, request) => {
+      const tag =
+        typeof request === "object" && request !== null && "_tag" in request
+          ? request._tag
+          : undefined;
+      if (tag === "organizationDecision")
+        return Effect.succeed({
+          state: legacyState,
+          participants: ["env-alpha", "env-beta"],
+          patch:
+            legacyState === "preparing"
+              ? null
+              : {
+                  snapshot: legacySnapshot,
+                  owner: legacySnapshot.owner,
+                  hosts: ["env-alpha", "env-beta"],
+                  revision: 501,
+                },
+        });
+      if (tag === "organizationInspect") return Effect.succeed(legacySnapshot);
+      if (tag === "ownership")
+        return Effect.succeed({
+          owner: legacySnapshot.owner,
+          revision: 501,
+          runtimeMode: "full-access",
+        });
+      return Effect.fail(new Workers.WorkerError({ message: "Legacy peer has no such operation" }));
+    });
+    expect((yield* cw.readOwnership(b.worker, "env-alpha")).ownerThreadId).toBe(c.owner);
+    for (const request of [
+      { _tag: "synchronizeOwnership", threadId: b.worker },
+      { _tag: "organizationSynchronize", threadId: b.worker },
+      { _tag: "organizationReserve", id: "legacy-stale" },
+      {
+        _tag: "organizationChange",
+        input: {
+          ...input,
+          clientRequestId: "legacy-revert",
+          expectedOwnerThreadId: c.owner,
+          expectedOwnerEnvironmentId: "env-gamma",
+          expectedRevision: 1,
+          ownerThreadId: a.owner,
+          ownerEnvironmentId: "env-alpha",
+        },
+      },
+    ])
+      expect(Exit.isFailure(yield* bw.receive("env-alpha", request).pipe(Effect.exit))).toBe(true);
+    expect(yield* sql`SELECT * FROM custom_ownership_reservation`).toHaveLength(0);
+    legacyState = "committed";
+    yield* bw.receive("env-alpha", {
+      _tag: "organizationFinish",
+      id: "legacy-stale",
+      release: true,
+    });
+    const owner = { threadId: a.owner, runtimeMode: "full-access", interactionMode: "default" };
+    for (const op of ["send", "control", "stop"])
+      expect(
+        Exit.isFailure(
+          yield* bw
+            .receive("env-alpha", {
+              _tag: "worker",
+              workerThreadId: b.worker,
+              owner,
+              op,
+              input: {
+                threadId: b.worker,
+                clientRequestId: "stale-start-or-steer",
+                prompt: "Do not run",
+                notifications: false,
+              },
+            })
+            .pipe(Effect.exit),
+        ),
+      ).toBe(true);
+    expect((yield* bw.readOwnership(b.worker)).ownerThreadId).toBe(c.owner);
+    expect(Option.getOrThrow(yield* betaSnapshots.getThreadDetailById(b.worker)).session).toEqual(
+      before.session,
+    );
+    yield* cw.control(c.owner, { threadId: b.worker, notifications: true });
+    yield* bw.report(b.worker, {
+      clientRequestId: "new-report",
+      outcome: "done",
+      summary: "Execution routes directly to new owner",
+    });
+    yield* bw.drain();
+    yield* cw.drain();
+    const delivered = yield* messages(gammaSnapshots, c.owner);
+    for (const summary of [
+      "Legacy queued blocked",
+      "Legacy queued done",
+      "Execution routes directly to new owner",
+    ])
+      expect(delivered.filter((text) => text.includes(summary))).toHaveLength(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "upgrade reconciles a durable committed legacy decision and releases its reservation",
+  () =>
+    Effect.gen(function* () {
+      const {
+        alpha,
+        beta,
+        gamma,
+        alphaWorkers: aw,
+        betaWorkers: bw,
+        gammaWorkers: cw,
+        gammaSnapshots,
+        messages,
+      } = yield* linkedPair;
+      const a = yield* seed("legacy-commit-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("legacy-commit-b").pipe(Effect.provide(beta));
+      const c = yield* seed("legacy-commit-c").pipe(Effect.provide(gamma));
+      yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+      const sql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+      const snapshot = {
+        threadId: b.worker,
+        execution: "env-beta",
+        authority: "env-alpha",
+        owner: { environmentId: "env-alpha", threadId: a.owner },
+        revision: 0,
+        plan: { ...b.input, runtimeMode: "full-access", interactionMode: "default" },
+        hasChildren: false,
+      };
+      const decision = {
+        state: "committed",
+        participants: ["env-alpha", "env-beta", "env-gamma", "env-obsolete"],
+        patch: {
+          snapshot,
+          owner: { environmentId: "env-gamma", threadId: c.owner },
+          ownerRuntimeMode: "full-access",
+          hosts: ["env-alpha", "env-beta", "env-gamma"],
+          revision: 1,
+        },
+      };
+      peerHandlers.set("env-alpha", () => Effect.succeed(decision));
+      yield* sql`INSERT INTO custom_ownership_reservation (singleton, id, coordinator) VALUES (1, 'legacy-committed', 'env-alpha')`;
+      yield* bw.receive("env-alpha", { _tag: "organizationFinish", id: "legacy-committed" });
+      expect((yield* bw.readOwnership(b.worker)).ownerThreadId).toBe(c.owner);
+      expect(yield* sql`SELECT * FROM custom_ownership_reservation`).toHaveLength(0);
+      yield* bw.report(b.worker, {
+        clientRequestId: "decided-report",
+        outcome: "done",
+        summary: "Known legacy commit unblocks reports",
+      });
+      yield* bw.drain();
+      yield* cw.drain();
+      expect(
+        (yield* messages(gammaSnapshots, c.owner)).filter((text) =>
+          text.includes("Known legacy commit unblocks reports"),
+        ),
+      ).toHaveLength(1);
+
+      yield* bw.receive("env-alpha", {
+        _tag: "organizationFinish",
+        id: "legacy-committed",
+        release: true,
+      });
+      yield* bw.receive("env-alpha", {
+        _tag: "organizationFinish",
+        id: "legacy-committed",
+        release: true,
+      });
+      expect(yield* sql`SELECT * FROM custom_ownership_reservation`).toHaveLength(0);
+      const result = yield* cw.changeOwnership({
+        clientRequestId: "after-legacy-commit",
+        threadId: b.worker,
+        threadEnvironmentId: "env-beta",
+        ownerThreadId: c.source,
+        ownerEnvironmentId: "env-gamma",
+        expectedOwnerThreadId: c.owner,
+        expectedOwnerEnvironmentId: "env-gamma",
+        expectedRevision: 1,
+      });
+      expect(result.revision).toBe(2);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "an unavailable legacy decision stays reserved with actionable recovery instructions",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, alphaWorkers: aw, betaWorkers: bw } = yield* linkedPair;
+      const a = yield* seed("legacy-unknown-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("legacy-unknown-b").pipe(Effect.provide(beta));
+      yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+      const sql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+      yield* sql`INSERT INTO custom_ownership_reservation (singleton, id, coordinator) VALUES (1, 'unknown-legacy-decision', 'env-alpha')`;
+      offline.add("env-alpha");
+      yield* bw.drain();
+      const error = yield* bw
+        .changeOwnership({
+          clientRequestId: "while-unknown",
+          threadId: b.worker,
+          ownerThreadId: b.owner,
+          expectedOwnerThreadId: a.owner,
+          expectedOwnerEnvironmentId: "env-alpha",
+          expectedRevision: 0,
+        })
+        .pipe(Effect.flip);
+      expect(error.message).toContain("unknown-legacy-decision");
+      expect(error.message).toContain("env-alpha");
+      expect(error.message).toContain("original request");
+      expect(yield* sql`SELECT id FROM custom_ownership_reservation`).toEqual([
+        { id: "unknown-legacy-decision" },
+      ]);
+      expect((yield* bw.readOwnership(b.worker)).ownerThreadId).toBe(a.owner);
+    }).pipe(Effect.scoped),
 );

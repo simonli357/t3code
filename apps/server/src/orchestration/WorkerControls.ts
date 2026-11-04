@@ -316,7 +316,7 @@ const Plan = Schema.Struct({
   environmentId: Schema.optional(Schema.String),
   /** On a worker owned by a peer master: that master's permission ceiling. */
   ownerRuntimeMode: Schema.optional(OrchestrationThreadShell.fields.runtimeMode),
-  /** Routing back to the authority proxy after a remote worker becomes independent. */
+  /** Execution authority for this revision; legacy rows may still name a former master. */
   authorityEnvironmentId: Schema.optional(Schema.String),
   authorityRevision: Schema.optional(Schema.Number),
   organizationHosts: Schema.optional(Schema.Array(Schema.String)),
@@ -340,6 +340,7 @@ const OrganizationPatch = Schema.Struct({
 });
 type OrganizationPatch = typeof OrganizationPatch.Type;
 const OrganizationDecision = Schema.Struct({
+  authorityEnvironmentId: Schema.optional(Schema.String),
   state: Schema.Literals(["preparing", "committed", "complete", "aborted"]),
   participants: Schema.Array(Schema.String),
   patch: Schema.NullOr(OrganizationPatch),
@@ -467,6 +468,7 @@ export const PeerRequest = Schema.TaggedUnion({
     actor: SessionAddress,
   },
   organizationChange: {
+    executionAuthority: Schema.optional(Schema.Boolean),
     input: SessionOwnershipInput,
     actor: Schema.optional(SessionAddress),
   },
@@ -1525,6 +1527,8 @@ const make = Effect.gen(function* () {
     yield* refreshJobs();
     yield* processRenewals();
     if (!(yield* sql`SELECT 1 FROM custom_ownership_reservation`).length) yield* processHandoffs();
+    // Install committed ownership routes before any report can reach its owner.
+    yield* syncOwnershipChanges();
     // Refresh historical master copies before forming digests or dispatching
     // pending reports. An offline execution host cannot authorize stale delivery.
     const staleReports = new Set<string>();
@@ -1933,11 +1937,7 @@ const make = Effect.gen(function* () {
     }
   });
   const drainAndPublish = () =>
-    drainJobs().pipe(
-      Effect.andThen(syncOwnershipChanges()),
-      Effect.andThen(publishOrganizations()),
-      Effect.mapError(failure),
-    );
+    drainJobs().pipe(Effect.andThen(publishOrganizations()), Effect.mapError(failure));
   const drain = () =>
     recoverOrganizations().pipe(
       Effect.andThen(lock.withPermit(drainAndPublish())),
@@ -2603,16 +2603,16 @@ const make = Effect.gen(function* () {
     let current = environment ?? (yield* peers.localEnvironment).environmentId;
     let snapshot = yield* inspectAt({ environmentId: current, threadId });
     const seen = new Set<string>();
-    while (snapshot.authority !== current) {
-      if (seen.has(snapshot.authority))
+    while (snapshot.execution !== current) {
+      if (seen.has(snapshot.execution))
         return yield* new WorkerError({
           message: "Ownership routing is inconsistent; retry after recovery.",
         });
       seen.add(current);
-      current = snapshot.authority;
+      current = snapshot.execution;
       snapshot = yield* inspectAt({ environmentId: current, threadId });
     }
-    return snapshot;
+    return { ...snapshot, authority: snapshot.execution };
   });
   const organizationResult = (
     snapshot: OrganizationSnapshot,
@@ -2647,7 +2647,7 @@ const make = Effect.gen(function* () {
       if (held && (held.id !== id || held.coordinator !== coordinator))
         return yield* new WorkerError({
           code: "conflict",
-          message: "Another ownership change is in progress. Retry after it finishes.",
+          message: `Ownership transaction ${held.id} is reserved by ${held.coordinator}. Reconnect that coordinator and retry its original request to reconcile the durable decision before starting another transfer.`,
         });
       if (
         (yield* sql`SELECT 1 FROM custom_orchestrator_handoffs WHERE state IN ('queued', 'error') LIMIT 1`)
@@ -2677,7 +2677,14 @@ const make = Effect.gen(function* () {
     const row =
       (yield* sql<OrganizationTransaction>`SELECT * FROM custom_ownership_transactions WHERE id = ${id}`)[0];
     if (!row) return yield* new WorkerError({ message: "Unknown ownership transaction." });
+    const request = decodeOrganizationRequest(row.request_json);
+    const record =
+      (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${request.input.threadId}`)[0];
     return {
+      authorityEnvironmentId:
+        record?.state === "remote"
+          ? decodePlan(record.plan_json).environmentId
+          : (yield* peers.localEnvironment).environmentId,
       state: row.state,
       participants: decodeHosts(row.participants_json),
       patch: row.patch_json ? decodeOrganizationPatch(row.patch_json) : null,
@@ -2718,7 +2725,24 @@ const make = Effect.gen(function* () {
       });
     const record =
       (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${snapshot.threadId}`)[0];
-    if (record && (decodePlan(record.plan_json).authorityRevision ?? -1) >= patch.revision) return;
+    if (record) {
+      const plan = decodePlan(record.plan_json);
+      const revision = Math.max(
+        plan.authorityRevision ?? -1,
+        local === snapshot.execution
+          ? ((yield* authorityOf(snapshot.threadId))?.revision ?? -1)
+          : -1,
+      );
+      if (revision > patch.revision) return;
+      if (revision === patch.revision) {
+        if (localId(patch.owner, local) !== record.owner_id)
+          return yield* new WorkerError({
+            code: "conflict",
+            message: "Conflicting owners at the same ownership revision.",
+          });
+        if (plan.authorityEnvironmentId === snapshot.authority) return;
+      }
+    }
     const owner = localId(patch.owner, local);
     const {
       environmentId: _execution,
@@ -2733,17 +2757,9 @@ const make = Effect.gen(function* () {
       organizationHosts: patch.hosts,
       ...(patch.ownerRuntimeMode ? { ownerRuntimeMode: patch.ownerRuntimeMode } : {}),
     });
-    // Every report takes the same authority route before and after transfer. A
-    // receipt's origin identity survives relays and lost responses.
-    const reportTarget =
-      local === snapshot.execution && local !== snapshot.authority
-        ? peerRef(snapshot.authority, snapshot.threadId)
-        : owner;
-    yield* retargetReports(
-      [snapshot.threadId],
-      record?.owner_id ? [record.owner_id] : [],
-      reportTarget,
-    );
+    // Execution sends directly to the current owner. Retained delivery identities
+    // let legacy relays and retries reconcile without replaying accepted reports.
+    yield* retargetReports([snapshot.threadId], record?.owner_id ? [record.owner_id] : [], owner);
     const baseline = yield* engine.latestSequence;
     yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json, state, baseline, read_seq)
       VALUES (${snapshot.threadId}, ${owner}, ${plan}, ${snapshot.execution === local ? "ready" : "remote"}, ${baseline}, ${baseline})
@@ -2776,8 +2792,33 @@ const make = Effect.gen(function* () {
       // A completed release is idempotent. A delayed packet never releases a newer reservation.
       if (!held || held.id !== id || held.coordinator !== coordinator) return;
       if (decision.state === "preparing") return;
-      if (decision.state !== "aborted" && decision.patch) yield* applyOrganization(decision.patch);
-      if (release || decision.state === "aborted" || decision.state === "complete")
+      const legacyCommit =
+        decision.patch !== null &&
+        decision.patch.snapshot.authority !== decision.patch.snapshot.execution;
+      if (decision.state !== "aborted" && decision.patch) {
+        const patch = decision.patch;
+        // A pre-upgrade reservation is proof that this participant joined the
+        // legacy decision. Reconcile its durable commit, then fence future
+        // decisions at native execution. New legacy reservations are refused.
+        if (
+          patch.snapshot.authority !== patch.snapshot.execution &&
+          patch.snapshot.authority !== coordinator
+        )
+          return yield* new WorkerError({
+            code: "conflict",
+            message: "The reserved coordinator does not own this legacy decision.",
+          });
+        yield* applyOrganization({
+          ...patch,
+          snapshot: { ...patch.snapshot, authority: patch.snapshot.execution },
+        });
+        if (legacyCommit && local === patch.snapshot.execution)
+          yield* queueOwnershipSync([patch.snapshot.threadId]);
+      }
+      // A durable legacy commit is decided; an offline historical participant
+      // must not keep the upgraded execution host globally locked. Persisted
+      // synchronization installs its routes and reports retain their receipts.
+      if (legacyCommit || release || decision.state === "aborted" || decision.state === "complete")
         yield* sql`DELETE FROM custom_ownership_reservation WHERE id = ${id} AND coordinator = ${coordinator}`;
     }).pipe(sql.withTransaction, lock.withPermit);
     yield* Queue.offer(drainRequests, undefined);
@@ -2843,8 +2884,9 @@ const make = Effect.gen(function* () {
         seen.add(current.environmentId);
         yield* reserve(current.environmentId);
         const value = yield* inspectAt(current);
-        if (value.authority === current.environmentId) return value;
-        current = { threadId: current.threadId, environmentId: value.authority };
+        if (value.execution === current.environmentId)
+          return { ...value, authority: value.execution };
+        current = { threadId: current.threadId, environmentId: value.execution };
       }
     });
     return yield* Effect.gen(function* () {
@@ -3061,6 +3103,7 @@ const make = Effect.gen(function* () {
       const response = yield* peers
         .call(snapshot.authority, {
           _tag: "organizationChange",
+          executionAuthority: true,
           input: scopedInput,
           actor: verifiedActor,
         })
@@ -3925,6 +3968,7 @@ const make = Effect.gen(function* () {
           .pipe(Effect.flatMap(peerResult(decodeOrganizationDecision)));
         if (
           decision.state !== "preparing" ||
+          decision.authorityEnvironmentId !== from ||
           !decision.participants.includes((yield* peers.localEnvironment).environmentId)
         )
           return yield* new WorkerError({
@@ -3960,6 +4004,12 @@ const make = Effect.gen(function* () {
         };
       }
       case "organizationChange": {
+        if (request.executionAuthority !== true)
+          return yield* new WorkerError({
+            code: "conflict",
+            message:
+              "This peer uses the retired ownership protocol. Read ownership and transfer through the execution host using an updated client.",
+          });
         if (request.actor && request.actor.environmentId !== from)
           return yield* new WorkerError({
             message: "A peer cannot impersonate another environment's session.",
