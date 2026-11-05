@@ -4291,7 +4291,10 @@ const make = Effect.gen(function* () {
       Effect.repeat(Schedule.spaced("30 seconds")),
       Effect.forkScoped,
     );
-    yield* drain();
+    // One unprocessable worker, such as a thread locked by a session move, must not stop the server.
+    yield* drain().pipe(
+      Effect.catch((error) => Effect.logError("Worker queue reconciliation failed", error)),
+    );
   });
   const peerFor = (environment: string | undefined) =>
     environment ? resolvePeer(environment) : Effect.succeed(undefined);
