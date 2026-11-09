@@ -363,7 +363,7 @@ export function AllocationControls({
                             setCap(group.key, { stopWorkers: event.currentTarget.checked })
                           }
                         />
-                        Stop workers owned by any master
+                        Block new worker turns, for any master
                       </label>
                       <label className="flex items-center gap-2 text-sm">
                         <input
@@ -376,7 +376,7 @@ export function AllocationControls({
                             setCap(group.key, { stopMasters: event.currentTarget.checked })
                           }
                         />
-                        Stop masters using this account
+                        Block new master turns on this account
                       </label>
                     </div>
                     {noAction && (

@@ -69,6 +69,16 @@ const reportHeader = (title: string, createdAt?: string) =>
 // A peer message names its sender and time on its first line. A delivery repeated after a
 // lost reply may land in a later minute, so it matches on the rest.
 const afterFirstLine = (text: string) => text.slice(text.indexOf("\n"));
+/** A provider or cap refusal that another account, or waiting for the reset, gets past. */
+const USAGE_LIMIT_ERROR =
+  /usage[ _-]?(?:limit|cap)|usageLimitExceeded|quota[ _-]?(?:exceeded|exhausted)/i;
+/** The model is overloaded for every account; only a later try helps. */
+const MODEL_CAPACITY_ERROR = /model is at capacity/i;
+/** Sent when the stopped turn had no stored prompt, such as one the worker started itself. */
+const USAGE_RESUME_PROMPT =
+  "Your previous turn was stopped by a provider usage limit before it finished. Continue the assignment from where it left off.";
+/** How long to wait when a switch could not be applied or the reset time is unknown. */
+const USAGE_RETRY_MS = 30 * 60_000;
 const USAGE_CAP_NOTICE_HEADER = "[T3 worker stopped by account usage cap]";
 const isUsageCapNotice = (job: { readonly prompt: string }) =>
   job.prompt.startsWith(USAGE_CAP_NOTICE_HEADER);
@@ -276,6 +286,8 @@ type Job = {
   dispatched_at: string | null;
   policy_json: string | null;
   report_ids_json: string | null;
+  resume_at: string | null;
+  resume_when_clear: number;
 };
 type Authority = {
   active: number;
@@ -687,7 +699,7 @@ const make = Effect.gen(function* () {
           const suffix = originalId.slice(`notice:${source.id}:`.length);
           if (suffix === "terminal") {
             relevant &&= ["error", "interrupted"].includes(source.state);
-          } else if (suffix !== "usage-switch") {
+          } else if (!suffix.startsWith("usage-")) {
             const activity = (yield* sql<{
               kind: string;
               payload_json: string;
@@ -1148,6 +1160,147 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const later = (ms: number) =>
+    DateTime.now.pipe(
+      Effect.map((at) => DateTime.formatIso(DateTime.makeUnsafe(DateTime.toEpochMillis(at) + ms))),
+    );
+  /** A worker that supervises its own workers keeps its account and only waits for the reset. */
+  const usageRoute = Effect.fn(function* (
+    worker: Worker,
+    target: OrchestrationThreadShell,
+    rejected: boolean,
+  ) {
+    const proceed: ProviderAllocation.UsageRoute = { _tag: "proceed" };
+    if (Option.isNone(allocation)) return proceed;
+    const supervises =
+      (yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${worker.thread_id} LIMIT 1`)
+        .length > 0;
+    return yield* allocation.value
+      .reroute(target.id, target.modelSelection, { rejected, switchAccount: !supervises })
+      .pipe(
+        Effect.catch((cause): Effect.Effect<ProviderAllocation.UsageRoute> =>
+          rejected
+            ? Effect.logWarning("Usage routing unavailable; retrying on this account later", {
+                cause,
+              }).pipe(
+                Effect.andThen(later(USAGE_RETRY_MS)),
+                Effect.map((until) => ({ _tag: "wait", until, observed: false })),
+              )
+            : Effect.succeed(proceed),
+        ),
+      );
+  });
+  /** Applies an account switch now; returns when the assignment may start and what to tell the master. */
+  const settleUsageRoute = Effect.fn(function* (
+    worker: Worker,
+    target: OrchestrationThreadShell,
+    route: ProviderAllocation.UsageRoute,
+  ) {
+    const providers = yield* catalog.getProviders;
+    const label = (id: string) => providers.find((p) => p.instanceId === id)?.displayName ?? id;
+    const from = label(target.modelSelection.instanceId);
+    if (route._tag === "switch") {
+      const switched = yield* controlUnlocked(ThreadId.make(worker.owner_id!), {
+        threadId: target.id,
+        modelSelection: route.selection,
+      }).pipe(
+        Effect.as(true),
+        Effect.catch((cause) =>
+          Effect.logWarning("Worker account switch failed; waiting instead", { cause }).pipe(
+            Effect.as(false),
+          ),
+        ),
+      );
+      if (switched)
+        return {
+          resumeAt: null,
+          whenClear: false,
+          waiting: null,
+          // Another family continues from a summary with another model, so the master is told.
+          notice: route.crossFamily
+            ? ([
+                "usage-switch",
+                `switched ${target.title} from ${from} to ${label(route.selection.instanceId)} after a usage limit`,
+              ] as const)
+            : null,
+        };
+    }
+    const resumeAt =
+      route._tag === "wait"
+        ? route.until
+        : route._tag === "switch"
+          ? yield* later(USAGE_RETRY_MS)
+          : null;
+    if (resumeAt === null) return { resumeAt, whenClear: false, waiting: null, notice: null };
+    const long =
+      Date.parse(resumeAt) - DateTime.toEpochMillis(yield* DateTime.now) >
+      ProviderAllocation.LONG_USAGE_WAIT_MS;
+    return {
+      resumeAt,
+      whenClear: route._tag === "wait" && route.observed,
+      waiting: `Waiting for ${from} until ${resumeAt}; resumes by itself.`,
+      notice: long
+        ? ([
+            "usage-wait",
+            `${target.title} is waiting for ${from} until ${resumeAt} (usage limit or cap) and resumes by itself. Switch its account to resume sooner.`,
+          ] as const)
+        : null,
+    };
+  });
+  /** One wait notice per assignment, however many times its retries have to wait again. */
+  const notifyUsageRoute = Effect.fn(function* (
+    worker: Worker,
+    job: Job,
+    outcome: Effect.Success<ReturnType<typeof settleUsageRoute>>,
+  ) {
+    if (!outcome.notice) return;
+    const [suffix, detail] = outcome.notice;
+    if (suffix === "usage-wait") {
+      const attempts = job.id.split("usage-retry:");
+      const root = attempts.at(-1)!;
+      const chain = attempts.map(
+        (_, index) => `notice:${"usage-retry:".repeat(index)}${root}:usage-wait`,
+      );
+      if (
+        (yield* sql`SELECT 1 FROM custom_worker_jobs WHERE ${sql.in("id", chain)} LIMIT 1`).length
+      )
+        return;
+    }
+    yield* report(worker, job, suffix, detail);
+  });
+  /**
+   * Before an assignment starts on an account already known to be limited or capped: move the
+   * worker to another account, or hold the assignment until the provider reset. True holds it
+   * for this pass.
+   */
+  const holdForUsage = Effect.fn(function* (job: Job, worker: Worker) {
+    if (
+      worker.state !== "ready" ||
+      worker.owner_id === null ||
+      Option.isNone(allocation) ||
+      !(yield* settings.getSettings).workerAutoSwitchOnUsageLimit
+    )
+      return false;
+    const shell = yield* snapshots.getThreadShellById(ThreadId.make(job.target_id));
+    if (Option.isNone(shell)) return false;
+    const target = shell.value;
+    if (!(yield* allocation.value.limited(target.modelSelection.instanceId))) return false;
+    // A running turn finishes where it is; a new assignment is not steered into it.
+    if (yield* busy(target)) return true;
+    const route = yield* usageRoute(worker, target, false);
+    if (route._tag === "proceed") return false;
+    const outcome = yield* settleUsageRoute(worker, target, route);
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql`UPDATE custom_worker_jobs SET resume_at = ${outcome.resumeAt}, resume_when_clear = ${outcome.whenClear ? 1 : 0}, error = ${outcome.waiting} WHERE id = ${job.id}`;
+        yield* notifyUsageRoute(worker, job, outcome);
+      }),
+    );
+    // A switched worker starts on the next pass, from its new settings.
+    if (outcome.resumeAt === null) yield* Queue.offer(drainRequests, undefined);
+    return true;
+  });
+
   const refreshJobs = Effect.fn(function* () {
     // Adopt direct input without replaying superseded historical turns on upgrade.
     // Persist it as already submitted: observing a turn must never send it again.
@@ -1261,16 +1414,14 @@ const make = Effect.gen(function* () {
             "Worker stopped before its turn started.";
         }
       }
+      const limitError = USAGE_LIMIT_ERROR.test(error ?? "");
       if (
         state === "error" &&
         (turn?.state === "error" || failedStart) &&
         job.state === "submitted" &&
         worker.state === "ready" &&
         worker.owner_id !== null &&
-        !job.id.startsWith("usage-retry:") &&
-        /usage[ _-]?limit|usageLimitExceeded|quota[ _-]?(?:exceeded|exhausted)/i.test(
-          error ?? "",
-        ) &&
+        (limitError || MODEL_CAPACITY_ERROR.test(error ?? "")) &&
         (yield* settings.getSettings).workerAutoSwitchOnUsageLimit &&
         Option.isSome(allocation) &&
         Option.isSome(session) &&
@@ -1278,36 +1429,38 @@ const make = Effect.gen(function* () {
         session.value.settledAt === null &&
         session.value.snoozedUntil == null &&
         !(yield* busy(session.value)) &&
-        !(yield* sql`SELECT 1 FROM custom_workers WHERE owner_id = ${worker.thread_id} LIMIT 1`)
-          .length
+        // A turn the worker started itself after reporting done has nothing left to resume.
+        (job.prompt.trim() !== "" ||
+          (yield* sql<{ kind: string }>`SELECT kind FROM custom_worker_jobs
+            WHERE worker_id = ${worker.thread_id} AND (kind = 'done' OR (kind = 'work' AND id NOT LIKE 'direct:%'))
+            ORDER BY rowid DESC LIMIT 1`)[0]?.kind !== "done")
       ) {
         const retryId = `usage-retry:${job.id}`;
         if (!(yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${retryId}`).length) {
           const recovered = yield* Effect.gen(function* () {
             const target = session.value;
-            const selection = yield* allocation.value.replacement(target.id, target.modelSelection);
-            if (!selection || !job.prompt.trim()) return false;
-            // Claim this failure before switching. Only submitted jobs can auto-switch, so
-            // a restart or another failure on the retry cannot repeat the attempt.
+            // Claim this failure before rerouting. Only submitted jobs recover, so a restart
+            // cannot repeat the attempt; a retry that is limited again recovers as its own job.
             yield* sql`UPDATE custom_worker_jobs SET state = 'error', error = ${error} WHERE id = ${job.id}`;
-            yield* controlUnlocked(ThreadId.make(worker.owner_id!), {
-              threadId: target.id,
-              modelSelection: selection,
-            });
-            const providers = yield* catalog.getProviders;
-            const label = (id: string) =>
-              providers.find((p) => p.instanceId === id)?.displayName ?? id;
+            const routed = limitError ? yield* usageRoute(worker, target, true) : undefined;
+            // No reading explains the refusal: an overloaded model is tried again after 5 minutes
+            // and an unexplained limit after 30, doubling each time it repeats, up to 6 hours.
+            const repeats = job.id.split("usage-retry:").length - 1;
+            const route =
+              routed?._tag === "switch" || (routed?._tag === "wait" && routed.observed)
+                ? routed
+                : {
+                    _tag: "wait" as const,
+                    until: yield* later(Math.min(360, (routed ? 30 : 5) * 2 ** repeats) * 60_000),
+                    observed: false,
+                  };
+            const outcome = yield* settleUsageRoute(worker, target, route);
             yield* sql.withTransaction(
               Effect.gen(function* () {
-                yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
-                  VALUES (${retryId}, ${worker.thread_id}, ${worker.thread_id}, 'work', ${job.prompt}, ${yield* now})`;
+                yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, resume_at, resume_when_clear, error)
+                  VALUES (${retryId}, ${worker.thread_id}, ${worker.thread_id}, 'work', ${job.prompt.trim() ? job.prompt : USAGE_RESUME_PROMPT}, ${yield* now}, ${outcome.resumeAt}, ${outcome.whenClear ? 1 : 0}, ${outcome.waiting})`;
                 yield* sql`UPDATE custom_worker_jobs SET reported = 1 WHERE id = ${job.id}`;
-                yield* report(
-                  worker,
-                  { ...job, id: retryId },
-                  "usage-switch",
-                  `switched ${target.title} from ${label(target.modelSelection.instanceId)} to ${label(selection.instanceId)} after a usage limit`,
-                );
+                yield* notifyUsageRoute(worker, { ...job, id: retryId }, outcome);
               }),
             );
             return true;
@@ -1560,8 +1713,10 @@ const make = Effect.gen(function* () {
     let communicationDeadline: number | undefined;
     const blocked = new Set<string>();
     const unreachable = new Set<string>();
+    const passAt = DateTime.toEpochMillis(yield* DateTime.now);
     for (const job of jobs) {
       if (blocked.has(job.target_id) || held.has(job.id)) continue;
+
       if (staleReports.has(job.worker_id) && ["done", "blocked", "notice"].includes(job.kind))
         continue;
       if (
@@ -1580,6 +1735,26 @@ const make = Effect.gen(function* () {
       const workers =
         yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
       const worker = workers[0];
+      // An assignment waiting for a provider reset keeps its place; the timer below wakes it.
+      // A wait on an exhaustion that readings or caps showed ends early once they show it gone.
+      if (
+        job.kind === "work" &&
+        job.resume_at &&
+        Date.parse(job.resume_at) > passAt &&
+        !(
+          job.resume_when_clear &&
+          worker &&
+          Option.isSome(allocation) &&
+          !(yield* allocation.value
+            .limited(decodePlan(worker.plan_json).modelSelection.instanceId)
+            .pipe(Effect.orElseSucceed(() => true)))
+        )
+      ) {
+        const deadline = Date.parse(job.resume_at);
+        communicationDeadline = Math.min(communicationDeadline ?? deadline, deadline);
+        blocked.add(job.target_id);
+        continue;
+      }
       // Peer messages share durable delivery, not worker ownership/control.
       const preparing = yield* sql`SELECT 1 FROM custom_orchestrator_handoffs
           WHERE thread_id = ${job.target_id} AND state != 'completed'`;
@@ -1594,7 +1769,13 @@ const make = Effect.gen(function* () {
         )
           continue;
       }
-      if (worker && (job.kind === "notice" || job.kind === "blocked") && !isUsageCapNotice(job)) {
+      if (
+        worker &&
+        (job.kind === "notice" || job.kind === "blocked") &&
+        !isUsageCapNotice(job) &&
+        // The waiting assignment has not started, so its communication window would hold this back.
+        !job.id.endsWith(":usage-wait")
+      ) {
         const status = yield* communicationStatus(worker.thread_id, job.id).pipe(
           Effect.catch((cause) =>
             sql`UPDATE custom_worker_jobs SET error = ${failure(cause).message} WHERE id = ${job.id}`.pipe(
@@ -1635,6 +1816,21 @@ const make = Effect.gen(function* () {
         if (!approved) continue;
       }
       const remote = parsePeerRef(job.target_id);
+      if (
+        !remote &&
+        job.kind === "work" &&
+        worker &&
+        (yield* holdForUsage(job, worker).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Worker usage check failed; dispatching anyway", { cause }).pipe(
+              Effect.as(false),
+            ),
+          ),
+        ))
+      ) {
+        blocked.add(job.target_id);
+        continue;
+      }
       if (remote) {
         if (unreachable.has(remote.environmentId)) continue;
         const relocated =
@@ -2458,6 +2654,10 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         if (adopted !== undefined)
           yield* sql`UPDATE custom_workers SET plan_json = ${adopted} WHERE thread_id = ${input.threadId}`;
+        // A wait belonged to the previous account.
+        if (input.modelSelection)
+          yield* sql`UPDATE custom_worker_jobs SET resume_at = NULL, resume_when_clear = 0, error = NULL
+            WHERE worker_id = ${input.threadId} AND kind = 'work' AND state = 'queued' AND resume_at IS NOT NULL`;
         if (input.notifications !== undefined)
           yield* sql`UPDATE custom_workers SET notify = ${input.notifications ? 1 : 0} WHERE thread_id = ${input.threadId}`;
         if (cancelled)
@@ -4285,7 +4485,9 @@ const make = Effect.gen(function* () {
     // Existing peer/digest recovery cadence. Communication-window notices use
     // the one-shot deadline above, never this polling path unless delivery or
     // executor lookup actually failed. Local events/settings reschedule them.
-    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND (kind = 'done' OR (target_id LIKE 'peer:%' AND kind NOT IN ('notice', 'blocked')) OR (kind IN ('notice', 'blocked') AND error IS NOT NULL)) UNION ALL SELECT 1 FROM custom_session_ownership_changes WHERE announced = 0 UNION ALL SELECT 1 FROM custom_ownership_transactions WHERE state IN ('preparing', 'committed') UNION ALL SELECT 1 FROM custom_ownership_reservation LIMIT 1`.pipe(
+    // An assignment held for a visible limit or cap is rechecked here, because a raised cap
+    // or a fresh reading emits no thread event.
+    yield* sql`SELECT 1 FROM custom_worker_jobs WHERE state = 'queued' AND (kind = 'done' OR (target_id LIKE 'peer:%' AND kind NOT IN ('notice', 'blocked')) OR (kind IN ('notice', 'blocked') AND error IS NOT NULL) OR (kind = 'work' AND resume_when_clear = 1)) UNION ALL SELECT 1 FROM custom_session_ownership_changes WHERE announced = 0 UNION ALL SELECT 1 FROM custom_ownership_transactions WHERE state IN ('preparing', 'committed') UNION ALL SELECT 1 FROM custom_ownership_reservation LIMIT 1`.pipe(
       Effect.flatMap((rows) => (rows.length ? Queue.offer(drainRequests, undefined) : Effect.void)),
       Effect.catch((error) => Effect.logError("Peer delivery retry failed", error)),
       Effect.repeat(Schedule.spaced("30 seconds")),

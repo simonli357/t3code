@@ -333,6 +333,7 @@ function fixture(
     projects: OrchestrationProjectShell[];
     capacity: ComputerCapacity;
     workPaths: Array<string | undefined>;
+    refresh: (instanceId: string) => Effect.Effect<void>;
   } = {
     threads: [],
     peers: [],
@@ -340,6 +341,7 @@ function fixture(
     projects: [],
     capacity: capacityAt(Date.parse(at)),
     workPaths: [],
+    refresh: () => Effect.void,
   };
   const db = NodeSqliteClient.layer({ filename: ":memory:" });
   const deps = Layer.mergeAll(
@@ -347,7 +349,11 @@ function fixture(
     Settings.layerTest({
       allocationCoordinatorEnvironmentId: options.remote ? "remote" : (options.localId ?? "local"),
     }),
-    Layer.mock(ProviderRegistry)({ getProviders: Effect.sync(() => state.providers) }),
+    Layer.mock(ProviderRegistry)({
+      getProviders: Effect.sync(() => state.providers),
+      refreshInstance: (instanceId) =>
+        Effect.suspend(() => state.refresh(instanceId)).pipe(Effect.map(() => state.providers)),
+    }),
     Layer.mock(ProjectionSnapshotQuery)({
       getShellSnapshot: () =>
         Effect.succeed({
@@ -1245,20 +1251,65 @@ it.effect(
     }).pipe(Effect.provide(f.layer));
   },
 );
-it.effect(
-  "coordinator disconnection returns a safe failure without local fallback or startup",
-  () => {
-    const f = fixture({ remote: true });
-    return Effect.gen(function* () {
-      const { assignments, store } = yield* f.setup;
-      expect(
-        Exit.isFailure(yield* Effect.exit(assignments.start(startInput, ThreadId.make("master")))),
-      ).toBe(true);
-      expect(yield* store.reservations).toEqual([]);
-      expect(f.calls).toHaveLength(0);
-    }).pipe(Effect.provide(f.layer));
-  },
-);
+for (const failure of ["unreachable", "version-skew"] as const)
+  it.effect(
+    `a start decides locally with a recorded warning when the coordinator is ${failure}`,
+    () => {
+      const f = fixture({
+        remote: true,
+        peerCall: (id) =>
+          failure === "unreachable"
+            ? Effect.fail(
+                new PeerUnavailable({ environmentId: id, message: "remote: unreachable" }),
+              )
+            : Effect.fail(
+                new PeerRejected({ message: "remote: Invalid allocation peer request." }),
+              ),
+      });
+      return Effect.gen(function* () {
+        const { assignments, store } = yield* f.setup;
+        // This computer is not the coordinator and only holds a copy of the policy.
+        const current = yield* store.policy;
+        yield* store.savePolicy({
+          expectedVersion: current.version,
+          policy: { ...current, coordinatorEnvironmentId: "remote" },
+        });
+        const started = yield* assignments.start(startInput, ThreadId.make("master"));
+        expect(started.state).toBe("submitted");
+        expect(started.allocation?.decision.selectedInstanceId).toBe(provider.instanceId);
+        expect(started.allocation?.decision.reasons).toContain(
+          "Allocation coordinator unavailable or not configured.",
+        );
+        expect(started.recommendation?.warnings).toContain(
+          "Allocation coordinator unavailable or not configured.",
+        );
+        expect(f.calls).toHaveLength(1);
+        // The reservation lives here, so its start and an identical retry stay here.
+        expect((yield* store.reservations).map((r) => r.state)).toEqual(["starting"]);
+        expect((yield* assignments.start(startInput, ThreadId.make("master"))).state).toBe(
+          "submitted",
+        );
+        expect(yield* store.reservations).toHaveLength(1);
+      }).pipe(Effect.provide(f.layer), Effect.scoped);
+    },
+  );
+
+it.effect("a coordinator's deliberate refusal still fails the start", () => {
+  const f = fixture({
+    remote: true,
+    peerCall: () =>
+      Effect.fail(
+        new PeerRejected({ message: "remote: This thread already has an active allocation." }),
+      ),
+  });
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    const error = yield* Effect.flip(assignments.start(startInput, ThreadId.make("master")));
+    expect(error.code).toBe("unavailable");
+    expect(f.calls).toHaveLength(0);
+    expect(yield* store.reservations).toHaveLength(0);
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
 
 const decodeShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
 const shell = (sessionStatus: "running" | "error" | "ready" = "running") =>
@@ -2264,10 +2315,14 @@ it.effect("usage recovery prefers another same-family account and observes live 
       instanceId: ProviderInstanceId.make("spare"),
       auth: { ...provider.auth, email: "spare@example.test" },
     };
+    const route = allocation.reroute(ThreadId.make("worker"), selection, { rejected: true });
+    // No reading names the exhausted window, so the rejected account is retried in half an hour.
+    const wait = { _tag: "wait", until: "1970-01-01T00:30:00.000Z", observed: false };
     f.state.providers = [provider, spare];
-    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toEqual({
-      ...selection,
-      instanceId: spare.instanceId,
+    expect(yield* route).toEqual({
+      _tag: "switch",
+      selection: { ...selection, instanceId: spare.instanceId },
+      crossFamily: false,
     });
     f.state.providers = [
       provider,
@@ -2279,75 +2334,150 @@ it.effect("usage recovery prefers another same-family account and observes live 
         },
       },
     ];
-    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+    expect(yield* route).toEqual(wait);
     f.state.providers = [provider, { ...spare, auth: provider.auth }];
-    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+    expect(yield* route).toEqual(wait);
     f.state.providers = [provider, { ...spare, usageLimits: undefined }];
-    expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+    expect(yield* route).toEqual(wait);
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
 
-it.effect("usage recovery falls back to the other family's configured profile", () => {
+it.effect(
+  "usage recovery waits for the provider reset, and changes family only when that wait is long",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const profile = defaultModelRoutingPolicy.claudeAgent.cells[5]![5]!;
+      const other = yield* decodeProvider({
+        ...provider,
+        instanceId: "claude-spare",
+        driver: "claudeAgent",
+        auth: { ...provider.auth, email: "other@example.test" },
+        models: [
+          {
+            slug: profile.model,
+            name: profile.model,
+            isCustom: false,
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "effort",
+                  label: "Effort",
+                  type: "select",
+                  options: [{ id: profile.effort, label: profile.effort }],
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const same = {
+        ...provider,
+        instanceId: ProviderInstanceId.make("same-family"),
+        auth: { ...provider.auth, email: "same@example.test" },
+      };
+      const exhausted = (windowId: string) => ({
+        ...provider,
+        usageLimits: {
+          ...provider.usageLimits!,
+          windows: provider.usageLimits!.windows.map((w) =>
+            w.id === windowId ? { ...w, usedPercent: 100 } : w,
+          ),
+        },
+      });
+      const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+      const route = allocation.reroute(ThreadId.make("worker"), selection, { rejected: true });
+      // The weekly window resets in six days.
+      f.state.providers = [exhausted("weekly"), other, same];
+      expect(yield* route).toMatchObject({
+        _tag: "switch",
+        selection: { instanceId: same.instanceId },
+        crossFamily: false,
+      });
+      f.state.providers = [exhausted("weekly"), other];
+      expect(yield* route).toEqual({
+        _tag: "switch",
+        selection: {
+          instanceId: other.instanceId,
+          model: profile.model,
+          options: [{ id: "effort", value: profile.effort }],
+        },
+        crossFamily: true,
+      });
+      // A worker that supervises others keeps its account and waits.
+      expect(
+        yield* allocation.reroute(ThreadId.make("worker"), selection, {
+          rejected: true,
+          switchAccount: false,
+        }),
+      ).toEqual({ _tag: "wait", until: "1970-01-07T00:00:00.000Z", observed: true });
+      // Thirty minutes is not worth a summary handoff to another family.
+      f.state.providers = [provider, other];
+      expect(yield* route).toEqual({
+        _tag: "wait",
+        until: "1970-01-01T00:30:00.000Z",
+        observed: false,
+      });
+      // Before any rejection, an account with headroom is left alone and an exhausted one is not.
+      expect(yield* allocation.reroute(ThreadId.make("worker"), selection)).toEqual({
+        _tag: "proceed",
+      });
+      expect(yield* allocation.limited(provider.instanceId)).toBe(false);
+      f.state.providers = [exhausted("short"), other];
+      expect(yield* allocation.limited(provider.instanceId)).toBe(true);
+      // Its four-hour wait is long enough to change family.
+      expect(yield* allocation.reroute(ThreadId.make("worker"), selection)).toMatchObject({
+        _tag: "switch",
+        crossFamily: true,
+      });
+      // A candidate whose reading went stale and cannot be refreshed proves no headroom.
+      yield* TestClock.adjust("11 minutes");
+      expect(yield* allocation.reroute(ThreadId.make("worker"), selection)).toEqual({
+        _tag: "wait",
+        until: "1970-01-01T04:00:00.000Z",
+        observed: true,
+      });
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect("a reached cap closes its account to workers until the provider reset", () => {
   const f = fixture();
   return Effect.gen(function* () {
     const { allocation } = yield* f.setup;
-    const profile = defaultModelRoutingPolicy.claudeAgent.cells[5]![5]!;
-    const other = yield* decodeProvider({
+    const sql = yield* SqlClient.SqlClient;
+    const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+    const spare = {
       ...provider,
-      instanceId: "claude-spare",
-      driver: "claudeAgent",
-      auth: { ...provider.auth, email: "other@example.test" },
-      models: [
-        {
-          slug: profile.model,
-          name: profile.model,
-          isCustom: false,
-          capabilities: {
-            optionDescriptors: [
-              {
-                id: "effort",
-                label: "Effort",
-                type: "select",
-                options: [{ id: profile.effort, label: profile.effort }],
-              },
-            ],
-          },
-        },
-      ],
-    });
-    const same = {
-      ...provider,
-      instanceId: ProviderInstanceId.make("same-family"),
-      auth: { ...provider.auth, email: "same@example.test" },
+      instanceId: ProviderInstanceId.make("spare"),
+      auth: { ...provider.auth, email: "spare@example.test" },
     };
-    f.state.providers = [provider, other, same];
-    expect(
-      (yield* allocation.replacement(ThreadId.make("worker"), {
-        instanceId: provider.instanceId,
-        model: "astra",
-        options: [],
-      }))?.instanceId,
-    ).toBe(same.instanceId);
-    f.state.providers = [provider, other];
-    expect(
-      yield* allocation.replacement(ThreadId.make("worker"), {
-        instanceId: provider.instanceId,
-        model: "astra",
-        options: [],
-      }),
-    ).toEqual({
-      instanceId: other.instanceId,
-      model: profile.model,
-      options: [{ id: "effort", value: profile.effort }],
+    f.state.providers = [provider, spare];
+    const inventory = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    const latch = (instanceId: string, stopWorkers: boolean) =>
+      sql`INSERT INTO provider_usage_cap_latches (account_key, driver, window_id, cycle_key,
+        used_percent, threshold_percent, checked_at, resets_at, enforced_at, stop_workers, stop_masters)
+        VALUES (${allocationPreferenceKey(inventory.accounts.find((a) => a.instanceId === instanceId)!)},
+          'codex', 'weekly', 'cycle', 81, 80, ${at}, '1970-01-07T00:00:00.000Z', ${at}, ${stopWorkers ? 1 : 0}, 1)`;
+    yield* latch(provider.instanceId, false);
+    expect(yield* allocation.limited(provider.instanceId)).toBe(false);
+    yield* sql`DELETE FROM provider_usage_cap_latches`;
+    yield* latch(provider.instanceId, true);
+    expect(yield* allocation.limited(provider.instanceId)).toBe(true);
+    expect(yield* allocation.reroute(ThreadId.make("worker"), selection)).toEqual({
+      _tag: "switch",
+      selection: { ...selection, instanceId: spare.instanceId },
+      crossFamily: false,
     });
-    yield* TestClock.adjust("11 minutes");
-    expect(
-      yield* allocation.replacement(ThreadId.make("worker"), {
-        instanceId: provider.instanceId,
-        model: "astra",
-        options: [],
-      }),
-    ).toBeNull();
+    // A capped account is not a destination either.
+    yield* latch(spare.instanceId, true);
+    f.state.providers = [provider, spare];
+    expect(yield* allocation.reroute(ThreadId.make("worker"), selection)).toEqual({
+      _tag: "wait",
+      until: "1970-01-07T00:00:00.000Z",
+      observed: true,
+    });
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
 
@@ -2440,17 +2570,14 @@ it.effect(
       };
       f.state.providers = [provider, spare, enabled];
       yield* settings.updateSettings({ workerDisabledInstanceIds: [spare.instanceId] });
-      expect((yield* allocation.replacement(ThreadId.make("worker"), selection))?.instanceId).toBe(
-        enabled.instanceId,
-      );
+      const route = allocation.reroute(ThreadId.make("worker"), selection, { rejected: true });
+      expect(yield* route).toMatchObject({ selection: { instanceId: enabled.instanceId } });
       yield* settings.updateSettings({
         workerDisabledInstanceIds: [spare.instanceId, enabled.instanceId],
       });
-      expect(yield* allocation.replacement(ThreadId.make("worker"), selection)).toBeNull();
+      expect((yield* route)._tag).toBe("wait");
       yield* settings.updateSettings({ workerDisabledInstanceIds: [enabled.instanceId] });
-      expect((yield* allocation.replacement(ThreadId.make("worker"), selection))?.instanceId).toBe(
-        spare.instanceId,
-      );
+      expect(yield* route).toMatchObject({ selection: { instanceId: spare.instanceId } });
     }).pipe(Effect.provide(f.layer));
   },
 );
@@ -2488,3 +2615,45 @@ it.effect("explicit peer worker starts use the destination's availability settin
     expect(f.calls).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect(
+  "a decision refreshes stale quota readings first, and waits only briefly for them",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const refreshed: string[] = [];
+      const reading = (checkedAt: string) => ({
+        ...provider,
+        usageLimits: { ...provider.usageLimits!, checkedAt },
+      });
+      const stale = (response: AllocationResponse) =>
+        response.result!.decision.candidates[0]!.warnings!.some((w) =>
+          w.includes("Quota reading is stale"),
+        );
+      const preview = allocation.execute({ _tag: "preview", request: startInput.request });
+      f.state.refresh = (instanceId) =>
+        Effect.sync(() => {
+          refreshed.push(instanceId);
+          f.state.providers = [reading("1970-01-01T00:11:00.000Z")];
+        });
+      expect(stale(yield* preview)).toBe(false);
+      expect(refreshed).toEqual([]);
+      yield* TestClock.adjust("11 minutes");
+      // Looking at the accounts is not a decision and probes nothing.
+      yield* allocation.execute({ _tag: "snapshot" });
+      expect(refreshed).toEqual([]);
+      expect(stale(yield* preview)).toBe(false);
+      expect(refreshed).toEqual([provider.instanceId]);
+      // An account that does not answer costs a start three seconds, once a minute at most.
+      f.state.refresh = (instanceId) =>
+        Effect.sync(() => refreshed.push(instanceId)).pipe(Effect.andThen(Effect.never));
+      yield* TestClock.adjust("11 minutes");
+      const slow = yield* Effect.forkChild(preview);
+      yield* TestClock.adjust("3 seconds");
+      expect(stale(yield* Fiber.join(slow))).toBe(true);
+      expect(stale(yield* preview)).toBe(true);
+      expect(refreshed).toEqual([provider.instanceId, provider.instanceId]);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);

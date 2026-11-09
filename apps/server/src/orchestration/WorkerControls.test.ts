@@ -5975,11 +5975,29 @@ it.layer(testLayer)("strict window renewal", (it) => {
   );
 });
 
+// What the allocation service answers for the worker under test.
+const usage: {
+  route: Allocation.UsageRoute | undefined;
+  /** Accounts whose readings or cap already show them exhausted. */
+  limited: readonly string[];
+  calls: Array<{ threadId: string; rejected?: boolean; switchAccount?: boolean }>;
+} = { route: undefined, limited: [], calls: [] };
 const usageRecoveryLayer = Workers.layer.pipe(
   Layer.provideMerge(
     Layer.mock(Allocation.ProviderAllocation)({
-      replacement: (threadId) =>
-        Effect.succeed(selections[threadId.includes("cross-family") ? 2 : 1]!),
+      reroute: (threadId, _current, options) =>
+        Effect.sync(() => {
+          usage.calls.push({ threadId, ...options });
+          const crossFamily = threadId.includes("cross-family");
+          return (
+            usage.route ?? {
+              _tag: "switch",
+              selection: selections[crossFamily ? 2 : 1]!,
+              crossFamily,
+            }
+          );
+        }),
+      limited: (instanceId) => Effect.sync(() => usage.limited.includes(instanceId)),
     }),
   ),
   Layer.provideMerge(infrastructure),
@@ -5988,62 +6006,296 @@ const usageRecoveryLayer = Workers.layer.pipe(
   Layer.provideMerge(noPeers),
 );
 it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
+  const usageJobs = Effect.fn(function* (worker: ThreadId) {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<{
+      id: string;
+      prompt: string;
+      state: string;
+      resume_at: string | null;
+    }>`SELECT id, prompt, state, resume_at FROM custom_worker_jobs
+      WHERE worker_id = ${worker} AND kind = 'work' ORDER BY rowid`;
+  });
+  const usageNotices = Effect.fn(function* (worker: ThreadId) {
+    const sql = yield* SqlClient.SqlClient;
+    return yield* sql<{
+      id: string;
+      prompt: string;
+    }>`SELECT id, prompt FROM custom_worker_jobs
+      WHERE worker_id = ${worker} AND kind = 'notice' ORDER BY rowid`;
+  });
+  // The block shares one database, so earlier tests' queued assignments are routed too.
+  const routed = (worker: ThreadId) =>
+    usage.calls.flatMap(({ threadId, ...options }) => (threadId === worker ? [options] : []));
+  // It shares one clock as well, so each test measures from its own start.
+  const reset = Effect.gen(function* () {
+    usage.route = undefined;
+    usage.limited = [];
+    usage.calls = [];
+    const start = DateTime.toEpochMillis(yield* DateTime.now);
+    return (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(start + minutes * 60_000));
+  });
   for (const family of ["same-family", "cross-family"] as const)
     it.effect(
-      `switches and retries once with ${family}, preserving the prompt and one runtime notice`,
+      `retries a usage-limited assignment on another ${family} account and tells the master only across families`,
       () =>
         Effect.gen(function* () {
+          yield* reset;
           const service = yield* Workers.WorkerControls;
-          const sql = yield* SqlClient.SqlClient;
           const snapshots = yield* ProjectionSnapshotQuery;
           const replacement = selections[family === "cross-family" ? 2 : 1]!;
           const { owner, worker, input } = yield* seed(`usage-recovery-${family}`);
           yield* service.spawn(owner, input);
           yield* session(worker, "running", "usage-first");
-          yield* service.send(owner, {
-            threadId: worker,
-            clientRequestId: `${family}-followup`,
-            prompt: "next task",
-          });
           yield* session(worker, "error", "usage-failed", undefined, "Codex usage limit reached.");
           yield* service.drain();
+          expect(routed(worker)).toEqual([{ rejected: true, switchAccount: true }]);
           expect(
             Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).modelSelection,
           ).toEqual(replacement);
-          const retries = yield* sql<{
-            id: string;
-            prompt: string;
-            state: string;
-          }>`SELECT id, prompt, state FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`;
-          expect(retries).toHaveLength(1);
-          expect(retries[0]!.prompt).toBe(input.prompt);
-          expect(retries[0]!.state).toBe("submitted");
-          const notices = yield* sql<{
-            prompt: string;
-          }>`SELECT prompt FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE '%:usage-switch'`;
-          expect(notices).toHaveLength(1);
-          expect(notices[0]!.prompt).toContain(
-            `from codex to ${replacement.instanceId} after a usage limit`,
+          expect(yield* usageJobs(worker)).toMatchObject([
+            { id: `spawn:${worker}`, state: "error" },
+            { id: `usage-retry:spawn:${worker}`, prompt: input.prompt, state: "submitted" },
+          ]);
+          const notices = yield* usageNotices(worker);
+          expect(notices.map((notice) => notice.id)).toEqual(
+            family === "cross-family" ? [`notice:usage-retry:spawn:${worker}:usage-switch`] : [],
           );
-          yield* session(worker, "running", "usage-second", replacement.instanceId);
-          yield* session(
-            worker,
-            "error",
-            "usage-second-failed",
-            replacement.instanceId,
-            "Codex usage limit reached.",
-          );
-          yield* service.drain();
+          if (family === "cross-family")
+            expect(notices[0]!.prompt).toContain(
+              `from codex to ${replacement.instanceId} after a usage limit`,
+            );
+          // A restart reads the same durable rows and repeats nothing.
           const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
           yield* restarted.drain();
-          expect(
-            yield* sql`SELECT id FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`,
-          ).toHaveLength(1);
+          expect(yield* usageJobs(worker)).toHaveLength(2);
         }),
     );
+  it.effect(
+    "queues a usage-limited assignment until the provider reset when no account has headroom",
+    () =>
+      Effect.gen(function* () {
+        const after = yield* reset;
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("usage-wait");
+        yield* service.spawn(owner, input);
+        yield* session(worker, "running", "wait-first");
+        // A fresh reading shows the exhausted window and when it resets.
+        usage.limited = [input.modelSelection.instanceId];
+        usage.route = { _tag: "wait", until: after(120), observed: true };
+        yield* session(worker, "error", "wait-failed", undefined, "Claude usage limit reached.");
+        yield* service.drain();
+        const retry = `usage-retry:spawn:${worker}`;
+        expect(yield* usageJobs(worker)).toMatchObject([
+          { id: `spawn:${worker}`, state: "error" },
+          { id: retry, prompt: input.prompt, state: "queued", resume_at: usage.route.until },
+        ]);
+        expect((yield* service.list(owner))[0]?.latestRequest).toMatchObject({
+          requestId: retry,
+          state: "queued",
+          error: `Waiting for codex until ${after(120)}; resumes by itself.`,
+        });
+        // Two hours is a short wait: nothing is switched and the master is not told.
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(worker)).modelSelection,
+        ).toEqual(input.modelSelection);
+        expect(yield* usageNotices(worker)).toEqual([]);
+        // A later assignment keeps its place behind the waiting one.
+        yield* service.send(owner, { threadId: worker, clientRequestId: "next", prompt: "next" });
+        yield* TestClock.adjust("119 minutes");
+        yield* service.drain();
+        expect((yield* usageJobs(worker)).map((job) => job.state)).toEqual([
+          "error",
+          "queued",
+          "queued",
+        ]);
+        yield* TestClock.adjust("1 minute");
+        usage.limited = [];
+        yield* service.drain();
+        expect((yield* usageJobs(worker)).map((job) => job.state)).toEqual([
+          "error",
+          "submitted",
+          "queued",
+        ]);
+        // Limited again at the reset: the retry waits again, now long enough to tell the master once.
+        yield* session(worker, "running", "wait-second");
+        usage.limited = [input.modelSelection.instanceId];
+        usage.route = { _tag: "wait", until: after(480), observed: true };
+        yield* session(
+          worker,
+          "error",
+          "wait-second-failed",
+          undefined,
+          "Claude usage limit reached.",
+        );
+        yield* service.drain();
+        expect(
+          (yield* usageJobs(worker)).find((job) => job.state === "queued" && job.resume_at),
+        ).toMatchObject({ id: `usage-retry:${retry}`, resume_at: usage.route.until });
+        expect((yield* usageNotices(worker)).map((notice) => notice.id)).toEqual([
+          `notice:usage-retry:${retry}:usage-wait`,
+        ]);
+        expect((yield* usageNotices(worker))[0]!.prompt).toContain(
+          `is waiting for codex until ${after(480)}`,
+        );
+        // The master switching the account ends the wait.
+        yield* service.control(owner, { threadId: worker, modelSelection: selections[1]! });
+        yield* service.drain();
+        expect(
+          (yield* usageJobs(worker)).find((job) => job.id === `usage-retry:${retry}`),
+        ).toMatchObject({ state: "submitted", resume_at: null });
+      }),
+  );
+  it.effect("retries later, backing off, while the model is at capacity", () =>
+    Effect.gen(function* () {
+      const after = yield* reset;
+      const service = yield* Workers.WorkerControls;
+      const { owner, worker, input } = yield* seed("usage-capacity");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "capacity-first");
+      yield* session(
+        worker,
+        "error",
+        "capacity-failed",
+        undefined,
+        "Selected model is at capacity. Please try a different model.",
+      );
+      yield* service.drain();
+      // Another account would be just as overloaded, so allocation is not asked.
+      expect(routed(worker)).toEqual([]);
+      expect(yield* usageJobs(worker)).toMatchObject([
+        { state: "error" },
+        { id: `usage-retry:spawn:${worker}`, state: "queued", resume_at: after(5) },
+      ]);
+      yield* TestClock.adjust("5 minutes");
+      yield* service.drain();
+      yield* session(worker, "running", "capacity-second");
+      yield* session(
+        worker,
+        "error",
+        "capacity-second-failed",
+        undefined,
+        "Selected model is at capacity. Please try a different model.",
+      );
+      yield* service.drain();
+      expect((yield* usageJobs(worker)).at(-1)).toMatchObject({
+        id: `usage-retry:usage-retry:spawn:${worker}`,
+        state: "queued",
+        resume_at: after(15),
+      });
+    }),
+  );
+  it.effect("resumes a turn the worker started itself, unless it had already reported done", () =>
+    Effect.gen(function* () {
+      yield* reset;
+      const service = yield* Workers.WorkerControls;
+      const { owner, worker, input } = yield* seed("usage-self-started");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "self-usage-assignment");
+      yield* session(worker, "ready", "self-usage-assignment-finished");
+      yield* service.drain();
+      // The worker wakes itself, for example when a background build ends, and hits the limit.
+      yield* session(worker, "running", "self-usage-wake");
+      yield* session(
+        worker,
+        "error",
+        "self-usage-wake-failed",
+        undefined,
+        "Claude usage limit reached.",
+      );
+      yield* service.drain();
+      const resumed = (yield* usageJobs(worker)).filter((job) => job.id.startsWith("usage-retry:"));
+      expect(resumed).toMatchObject([{ state: "submitted" }]);
+      expect(resumed[0]!.prompt).toContain("stopped by a provider usage limit");
+      // After its done report there is nothing left to resume.
+      yield* session(worker, "running", "self-usage-final", selections[1]!.instanceId);
+      yield* replyAndReport(worker, "self-usage-final", "all checks pass");
+      yield* session(worker, "ready", "self-usage-final-finished", selections[1]!.instanceId);
+      yield* service.drain();
+      yield* session(worker, "running", "self-usage-late", selections[1]!.instanceId);
+      yield* session(
+        worker,
+        "error",
+        "self-usage-late-failed",
+        selections[1]!.instanceId,
+        "Claude usage limit reached.",
+      );
+      yield* service.drain();
+      expect(
+        (yield* usageJobs(worker)).filter((job) => job.id.startsWith("usage-retry:")),
+      ).toHaveLength(1);
+    }),
+  );
+  it.effect(
+    "moves or holds an assignment before dispatch when its account is already limited",
+    () =>
+      Effect.gen(function* () {
+        const after = yield* reset;
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const held = yield* seed("usage-before-dispatch-hold");
+        usage.limited = [selections[0]!.instanceId];
+        usage.route = { _tag: "wait", until: after(60), observed: true };
+        yield* service.spawn(held.owner, held.input);
+        yield* service.drain();
+        // Nothing was sent into the certain failure, and a short wait is not reported.
+        expect(yield* usageJobs(held.worker)).toMatchObject([
+          { id: `spawn:${held.worker}`, state: "queued", resume_at: after(60) },
+        ]);
+        expect(routed(held.worker)).toEqual([{ rejected: false, switchAccount: true }]);
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(held.worker)).session,
+        ).toBeNull();
+        expect(yield* usageNotices(held.worker)).toEqual([]);
+        yield* TestClock.adjust("30 minutes");
+        yield* service.drain();
+        expect(yield* usageJobs(held.worker)).toMatchObject([{ state: "queued" }]);
+        expect(routed(held.worker)).toHaveLength(1);
+        // The cap is raised or the limit resets early: the assignment starts without waiting on.
+        usage.limited = [];
+        yield* service.drain();
+        expect(yield* usageJobs(held.worker)).toMatchObject([{ state: "submitted" }]);
+
+        // Another account has headroom: the worker moves there first, silently within a family.
+        const moved = yield* seed("usage-before-dispatch-move");
+        usage.limited = [selections[0]!.instanceId];
+        usage.route = undefined;
+        yield* service.spawn(moved.owner, moved.input);
+        yield* service.drain();
+        expect(
+          Option.getOrThrow(yield* snapshots.getThreadShellById(moved.worker)).modelSelection,
+        ).toEqual(selections[1]);
+        yield* service.drain();
+        expect(yield* usageJobs(moved.worker)).toMatchObject([
+          { id: `spawn:${moved.worker}`, state: "submitted", resume_at: null },
+        ]);
+        expect(yield* usageNotices(moved.worker)).toEqual([]);
+        // A running turn finishes on its account; a new assignment is not steered into it.
+        yield* session(
+          moved.worker,
+          "running",
+          "before-dispatch-running",
+          selections[1]!.instanceId,
+        );
+        usage.limited = [selections[1]!.instanceId];
+        yield* service.send(moved.owner, {
+          threadId: moved.worker,
+          clientRequestId: "held",
+          prompt: "held",
+        });
+        yield* service.drain();
+        expect((yield* usageJobs(moved.worker)).at(-1)).toMatchObject({
+          state: "queued",
+          resume_at: null,
+        });
+        expect(routed(moved.worker)).toHaveLength(1);
+      }),
+  );
   for (const scenario of ["disabled", "ordinary-error", "master"] as const)
     it.effect(`does not switch for ${scenario}`, () =>
       Effect.gen(function* () {
+        const after = yield* reset;
         const service = yield* Workers.WorkerControls;
         const settings = yield* Settings.ServerSettingsService;
         const { owner, worker, input } = yield* seed(`usage-${scenario}`);
@@ -6052,6 +6304,7 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
         if (scenario === "master") {
           const child = ThreadId.make(`${worker}-child`);
           yield* service.spawn(worker, { ...input, threadId: child });
+          usage.route = { _tag: "wait", until: after(60), observed: false };
         }
         yield* session(worker, "running", `${scenario}-running`);
         yield* session(
@@ -6062,10 +6315,13 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
           scenario === "ordinary-error" ? "Network unavailable" : "Codex usage limit reached.",
         );
         yield* service.drain();
-        const sql = yield* SqlClient.SqlClient;
+        // A worker that supervises its own workers keeps its account and waits for the reset.
+        expect(routed(worker)).toEqual(
+          scenario === "master" ? [{ rejected: true, switchAccount: false }] : [],
+        );
         expect(
-          yield* sql`SELECT id FROM custom_worker_jobs WHERE worker_id = ${worker} AND id LIKE 'usage-retry:%'`,
-        ).toHaveLength(0);
+          (yield* usageJobs(worker)).filter((job) => job.id.startsWith("usage-retry:")),
+        ).toHaveLength(scenario === "master" ? 1 : 0);
         yield* settings.updateSettings({ workerAutoSwitchOnUsageLimit: true });
       }),
     );
