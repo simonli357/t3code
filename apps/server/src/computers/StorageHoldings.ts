@@ -57,33 +57,10 @@ export interface ArchiveInfo {
   /** Whether the library that holds this bundle is on the computer reporting it. */
   readonly local: boolean;
   readonly host: string | null;
-  readonly backup: "confirmed" | "published" | "not-verified";
-  readonly backupVerifiedAt: number | null;
-  readonly backupSnapshot: string | null;
-  readonly backupRequired: boolean | null;
 }
 
-export interface BackupInfo {
-  readonly id: string;
-  readonly repository: string;
-  readonly description: string | null;
-  readonly localPath: string | null;
-  readonly host: string | null;
-  readonly scope: readonly string[];
-  readonly retention: string | null;
-  readonly physicalId: string | null;
-  readonly libraryPhysicalId: string | null;
-  /** The newest receipt; null when none could be read. */
-  readonly latest: {
-    readonly snapshotId: string;
-    readonly confirmedAt: number | null;
-    readonly confirmedPaths: ReadonlySet<string>;
-    readonly repositoryBytes: number | null;
-    readonly repositoryBytesAt: number | null;
-  } | null;
-  /** Why the receipt is unknown, when it is. */
-  readonly problem: string | null;
-}
+/** Clients from before library backups were retired cannot decode a kept bundle without these. */
+const LEGACY_ARCHIVE_BACKUP = { backup: "published", backupVerifiedAt: null, backupSnapshot: null };
 
 export interface RetainedSource {
   readonly path: string;
@@ -111,11 +88,6 @@ export interface HoldingsInput {
   readonly archives: readonly ArchiveInfo[];
   readonly archiveProblem: string | null;
   readonly archiveSupported: boolean;
-  /** Library bundles the backup should cover (paths on the library). */
-  readonly libraryPaths: ReadonlySet<string>;
-  readonly backups: readonly BackupInfo[];
-  readonly backupProblem: string | null;
-  readonly backupSupported: boolean;
   readonly retained: readonly RetainedSource[];
   readonly retainedSupported: boolean;
   readonly sizes: (path: string) => StorageSize | null;
@@ -317,14 +289,9 @@ export function buildHoldings(input: HoldingsInput): StorageHoldings {
           project: archive.project,
           source: archive.source,
           createdAt: archive.createdAt,
-          retention:
-            archive.backupRequired === true
-              ? "Kept; its independent backup is required"
-              : "Kept; no expiry is recorded",
+          retention: "Kept; no expiry is recorded",
           files: archive.files,
-          backup: archive.backup,
-          backupVerifiedAt: archive.backupVerifiedAt,
-          backupSnapshot: archive.backupSnapshot,
+          ...LEGACY_ARCHIVE_BACKUP,
         },
         notes: archive.local
           ? [
@@ -336,72 +303,6 @@ export function buildHoldings(input: HoldingsInput): StorageHoldings {
       };
     })
     .toSorted((a, b) => (b.archive?.createdAt ?? 0) - (a.archive?.createdAt ?? 0));
-
-  // --- backups -----------------------------------------------------------------------------------
-  const backups: StorageEntry[] = input.backups.map((backup): StorageEntry => {
-    const local = backup.localPath !== null;
-    const where = backup.localPath ? locate(input.disks, platform, backup.localPath) : null;
-    const reported = backup.latest?.repositoryBytes ?? null;
-    const measured = backup.localPath ? input.sizes(backup.localPath) : null;
-    const size: StorageSize =
-      reported !== null
-        ? {
-            bytes: reported,
-            complete: true,
-            measuredAt: backup.latest?.repositoryBytesAt ?? backup.latest?.confirmedAt ?? null,
-            basis: "reported",
-          }
-        : (measured ?? UNMEASURED);
-    // Coverage is counted against the bundles stored on this computer; with none, it is not known here.
-    const counted = backup.latest !== null && input.libraryPaths.size > 0;
-    const covered = counted
-      ? [...input.libraryPaths].filter((path) => backup.latest!.confirmedPaths.has(path)).length
-      : null;
-    const independent =
-      backup.physicalId && backup.libraryPhysicalId
-        ? backup.physicalId !== backup.libraryPhysicalId
-        : null;
-    const notes = [
-      "Snapshots share their data (deduplicated); they are not independent copies and their sizes are not added.",
-      ...(size.bytes === null
-        ? [
-            local
-              ? "Occupied bytes are not readable by this server and the backup tool does not report them."
-              : "The repository is on another computer; its occupied bytes are not reported here.",
-          ]
-        : []),
-      ...(backup.problem ? [backup.problem] : []),
-      ...(backup.latest && !counted
-        ? ["No kept bundle is stored on this computer, so the receipt is not matched to any here."]
-        : []),
-      ...backup.scope.slice(0, 2).map((line) => `Covers: ${line}`),
-    ];
-    return {
-      id: `backup:${backup.id}`,
-      group: "backups",
-      title: `${backup.id === "library" ? "Library backup" : `Backup ${backup.id}`} on ${
-        local ? input.host : (backup.host ?? "another computer")
-      }`,
-      subtitle: backup.description,
-      host: local ? input.host : (backup.host ?? "another computer"),
-      local,
-      location: backup.repository,
-      disk: where ? { disk: where.disk, volume: where.volume } : null,
-      size,
-      ram: [],
-      backup: {
-        kind: "restic",
-        repository: backup.repository,
-        snapshots: null,
-        covered,
-        expected: counted ? input.libraryPaths.size : null,
-        verifiedAt: backup.latest?.confirmedAt ?? null,
-        retention: backup.retention,
-        independent,
-      },
-      notes,
-    };
-  });
 
   // --- other retained project data ---------------------------------------------------------------
   const other: StorageEntry[] = [];
@@ -525,21 +426,6 @@ export function buildHoldings(input: HoldingsInput): StorageHoldings {
           !input.archiveSupported
             ? "Kept results need the lifecycle tool, which is not installed on this computer."
             : input.archiveProblem,
-        );
-      case "backups":
-        return group(
-          id,
-          backups,
-          !input.backupSupported
-            ? "unsupported"
-            : input.backupProblem && !backups.length
-              ? "unavailable"
-              : input.backupProblem || backups.some((entry) => entry.backup?.verifiedAt == null)
-                ? "partial"
-                : "complete",
-          !input.backupSupported
-            ? "Backups are described by the lifecycle tool's library interface, which is not installed on this computer."
-            : input.backupProblem,
         );
       case "other":
         return group(

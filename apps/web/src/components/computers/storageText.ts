@@ -9,7 +9,6 @@ import type { GroupCoverage, HoldingGroupModel } from "./storageViewModel";
 const NOUN = {
   workspaces: ["workspace", "workspaces"],
   archives: ["archive", "archives"],
-  backups: ["repository", "repositories"],
   other: ["item", "items"],
 } as const;
 

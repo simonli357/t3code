@@ -39,7 +39,7 @@ const BASIS_TEXT: Record<StorageSize["basis"], string> = {
   lifecycle: "estimate by the lifecycle tool: single-link files only",
   manifest: "recorded size of the bundle's files",
   filesystem: "from the filesystem",
-  reported: "reported by the backup tool",
+  reported: "as reported",
   unavailable: "",
 };
 
@@ -271,28 +271,6 @@ function EntryDetails({ row }: { readonly row: HoldingRow }) {
         </Field>
         <Field label="Kept">{time(a.createdAt, "Not recorded")}</Field>
         <Field label="Retention">{a.retention ?? NOT_VERIFIED}</Field>
-        <Field label="Backup">
-          {a.backup === "confirmed" ? (
-            <>
-              <Badge variant="success" size="sm">
-                Verified
-              </Badge>{" "}
-              {a.backupSnapshot ? `in snapshot ${a.backupSnapshot} ` : ""}
-              {a.backupVerifiedAt !== null ? <>on {time(a.backupVerifiedAt, "")}</> : null}
-            </>
-          ) : a.backup === "published" ? (
-            <>
-              <Badge variant="warning" size="sm">
-                Published, backup not verified
-              </Badge>{" "}
-              <span className="text-muted-foreground">
-                A library copy is not an independent backup.
-              </span>
-            </>
-          ) : (
-            NOT_VERIFIED
-          )}
-        </Field>
         <Field label="Size">
           <SizeText size={entry.size} />
           {a.files !== null ? (
@@ -304,52 +282,6 @@ function EntryDetails({ row }: { readonly row: HoldingRow }) {
             <Breakdown details={row.details} />
           </Field>
         ) : null}
-        {notes}
-      </dl>
-    );
-  }
-  if (entry.backup) {
-    const b = entry.backup;
-    return (
-      <dl className="flex flex-col gap-2 px-3 pb-3">
-        {where}
-        <Field label="Repository">
-          <StartTruncatedPath path={b.repository} className="font-mono" />
-        </Field>
-        <Field label="Occupied">
-          <SizeText size={entry.size} />
-        </Field>
-        <Field label="Coverage">
-          {b.covered !== null && b.expected !== null ? (
-            <>
-              {b.covered} of {b.expected} kept bundles confirmed in the latest backup
-              {b.covered < b.expected ? (
-                <span className="text-muted-foreground"> · the rest are not verified</span>
-              ) : null}
-            </>
-          ) : (
-            <span className="text-muted-foreground">
-              {b.verifiedAt === null
-                ? "Not known: the latest receipt is not readable"
-                : "Not matched to kept bundles on this computer"}
-            </span>
-          )}
-        </Field>
-        <Field label="Last verified">{time(b.verifiedAt, NOT_VERIFIED)}</Field>
-        <Field label="Retention">
-          {b.retention ?? <span className="text-muted-foreground">Not reported</span>}
-        </Field>
-        <Field label="Independent">
-          {b.independent === null ? (
-            <span className="text-muted-foreground">Not known</span>
-          ) : b.independent ? (
-            "Yes: another physical disk than the library"
-          ) : (
-            <span className="text-warning-foreground">
-              No: the same physical disk as the library
-            </span>
-          )}
-        </Field>
         {notes}
       </dl>
     );
@@ -388,7 +320,6 @@ function EntryDetails({ row }: { readonly row: HoldingRow }) {
 function EntryHeadline({ row }: { readonly row: HoldingRow }) {
   const { entry } = row;
   const state = entry.workspace ? STATE_BADGE[entry.workspace.state] : null;
-  const backup = entry.archive?.backup;
   return (
     <>
       <span className="flex min-w-0 flex-col gap-0.5 text-left">
@@ -401,11 +332,6 @@ function EntryHeadline({ row }: { readonly row: HoldingRow }) {
           {state ? (
             <Badge variant={state.variant} size="sm">
               {state.label}
-            </Badge>
-          ) : null}
-          {backup ? (
-            <Badge variant={backup === "confirmed" ? "success" : "warning"} size="sm">
-              {backup === "confirmed" ? "Backup verified" : "Backup not verified"}
             </Badge>
           ) : null}
           {entry.ram.length ? (

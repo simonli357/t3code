@@ -129,7 +129,6 @@ export const indexFiles = Effect.fn("Computers.indexFiles")(function* (
           modifiedAt: Option.getOrNull(Option.map(stat.value.mtime, (d) => d.getTime())),
           directory: false,
           backup: "not-verified",
-          backupVerifiedAt: null,
           reference: null,
         });
     }

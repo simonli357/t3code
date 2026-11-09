@@ -372,7 +372,7 @@ describe("configured reserves and agent-work headroom", () => {
       reserves: [
         { path: "/home/user/jobs", role: "agent-work", bytes: 60 * GiB },
         { path: "/srv/library", role: "library", bytes: 40 * GiB },
-        { path: "/data/backup", role: "backup", bytes: 30 * GiB },
+        { path: "/data/scratch", role: "other", bytes: 30 * GiB },
       ],
       workRoots: ["/home/user/jobs"],
       reserveSource: "the lifecycle tool's capacity configuration",
@@ -386,8 +386,8 @@ describe("configured reserves and agent-work headroom", () => {
       availableBytes: 100 * GiB,
       headroomBytes: 40 * GiB,
     });
-    // A backup reserve is a reserve, but no agent work lives there, so there is no work headroom.
-    expect(data).toMatchObject({ holds: ["backup"], reserveBytes: 30 * GiB, headroomBytes: null });
+    // Another reserve is a reserve, but no agent work lives there, so there is no work headroom.
+    expect(data).toMatchObject({ holds: [], reserveBytes: 30 * GiB, headroomBytes: null });
     expect(result.reserveSource).toBe("the lifecycle tool's capacity configuration");
   });
 

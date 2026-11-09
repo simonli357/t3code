@@ -27,7 +27,6 @@ const inspection = (offset = 0, totalFiles = 500_000, indexedAt = 1): ComputerIn
     sizeBytes: 1,
     modifiedAt: 1,
     directory: false,
-    backup: "not-verified",
     reference: null,
   })),
 });

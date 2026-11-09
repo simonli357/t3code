@@ -4,12 +4,11 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import type { StorageReserve } from "./StorageDisks.ts";
-import { messageOf, parseTime, workenvHome, type WorkenvConfig } from "./WorkenvConfig.ts";
+import { messageOf, workenvHome, type WorkenvConfig } from "./WorkenvConfig.ts";
 
 /**
  * What the lifecycle tool installed on this computer says about storage, read from its own files
- * and nothing else: the job lifecycle records, the capacity configuration and the library
- * interface with its backup receipts. Every reader is tolerant (a field the tool adds later is
+ * and nothing else: the job lifecycle records and the capacity configuration. Every reader is tolerant (a field the tool adds later is
  * ignored) and optional (a computer without the tool, or without a file, simply has no answer).
  */
 
@@ -153,13 +152,12 @@ const Capacity = Schema.Struct({
     }),
   ),
   library: Schema.optionalKey(Schema.Struct({ host: Schema.String, path: Schema.String })),
-  backup: Schema.optionalKey(Schema.Struct({ host: Schema.String, path: Schema.String })),
 });
 const decodeCapacity = Schema.decodeUnknownEffect(Schema.fromJsonString(Capacity));
 
 export interface CapacityLayout {
   readonly reserves: readonly StorageReserve[];
-  /** Installed runtimes the configuration names (a path that is not a work, library or backup location). */
+  /** Installed runtimes the configuration names (a path that is not a work or library location). */
   readonly runtimes: ReadonlyArray<{ readonly key: string; readonly path: string }>;
   readonly jobRoots: readonly string[];
   readonly source: string | null;
@@ -196,8 +194,6 @@ export const readCapacityLayout = Effect.fn("StorageLifecycle.capacity")(functio
     return { ...emptyLayout, notices: [`The capacity configuration does not name ${hostname}.`] };
   const libraryKey =
     parsed.success.library?.host.toLowerCase() === local ? parsed.success.library.path : null;
-  const backupKey =
-    parsed.success.backup?.host.toLowerCase() === local ? parsed.success.backup.path : null;
   const reserves: StorageReserve[] = [];
   const runtimes: Array<{ key: string; path: string }> = [];
   for (const [key, entry] of Object.entries(host.paths ?? {})) {
@@ -207,9 +203,7 @@ export const readCapacityLayout = Effect.fn("StorageLifecycle.capacity")(functio
         ? "agent-work"
         : key === libraryKey || key.startsWith("library")
           ? "library"
-          : key === backupKey || key.startsWith("backup")
-            ? "backup"
-            : "other";
+          : "other";
     if (role === "other" && /runtime/i.test(key)) runtimes.push({ key, path: entry.path });
     reserves.push({ path: entry.path, role, bytes: entry.reserve_bytes ?? null });
   }
@@ -220,214 +214,6 @@ export const readCapacityLayout = Effect.fn("StorageLifecycle.capacity")(functio
     source: "the capacity configuration of the lifecycle tool",
     notices: [],
   } satisfies CapacityLayout;
-});
-
-// --- library interface and backup receipts ------------------------------------------------------------
-
-const BackupSection = Schema.Struct({
-  repository: Schema.optionalKey(Schema.String),
-  repository_path: Schema.optionalKey(Schema.String),
-  scope: Schema.optionalKey(Schema.Array(Schema.String)),
-  retention: Schema.optionalKey(Schema.String),
-  receipt: Schema.optionalKey(Schema.Struct({ latest: Schema.optionalKey(Schema.String) })),
-});
-const Qualified = Schema.Struct({
-  library: Schema.optionalKey(Schema.Struct({ physical_id: Schema.optionalKey(Schema.String) })),
-  backup: Schema.optionalKey(
-    Schema.Struct({
-      path: Schema.optionalKey(Schema.String),
-      physical_id: Schema.optionalKey(Schema.String),
-      ssh_host: Schema.optionalKey(Schema.String),
-    }),
-  ),
-});
-const InterfaceBackups = Schema.Struct({
-  library: Schema.optionalKey(Schema.Struct({ root: Schema.optionalKey(Schema.String) })),
-  backup: Schema.optionalKey(BackupSection),
-  additional_backups: Schema.optionalKey(
-    Schema.Record(
-      Schema.String,
-      Schema.Struct({
-        backup: Schema.optionalKey(BackupSection),
-        qualified_storage: Schema.optionalKey(Qualified),
-      }),
-    ),
-  ),
-});
-const decodeInterfaceBackups = Schema.decodeUnknownEffect(Schema.fromJsonString(InterfaceBackups));
-
-export interface BackupRepository {
-  readonly id: string;
-  /** The repository as the interface states it: a local path or `sftp:<alias>:<path>`. */
-  readonly repository: string;
-  readonly description: string | null;
-  /** Set when the repository is a local path (not reached over sftp). */
-  readonly localPath: string | null;
-  readonly sshHost: string | null;
-  readonly remotePath: string | null;
-  readonly latestReceipt: string | null;
-  readonly scope: readonly string[];
-  readonly retention: string | null;
-  /** Physical identity of the disk the repository was qualified on, when the interface records it. */
-  readonly physicalId: string | null;
-  readonly libraryPhysicalId: string | null;
-}
-
-/** `<repository> (<description>)` or `<repository> <description>`; the repository is the first word. */
-function splitRepository(text: string) {
-  const space = text.indexOf(" ");
-  return space < 0
-    ? { repository: text, description: null }
-    : {
-        repository: text.slice(0, space),
-        description:
-          text
-            .slice(space + 1)
-            .trim()
-            .replace(/^\((.*)\)$/, "$1") || null,
-      };
-}
-
-function repositoryOf(
-  id: string,
-  section: typeof BackupSection.Type | undefined,
-  qualified: typeof Qualified.Type | undefined,
-): BackupRepository | null {
-  const stated = section?.repository_path ?? section?.repository;
-  if (!stated) return null;
-  const { repository, description } = splitRepository(section?.repository ?? stated);
-  const spec = section?.repository_path ?? repository;
-  const sftp = /^sftp:([^:]+):(.+)$/.exec(spec);
-  return {
-    id,
-    repository: spec,
-    description,
-    localPath: sftp ? null : spec,
-    sshHost: sftp?.[1] ?? qualified?.backup?.ssh_host ?? null,
-    remotePath: sftp?.[2] ?? null,
-    latestReceipt: section?.receipt?.latest ?? null,
-    scope: section?.scope ?? [],
-    retention: section?.retention ?? null,
-    physicalId: qualified?.backup?.physical_id ?? null,
-    libraryPhysicalId: qualified?.library?.physical_id ?? null,
-  };
-}
-
-/** Every backup repository the library interface describes, the library's own first. */
-export const readBackupRepositories = Effect.fn("StorageLifecycle.backups")(function* (
-  config: WorkenvConfig,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const file = config.keep.interface_path;
-  if (!file)
-    return {
-      repositories: [] as BackupRepository[],
-      error: "The library interface is not configured.",
-    };
-  const read = yield* fs
-    .readFileString(file)
-    .pipe(Effect.flatMap(decodeInterfaceBackups), Effect.result);
-  if (read._tag === "Failure")
-    return {
-      repositories: [] as BackupRepository[],
-      error: `The library interface cannot be read on this computer: ${messageOf(read.failure)}`,
-    };
-  const interfaceFile = read.success;
-  const repositories = [
-    repositoryOf("library", interfaceFile.backup, undefined),
-    ...Object.entries(interfaceFile.additional_backups ?? {}).map(([id, entry]) =>
-      repositoryOf(id, entry.backup, entry.qualified_storage),
-    ),
-  ].flatMap((repository) => (repository ? [repository] : []));
-  return { repositories, error: null as string | null };
-});
-
-const BackupItem = Schema.Struct({
-  path: Schema.String,
-  status: Schema.String,
-  bytes: Schema.optionalKey(Schema.Number),
-  files: Schema.optionalKey(Schema.Number),
-});
-const LatestBackup = Schema.Struct({
-  snapshot_id: Schema.String,
-  confirmed_at: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
-  backup_finished: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
-  items: Schema.optionalKey(Schema.Array(BackupItem)),
-  /** Optional: the repository's occupied bytes, when the backup tool records them. */
-  repository_bytes: Schema.optionalKey(Schema.Number),
-  repository_bytes_at: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
-});
-const decodeLatestBackup = Schema.decodeUnknownEffect(Schema.fromJsonString(LatestBackup));
-
-export interface LatestBackup {
-  readonly snapshotId: string;
-  readonly confirmedAt: number | null;
-  /** Library paths the latest backup confirmed, with the bytes each holds. */
-  readonly confirmed: ReadonlyMap<string, number | null>;
-  readonly itemCount: number;
-  readonly repositoryBytes: number | null;
-  readonly repositoryBytesAt: number | null;
-}
-const timeOf = (value: string | number | undefined) =>
-  typeof value === "number" ? value * 1000 : value === undefined ? null : parseTime(value);
-
-export const readLatestBackup = Effect.fn("StorageLifecycle.latestBackup")(function* (
-  file: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const read = yield* fs
-    .readFileString(file)
-    .pipe(Effect.flatMap(decodeLatestBackup), Effect.option);
-  if (Option.isNone(read)) return null;
-  const items = read.value.items ?? [];
-  return {
-    snapshotId: read.value.snapshot_id,
-    confirmedAt: timeOf(read.value.confirmed_at) ?? timeOf(read.value.backup_finished),
-    confirmed: new Map(
-      items
-        .filter((item) => item.status === "confirmed")
-        .map((item) => [item.path, item.bytes ?? null]),
-    ),
-    itemCount: items.length,
-    repositoryBytes: read.value.repository_bytes ?? null,
-    repositoryBytesAt: timeOf(read.value.repository_bytes_at),
-  } satisfies LatestBackup;
-});
-
-/** The newest retention plan's `--keep-*` options as a sentence, or null when none can be read. */
-export const readRetentionPolicy = Effect.fn("StorageLifecycle.retention")(function* (
-  latestReceipt: string,
-) {
-  const fs = yield* FileSystem.FileSystem,
-    path = yield* Path.Path;
-  const directory = path.join(path.dirname(latestReceipt), "retention");
-  const names = (yield* fs
-    .readDirectory(directory)
-    .pipe(Effect.orElseSucceed(() => [] as string[])))
-    .filter((name) => name.endsWith(".json"))
-    .toSorted();
-  const newest = names.at(-1);
-  if (!newest) return null;
-  const plan = yield* fs
-    .readFileString(path.join(directory, newest))
-    .pipe(
-      Effect.flatMap(
-        Schema.decodeUnknownEffect(
-          Schema.fromJsonString(
-            Schema.Struct({ policy: Schema.optionalKey(Schema.Array(Schema.String)) }),
-          ),
-        ),
-      ),
-      Effect.option,
-    );
-  if (Option.isNone(plan)) return null;
-  const policy = plan.value.policy ?? [];
-  const kept = policy.flatMap((word, position) => {
-    const found = /^--keep-(\w+)$/.exec(word);
-    const count = policy[position + 1];
-    return found && count && /^\d+$/.test(count) ? [`${count} ${found[1]}`] : [];
-  });
-  return kept.length ? `Keeps ${kept.join(", ")} snapshots` : null;
 });
 
 // --- shared locations --------------------------------------------------------------------------------

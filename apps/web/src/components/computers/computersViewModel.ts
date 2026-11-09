@@ -183,28 +183,6 @@ export type FileKind = "file" | "folder";
 /** Where a result lives. Caches and system files are never searched, so they have no entry. */
 export type FileLocation = "project" | "work-folder" | "kept-archive";
 
-/**
- * What is known about a file's backup. "not-verified" is for every case where it is not known:
- * never checked, check failed, or the computer is unreachable. It is the default, and nothing is
- * shown as backed up unless a check says "confirmed".
- */
-export type BackupStatus =
-  | {
-      /** A check found the copy. */
-      readonly state: "confirmed";
-      /** When that check ran. */
-      readonly at: IsoTimestamp | null;
-      /** Where the copy is ("nas-archive:/backups/2026-10"). */
-      readonly where: string | null;
-    }
-  | {
-      /** A copy was handed to the archive but no check has found it yet. */
-      readonly state: "published";
-      readonly at: IsoTimestamp | null;
-      readonly where: string | null;
-    }
-  | { readonly state: "not-verified" };
-
 export interface KeptInfo {
   /** The one-line reason the file was kept. */
   readonly reason: string;
@@ -226,7 +204,8 @@ export interface FileRow {
   readonly fileType: string | null;
   readonly sizeBytes: number | null;
   readonly modifiedAt: IsoTimestamp | null;
-  readonly backup: BackupStatus;
+  /** Kept-archive files: where the archived copy is, as its publisher names it. */
+  readonly reference: string | null;
   /** Set once the file is in the kept archive. */
   readonly kept: KeptInfo | null;
 }
@@ -291,8 +270,8 @@ export interface ComputersSearchModel {
 
 // ── Activity ─────────────────────────────────────────────────────────────────
 
-/** Workenv jobs, file transfers, backups, and restores, in one list. */
-export type ActivityKind = "job" | "transfer" | "backup" | "restore";
+/** Workenv jobs, file transfers, and restores, in one list. */
+export type ActivityKind = "job" | "transfer" | "restore";
 
 /** "unknown" is for a status the data layer could not map; it is never guessed as running or done. */
 export type ActivityStatus = "queued" | "running" | "succeeded" | "failed" | "canceled" | "unknown";
@@ -304,7 +283,7 @@ export interface ActivityProgress {
 }
 
 /**
- * Retry is offered only for a failed transfer, backup, or restore, and only when this is not null.
+ * Retry is offered only for a failed transfer or restore, and only when this is not null.
  * A failed job never gets a Retry button, whatever is sent here.
  */
 export type ActivityRetry =
@@ -372,7 +351,7 @@ export const KEEP_REASON_MAX_LENGTH = 200;
 
 /**
  * The only things a person can do here: look, Keep a file, Restore a file to a folder, and Retry a
- * failed transfer or backup. There is deliberately nothing that stops or changes a process or job.
+ * failed transfer or restore. There is deliberately nothing that stops or changes a process or job.
  */
 export interface ComputersActions {
   /** Reload everything; also the "Try again" of the computers, activity, and search error states. */

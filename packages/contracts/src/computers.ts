@@ -45,9 +45,8 @@ export const ComputerFile = Schema.Struct({
   sizeComplete: Schema.optionalKey(Schema.Boolean),
   modifiedAt: Schema.NullOr(Schema.Number),
   directory: Schema.Boolean,
-  backup: Schema.Literals(["not-verified", "published", "confirmed"]),
-  /** Epoch milliseconds of the check supporting `confirmed`; null otherwise. */
-  backupVerifiedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  /** Unused. Still sent, because clients from before library backups were retired require it. */
+  backup: Schema.optionalKey(Schema.String),
   reference: Schema.NullOr(Schema.String),
   /** Kept-archive files only: whether this computer can restore the file right now. */
   restorable: Schema.optionalKey(Schema.Boolean),
@@ -65,6 +64,7 @@ export type ComputerFile = typeof ComputerFile.Type;
  */
 export const ComputerActivity = Schema.Struct({
   id: Schema.String,
+  /** `backup` is only in records from before library backups were retired. */
   kind: Schema.Literals(["job", "transfer", "backup", "restore"]),
   label: Schema.String,
   status: Schema.String,
@@ -121,7 +121,7 @@ export const StorageVolume = Schema.Struct({
   reserveBytes: Bytes,
   /** What agent work may still use here (available minus reserve, not below zero); null unless the work disk and both are known. */
   headroomBytes: Bytes,
-  /** What the host's configuration places on this volume. */
+  /** What the host's configuration places on this volume. Only older servers report `backup`. */
   holds: Schema.Array(Schema.Literals(["agent-work", "library", "backup"])),
   measuredAt: Schema.NullOr(Schema.Number),
 });
@@ -180,8 +180,13 @@ export const StorageDisks = Schema.Struct({
 });
 export type StorageDisks = typeof StorageDisks.Type;
 
-export const STORAGE_GROUPS = ["workspaces", "archives", "backups", "other"] as const;
+export const STORAGE_GROUPS = ["workspaces", "archives", "other"] as const;
 export type StorageGroupId = (typeof STORAGE_GROUPS)[number];
+/**
+ * Library backups are retired, but servers and clients from before that still send and ask for a
+ * `backups` group, so it is accepted on the wire. It is never listed or shown.
+ */
+const StorageGroupOnWire = Schema.Literals([...STORAGE_GROUPS, "backups"]);
 /** A size is a measurement with its basis, never a bare number. */
 export const StorageSize = Schema.Struct({
   bytes: Bytes,
@@ -220,7 +225,7 @@ export type StorageWorkspaceState = typeof StorageWorkspaceState.Type;
 export const StorageEntry = Schema.Struct({
   /** Opaque and stable on this computer; `holding` takes it back. */
   id: Schema.String,
-  group: Schema.Literals(STORAGE_GROUPS),
+  group: StorageGroupOnWire,
   title: Schema.String,
   /** One muted line: project, kind, collection. */
   subtitle: Schema.NullOr(Schema.String),
@@ -266,22 +271,10 @@ export const StorageEntry = Schema.Struct({
     createdAt: Schema.NullOr(Schema.Number),
     retention: Schema.NullOr(Schema.String),
     files: Schema.NullOr(Schema.Number),
-    backup: Schema.Literals(["confirmed", "published", "not-verified"]),
-    backupVerifiedAt: Schema.NullOr(Schema.Number),
-    backupSnapshot: Schema.NullOr(Schema.String),
-  }),
-  backup: optionalStruct({
-    kind: Schema.String,
-    repository: Schema.String,
-    /** Snapshots share data: the count is not a count of independent copies. */
-    snapshots: Schema.NullOr(Schema.Number),
-    /** Kept bundles the latest backup covers, out of those it should cover. */
-    covered: Schema.NullOr(Schema.Number),
-    expected: Schema.NullOr(Schema.Number),
-    verifiedAt: Schema.NullOr(Schema.Number),
-    retention: Schema.NullOr(Schema.String),
-    /** Whether this repository sits on another physical disk than the library it protects. */
-    independent: Schema.NullOr(Schema.Boolean),
+    /** Unused. Still sent, because clients from before library backups were retired require them. */
+    backup: Schema.optionalKey(Schema.String),
+    backupVerifiedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+    backupSnapshot: Schema.optionalKey(Schema.NullOr(Schema.String)),
   }),
   other: optionalStruct({
     classification: Schema.Literals([
@@ -298,7 +291,7 @@ export const StorageEntry = Schema.Struct({
 });
 export type StorageEntry = typeof StorageEntry.Type;
 export const StorageGroup = Schema.Struct({
-  group: Schema.Literals(STORAGE_GROUPS),
+  group: StorageGroupOnWire,
   /** `partial` when only some of what exists could be read; `unsupported` when this computer cannot tell. */
   status: Schema.Literals(["complete", "partial", "unsupported", "unavailable"]),
   reason: Schema.NullOr(Schema.String),
@@ -321,7 +314,7 @@ export type StorageGroup = typeof StorageGroup.Type;
 export const StorageHoldings = Schema.Struct({
   sampledAt: Schema.Number,
   host: Schema.String,
-  /** Always the four groups, in display order. */
+  /** Always the three groups, in display order. */
   groups: Schema.Array(StorageGroup),
   /** Sizes are still being measured in the background. */
   measuring: Schema.Boolean,
@@ -357,7 +350,7 @@ export type StorageDetail = typeof StorageDetail.Type;
 export const ComputerInspectInput = Schema.Struct({
   /**
    * `disks`, `holdings` and `holding` belong to the storage views: the real disks and volumes, the
-   * four groups of kept data, and the lazily read details of one entry (`entry`).
+   * three groups of kept data, and the lazily read details of one entry (`entry`).
    */
   section: Schema.Literals([
     "overview",
@@ -375,7 +368,7 @@ export const ComputerInspectInput = Schema.Struct({
    * `holdings` only: the groups whose entries are wanted. The others still carry their counts and
    * totals, with no entries; omitted means every group.
    */
-  groups: Schema.optionalKey(Schema.Array(Schema.Literals(STORAGE_GROUPS))),
+  groups: Schema.optionalKey(Schema.Array(StorageGroupOnWire)),
   path: Schema.optionalKey(Schema.String),
   query: Schema.optionalKey(Schema.String),
   project: Schema.optionalKey(Schema.String),
@@ -410,14 +403,9 @@ export const ComputerInspection = Schema.Struct({
   storageDetail: Schema.optionalKey(Schema.NullOr(StorageDetail)),
 });
 export type ComputerInspection = typeof ComputerInspection.Type;
-/**
- * `retry` takes the `id` of a transfer activity. `backup` re-verifies, and if needed restarts, the
- * library backup for published keeps; `requestId` explicitly rechecks one keep even if it was
- * confirmed before (a published native receipt, its backup activity id, or a catalog bundle id).
- * Only omission of `requestId` checks all waiting keeps; unresolved explicit ids are rejected.
- */
+/** `retry` takes the `id` of a transfer activity. */
 export const ComputerActionInput = Schema.Struct({
-  action: Schema.Literals(["keep", "retry", "restore", "backup"]),
+  action: Schema.Literals(["keep", "retry", "restore"]),
   path: Schema.optionalKey(Schema.String),
   reason: Schema.optionalKey(Schema.String),
   destination: Schema.optionalKey(Schema.String),

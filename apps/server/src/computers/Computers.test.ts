@@ -23,11 +23,9 @@ import * as Computers from "./Computers.ts";
 import {
   fromJson,
   interfaceJson,
-  latestReceipt,
   makeBundle,
   output,
   scriptedLibrary,
-  SNAPSHOT,
   toJson,
   workenvConfig,
 } from "./testSupport.ts";
@@ -37,9 +35,6 @@ const bundle = makeBundle({
   files: { "report.txt": "selected", "docs/notes.md": "notes" },
 });
 const KEY = "k".repeat(24);
-const SECOND_KEY = "m".repeat(24);
-const secondBundle = makeBundle({ id: "2".repeat(32), files: { "other.txt": "other" } });
-const LATEST = "/var/lib/workenv/backup/latest.json";
 const publishedReceipt = (extra: Record<string, unknown> = {}) =>
   toJson({ ...bundle.receipt, ...extra });
 const keepReceipt = toJson({
@@ -108,8 +103,6 @@ const harness = Effect.gen(function* () {
       },
     ],
     files: { "/etc/library-interface.json": interfaceJson(), ...bundle.files },
-    admin: (command) =>
-      command.includes("snapshots") ? output(toJson([{ id: SNAPSHOT }])) : output(),
   });
   const start = (
     scope: Scope.Closeable,
@@ -255,8 +248,8 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       yield* h.base.makeDirectory(actions, { recursive: true });
       const running: ComputerActivity = {
         id: "stopped",
-        kind: "backup",
-        label: "Verify library backups",
+        kind: "restore",
+        label: "Restore report.txt",
         status: "running",
         updatedAt: 5,
         detail: null,
@@ -283,18 +276,10 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
         detail: "Transfer failed.",
         retryable: true,
       };
-      const failedBackup: ComputerActivity = {
-        ...running,
-        id: "failed-backup",
-        status: "failed",
-        detail: "Backup failed.",
-        retryable: true,
-      };
       yield* h.base.writeFileString(`${actions}/stopped.json`, toJson(running));
       yield* h.base.writeFileString(`${actions}/done.json`, toJson(done));
       yield* h.base.writeFileString(`${actions}/pending-transfer.json`, toJson(pendingTransfer));
       yield* h.base.writeFileString(`${actions}/failed-transfer.json`, toJson(failedTransfer));
-      yield* h.base.writeFileString(`${actions}/failed-backup.json`, toJson(failedBackup));
       yield* h.base.writeFileString(`${actions}/half-written.json.abc.tmp`, "{");
       yield* h.base.writeFileString(`${actions}/damaged.json`, "{not json");
       const scope = yield* Scope.make();
@@ -303,14 +288,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       const byId = Object.fromEntries(activities.map((activity) => [activity.id, activity]));
       expect(byId["stopped"]).toMatchObject({ status: "failed", retryable: false });
       expect(byId["stopped"]!.detail).toContain("Interrupted when the server stopped");
-      for (const id of ["stopped", "failed-backup"]) {
-        expect(byId[id]).toMatchObject({ status: "failed", retryable: false });
-        expect(byId[id]!.detail).toContain("native workenv backup row");
-        expect(
-          (fromJson(yield* h.base.readFileString(`${actions}/${id}.json`)) as ComputerActivity)
-            .retryable,
-        ).toBe(false);
-      }
       expect(byId["done"]).toEqual(done);
       for (const id of ["pending-transfer", "failed-transfer"]) {
         expect(byId[id]).toMatchObject({ status: "failed", retryable: false });
@@ -479,7 +456,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
           { action: "keep", path: "/work/evidence", reason: "two\nlines" },
           { action: "restore", path: "/library/x" },
           { action: "retry", requestId: "missing" },
-          { action: "backup" },
         ] as const)
           expect((yield* service.act(input).pipe(Effect.flip)).message.length).toBeGreaterThan(0);
         yield* Ref.set(h.failing, true);
@@ -529,189 +505,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
   );
 
   it.effect(
-    "retries a published keep's backup without its job or source, and remembers the verification",
-    () =>
-      Effect.gen(function* () {
-        const h = yield* harness;
-        yield* h.configure();
-        // The keep was published long ago; its job and source are gone, and only a backup is missing.
-        yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-        h.library.files[LATEST] = latestReceipt([bundle]);
-        const scope = yield* Scope.make();
-        const service = yield* h.start(scope);
-        const before = (yield* inspect(service, "activity")).activities;
-        expect(before.find((row) => row.id === KEY)).toMatchObject({
-          status: "published",
-          retryable: false,
-        });
-        expect(before.find((row) => row.id === `backup:${KEY}`)).toMatchObject({
-          kind: "backup",
-          status: "failed",
-          retryable: true,
-        });
-        const { activity } = yield* service.act({ action: "retry", requestId: KEY });
-        expect(activity.kind).toBe("backup");
-        const final = yield* h.settled(activity.id);
-        expect(final).toMatchObject({ status: "completed", retryable: false });
-        expect(final.detail).toContain("Backup confirmed for 1 keep");
-        expect(h.library.calls.filter((call) => call.command.endsWith("workenv"))).toHaveLength(0);
-        const after = (yield* inspect(service, "activity")).activities;
-        expect(after.find((row) => row.id === `backup:${KEY}`)).toMatchObject({
-          status: "completed",
-          retryable: false,
-        });
-        expect(
-          (yield* inspect(service, "files")).files.every(
-            (file) => file.backup === "confirmed" && file.restorable === true,
-          ),
-        ).toBe(true);
-        // The verification is on disk: a restarted server still knows the bundle is backed up.
-        yield* Scope.close(scope, Exit.void);
-        expect(
-          yield* h.base.exists(
-            `${h.serverConfig.stateDir}/computers/proofs/${bundle.receipt.id}.json`,
-          ),
-        ).toBe(true);
-        const restartedScope = yield* Scope.make();
-        const restarted = yield* h.start(restartedScope);
-        expect(
-          (yield* inspect(restarted, "files")).files.every((file) => file.backup === "confirmed"),
-        ).toBe(true);
-        yield* Scope.close(restartedScope, Exit.void);
-      }),
-  );
-
-  it.effect("verifies all waiting backups only when requestId is omitted", () =>
-    Effect.gen(function* () {
-      const h = yield* harness;
-      yield* h.configure();
-      yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-      yield* h.base.writeFileString(
-        `${h.state}/keep/requests/${SECOND_KEY}.json`,
-        toJson(secondBundle.receipt),
-      );
-      Object.assign(h.library.files, secondBundle.files, {
-        [LATEST]: latestReceipt([bundle, secondBundle]),
-      });
-      const scope = yield* Scope.make();
-      const service = yield* h.start(scope);
-      const { activity } = yield* service.act({ action: "backup" });
-      expect(yield* h.settled(activity.id)).toMatchObject({
-        status: "completed",
-        detail: "Backup confirmed for 2 keeps.",
-        retryable: false,
-      });
-      yield* Scope.close(scope, Exit.void);
-    }),
-  );
-
-  it.effect("retries only the bundle identified by a native backup row", () =>
-    Effect.gen(function* () {
-      const h = yield* harness;
-      yield* h.configure();
-      yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-      yield* h.base.writeFileString(
-        `${h.state}/keep/requests/${SECOND_KEY}.json`,
-        toJson(secondBundle.receipt),
-      );
-      Object.assign(h.library.files, secondBundle.files, { [LATEST]: latestReceipt([bundle]) });
-      const scope = yield* Scope.make(),
-        service = yield* h.start(scope);
-      const native = (yield* inspect(service, "activity")).activities.find(
-        (row) => row.id === `backup:${KEY}`,
-      )!;
-      expect(native.retryable).toBe(true);
-      const { activity } = yield* service.act({ action: "backup", requestId: native.id });
-      expect(yield* h.settled(activity.id)).toMatchObject({
-        status: "completed",
-        detail: "Backup confirmed for 1 keep.",
-        retryable: false,
-      });
-      expect(
-        h.library.calls.some((call) =>
-          call.args.some(
-            (arg) => arg.includes(secondBundle.writerPath) || arg.includes("systemctl"),
-          ),
-        ),
-      ).toBe(false);
-      expect(
-        yield* h.base.exists(
-          `${h.serverConfig.stateDir}/computers/proofs/${secondBundle.receipt.id}.json`,
-        ),
-      ).toBe(false);
-      expect(
-        (yield* inspect(service, "activity")).activities.find(
-          (row) => row.id === `backup:${SECOND_KEY}`,
-        ),
-      ).toMatchObject({ status: "failed", retryable: true });
-      yield* Scope.close(scope, Exit.void);
-    }),
-  );
-
-  it.effect("offers Retry only on the native backup row after a synthetic backup fails", () =>
-    Effect.gen(function* () {
-      const h = yield* harness;
-      yield* h.configure();
-      yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-      h.library.files[LATEST] = latestReceipt([]);
-      const scope = yield* Scope.make(),
-        service = yield* h.start(scope);
-      const { activity } = yield* service.act({ action: "backup", requestId: `backup:${KEY}` });
-      const failed = yield* h.settled(activity.id);
-      expect(failed).toMatchObject({ status: "failed", retryable: false });
-      expect(failed.detail).toContain("native workenv backup row");
-      expect(
-        (yield* inspect(service, "activity")).activities
-          .filter((row) => row.kind === "backup" && row.retryable)
-          .map((row) => row.id),
-      ).toEqual([`backup:${KEY}`]);
-      const calls = h.library.calls.length;
-      expect(
-        (yield* service.act({ action: "backup", requestId: activity.id }).pipe(Effect.flip))
-          .message,
-      ).toContain("Select a published keep");
-      expect(h.library.calls).toHaveLength(calls);
-      expect(yield* h.actionFiles).toHaveLength(1);
-      yield* Scope.close(scope, Exit.void);
-    }),
-  );
-
-  it.effect(
-    "rejects unknown, stale and empty explicit backup ids while another backup is pending",
-    () =>
-      Effect.gen(function* () {
-        const h = yield* harness;
-        yield* h.configure();
-        yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-        yield* h.base.writeFileString(
-          `${h.state}/keep/requests/${SECOND_KEY}.json`,
-          toJson(secondBundle.receipt),
-        );
-        const scope = yield* Scope.make(),
-          service = yield* h.start(scope);
-        yield* h.base.remove(`${h.state}/keep/requests/${SECOND_KEY}.json`);
-        yield* TestClock.adjust("2 seconds");
-        for (const id of [
-          "5d0c4b7a-6c2e-4a3b-9a55-0f1a2b3c4d5e",
-          `backup:${SECOND_KEY}`,
-          "",
-          "backup:",
-        ])
-          expect(
-            (yield* service.act({ action: "backup", requestId: id }).pipe(Effect.flip)).message,
-          ).toContain("Select a published keep");
-        expect(h.library.calls).toHaveLength(0);
-        expect(yield* h.actionFiles).toHaveLength(0);
-        expect(
-          (yield* inspect(service, "activity")).activities.find(
-            (row) => row.id === `backup:${KEY}`,
-          ),
-        ).toMatchObject({ retryable: true });
-        yield* Scope.close(scope, Exit.void);
-      }),
-  );
-
-  it.effect(
     "finds a bundle only the library holds, lists its files, and restores one of them",
     () =>
       Effect.gen(function* () {
@@ -731,13 +524,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
         expect(listed.files[0]).toMatchObject({
           reference: bundle.receipt.reference,
           restorable: true,
-          backup: "published",
-        });
-        h.library.files[LATEST] = latestReceipt([bundle]);
-        const verified = yield* service.act({ action: "backup", requestId: bundle.receipt.id! });
-        expect(yield* h.settled(verified.activity.id)).toMatchObject({
-          status: "completed",
-          retryable: false,
         });
         const destination = `${h.root}/restored-from-library`;
         const { activity } = yield* service.act({
@@ -751,41 +537,43 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       }),
   );
 
-  it.effect("answers the storage sections from the same service, with kept bundles under Archives", () =>
-    Effect.gen(function* () {
-      const h = yield* harness;
-      yield* h.configure();
-      const scope = yield* Scope.make();
-      const service = yield* h.start(scope);
-      // The first look starts the library catalog in the background, as the file search does.
-      yield* inspect(service, "holdings", { groups: [] });
-      yield* h.written((file) => file.includes("/computers/catalog/"));
-      const holdings = (yield* inspect(service, "holdings", { groups: ["archives"] })).storageHoldings!;
-      expect(holdings.groups.map((group) => group.group)).toEqual([
-        "workspaces",
-        "archives",
-        "backups",
-        "other",
-      ]);
-      const archives = holdings.groups[1]!;
-      expect(archives).toMatchObject({ status: "complete", count: 1 });
-      expect(archives.entries[0]).toMatchObject({
-        id: `archive:${bundle.receipt.id}`,
-        title: "Evidence",
-        subtitle: "t3 · evidence",
-        // The library is reached over ssh: its bytes are not on this computer.
-        local: false,
-        size: { bytes: "selected".length + "notes".length, basis: "manifest", complete: true },
-        archive: { backup: "published", files: 2 },
-      });
-      // Other groups carry totals only, because only Archives was asked for.
-      expect(holdings.groups.filter((group) => group.entries.length).map((group) => group.group)).toEqual([
-        "archives",
-      ]);
-      const disks = (yield* inspect(service, "disks")).storageDisks!;
-      expect(disks.host.length).toBeGreaterThan(0);
-      yield* Scope.close(scope, Exit.void);
-    }),
+  it.effect(
+    "answers the storage sections from the same service, with kept bundles under Archives",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness;
+        yield* h.configure();
+        const scope = yield* Scope.make();
+        const service = yield* h.start(scope);
+        // The first look starts the library catalog in the background, as the file search does.
+        yield* inspect(service, "holdings", { groups: [] });
+        yield* h.written((file) => file.includes("/computers/catalog/"));
+        const holdings = (yield* inspect(service, "holdings", { groups: ["archives"] }))
+          .storageHoldings!;
+        expect(holdings.groups.map((group) => group.group)).toEqual([
+          "workspaces",
+          "archives",
+          "other",
+        ]);
+        const archives = holdings.groups[1]!;
+        expect(archives).toMatchObject({ status: "complete", count: 1 });
+        expect(archives.entries[0]).toMatchObject({
+          id: `archive:${bundle.receipt.id}`,
+          title: "Evidence",
+          subtitle: "t3 · evidence",
+          // The library is reached over ssh: its bytes are not on this computer.
+          local: false,
+          size: { bytes: "selected".length + "notes".length, basis: "manifest", complete: true },
+          archive: { files: 2 },
+        });
+        // Other groups carry totals only, because only Archives was asked for.
+        expect(
+          holdings.groups.filter((group) => group.entries.length).map((group) => group.group),
+        ).toEqual(["archives"]);
+        const disks = (yield* inspect(service, "disks")).storageDisks!;
+        expect(disks.host.length).toBeGreaterThan(0);
+        yield* Scope.close(scope, Exit.void);
+      }),
   );
 
   it.effect("restores a kept file onto this computer and records the restore", () =>
@@ -914,7 +702,7 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       yield* h.base.makeDirectory(source);
       yield* h.configure({
         ...config,
-        projects: { t3: { source: h.root, keep: { audience: "private", backup_required: true } } },
+        projects: { t3: { source: h.root, keep: { audience: "private" } } },
       });
       const failedReceipt = {
         ...bundle.receipt,
@@ -956,72 +744,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
       yield* Scope.close(scope, Exit.void);
     }),
   );
-
-  for (const changed of ["snapshot", "manifest"] as const)
-    it.effect(
-      `downgrades persisted confirmation after explicit verification finds a changed ${changed}`,
-      () =>
-        Effect.gen(function* () {
-          const h = yield* harness;
-          yield* h.configure();
-          yield* h.base.writeFileString(`${h.state}/keep/requests/${KEY}.json`, publishedReceipt());
-          let snapshots = [{ id: SNAPSHOT }];
-          const library = scriptedLibrary(h.base, {
-            files: { ...h.library.files, [LATEST]: latestReceipt([bundle]) },
-            admin: (command) =>
-              command.includes("snapshots") ? output(toJson(snapshots)) : output(),
-          });
-          const scope = yield* Scope.make(),
-            service = yield* h.start(scope, library.runner);
-          const first = yield* service.act({ action: "backup", requestId: KEY });
-          expect(yield* h.settled(first.activity.id)).toMatchObject({ status: "completed" });
-          const confirmed = (yield* inspect(service, "files")).files;
-          expect(confirmed.length).toBeGreaterThan(0);
-          expect(
-            confirmed.every(
-              (file) =>
-                file.backup === "confirmed" &&
-                file.backupVerifiedAt !== null &&
-                file.area === "archive",
-            ),
-          ).toBe(true);
-          const saved = fromJson(
-            yield* h.base.readFileString(
-              `${h.serverConfig.stateDir}/computers/proofs/${bundle.receipt.id}.json`,
-            ),
-          ) as { proof: unknown };
-          yield* h.base.writeFileString(
-            `${h.state}/keep/requests/${KEY}.json`,
-            publishedReceipt({
-              backup: "confirmed",
-              backup_receipt: saved.proof,
-              backup_error: null,
-            }),
-          );
-          if (changed === "snapshot") snapshots = [];
-          else library.files[`${bundle.writerPath}/MANIFEST.sha256`] = "changed";
-          const second = yield* service.act({ action: "backup", requestId: KEY });
-          expect(yield* h.settled(second.activity.id)).toMatchObject({
-            status: "failed",
-            retryable: false,
-          });
-          const downgraded = (yield* inspect(service, "files")).files;
-          expect(
-            downgraded.every(
-              (file) => file.backup === "published" && file.backupVerifiedAt === null,
-            ),
-          ).toBe(true);
-          yield* Scope.close(scope, Exit.void);
-          const restartScope = yield* Scope.make(),
-            restarted = yield* h.start(restartScope, library.runner);
-          expect(
-            (yield* inspect(restarted, "files")).files.every(
-              (file) => file.backup === "published" && file.backupVerifiedAt === null,
-            ),
-          ).toBe(true);
-          yield* Scope.close(restartScope, Exit.void);
-        }),
-    );
 
   it.effect(
     "indexes validated job outputs, evidence and inputs outside all project roots, excluding repo and tmp",
@@ -1068,69 +790,6 @@ it.layer(NodeServices.layer)("the computers service", (it) => {
             .filter((file) => file.area !== "archive" && file.name !== "primary.txt")
             .every((file) => file.project === "t3" && file.area === "work"),
         ).toBe(true);
-        yield* Scope.close(scope, Exit.void);
-      }),
-  );
-
-  it.effect(
-    "removes surplus and orphaned proof records at startup and when receipts disappear",
-    () =>
-      Effect.gen(function* () {
-        const h = yield* harness;
-        yield* h.configure();
-        const requests = new Map<string, string>(),
-          proofs = new Map<string, string>();
-        const proofFolder = `${h.serverConfig.stateDir}/computers/proofs`,
-          requestFolder = `${h.state}/keep/requests`;
-        const proof = {
-          schema: "workenv-backup-receipt/2",
-          path: bundle.writerPath,
-          snapshot_id: SNAPSHOT,
-          content_verified_snapshot: SNAPSHOT,
-          manifest_sha256: bundle.manifestSha256,
-          method: "snapshot content hashed against manifest",
-          confirmed_at: "2026-10-22T10:00:00Z",
-        };
-        for (let i = 1; i <= 5001; i++) {
-          const id = i.toString(16).padStart(32, "0");
-          requests.set(`${id}.json`, toJson({ ...bundle.receipt, id }));
-          proofs.set(`${id}.json`, toJson({ id, proof, at: i }));
-        }
-        proofs.set(`${"f".repeat(32)}.json`, toJson({ id: "f".repeat(32), proof, at: 1 }));
-        const info = yield* h.base.stat(requestFolder);
-        const virtual = FileSystem.FileSystem.of({
-          ...h.base,
-          readDirectory: (folder, options) =>
-            folder === proofFolder
-              ? Effect.succeed([...proofs.keys()])
-              : folder === requestFolder
-                ? Effect.succeed([...requests.keys()])
-                : h.base.readDirectory(folder, options),
-          stat: (file) =>
-            file.startsWith(`${requestFolder}/`) ? Effect.succeed(info) : h.base.stat(file),
-          readFileString: (file, options) =>
-            file.startsWith(`${requestFolder}/`)
-              ? Effect.succeed(requests.get(file.slice(requestFolder.length + 1))!)
-              : file.startsWith(`${proofFolder}/`)
-                ? Effect.succeed(proofs.get(file.slice(proofFolder.length + 1))!)
-                : h.base.readFileString(file, options),
-          remove: (file, options) =>
-            file.startsWith(`${proofFolder}/`)
-              ? Effect.sync(() => {
-                  proofs.delete(file.slice(proofFolder.length + 1));
-                })
-              : h.base.remove(file, options),
-        });
-        const scope = yield* Scope.make(),
-          service = yield* h.start(scope, h.library.runner, virtual);
-        expect(proofs.size).toBe(5000);
-        expect(proofs.has(`${"f".repeat(32)}.json`)).toBe(false);
-        const removed = [...proofs.keys()][0]!;
-        requests.delete(removed);
-        yield* TestClock.adjust("2 seconds");
-        yield* inspect(service, "files");
-        expect(proofs.size).toBe(4999);
-        expect(proofs.has(removed)).toBe(false);
         yield* Scope.close(scope, Exit.void);
       }),
   );

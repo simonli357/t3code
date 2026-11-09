@@ -30,7 +30,6 @@ const ROLE_LABEL = {
 const HOLD_LABEL = {
   "agent-work": "Agent work",
   library: "Kept results",
-  backup: "Backup",
 } as const;
 const KIND_LABEL = {
   memory: "Memory (RAM)",

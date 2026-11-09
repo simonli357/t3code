@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  STORAGE_GROUPS,
   EnvironmentId,
   type StorageDisks,
   type StorageEntry,
@@ -79,7 +80,7 @@ const holdings = (
   host: "alpha",
   measuring: false,
   notices: [],
-  groups: (["workspaces", "archives", "backups", "other"] as const).map((id) => {
+  groups: STORAGE_GROUPS.map((id) => {
     const given = groups[id];
     const entries = given?.entries ?? [];
     const local = entries.filter((item) => item.local);
@@ -179,18 +180,12 @@ describe("the disks view", () => {
 });
 
 describe("the workspaces and archives view", () => {
-  it("is always four groups, in order, whatever the computers report", () => {
+  it("is always three groups, in order, whatever the computers report", () => {
     const model = holdingsModel([alpha], {}, {}, true);
-    expect(model.groups.map((group) => group.id)).toEqual([
-      "workspaces",
-      "archives",
-      "backups",
-      "other",
-    ]);
+    expect(model.groups.map((group) => group.id)).toEqual(["workspaces", "archives", "other"]);
     expect(model.groups.map((group) => group.title)).toEqual([
       "Workspaces",
       "Archives",
-      "Backups",
       "Other retained project data",
     ]);
   });
@@ -234,25 +229,25 @@ describe("the workspaces and archives view", () => {
       // The page sorts computers by name before it maps them.
       [alpha, away, beta, old],
       {
-        alpha: data({ holdings: holdings({ backups: { entries: [entry("b1", "backups")] } }) }),
+        alpha: data({ holdings: holdings({ other: { entries: [entry("o1", "other")] } }) }),
         away: data({
           holdings: holdings({
-            backups: { entries: [], status: "unsupported", reason: "No interface." },
+            other: { entries: [], status: "unsupported", reason: "No interface." },
           }),
         }),
       },
       {},
       true,
     );
-    const backups = model.groups[2]!;
-    expect(backups.coverage.map((item) => [item.name, item.state])).toEqual([
+    const other = model.groups[2]!;
+    expect(other.coverage.map((item) => [item.name, item.state])).toEqual([
       ["Alpha", "complete"],
       ["Away", "offline"],
       ["Beta", "loading"],
       ["Old", "unsupported"],
     ]);
-    expect(backups.coverage.find((item) => item.name === "Away")!.lastKnownAt).not.toBeNull();
-    expect(describeCoverage(backups.coverage).overall).toBe("partial");
+    expect(other.coverage.find((item) => item.name === "Away")!.lastKnownAt).not.toBeNull();
+    expect(describeCoverage(other.coverage).overall).toBe("partial");
   });
 
   it("says a group is unsupported when every computer says so, not that it is empty", () => {
@@ -348,8 +343,18 @@ describe("entries that arrive only for open groups", () => {
   });
 
   it("knows which groups a saved answer carries entries for", () => {
-    expect(loadedGroups(everything)).toEqual(["workspaces", "archives", "backups", "other"]);
-    expect(loadedGroups(totalsOnly)).toEqual(["backups", "other"]);
+    expect(loadedGroups(everything)).toEqual(["workspaces", "archives", "other"]);
+    expect(loadedGroups(totalsOnly)).toEqual(["other"]);
+  });
+
+  it("ignores the backups group an older server still sends", () => {
+    const fromOlderServer: StorageHoldings = {
+      ...everything,
+      groups: [...everything.groups, { ...everything.groups[0]!, group: "backups" }],
+    };
+    expect(loadedGroups(fromOlderServer)).toEqual(["workspaces", "archives", "other"]);
+    const model = holdingsModel([alpha], { alpha: data({ holdings: fromOlderServer }) }, {}, true);
+    expect(model.groups.map((group) => group.id)).toEqual(["workspaces", "archives", "other"]);
   });
 
   it("shows an open group as loading until its entries have arrived", () => {
@@ -406,8 +411,8 @@ describe("group header sentences", () => {
 
   it("states an exact total plainly and an empty group as empty", () => {
     expect(describeGroupUsage(group({ count: 1, bytes: 5 * GiB })).bytes).toBe("5 GB on disk");
-    expect(describeGroupUsage(group({ id: "backups", count: 1, bytes: null })).count).toBe(
-      "1 repository",
+    expect(describeGroupUsage(group({ id: "archives", count: 1, bytes: null })).count).toBe(
+      "1 archive",
     );
     expect(describeGroupUsage(group({ id: "other", count: 0, bytes: null })).caveats).toEqual([
       "Nothing found",

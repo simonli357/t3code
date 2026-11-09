@@ -21,15 +21,19 @@ entry; bytes in multiply-linked files are reported as `sharedBytes` because anot
 them too, so group totals say they are not exact sums. The lifecycle tool's own allocation estimate
 is shown only until a measurement exists, labelled as an estimate.
 
-**What is local is what is charged.** An entry on a network mount, a kept bundle in another
-computer's library and a backup repository reached over ssh are listed with their host and `local:
-false`. Their bytes are in no disk total. The page lists a bundle once, as the stored one, when two
+**What is local is what is charged.** An entry on a network mount and a kept bundle in another
+computer's library are listed with their host and `local: false`. Their bytes are in no disk total. The page lists a bundle once, as the stored one, when two
 computers report it. RAM-backed paths (tmpfs mounts inside a job, or links from it into tmpfs) are
 attached to their job and excluded from disk totals.
 
 **The lifecycle tool is optional and read, not run.** `StorageLifecycle.ts` reads the files Workenv
-installs (job lifecycle records, capacity configuration, library interface, latest backup receipt)
-with tolerant schemas; a missing or changed file makes that part unavailable, and the group says
+installs (job lifecycle records, capacity configuration) with tolerant schemas; a missing or changed file makes that part unavailable, and the group says
 why. T3's own session records and projects keep the Workspaces and Other groups useful without it.
-Nothing here deletes, moves or changes anything. `repository_bytes` in a backup receipt is optional:
-when the backup tool records it, it is shown; otherwise the repository's occupied bytes are unknown.
+Nothing here deletes, moves or changes anything.
+
+**Library backups are retired, but their wire shape is not.** Workenv dropped its backups, so
+nothing here reads, shows or starts one. Linked servers can run a version from before that, so the
+contract still accepts what they send and ask for (a `backups` group, a `backup` activity kind and
+volume role, backup fields on files and kept bundles) and clients drop it; and this server still
+sends the `backup` keys on files and kept bundles, never as confirmed, because an older client
+cannot decode them otherwise. Remove both once no linked server predates the removal.

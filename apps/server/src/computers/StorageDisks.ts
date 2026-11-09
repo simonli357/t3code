@@ -27,7 +27,7 @@ import { fail } from "./WorkenvConfig.ts";
 /** A configured amount that must stay free on the volume holding `path`. */
 export interface StorageReserve {
   readonly path: string;
-  readonly role: "agent-work" | "library" | "backup" | "other";
+  readonly role: "agent-work" | "library" | "other";
   readonly bytes: number | null;
 }
 

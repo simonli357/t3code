@@ -26,13 +26,12 @@ import {
   KEEP_REASON_MAX_LENGTH,
   type ActionAvailability,
   type ActionState,
-  type BackupStatus,
   type ComputersActions,
   type ComputersDetail,
   type FileDetail,
 } from "./computersViewModel";
 import { DetailDialog } from "./DetailDialog";
-import { BackupBadge, DatedTime, LoadError } from "./sectionParts";
+import { DatedTime, LoadError } from "./sectionParts";
 
 type FileDetailState = Extract<ComputersDetail, { kind: "file" }>;
 
@@ -47,37 +46,6 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
 
 function Unverified() {
   return <span className="text-muted-foreground">{NOT_VERIFIED}</span>;
-}
-
-function BackupFact({ backup }: { readonly backup: BackupStatus }) {
-  return (
-    <div className="flex flex-col items-start gap-1">
-      <BackupBadge backup={backup} />
-      {backup.state === "not-verified" ? (
-        <p className="text-xs text-muted-foreground">
-          No check has confirmed a backup copy of this file.
-        </p>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          {backup.state === "confirmed"
-            ? "A check found the copy"
-            : "Kept in the archive; an independent backup has not been verified"}
-          {backup.at ? (
-            <>
-              {" · "}
-              <DatedTime iso={backup.at} />
-            </>
-          ) : null}
-          {backup.where ? (
-            <>
-              {" · "}
-              <span className="font-mono">{backup.where}</span>
-            </>
-          ) : null}
-        </p>
-      )}
-    </div>
-  );
 }
 
 function ActionMessage({ state }: { readonly state: ActionState }) {
@@ -344,9 +312,11 @@ function FileFacts({ file }: { readonly file: FileDetail }) {
         {file.sizeBytes === null ? <Unverified /> : formatBytes(file.sizeBytes)}
       </Fact>
       <Fact label="Modified">{modified === null ? <Unverified /> : modified}</Fact>
-      <Fact label="Backup">
-        <BackupFact backup={file.backup} />
-      </Fact>
+      {file.reference ? (
+        <Fact label="Reference">
+          <span className="font-mono text-xs">{file.reference}</span>
+        </Fact>
+      ) : null}
     </dl>
   );
 }

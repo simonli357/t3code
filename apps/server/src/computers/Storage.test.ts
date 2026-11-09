@@ -22,7 +22,6 @@ const deps = (
   workenv: Effect.succeed({ config: null, error: null }),
   workenvJobs: () => Effect.succeed([]),
   archive: () => Effect.succeed({ sources: [], problem: null }),
-  verified: () => new Map(),
   sessions: Effect.succeed([]),
   shells: Effect.succeed({ projects: [], threads: [] }),
   agentWorkRoot: Effect.succeed(work),
@@ -124,7 +123,7 @@ it.live("sends entries only for the groups asked for, with every group's totals"
     const { work, state } = yield* fixture;
     const storage = yield* makeStorage(deps(state, work));
     const headers = yield* storage.holdings(false, []);
-    expect(headers.groups.map((group) => group.entries.length)).toEqual([0, 0, 0, 0]);
+    expect(headers.groups.map((group) => group.entries.length)).toEqual([0, 0, 0]);
     expect(headers.groups[0]).toMatchObject({ count: 2, shown: 2 });
     const opened = yield* storage.holdings(false, ["workspaces"]);
     expect(opened.groups[0]!.entries).toHaveLength(2);
@@ -150,26 +149,18 @@ it.live("reports a session folder that no longer exists in a notice, not as an e
   }).pipe(Effect.scoped, Effect.provide(live)),
 );
 
-it.live(
-  "says kept results, backups and retention are unsupported when no lifecycle tool exists",
-  () =>
-    Effect.gen(function* () {
-      const { work, state } = yield* fixture;
-      const storage = yield* makeStorage(deps(state, work));
-      const groups = (yield* storage.holdings(false)).groups;
-      expect(groups.map((group) => group.group)).toEqual([
-        "workspaces",
-        "archives",
-        "backups",
-        "other",
-      ]);
-      expect(groups[0]).toMatchObject({ status: "partial" });
-      expect(groups[1]).toMatchObject({ status: "unsupported", count: 0, bytes: null });
-      expect(groups[2]).toMatchObject({ status: "unsupported", count: 0, bytes: null });
-      expect(groups[1]!.reason).toMatch(/lifecycle tool/);
-      for (const entry of groups[0]!.entries)
-        expect(entry.workspace).toMatchObject({ state: "unknown", stateSource: "none" });
-    }).pipe(Effect.scoped, Effect.provide(live)),
+it.live("says kept results and retention are unsupported when no lifecycle tool exists", () =>
+  Effect.gen(function* () {
+    const { work, state } = yield* fixture;
+    const storage = yield* makeStorage(deps(state, work));
+    const groups = (yield* storage.holdings(false)).groups;
+    expect(groups.map((group) => group.group)).toEqual(["workspaces", "archives", "other"]);
+    expect(groups[0]).toMatchObject({ status: "partial" });
+    expect(groups[1]).toMatchObject({ status: "unsupported", count: 0, bytes: null });
+    expect(groups[1]!.reason).toMatch(/lifecycle tool/);
+    for (const entry of groups[0]!.entries)
+      expect(entry.workspace).toMatchObject({ state: "unknown", stateSource: "none" });
+  }).pipe(Effect.scoped, Effect.provide(live)),
 );
 
 it.live(
@@ -185,7 +176,7 @@ it.live(
           }),
         }),
       );
-      const other = (yield* storage.holdings(false)).groups[3]!;
+      const other = (yield* storage.holdings(false)).groups[2]!;
       expect(other.entries).toEqual([
         expect.objectContaining({
           title: "Storage app",

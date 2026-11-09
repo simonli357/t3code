@@ -4,7 +4,7 @@ import {
   type StorageDetail,
   type StorageDisks,
   type StorageEntry,
-  type StorageGroupId,
+  type ComputerInspectInput,
   type StorageHoldings,
   type StorageRam,
 } from "@t3tools/contracts";
@@ -26,18 +26,14 @@ import {
   locate,
   normalize,
   type ArchiveInfo,
-  type BackupInfo,
   type RetainedSource,
   type WorkspaceSource,
 } from "./StorageHoldings.ts";
 import {
   emptyLayout,
   newLifecycleCache,
-  readBackupRepositories,
   readCapacityLayout,
-  readLatestBackup,
   readLifecycle,
-  readRetentionPolicy,
   readSharedLocations,
   sharedProtection,
   type CapacityLayout,
@@ -56,7 +52,6 @@ import {
   UNMEASURED,
   type TreeBudget,
 } from "./StorageMeasure.ts";
-import { backupEvidence, type BackupVerification } from "./WorkenvBackup.ts";
 import { messageOf, parseTime, type WorkenvConfig } from "./WorkenvConfig.ts";
 import { isWithin } from "./paths.ts";
 
@@ -111,7 +106,6 @@ export interface StorageDeps {
   readonly archive: (
     config: WorkenvConfig,
   ) => Effect.Effect<{ sources: readonly ArchiveSource[]; problem: string | null }>;
-  readonly verified: () => ReadonlyMap<string, BackupVerification>;
   readonly sessions: Effect.Effect<ReadonlyArray<{ threadId: string; root: string }>>;
   readonly shells: Effect.Effect<ShellInfo>;
   readonly agentWorkRoot: Effect.Effect<string | null>;
@@ -383,10 +377,8 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
     config: WorkenvConfig,
     label: (name: string | null | undefined) => string | null,
   ): ArchiveInfo[] => {
-    const verified = deps.verified();
     return [...chooseBundles(sources).values()].map((source): ArchiveInfo => {
       const { receipt } = source;
-      const evidence = backupEvidence(receipt, verified.get(receipt.id ?? ""));
       const sameLibrary = receipt.library_id === config.keep.library_id;
       const local = sameLibrary ? config.keep.writer_local === true : false;
       const members = source.members;
@@ -411,70 +403,15 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
             ? host
             : label(config.keep.ssh_host)
           : label(receipt.library_ssh ?? receipt.origin?.host),
-        backup: evidence ? "confirmed" : "published",
-        backupVerifiedAt: evidence?.at ?? null,
-        backupSnapshot: evidence?.proof.snapshot_id.slice(0, 8) ?? null,
-        backupRequired:
-          receipt.backup_required ??
-          config.projects[receipt.project]?.keep?.backup_required ??
-          null,
       };
     });
   };
-
-  const backupInfos = Effect.fn("Storage.backups")(function* (
-    config: WorkenvConfig,
-    libraryPaths: ReadonlySet<string>,
-    label: (name: string | null | undefined) => string | null,
-  ) {
-    const found = yield* readBackupRepositories(config);
-    const infos: BackupInfo[] = [];
-    for (const repository of found.repositories) {
-      const latest = repository.latestReceipt
-        ? yield* readLatestBackup(repository.latestReceipt)
-        : null;
-      const retention =
-        repository.retention ??
-        (repository.latestReceipt ? yield* readRetentionPolicy(repository.latestReceipt) : null);
-      infos.push({
-        id: repository.id,
-        repository: repository.repository,
-        description: repository.description,
-        localPath: repository.localPath,
-        host: label(repository.sshHost),
-        scope: repository.scope,
-        retention,
-        physicalId: repository.physicalId,
-        libraryPhysicalId: repository.libraryPhysicalId,
-        latest: latest
-          ? {
-              snapshotId: latest.snapshotId,
-              confirmedAt: latest.confirmedAt,
-              confirmedPaths: new Set(latest.confirmed.keys()),
-              repositoryBytes: latest.repositoryBytes,
-              repositoryBytesAt: latest.repositoryBytesAt,
-            }
-          : null,
-        problem: latest
-          ? null
-          : repository.latestReceipt
-            ? `The latest backup receipt (${repository.latestReceipt}) is not readable on this computer.`
-            : "This repository records no receipt path.",
-      });
-    }
-    void libraryPaths;
-    return { infos, error: found.error };
-  });
 
   /**
    * A holdings answer carries the first `limit` entries of the groups asked for; the others keep
    * their totals and send none. `shown` says how many entries each group would send.
    */
-  const only = (
-    value: StorageHoldings,
-    groups: readonly StorageGroupId[] | undefined,
-    limit: number,
-  ) => ({
+  const only = (value: StorageHoldings, groups: ComputerInspectInput["groups"], limit: number) => ({
     ...value,
     groups: value.groups.map((group) => ({
       ...group,
@@ -485,7 +422,7 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
 
   const holdings = Effect.fn("Storage.holdings")(function* (
     refresh: boolean,
-    groups?: readonly StorageGroupId[],
+    groups?: ComputerInspectInput["groups"],
     limit: number = ENTRIES_SENT,
   ) {
     const now = yield* Clock.currentTimeMillis;
@@ -619,12 +556,6 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
         : [],
     );
     const archives = config ? archiveInfos(archive.sources, config, label) : [];
-    const libraryPaths = new Set(
-      archives.filter((entry) => entry.local).map((entry) => entry.writerPath),
-    );
-    const backups = config
-      ? yield* backupInfos(config, libraryPaths, label)
-      : { infos: [] as BackupInfo[], error: null };
 
     const shared = config ? yield* readSharedLocations(platform) : [];
     const retained: RetainedSource[] = [
@@ -638,9 +569,7 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
         path: project.source,
         title: name,
         classification: project.mode === "directory" ? "original-data" : "permanent-source",
-        detail: project.keep?.backup_required
-          ? "Results kept from this project need an independent backup."
-          : null,
+        detail: null,
       })),
       ...shared.map((location): RetainedSource => ({
         path: location.path,
@@ -669,10 +598,6 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
       archives,
       archiveProblem: archive.problem,
       archiveSupported: config !== null,
-      libraryPaths,
-      backups: backups.infos,
-      backupProblem: backups.error,
-      backupSupported: config !== null,
       retained,
       retainedSupported: config !== null,
       sizes: (target) => sizes.get(target) ?? null,
@@ -692,12 +617,7 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
     const targets = value.groups.flatMap((group) =>
       group.entries
         .filter((entry) => entry.local && entry.location)
-        .filter(
-          (entry) =>
-            entry.group === "workspaces" ||
-            entry.group === "other" ||
-            (entry.group === "backups" && entry.size.basis !== "reported"),
-        )
+        .filter((entry) => entry.group === "workspaces" || entry.group === "other")
         .map((entry) => ({
           path: entry.location!,
           maxAgeMs:
@@ -705,13 +625,10 @@ export const makeStorage = Effect.fn("Storage.make")(function* (deps: StorageDep
               ? entry.workspace?.state === "active"
                 ? ACTIVE_SIZE_TTL_MS
                 : IDLE_SIZE_TTL_MS
-              : entry.group === "backups"
-                ? IDLE_SIZE_TTL_MS
-                : RETAINED_SIZE_TTL_MS,
+              : RETAINED_SIZE_TTL_MS,
           budget: entry.group === "other" ? RETAINED_TREE_BUDGET : DEFAULT_TREE_BUDGET,
         })),
     );
-    // A repository that is only a remote location (sftp:...) has no folder to measure here.
     yield* schedule(
       [
         ...targets.filter((target) => path.isAbsolute(target.path)),

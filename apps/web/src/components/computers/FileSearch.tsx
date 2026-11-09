@@ -40,13 +40,13 @@ import type {
   FileRow,
   FilterOption,
 } from "./computersViewModel";
-import { BackupBadge, EmptyNotice, LoadError, SectionHeading } from "./sectionParts";
+import { EmptyNotice, LoadError, SectionHeading } from "./sectionParts";
 
 /**
  * Name takes what is left; the figures keep fixed columns so rows line up from one to the next.
- * Below a roomy page a row is one column: name, then where it is, then size, modified, and backup on one line.
+ * Below a roomy page a row is one column: name, then where it is, then size and modified on one line.
  */
-const RESULT_COLUMNS = "@3xl/computers:grid-cols-[minmax(0,1fr)_6rem_9.5rem_12rem]";
+const RESULT_COLUMNS = "@3xl/computers:grid-cols-[minmax(0,1fr)_6rem_9.5rem]";
 
 function FilterSelect({
   label,
@@ -213,9 +213,6 @@ function ResultRow({
             <span className="text-muted-foreground @3xl/computers:sr-only">Modified </span>
             {modified === null ? <Unverified /> : modified}
           </span>
-          <span className="@3xl/computers:col-start-4 @3xl/computers:row-start-1">
-            <BackupBadge backup={row.backup} />
-          </span>
         </span>
       </button>
     </li>
@@ -314,7 +311,6 @@ export function SearchResultsSection({
                   <span>Name</span>
                   <span>Size</span>
                   <span>Modified</span>
-                  <span>Backup</span>
                 </div>
                 <ul className="divide-y divide-border/50">
                   {results.rows.map((row) => (

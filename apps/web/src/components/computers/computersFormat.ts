@@ -15,7 +15,6 @@ import {
   type ActivityRetry,
   type ActivityRow,
   type ActivityStatus,
-  type BackupStatus,
   type ComputerConnection,
   type ComputerDisk,
   type ComputerMetrics,
@@ -29,7 +28,7 @@ import {
 
 /** A live measurement (CPU, memory, disk) that has no value. */
 export const NOT_MEASURED = "Not measured";
-/** Backup, size, and modified time when nothing has confirmed them. */
+/** Size and modified time when nothing has confirmed them. */
 export const NOT_VERIFIED = "Not verified";
 
 // ── Numbers ──────────────────────────────────────────────────────────────────
@@ -273,22 +272,6 @@ export function isSearching(search: Pick<ComputersSearchModel, "query" | "result
   return search.query.trim().length > 0 || search.results.status !== "idle";
 }
 
-export interface BackupPresentation {
-  readonly label: string;
-  readonly tone: "success" | "warning" | "error" | "info" | "muted";
-}
-
-export function presentBackup(backup: BackupStatus): BackupPresentation {
-  switch (backup.state) {
-    case "confirmed":
-      return { label: "Backup confirmed", tone: "success" };
-    case "published":
-      return { label: "Published, not confirmed", tone: "warning" };
-    case "not-verified":
-      return { label: NOT_VERIFIED, tone: "muted" };
-  }
-}
-
 // ── Activity ─────────────────────────────────────────────────────────────────
 
 export type ActivityFilter = "all" | "in-progress" | "failed";
@@ -305,7 +288,6 @@ export function filterActivity(
 export const ACTIVITY_KIND_LABELS: Record<ActivityKind, string> = {
   job: "Job",
   transfer: "Transfer",
-  backup: "Backup",
   restore: "Restore",
 };
 
@@ -332,7 +314,7 @@ export function presentActivityStatus(status: ActivityStatus): ActivityStatusPre
 }
 
 /**
- * The retry to offer on a row, or null for none. A person may retry a failed transfer, backup, or
+ * The retry to offer on a row, or null for none. A person may retry a failed transfer or
  * restore; a job is never retried from here, whatever the data layer attached.
  */
 export function retryOffer(row: ActivityRow): ActivityRetry | null {

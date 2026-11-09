@@ -6,13 +6,12 @@ import * as ProcessRunner from "../processRunner.ts";
 import { buildArchive, fromLibraryManifest, toSource } from "./Archive.ts";
 import { decodeCatalogFile, loadCatalog, newCatalog, refreshCatalog } from "./LibraryCatalog.ts";
 import { restoreKeep } from "./Workenv.ts";
-import type { BackupProof, KeepReceipt } from "./WorkenvConfig.ts";
+import type { KeepReceipt } from "./WorkenvConfig.ts";
 import {
   fromJson,
   interfaceJson,
   makeBundle,
   scriptedLibrary,
-  SNAPSHOT,
   toJson,
   workenvConfig,
 } from "./testSupport.ts";
@@ -32,16 +31,7 @@ const source = (origin: "request" | "receipt" | "library", receipt: KeepReceipt,
 const build = (
   sources: Parameters<typeof buildArchive>[0],
   extra: Partial<Parameters<typeof buildArchive>[1]> = {},
-) => buildArchive(sources, { config, platform: "linux", verified: new Map(), ...extra });
-const proof: BackupProof = {
-  schema: "workenv-backup-receipt/2",
-  snapshot_id: SNAPSHOT,
-  content_verified_snapshot: SNAPSHOT,
-  manifest_sha256: one.manifestSha256,
-  path: one.writerPath,
-  method: "snapshot content hashed against manifest",
-  confirmed_at: "2026-10-22T07:50:42-04:00",
-};
+) => buildArchive(sources, { config, platform: "linux", ...extra });
 
 describe("the kept archive", () => {
   it("lists each published file once, whichever receipts and manifests describe its bundle", () => {
@@ -53,7 +43,7 @@ describe("the kept archive", () => {
       source("request", { ...two.receipt, id: "3".repeat(32), superseded: true }, "superseded"),
     ]);
     expect(archive.bundles).toHaveLength(1);
-    // The computer's own request record wins: it is the one that carries the backup state.
+    // The computer's own request record wins.
     expect(archive.bundles[0]).toMatchObject({
       id: one.receipt.id,
       origin: "request",
@@ -68,7 +58,6 @@ describe("the kept archive", () => {
       sizeBytes: 5,
       directory: false,
       modifiedAt: null,
-      backup: "published",
       reference: one.receipt.reference,
       location: one.writerPath,
       computer: "archive",
@@ -81,31 +70,6 @@ describe("the kept archive", () => {
   it("keeps a superseded bundle that only workenv's receipts folder still describes", () => {
     const archive = build([source("receipt", { ...one.receipt, superseded: true })]);
     expect(archive.files).toHaveLength(2);
-  });
-
-  it("reports backup as confirmed from workenv's recorded proof or this server's own check", () => {
-    const recorded = {
-      ...one.receipt,
-      backup: "confirmed",
-      backup_receipt: proof,
-      backup_error: null,
-    };
-    expect(
-      build([source("request", recorded)]).files.every((file) => file.backup === "confirmed"),
-    ).toBe(true);
-    const verified = new Map([[one.receipt.id!, { proof, at: 1 }]]);
-    expect(
-      build([source("request", one.receipt)], { verified }).files.every(
-        (file) => file.backup === "confirmed",
-      ),
-    ).toBe(true);
-    // A proof for another path is not a proof for this bundle.
-    const foreign = new Map([
-      [one.receipt.id!, { proof: { ...proof, path: "/library/elsewhere" }, at: 1 }],
-    ]);
-    expect(build([source("request", one.receipt)], { verified: foreign }).files[0]!.backup).toBe(
-      "published",
-    );
   });
 
   it("says per file why it cannot be restored here", () => {
@@ -195,7 +159,6 @@ it.layer(NodeServices.layer)("the library catalog", (it) => {
         expect(archive.files.find((file) => file.path.endsWith("report.txt"))).toMatchObject({
           reference: one.receipt.reference,
           restorable: true,
-          backup: "published",
         });
         expect(yield* fs.readDirectory(directories.cache)).toHaveLength(2);
         // Nothing is left staged between refreshes.

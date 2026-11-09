@@ -23,6 +23,7 @@ import {
 } from "../state/computersFiles";
 import {
   activityRow,
+  isShownActivity,
   failure,
   iso,
   key,
@@ -423,12 +424,7 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
       if (!target || retrying.has(activityId)) return;
       setRetrying((old) => new Set(old).add(activityId));
       setRetryFailures(({ [activityId]: _cleared, ...rest }) => rest);
-      void perform(
-        target.env.environmentId,
-        target.activity.kind === "backup"
-          ? { action: "backup", requestId: target.activity.id }
-          : { action: "retry", requestId: target.activity.id },
-      )
+      void perform(target.env.environmentId, { action: "retry", requestId: target.activity.id })
         .catch((error) => setRetryFailures((old) => ({ ...old, [activityId]: failure(error) })))
         .finally(() =>
           setRetrying((old) => {
@@ -444,9 +440,9 @@ export function useComputers(): { model: ComputersViewModel; actions: ComputersA
     () =>
       environments
         .flatMap((env) =>
-          (snapshots[env.environmentId]?.activity?.activities ?? []).map((activity) =>
-            activityRow(env, activity),
-          ),
+          (snapshots[env.environmentId]?.activity?.activities ?? [])
+            .filter(isShownActivity)
+            .map((activity) => activityRow(env, activity)),
         )
         .sort((a, b) => ((a.updatedAt ?? "") < (b.updatedAt ?? "") ? 1 : -1))
         .map((row) => {

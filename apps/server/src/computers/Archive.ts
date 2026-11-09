@@ -1,6 +1,5 @@
 import type { ComputerFile } from "@t3tools/contracts";
 import { configProblem, memberPlatformProblem, routeProblem, snapshotProblem } from "./Workenv.ts";
-import { backupEvidence, type BackupVerification } from "./WorkenvBackup.ts";
 import { parseTime, type KeepReceipt, type WorkenvConfig } from "./WorkenvConfig.ts";
 
 /** Searching more archive files than this would cost the server more than it helps anyone. */
@@ -93,10 +92,9 @@ export function buildArchive(
   context: {
     readonly config: WorkenvConfig;
     readonly platform: NodeJS.Platform;
-    readonly verified: ReadonlyMap<string, BackupVerification>;
   },
 ): Archive {
-  const { config, platform, verified } = context;
+  const { config, platform } = context;
   const chosen = chooseBundles(sources);
   const bundles: ArchiveBundle[] = [];
   const files: ComputerFile[] = [];
@@ -104,7 +102,6 @@ export function buildArchive(
   for (const [id, source] of chosen) {
     const { receipt } = source;
     const writerPath = receipt.writer_path!;
-    const evidence = backupEvidence(receipt, verified.get(id));
     const bundleProblem =
       configProblem(config, receipt) ?? routeProblem(config) ?? source.snapshotProblem;
     const kept = {
@@ -128,8 +125,7 @@ export function buildArchive(
         sizeBytes: bytes,
         modifiedAt: null,
         directory: false,
-        backup: evidence ? "confirmed" : "published",
-        backupVerifiedAt: evidence?.at ?? null,
+        backup: "published",
         reference,
         restorable: problem === null,
         restoreUnavailableReason: problem,

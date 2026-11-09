@@ -7,8 +7,7 @@ import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { ExpandableText } from "../settings/ExpandableText";
 import { useComputersClock } from "./computersClock";
-import { formatAge, formatDatedAge, formatMoment, presentBackup } from "./computersFormat";
-import type { BackupStatus } from "./computersViewModel";
+import { formatAge, formatDatedAge, formatMoment } from "./computersFormat";
 
 export function SectionHeading({
   id,
@@ -129,9 +128,4 @@ export function ToneBadge({
   readonly children: ReactNode;
 }) {
   return <Badge variant={TONE_BADGE_VARIANT[tone]}>{children}</Badge>;
-}
-
-export function BackupBadge({ backup }: { readonly backup: BackupStatus }) {
-  const { label, tone } = presentBackup(backup);
-  return <ToneBadge tone={tone}>{label}</ToneBadge>;
 }

@@ -527,14 +527,7 @@ export function keepOutcome(receipt: KeepReceipt) {
       detail: receipt.error ?? `The keep ended as ${receipt.status}.`,
       retryable: false,
     };
-  const backupPending = receipt.backup_required && receipt.backup !== "confirmed";
-  return {
-    status: "completed" as const,
-    detail: backupPending
-      ? `Published to the library. Independent backup is not confirmed yet: ${receipt.backup_error ?? "pending"}`
-      : "Published to the library.",
-    retryable: false,
-  };
+  return { status: "completed" as const, detail: "Published to the library.", retryable: false };
 }
 
 export const runKeep = Effect.fn("Workenv.keep")(function* (source: string, reason: string) {

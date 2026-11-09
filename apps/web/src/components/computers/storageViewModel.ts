@@ -35,7 +35,7 @@ export interface VolumeModel {
   readonly reserveBytes: number | null;
   /** Available minus the reserve, only where agent work lives. */
   readonly headroomBytes: number | null;
-  readonly holds: ReadonlyArray<"agent-work" | "library" | "backup">;
+  readonly holds: ReadonlyArray<"agent-work" | "library">;
   readonly measuredAt: IsoTimestamp | null;
   /** Whether the folder breakdown can be opened for it. */
   readonly openable: boolean;

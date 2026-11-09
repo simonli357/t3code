@@ -109,7 +109,7 @@ const ACTIVITY_STATUS = new Map<string, ActivityStatus>([
   ["failed", "failed"],
   ["invalid", "failed"],
   ["setup-failed", "failed"],
-  // Stopped without a recorded result; its detail says to check receipts, and a backup can be retried.
+  // Stopped without a recorded result; its detail says to check receipts.
   ["interrupted", "failed"],
 ]);
 /** The statuses the row's own badge already says; every other one is named beside it. */
@@ -124,9 +124,14 @@ const SELF_EXPLANATORY = new Set([
   "canceled",
 ]);
 
+/** Every activity but `backup`, which only an older server or a record from before backups were retired carries. */
+type ShownActivity = ComputerActivity & { readonly kind: ActivityRow["kind"] };
+export const isShownActivity = (activity: ComputerActivity): activity is ShownActivity =>
+  activity.kind !== "backup";
+
 export function activityRow(
   environment: ComputerEnvironment,
-  activity: ComputerActivity,
+  activity: ShownActivity,
 ): ActivityRow {
   const status = ACTIVITY_STATUS.get(activity.status) ?? "unknown";
   const named = SELF_EXPLANATORY.has(activity.status)
@@ -181,6 +186,7 @@ export function processList(
     measuredAt: iso(result.sampledAt),
     totalCount: result.processes.length,
     jobs: activities
+      .filter(isShownActivity)
       .filter((activity) => activity.kind === "job")
       .map((activity) => activityRow(environment, activity))
       .filter((row) => row.status === "running"),

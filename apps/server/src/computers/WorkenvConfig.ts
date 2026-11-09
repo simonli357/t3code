@@ -16,7 +16,6 @@ const Policy = Schema.Struct({
   audience: Schema.String,
   collection: Schema.optionalKey(Schema.String),
   relative_path: Schema.optionalKey(Schema.String),
-  backup_required: Schema.optionalKey(Schema.Boolean),
 });
 const Config = Schema.Struct({
   state: Schema.String,
@@ -52,17 +51,6 @@ const Entry = Schema.Struct({
   sha256: Schema.optionalKey(Schema.String),
   mode: Schema.optionalKey(Schema.Number),
 });
-/** What workenv records once the library's backup confirms one bundle (receipt schema v2). */
-export const BackupProof = Schema.Struct({
-  schema: Schema.String,
-  snapshot_id: Schema.String,
-  content_verified_snapshot: Schema.String,
-  manifest_sha256: Schema.String,
-  path: Schema.String,
-  method: Schema.String,
-  confirmed_at: Schema.Unknown,
-});
-export type BackupProof = typeof BackupProof.Type;
 /** A keep request or receipt; a published bundle's `manifest.json` has the same shape. */
 export const Receipt = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
@@ -77,10 +65,6 @@ export const Receipt = Schema.Struct({
   created_at: Schema.optionalKey(Schema.String),
   published_at: Schema.optionalKey(Schema.Number),
   error: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  backup_required: Schema.optionalKey(Schema.Boolean),
-  backup: Schema.optionalKey(Schema.String),
-  backup_error: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  backup_receipt: Schema.optionalKey(BackupProof),
   superseded: Schema.optionalKey(Schema.Boolean),
   reference: Schema.optionalKey(Schema.String),
   writer_path: Schema.optionalKey(Schema.String),

@@ -76,7 +76,8 @@ const volumeModel = (volume: StorageVolume, openable: boolean): VolumeModel => (
   availableBytes: volume.availableBytes,
   reserveBytes: volume.reserveBytes,
   headroomBytes: volume.headroomBytes,
-  holds: volume.holds,
+  // An older server may still report a backup location; library backups are retired.
+  holds: volume.holds.filter((hold) => hold !== "backup"),
   measuredAt: iso(volume.measuredAt),
   openable: openable && volume.mountPaths.length > 0 && volume.role !== "unmounted",
 });
@@ -173,12 +174,7 @@ const GROUP_TEXT: Record<StorageGroupId, { title: string; description: string }>
   },
   archives: {
     title: "Archives",
-    description: "Results that were kept, with where they live and whether a backup is verified.",
-  },
-  backups: {
-    title: "Backups",
-    description:
-      "Backup repositories: where they are, what they cover and when they were verified.",
+    description: "Results that were kept, with where they live.",
   },
   other: {
     title: "Other retained project data",
@@ -199,7 +195,7 @@ export function mergeHoldings(
     holdings: {
       ...next,
       groups: next.groups.map((group) =>
-        requested.includes(group.group)
+        requested.some((id) => id === group.group)
           ? group
           : {
               ...group,
@@ -214,9 +210,11 @@ export function mergeHoldings(
 
 /** The groups a saved answer already carries entries for. */
 export const loadedGroups = (holdings: StorageHoldings): StorageGroupId[] =>
-  holdings.groups
-    .filter((group) => group.entries.length > 0 || group.count === 0)
-    .map((group) => group.group);
+  STORAGE_GROUPS.filter((id) =>
+    holdings.groups.some(
+      (group) => group.group === id && (group.entries.length > 0 || group.count === 0),
+    ),
+  );
 
 export const detailKey = (computerId: string, entryId: string) =>
   JSON.stringify([computerId, entryId]);

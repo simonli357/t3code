@@ -386,8 +386,6 @@ it.layer(NodeServices.layer)("keep receipts", (it) => {
           collection: "evidence",
           audience: "private",
           reason: "Evidence",
-          backup_required: true,
-          backup: "not verified",
           status: "pending",
           error: "ssh: connect to host 192.168.0.80 port 22: Connection timed out",
         };
@@ -549,16 +547,11 @@ describe("workenv commands", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it("treats a published keep as done even while its independent backup is pending", () => {
-    const outcome = keepOutcome({
-      ...bundle.receipt,
-      backup: "pending",
-      backup_error: "snapshot missing",
+  it("treats a published keep as done", () => {
+    expect(keepOutcome(bundle.receipt)).toEqual({
+      status: "completed",
+      detail: "Published to the library.",
+      retryable: false,
     });
-    expect(outcome).toMatchObject({ status: "completed", retryable: false });
-    expect(outcome.detail).toContain("snapshot missing");
-    expect(keepOutcome({ ...bundle.receipt, backup_required: false }).detail).toBe(
-      "Published to the library.",
-    );
   });
 });

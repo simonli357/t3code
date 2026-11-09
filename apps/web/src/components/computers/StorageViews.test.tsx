@@ -84,7 +84,6 @@ const group = (
   title: {
     workspaces: "Workspaces",
     archives: "Archives",
-    backups: "Backups",
     other: "Other retained project data",
   }[id],
   description: "",
@@ -156,15 +155,14 @@ describe("the workspaces and archives view", () => {
           },
         ],
       }),
-      group("backups"),
       group("other"),
     ],
   });
 
-  it("opens with four collapsed groups; entries and their details appear only when opened", async () => {
+  it("opens with three collapsed groups; entries and their details appear only when opened", async () => {
     const onExpandEntry = vi.fn();
     await render(<Harness build={model} onExpandEntry={onExpandEntry} />);
-    for (const title of ["Workspaces", "Archives", "Backups", "Other retained project data"])
+    for (const title of ["Workspaces", "Archives", "Other retained project data"])
       expect(trigger(title)).toBeDefined();
     // Nothing below a header is rendered yet, and nothing was read for it.
     expect(container.textContent).not.toContain("Job a");
@@ -191,7 +189,6 @@ describe("the workspaces and archives view", () => {
           groups: [
             group("workspaces", { count: 3, bytes: 5 * GiB, measured: 2, unmeasured: 1, rows: [] }),
             group("archives", { count: 2, bytes: null, rows: [] }),
-            group("backups"),
             group("other"),
           ],
         }}
@@ -251,7 +248,6 @@ describe("the workspaces and archives view", () => {
               rows: [row(entry("a"))],
             }),
             group("archives"),
-            group("backups"),
             group("other"),
           ],
         }}
@@ -282,7 +278,6 @@ describe("the workspaces and archives view", () => {
               rows: [row(withRam)],
             }),
             group("archives"),
-            group("backups"),
             group("other"),
           ],
         })}

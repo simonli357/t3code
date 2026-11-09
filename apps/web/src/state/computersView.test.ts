@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, type ComputerActivity, type ComputerInspection } from "@t3tools/contracts";
 import type { ComputerCache } from "./computersCache";
 import type { EnvironmentPresentation } from "./environments";
-import { activityRow, panel, processList, searchCaveats } from "./computersView";
+import { activityRow, isShownActivity, panel, processList, searchCaveats } from "./computersView";
 
 const offline = {
   environmentId: EnvironmentId.make("computer-a"),
@@ -46,9 +46,9 @@ const nothingSaved: ComputerCache = {
   overview: null,
   activity: null,
 };
-const activity = (overrides: Partial<ComputerActivity>): ComputerActivity => ({
+const activity = (overrides: Partial<Parameters<typeof activityRow>[1]>) => ({
   id: "a1",
-  kind: "transfer",
+  kind: "transfer" as const,
   label: "Keep drawings",
   status: "published",
   updatedAt: 1000,
@@ -133,26 +133,20 @@ describe("activity rows", () => {
     expect(activityRow(connected, activity({ status: "failed" })).failureReason).toBeNull();
   });
 
-  it("offers retry for a failed backup or transfer only while the computer is connected", () => {
-    const backup = activity({
-      kind: "backup",
-      status: "failed",
-      detail: "Disk full",
-      retryable: true,
-    });
-    expect(activityRow(offline, backup).retry).toEqual({
+  it("offers retry for a failed transfer only while the computer is connected", () => {
+    const transfer = activity({ status: "failed", detail: "Disk full", retryable: true });
+    expect(activityRow(offline, transfer).retry).toEqual({
       state: "unavailable",
       reason: "Computer is offline",
     });
-    expect(activityRow(connected, backup).retry).toEqual({ state: "available" });
-    const transfer = activity({ status: "failed", retryable: true });
     expect(activityRow(connected, transfer).retry).toEqual({ state: "available" });
     expect(activityRow(connected, activity({ status: "failed" })).retry).toBeNull();
-    expect(
-      activityRow(connected, activity({ kind: "backup", status: "failed", retryable: false }))
-        .retry,
-    ).toBeNull();
     expect(activityRow(connected, activity({ status: "published" })).retry).toBeNull();
+  });
+
+  it("does not show a backup row from an older server or an old record", () => {
+    const old: ComputerActivity = { ...activity({}), kind: "backup" };
+    expect([old, activity({})].filter(isShownActivity)).toEqual([activity({})]);
   });
 });
 

@@ -60,13 +60,6 @@ import { decodeCatalogFile, loadCatalog, newCatalog, refreshCatalog } from "./Li
 import { isWithin } from "./paths.ts";
 import { readHandoffs, readJobs } from "./WorkenvActivity.ts";
 import {
-  backupActivity,
-  backupWanted,
-  retryBackups,
-  type BackupVerification,
-} from "./WorkenvBackup.ts";
-import {
-  BackupProof,
   decodeReceipt,
   fail,
   loadWorkenv,
@@ -81,14 +74,8 @@ const Index = Schema.Struct({
   indexedAt: Schema.Number,
   errors: Schema.Array(Schema.String),
 });
-const VerifiedBackup = Schema.Struct({
-  id: Schema.String,
-  proof: Schema.NullOr(BackupProof),
-  at: Schema.Number,
-});
 const decodeIndex = Schema.decodeUnknownEffect(Schema.fromJsonString(Index));
 const decodeActivity = Schema.decodeUnknownEffect(Schema.fromJsonString(ComputerActivity));
-const decodeVerified = Schema.decodeUnknownEffect(Schema.fromJsonString(VerifiedBackup));
 const encodeActionKey = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
 /** Keeps and the library catalog are re-read this often, or when asked to refresh. */
@@ -100,7 +87,6 @@ const ACTIVITY_TTL_MS = 10_000;
 const MEASUREMENT_TTL_MS = 30_000;
 const FOLDER_LISTINGS_KEPT = 16;
 const ACTION_LIMIT = 200;
-const PROOF_LIMIT = 5_000;
 
 export class Computers extends Context.Service<
   Computers,
@@ -128,7 +114,7 @@ interface Outcome {
 }
 /** A validated action, ready to run. Anything that can be refused up front is refused here. */
 interface Plan<R> {
-  readonly kind: "transfer" | "backup" | "restore";
+  readonly kind: "transfer" | "restore";
   readonly label: string;
   readonly source: string | null;
   /** Only one request with this key runs at a time. */
@@ -148,11 +134,9 @@ const failed = (detail: string): Outcome => ({
 });
 const actionFailureDetail = (kind: ComputerActivity["kind"], detail: string | null) => {
   const instruction =
-    kind === "backup"
-      ? "Use the native workenv backup row in Activity to retry."
-      : kind === "transfer"
-        ? "Use the native workenv transfer or handoff row in Activity to retry."
-        : null;
+    kind === "transfer"
+      ? "Use the native workenv transfer or handoff row in Activity to retry."
+      : null;
   return instruction && !detail?.endsWith(instruction)
     ? `${detail ?? "Action failed."} ${instruction}`
     : detail;
@@ -172,7 +156,6 @@ const make = Effect.gen(function* () {
   >();
   const directory = path.join(config.stateDir, "computers");
   const actionsDirectory = path.join(directory, "actions"),
-    proofsDirectory = path.join(directory, "proofs"),
     catalogDirectory = path.join(directory, "catalog"),
     indexPath = path.join(directory, "files.json");
 
@@ -187,7 +170,7 @@ const make = Effect.gen(function* () {
   const persist = writeJson,
     readNames = listNames;
 
-  for (const folder of [directory, actionsDirectory, proofsDirectory, catalogDirectory]) {
+  for (const folder of [directory, actionsDirectory, catalogDirectory]) {
     yield* fs.makeDirectory(folder, { recursive: true });
     for (const name of yield* readNames(folder, ".tmp"))
       yield* fs.remove(path.join(folder, name), { force: true }).pipe(Effect.ignore);
@@ -205,12 +188,7 @@ const make = Effect.gen(function* () {
           index = {
             ...value,
             files: sortFiles(
-              value.files.map((file) => ({
-                ...file,
-                area: file.area ?? "project",
-                backupVerifiedAt:
-                  file.backup === "confirmed" ? (file.backupVerifiedAt ?? null) : null,
-              })),
+              value.files.map((file) => ({ ...file, area: file.area ?? "project" })),
             ),
           };
           indexVersion++;
@@ -266,8 +244,6 @@ const make = Effect.gen(function* () {
   const actions = yield* Ref.make<ReadonlyArray<ComputerActivity>>(
     newestFirst.slice(0, ACTION_LIMIT),
   );
-  const verified = new Map<string, BackupVerification>();
-  let verifiedVersion = 0;
   // --- actions ---------------------------------------------------------------------------------
   const saveErrors = new Map<string, string>();
   const find = (id: string) =>
@@ -414,7 +390,6 @@ const make = Effect.gen(function* () {
       requestReceipts.version,
       publishedReceipts.version,
       catalog.version,
-      verifiedVersion,
       platform,
       configStamp,
     ].join("|");
@@ -424,7 +399,7 @@ const make = Effect.gen(function* () {
       ...files.published.map((file) => toSource("receipt", file.key, file.file, file.receipt)),
       ...[...catalog.entries.values()].map((entry) => entry.source),
     ];
-    const archive = buildArchive(sources, { config: workenv, platform, verified });
+    const archive = buildArchive(sources, { config: workenv, platform });
     archiveState = {
       signature,
       archive,
@@ -435,67 +410,10 @@ const make = Effect.gen(function* () {
     return archiveState;
   });
 
-  const referencedProofs = () =>
-    new Set([
-      ...(local?.requests ?? []).map((file) => file.receipt.id),
-      ...(local?.published ?? []).map((file) => file.receipt.id),
-      ...[...catalog.entries.values()].map((entry) => entry.source.receipt.id),
-    ]);
-  let prunedProofs = "";
-  const proofSignature = () =>
-    [requestReceipts.version, publishedReceipts.version, catalog.version, verifiedVersion].join(
-      "|",
-    );
-  const pruneProofs = Effect.gen(function* () {
-    if (prunedProofs === proofSignature()) return;
-    const referenced = referencedProofs();
-    const retained = new Set(
-      [...verified]
-        .filter(([id]) => referenced.has(id))
-        .toSorted((a, b) => b[1].at - a[1].at)
-        .slice(0, PROOF_LIMIT)
-        .map(([id]) => id),
-    );
-    for (const id of verified.keys())
-      if (!retained.has(id)) {
-        verified.delete(id);
-        verifiedVersion++;
-        yield* fs.remove(path.join(proofsDirectory, `${id}.json`), { force: true });
-      }
-    prunedProofs = proofSignature();
-  });
   const initialWorkenv = yield* load;
   if (initialWorkenv.config) {
     yield* readLocal(initialWorkenv.config);
     yield* loadCatalog(catalog, catalogDirectory, initialWorkenv.config);
-  }
-  const referenced = referencedProofs();
-  for (const name of (yield* readNames(proofsDirectory, ".json")).sort()) {
-    const file = path.join(proofsDirectory, name);
-    if (
-      !/^[0-9a-f]{32}\.json$/.test(name) ||
-      !referenced.has(name.slice(0, -5)) ||
-      verified.size >= PROOF_LIMIT
-    ) {
-      yield* fs.remove(file, { force: true });
-      continue;
-    }
-    yield* fs.readFileString(file).pipe(
-      Effect.flatMap(decodeVerified),
-      Effect.filterOrFail(
-        (record) => record.id === name.slice(0, -5),
-        () => fail("The proof record does not match its filename."),
-      ),
-      Effect.tap((record) =>
-        Effect.sync(() => {
-          if (record.id === name.slice(0, -5)) {
-            verified.set(record.id, { proof: record.proof, at: record.at });
-            verifiedVersion++;
-          }
-        }),
-      ),
-      Effect.catch(() => fs.remove(file, { force: true })),
-    );
   }
 
   // --- inspection --------------------------------------------------------------------------------
@@ -554,7 +472,6 @@ const make = Effect.gen(function* () {
     cataloging = true;
     catalogAttemptedAt = sampledAt;
     yield* refreshCatalog(catalog, workenv, { cache: catalogDirectory, staging: directory }).pipe(
-      Effect.tap(() => pruneProofs),
       Effect.tap((problems) =>
         Effect.sync(() => {
           catalogErrors = problems;
@@ -610,7 +527,6 @@ const make = Effect.gen(function* () {
         ),
         Effect.provideContext(context),
       ),
-    verified: () => verified,
     sessions: Option.isSome(workspaces)
       ? Effect.suspend(() => workspaces.value.list()).pipe(
           Effect.map((jobs) => jobs.map((job) => ({ threadId: job.threadId, root: job.root }))),
@@ -751,7 +667,6 @@ const make = Effect.gen(function* () {
       const errors = [...withError];
       if (workenv) {
         const files = yield* readLocal(workenv);
-        yield* pruneProofs;
         const extra = yield* readActivity(workenv);
         errors.push(...files.errors, ...extra.errors);
         for (const file of files.requests) {
@@ -761,11 +676,6 @@ const make = Effect.gen(function* () {
               file,
               published ||
                 (yield* fs.exists(file.receipt.source).pipe(Effect.orElseSucceed(() => false))),
-            ),
-            ...backupActivity(
-              file,
-              verified.get(file.receipt.id ?? ""),
-              backupWanted(workenv, file.receipt, verified.get(file.receipt.id ?? "")),
             ),
           );
         }
@@ -803,10 +713,7 @@ const make = Effect.gen(function* () {
       );
     }
     if (workenv) yield* kickCatalog(workenv, refresh, sampledAt);
-    if (workenv) {
-      yield* readLocal(workenv);
-      yield* pruneProofs;
-    }
+    if (workenv) yield* readLocal(workenv);
     const state = workenv ? yield* currentArchive(workenv) : null;
     const mergedKey = `${indexVersion}|${state?.signature ?? ""}`;
     if (merged.key !== mergedKey)
@@ -884,107 +791,10 @@ const make = Effect.gen(function* () {
   // --- actions ---------------------------------------------------------------------------------
   type Requirements = FileSystem.FileSystem | Path.Path | ProcessRunner.ProcessRunner;
 
-  const recordBackups = (
-    files: readonly ReceiptFile[],
-    confirmed: ReadonlyMap<string, BackupProof>,
-  ) =>
-    Effect.gen(function* () {
-      const at = yield* Clock.currentTimeMillis;
-      const problems: string[] = [];
-      for (const file of files) {
-        const proof = confirmed.get(file.key) ?? null;
-        const id = file.receipt.id;
-        if (!id || !/^[0-9a-f]{32}$/.test(id)) continue;
-        const saved = yield* persist(path.join(proofsDirectory, `${id}.json`), {
-          id,
-          proof,
-          at,
-        }).pipe(Effect.result);
-        // Kept in memory even when it cannot be saved: the check did happen.
-        verified.set(id, { proof, at });
-        verifiedVersion++;
-        if (saved._tag === "Failure") problems.push(messageOf(saved.failure));
-      }
-      yield* pruneProofs;
-      return problems;
-    }).pipe(Effect.mapError(operationError));
-
-  const backupPlan = Effect.fn("Computers.backupPlan")(function* (
-    workenv: WorkenvConfig,
-    requestId: string | undefined,
-  ) {
-    const local = yield* readLocal(workenv);
-    const requests = [
-      ...new Map(
-        [...local.published, ...local.requests].map((file) => [file.receipt.id ?? file.key, file]),
-      ).values(),
-    ];
-    const asKey = requestId?.replace(/^backup:/, "");
-    let selected = asKey
-      ? requests.find(
-          (file) => isPublished(file.receipt) && (file.key === asKey || file.receipt.id === asKey),
-        )
-      : undefined;
-    if (asKey && !selected) {
-      const entry = [...catalog.entries.values()].find(
-        (entry) => entry.source.receipt.id === asKey,
-      );
-      if (entry) {
-        const cached = yield* fs
-          .readFileString(entry.source.file)
-          .pipe(Effect.flatMap(decodeCatalogFile), Effect.mapError(operationError));
-        selected = {
-          key: asKey,
-          file: entry.source.file,
-          modifiedAt: entry.listing.modifiedAt,
-          receipt: fromLibraryManifest(workenv, cached.receipt, cached.reference),
-        };
-      }
-    }
-    if (requestId !== undefined && (!selected || !isPublished(selected.receipt)))
-      return yield* fail("Select a published keep to verify its backup.");
-    const target = selected?.key;
-    const targets = selected
-      ? [selected]
-      : requests.filter((file) =>
-          backupWanted(workenv, file.receipt, verified.get(file.receipt.id ?? "")),
-        );
-    if (!targets.length) return yield* fail("No published keep is waiting for a backup.");
-    return {
-      kind: "backup",
-      label: target ? `Verify backup of ${targets[0]!.receipt.reason}` : "Verify library backups",
-      source: null,
-      key: `backup:${target ?? "*"}`,
-      run: Effect.gen(function* () {
-        const result = yield* retryBackups(workenv, targets).pipe(
-          Effect.onError(() => recordBackups(targets, new Map()).pipe(Effect.ignore)),
-        );
-        const problems = yield* recordBackups(targets, result.confirmed);
-        const missing = targets.filter((file) => !result.confirmed.has(file.key));
-        const saved = problems.length ? ` (the result could not be saved: ${problems[0]})` : "";
-        if (!missing.length)
-          return {
-            status: "completed",
-            detail: `Backup confirmed for ${targets.length} keep${targets.length === 1 ? "" : "s"}${result.started ? " after starting the library backup" : ""}${saved}.`,
-          } satisfies Outcome;
-        const reasons = [...new Set(missing.map((file) => result.reasons.get(file.key)))]
-          .filter(Boolean)
-          .slice(0, 2)
-          .join(" ");
-        return failed(
-          `Confirmed ${targets.length - missing.length} of ${targets.length}. ${reasons}${
-            result.startFailure ? ` Starting the library backup failed: ${result.startFailure}` : ""
-          }${saved}`,
-        );
-      }),
-    } satisfies Plan<Requirements>;
-  });
-
   const plan = Effect.fn("Computers.plan")(function* (input: ComputerActionInput) {
     const { config: workenv, error: workenvError } = yield* load;
     if (!workenv)
       return yield* fail(workenvError ?? "Workenv is not installed/configured on this computer.");
-    if (input.action === "backup") return yield* backupPlan(workenv, input.requestId);
     if (input.action === "keep") {
       if (
         !input.path ||
@@ -1029,9 +839,7 @@ const make = Effect.gen(function* () {
       }
       const file = (yield* readLocal(workenv)).requests.find((entry) => entry.key === id);
       if (!file) return yield* fail("This transfer is no longer available.");
-      // A published keep can only be waiting for its backup: its source is not needed and may be
-      // long gone. Only an unpublished keep goes back through workenv's own keep.
-      if (isPublished(file.receipt)) return yield* backupPlan(workenv, id);
+      if (isPublished(file.receipt)) return yield* fail("This keep is already published.");
       const { receipt } = file;
       if (
         receipt.status === "cancelled" ||

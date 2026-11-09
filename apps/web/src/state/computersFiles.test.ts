@@ -15,13 +15,11 @@ const file = (path: string, extra: Partial<ComputerFile> = {}): ComputerFile => 
   sizeBytes: 10,
   modifiedAt: 1000,
   directory: false,
-  backup: "not-verified",
   reference: null,
   ...extra,
 });
 const kept = (path: string, extra: Partial<ComputerFile> = {}) =>
   file(path, {
-    backup: "published",
     reference: "sftp://archive/bundle/README.md",
     kept: { reason: "Accepted drawings", keptAt: 2000 },
     restorable: true,
@@ -112,16 +110,13 @@ describe("what a result offers", () => {
   });
 });
 
-it("labels work folders separately and preserves the backup verification time", () => {
+it("labels work folders separately and says where a kept copy is", () => {
   const result = mergeFilePages([
     source("a", "Alpha", true, [
       file("/jobs/task/outputs/a.csv", { area: "work", project: "Utility" }),
-      kept("/archive/b.csv", { area: "archive", backup: "confirmed", backupVerifiedAt: 2000 }),
+      kept("/archive/b.csv", { area: "archive" }),
     ]),
   ]);
   expect(result[0]?.row.location).toBe("work-folder");
-  expect(result[1]?.row.backup).toMatchObject({
-    state: "confirmed",
-    at: "1970-01-01T00:00:02.000Z",
-  });
+  expect(result[1]?.row.reference).toBe("sftp://archive/bundle/README.md");
 });

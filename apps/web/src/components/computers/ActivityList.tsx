@@ -2,7 +2,6 @@ import {
   ActivityIcon,
   ArchiveRestoreIcon,
   ArrowLeftRightIcon,
-  DatabaseBackupIcon,
   RotateCcwIcon,
   TerminalIcon,
   type LucideIcon,
@@ -39,7 +38,6 @@ const ACTIVITY_PAGE_SIZE = 20;
 const KIND_ICON: Record<ActivityKind, LucideIcon> = {
   job: TerminalIcon,
   transfer: ArrowLeftRightIcon,
-  backup: DatabaseBackupIcon,
   restore: ArchiveRestoreIcon,
 };
 
@@ -178,8 +176,8 @@ function ActivitySkeleton() {
 }
 
 /**
- * Jobs, transfers, backups, and restores in one list, newest first. A failed one says why, in the
- * words it was given. Retry appears only on a failed transfer, backup, or restore.
+ * Jobs, transfers, and restores in one list, newest first. A failed one says why, in the
+ * words it was given. Retry appears only on a failed transfer or restore.
  */
 export function ActivityList({
   activity,
@@ -232,7 +230,7 @@ export function ActivityList({
       <EmptyNotice
         icon={<ActivityIcon />}
         title="No activity yet"
-        description="Jobs, transfers, backups and restores show up here."
+        description="Jobs, transfers and restores show up here."
       />
     );
   } else {

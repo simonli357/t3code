@@ -30,7 +30,7 @@ export const output = (stdout = "", code = 0, stderr = ""): ProcessRunOutput => 
 export const workenvConfig = (state = "/state"): WorkenvConfig => ({
   state,
   projects: {
-    t3: { source: "/current/t3", keep: { audience: "private", backup_required: true } },
+    t3: { source: "/current/t3", keep: { audience: "private" } },
   },
   keep: {
     library_root: "/library",
@@ -47,13 +47,6 @@ export const interfaceJson = (overrides: { uuid?: string; root?: string } = {}) 
     library: {
       root: overrides.root ?? "/library",
       filesystem: { uuid: overrides.uuid ?? "library-uuid" },
-    },
-    backup: {
-      repository: "/data/work-backup/restic (restic 0.16.4)",
-      receipt: {
-        schema: "workenv-backup-receipt/2",
-        latest: "/var/lib/workenv/backup/latest.json",
-      },
     },
     colleague_read: { address: "100.1.2.3", port: 2022 },
   });
@@ -84,9 +77,6 @@ export function makeBundle(options: {
     status: "published",
     created_at: "2026-10-22T10:00:00Z",
     published_at: 1_792_000_000,
-    backup_required: true,
-    backup: "pending",
-    backup_error: "Required backup receipt does not identify this exact published bundle",
     library_id: "library-uuid",
     library_root: "/library",
     library_ssh: "archive",
@@ -120,26 +110,6 @@ export function makeBundle(options: {
   };
 }
 
-/** The library's backup receipt covering `bundles`, as workenv's backup service writes it. */
-export const latestReceipt = (
-  bundles: ReadonlyArray<{ writerPath: string; manifestSha256: string }>,
-  snapshot = SNAPSHOT,
-) =>
-  toJson({
-    schema: "workenv-backup-receipt/2",
-    repository: "/data/work-backup/restic",
-    snapshot_id: snapshot,
-    backup_finished: "2026-10-22T07:41:01-04:00",
-    confirmed_at: "2026-10-22T07:50:42-04:00",
-    items: bundles.map((bundle) => ({
-      path: bundle.writerPath,
-      manifest_sha256: bundle.manifestSha256,
-      status: "confirmed",
-      method: "snapshot content hashed against manifest",
-      content_verified_snapshot: snapshot,
-    })),
-  });
-
 export interface ScriptedLibrary {
   /** Library paths to their text; changes made by a test are seen by later commands. */
   readonly files: Record<string, string>;
@@ -148,14 +118,13 @@ export interface ScriptedLibrary {
 }
 
 /**
- * A ProcessRunner standing in for rclone (cat, copyto, lsjson, copy), for ssh (`admin` receives the
- * remote command) and for the workenv command (`workenv` receives its arguments).
+ * A ProcessRunner standing in for rclone (cat, copyto, lsjson, copy) and for the workenv command
+ * (`workenv` receives its arguments).
  */
 export function scriptedLibrary(
   fs: FileSystem.FileSystem,
   script: {
     files: Record<string, string>;
-    admin?: (command: string, files: Record<string, string>) => ProcessRunOutput;
     workenv?: (args: readonly string[]) => ProcessRunOutput | Effect.Effect<ProcessRunOutput>;
     listing?: ReadonlyArray<{ Path: string; Size: number; ModTime: string }>;
     /** Listings of particular library folders; `listing` answers every other one. */
@@ -198,11 +167,6 @@ export function scriptedLibrary(
             return output();
           }
         }
-        if (input.command === "ssh")
-          return (
-            script.admin?.(input.args.at(-1)!, script.files) ??
-            output("", 1, "no scripted ssh command")
-          );
         if (/workenv(\.cmd)?$/.test(input.command)) {
           const result = script.workenv?.(input.args);
           return result === undefined

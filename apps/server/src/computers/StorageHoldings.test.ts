@@ -5,7 +5,6 @@ import {
   locate,
   workspaceState,
   type ArchiveInfo,
-  type BackupInfo,
   type HoldingsInput,
   type WorkspaceSource,
 } from "./StorageHoldings.ts";
@@ -142,10 +141,6 @@ const archive = (id: string, extra: Partial<ArchiveInfo> = {}): ArchiveInfo => (
   writerPath: `/srv/library/projects/app/evidence/${id}`,
   local: true,
   host: "alpha",
-  backup: "confirmed",
-  backupVerifiedAt: now - 3600_000,
-  backupSnapshot: "bf674190",
-  backupRequired: true,
   ...extra,
 });
 
@@ -161,10 +156,6 @@ const input = (extra: Partial<HoldingsInput> = {}): HoldingsInput => ({
   archives: [],
   archiveProblem: null,
   archiveSupported: true,
-  libraryPaths: new Set(),
-  backups: [],
-  backupProblem: null,
-  backupSupported: true,
   retained: [],
   retainedSupported: true,
   sizes: () => null,
@@ -177,15 +168,10 @@ const input = (extra: Partial<HoldingsInput> = {}): HoldingsInput => ({
 const group = (result: ReturnType<typeof buildHoldings>, id: string) =>
   result.groups.find((entry) => entry.group === id)!;
 
-describe("the four groups", () => {
-  it("are always exactly Workspaces, Archives, Backups and Other, in that order", () => {
+describe("the three groups", () => {
+  it("are always exactly Workspaces, Archives and Other, in that order", () => {
     const result = buildHoldings(input());
-    expect(result.groups.map((entry) => entry.group)).toEqual([
-      "workspaces",
-      "archives",
-      "backups",
-      "other",
-    ]);
+    expect(result.groups.map((entry) => entry.group)).toEqual(["workspaces", "archives", "other"]);
   });
 
   it("say that a part is unsupported, with the reason, when the lifecycle tool is not installed", () => {
@@ -193,7 +179,6 @@ describe("the four groups", () => {
       input({
         lifecycleAvailable: false,
         archiveSupported: false,
-        backupSupported: false,
         retainedSupported: false,
         jobRoots: [],
       }),
@@ -201,7 +186,6 @@ describe("the four groups", () => {
     expect(group(result, "workspaces")).toMatchObject({ status: "unsupported", count: 0 });
     expect(group(result, "archives")).toMatchObject({ status: "unsupported", count: 0 });
     expect(group(result, "archives").reason).toMatch(/lifecycle tool/);
-    expect(group(result, "backups")).toMatchObject({ status: "unsupported" });
     expect(group(result, "other")).toMatchObject({ status: "partial" });
     // No size anywhere: the totals are unknown, not zero.
     for (const entry of result.groups) expect(entry.bytes).toBeNull();
@@ -412,7 +396,7 @@ describe("group totals", () => {
 });
 
 describe("archives", () => {
-  it("show the location, source, recorded size and the verified backup of a local bundle", () => {
+  it("show the location, source and recorded size of a local bundle", () => {
     const result = buildHoldings(input({ archives: [archive("a1")] }));
     const entry = group(result, "archives").entries[0]!;
     expect(entry).toMatchObject({
@@ -424,8 +408,6 @@ describe("archives", () => {
     });
     expect(entry.archive).toMatchObject({
       source: `${ROOT}/job-a/outputs`,
-      backup: "confirmed",
-      backupSnapshot: "bf674190",
       files: 4,
     });
   });
@@ -459,138 +441,13 @@ describe("archives", () => {
     ]);
   });
 
-  it("show a backup as not verified when no proof exists", () => {
-    const result = buildHoldings(
-      input({
-        archives: [
-          archive("a1", { backup: "published", backupVerifiedAt: null, backupSnapshot: null }),
-        ],
-      }),
-    );
+  it("still send the retired backup keys, which older clients need to decode a bundle", () => {
+    const result = buildHoldings(input({ archives: [archive("a1")] }));
     expect(group(result, "archives").entries[0]!.archive).toMatchObject({
       backup: "published",
       backupVerifiedAt: null,
+      backupSnapshot: null,
     });
-  });
-});
-
-describe("backups", () => {
-  const repository = (extra: Partial<BackupInfo> = {}): BackupInfo => ({
-    id: "library",
-    repository: "/backup/restic",
-    description: "restic 0.16",
-    localPath: "/backup/restic",
-    host: null,
-    scope: ["the work library"],
-    retention: "Keeps 7 daily, 4 weekly snapshots",
-    physicalId: null,
-    libraryPhysicalId: null,
-    latest: {
-      snapshotId: "s1",
-      confirmedAt: now - 3600_000,
-      confirmedPaths: new Set(["/srv/library/projects/app/evidence/a1"]),
-      repositoryBytes: null,
-      repositoryBytesAt: null,
-    },
-    problem: null,
-    ...extra,
-  });
-
-  it("show the repository's host, disk, coverage, latest verification and retention", () => {
-    const result = buildHoldings(
-      input({
-        backups: [repository()],
-        libraryPaths: new Set([
-          "/srv/library/projects/app/evidence/a1",
-          "/srv/library/projects/app/evidence/a2",
-        ]),
-      }),
-    );
-    const entry = group(result, "backups").entries[0]!;
-    expect(entry).toMatchObject({
-      title: "Library backup on alpha",
-      host: "alpha",
-      disk: { disk: "Backup HDD", volume: "backup-disk" },
-    });
-    expect(entry.backup).toMatchObject({
-      covered: 1,
-      expected: 2,
-      verifiedAt: now - 3600_000,
-      retention: "Keeps 7 daily, 4 weekly snapshots",
-    });
-    expect(entry.notes[0]).toMatch(/not independent copies/);
-  });
-
-  it("report occupied bytes only when they were measured or reported, otherwise unknown", () => {
-    const unknown = buildHoldings(input({ backups: [repository()] }));
-    expect(group(unknown, "backups").entries[0]!.size).toMatchObject({
-      bytes: null,
-      basis: "unavailable",
-    });
-    expect(group(unknown, "backups").entries[0]!.notes.join(" ")).toMatch(
-      /not readable by this server/,
-    );
-    expect(group(unknown, "backups").bytes).toBeNull();
-
-    const reported = buildHoldings(
-      input({
-        backups: [
-          repository({
-            latest: {
-              snapshotId: "s1",
-              confirmedAt: now,
-              confirmedPaths: new Set(),
-              repositoryBytes: 80 * GiB,
-              repositoryBytesAt: now - 60_000,
-            },
-          }),
-        ],
-      }),
-    );
-    expect(group(reported, "backups").entries[0]!.size).toMatchObject({
-      bytes: 80 * GiB,
-      basis: "reported",
-      measuredAt: now - 60_000,
-    });
-
-    const measuredRepository = buildHoldings(
-      input({
-        backups: [repository()],
-        sizes: (path) => (path === "/backup/restic" ? measured(75 * GiB) : null),
-      }),
-    );
-    expect(group(measuredRepository, "backups").entries[0]!.size.bytes).toBe(75 * GiB);
-  });
-
-  it("do not add repositories on other computers to this computer's disks, and say whether they are independent", () => {
-    const result = buildHoldings(
-      input({
-        backups: [
-          repository({ physicalId: "wwn:backup", libraryPhysicalId: "wwn:library" }),
-          repository({
-            id: "remote-copy",
-            repository: "sftp:other:/backups/restic",
-            localPath: null,
-            host: "other",
-            physicalId: "wwn:same",
-            libraryPhysicalId: "wwn:same",
-            latest: null,
-            problem: "The latest backup receipt is not readable on this computer.",
-          }),
-        ],
-        sizes: (path) => (path === "/backup/restic" ? measured(75 * GiB) : null),
-      }),
-    );
-    const backups = group(result, "backups");
-    expect(backups).toMatchObject({ count: 2, remote: 1, bytes: 75 * GiB });
-    expect(backups.entries.map((entry) => entry.backup!.independent)).toEqual([true, false]);
-    expect(backups.entries[1]).toMatchObject({
-      title: "Backup remote-copy on other",
-      host: "other",
-      local: false,
-      disk: null,
-    });
-    expect(backups.entries[1]!.notes.join(" ")).toMatch(/receipt is not readable/);
   });
 });
 
@@ -637,7 +494,7 @@ describe("other retained project data", () => {
 
 describe("locating a path on a disk", () => {
   it("picks the most specific volume and reports a network mount as another computer", () => {
-    expect(locate(disks, "linux", "/backup/restic/data")).toMatchObject({
+    expect(locate(disks, "linux", "/backup/files/data")).toMatchObject({
       disk: "Backup HDD",
       volume: "backup-disk",
       remote: null,

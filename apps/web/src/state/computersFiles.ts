@@ -70,7 +70,7 @@ function rowOf({ source, file }: Held, id: string): FileRow {
           : null,
     computerId: source.environmentId,
     // The computer whose server answered, so the name agrees with the Computer filter and with where
-    // Restore is sent. Where the archived copy physically lives is in `backup.where`.
+    // Restore is sent. Where the archived copy physically lives is in `reference`.
     computerName: source.label,
     path: file.path,
     projectName: file.project || null,
@@ -78,14 +78,7 @@ function rowOf({ source, file }: Held, id: string): FileRow {
     sizeBytes: file.sizeBytes,
     modifiedAt: iso(file.modifiedAt),
     kept: file.kept ? { reason: file.kept.reason, keptAt: iso(file.kept.keptAt) } : null,
-    backup:
-      file.backup === "not-verified"
-        ? { state: "not-verified" }
-        : {
-            state: file.backup,
-            at: file.backup === "confirmed" ? iso(file.backupVerifiedAt) : null,
-            where: file.reference,
-          },
+    reference: file.reference,
   };
 }
 

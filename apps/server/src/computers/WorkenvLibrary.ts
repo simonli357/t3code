@@ -21,10 +21,6 @@ const Interface = Schema.Struct({
     root: Schema.String,
     filesystem: Schema.Struct({ uuid: Schema.String }),
   }),
-  backup: Schema.Struct({
-    repository: Schema.String,
-    receipt: Schema.Struct({ schema: Schema.String, latest: Schema.String }),
-  }),
 });
 export type LibraryInterface = typeof Interface.Type;
 const decodeInterface = Schema.decodeUnknownEffect(Schema.fromJsonString(Interface));
@@ -47,7 +43,7 @@ export interface ListedFile {
 /**
  * The library as this computer's workenv configuration reaches it: through the pinned OpenSSH
  * alias (rclone's SFTP transport, nothing else) or directly when this computer is the library.
- * Everything here only reads, except `administer`, which runs fixed commands on the library host.
+ * Everything here only reads.
  */
 export interface Library {
   readonly local: boolean;
@@ -58,10 +54,6 @@ export interface Library {
     source: string,
     target: string,
   ) => Effect.Effect<void, ReturnType<typeof fail>>;
-  /** Constant commands only: argv elements are joined into one remote command string. */
-  readonly administer: (
-    command: readonly string[],
-  ) => Effect.Effect<string, ReturnType<typeof fail>>;
   readonly listManifests: (
     root: string,
   ) => Effect.Effect<ReadonlyArray<ListedFile>, ReturnType<typeof fail>>;
@@ -161,20 +153,6 @@ export const openLibrary = Effect.fn("WorkenvLibrary.open")(function* (config: W
       rcloneRun(`Cannot copy ${source}`, ["copyto", remote(source), target], {
         timeout: "30 minutes",
       }).pipe(Effect.asVoid),
-    administer: Effect.fn("WorkenvLibrary.administer")(function* (command: readonly string[]) {
-      const result = yield* run(
-        local
-          ? { command: command[0]!, args: command.slice(1), timeout: "30 minutes" }
-          : {
-              command: sshCommand,
-              args: [...sshArguments, command.join(" ")],
-              timeout: "30 minutes",
-            },
-      );
-      if (result.code !== 0)
-        return yield* fail(`${command.slice(0, 2).join(" ")} failed: ${brief(result.stderr)}`);
-      return result.stdout;
-    }),
     // Depth 4 is projects/<project>/<collection>/<bundle>/manifest.json: payload folders, which
     // may hold thousands of files, are never listed.
     listManifests: Effect.fn("WorkenvLibrary.listManifests")(function* (root: string) {

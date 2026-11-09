@@ -4,7 +4,6 @@ import {
   ALL_FILTER_VALUE,
   DISK_NEARLY_FULL_SHARE,
   NOT_MEASURED,
-  NOT_VERIFIED,
   STALE_SAMPLE_AFTER_MS,
   activityProgressPercent,
   describeActivityTime,
@@ -27,7 +26,6 @@ import {
   normalizeKeepReason,
   normalizeRestoreDestination,
   presentActivityStatus,
-  presentBackup,
   resolveDataFreshness,
   resolveDiskUsage,
   retryOffer,
@@ -257,24 +255,6 @@ describe("search state", () => {
   });
 });
 
-describe("presentBackup", () => {
-  it("says Not verified when nothing has confirmed the backup", () => {
-    expect(presentBackup({ state: "not-verified" })).toEqual({
-      label: NOT_VERIFIED,
-      tone: "muted",
-    });
-    expect(NOT_VERIFIED).toBe("Not verified");
-  });
-
-  it("does not call a published but unchecked copy backed up", () => {
-    expect(presentBackup({ state: "published", at: null, where: null })).toEqual({
-      label: "Published, not confirmed",
-      tone: "warning",
-    });
-    expect(presentBackup({ state: "confirmed", at: null, where: null }).tone).toBe("success");
-  });
-});
-
 const activity = (overrides: Partial<ActivityRow>): ActivityRow => ({
   id: "a",
   kind: "transfer",
@@ -291,9 +271,8 @@ const activity = (overrides: Partial<ActivityRow>): ActivityRow => ({
 });
 
 describe("retryOffer", () => {
-  it("offers retry for a failed transfer, backup, or restore", () => {
+  it("offers retry for a failed transfer or restore", () => {
     expect(retryOffer(activity({ kind: "transfer" }))).toEqual({ state: "available" });
-    expect(retryOffer(activity({ kind: "backup" }))).toEqual({ state: "available" });
     expect(retryOffer(activity({ kind: "restore" }))).toEqual({ state: "available" });
   });
 

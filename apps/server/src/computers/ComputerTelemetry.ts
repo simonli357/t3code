@@ -436,7 +436,6 @@ export const folders = Effect.fn("Computers.folders")(function* (
       modifiedAt: Option.getOrNull(Option.map(child.info.mtime, (date) => date.getTime())),
       directory: directoryChild,
       backup: "not-verified",
-      backupVerifiedAt: null,
       reference: null,
     };
   });
