@@ -12,6 +12,8 @@ import {
   WORKER_ACCOUNT_DISABLED_REASON,
   type AllocationSnapshot,
   type AllocationPolicy,
+  type AllocationPolicyEdit,
+  type AllocationPolicyView,
   type ComputerPlacement,
   type ComputerPlacementRequest,
 } from "@t3tools/contracts";
@@ -32,7 +34,8 @@ import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.ts";
 import { allocationInventory } from "./inventory.ts";
-import { decideAllocation } from "./decision.ts";
+import { ACCOUNT_RULE_REASON, decideAllocation } from "./decision.ts";
+import { allocationPolicyView, editAllocationPolicy } from "./policyEdit.ts";
 import { modelCandidates } from "./modelDecision.ts";
 import { recommendPlacement } from "./placement.ts";
 
@@ -92,6 +95,10 @@ export class ProviderAllocation extends Context.Service<
       threadId: ThreadId,
       current: ModelSelection,
     ) => Effect.Effect<ModelSelection | null, AllocationError>;
+    /** Reads the coordinator's policy, after applying `edit` when it changes anything. */
+    readonly editPolicy: (
+      edit: AllocationPolicyEdit,
+    ) => Effect.Effect<AllocationPolicyView, AllocationError>;
     readonly receive: (from: string, request: unknown) => Effect.Effect<unknown, AllocationError>;
     /**
      * Computer advice plus the inventories it ranked, read on this computer. Placement needs no
@@ -221,11 +228,21 @@ const make = Effect.gen(function* () {
         state: "pending",
       });
     }
+    const workers = new Set(
+      demand.length
+        ? (yield* sql<{
+            thread_id: string;
+          }>`SELECT thread_id FROM custom_workers WHERE owner_id IS NOT NULL AND ${sql.in(
+            "thread_id",
+            demand.map((d) => d.threadId),
+          )}`).map((row) => row.thread_id)
+        : [],
+    );
     return {
       ...current,
       maxActiveAgentSessions: (yield* settings.getSettings).maxActiveAgentSessions,
       environmentLabel: local.label,
-      demand,
+      demand: demand.map((d) => (workers.has(d.threadId) ? { ...d, worker: true } : d)),
       coordinatorEnvironmentId: (yield* settings.getSettings).allocationCoordinatorEnvironmentId,
       ...(computer ? { computer } : {}),
       ...(checkouts
@@ -626,7 +643,8 @@ const make = Effect.gen(function* () {
               code: "unavailable",
               detail: decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
                 ? WORKER_ACCOUNT_DISABLED_REASON
-                : "Reserved account no longer supports the exact requested profile or identity constraints.",
+                : (decision.reasons.find((reason) => reason.startsWith(ACCOUNT_RULE_REASON)) ??
+                  "Reserved account no longer supports the exact requested profile or identity constraints."),
             });
         }
       }
@@ -664,7 +682,7 @@ const make = Effect.gen(function* () {
     if (operation._tag === "snapshot")
       return {
         snapshot: {
-          accountWeightsSupported: true,
+          accountRulesSupported: true,
           accountCapsSupported: true,
           policy,
           inventories,
@@ -796,14 +814,42 @@ const make = Effect.gen(function* () {
         Effect.mapError((cause) =>
           cause.message.includes(WORKER_ACCOUNT_DISABLED_REASON)
             ? new AllocationError({ code: "invalid", detail: WORKER_ACCOUNT_DISABLED_REASON })
-            : unavailable(),
+            : // The coordinator's own answer to a policy save or a rule refusal is the message.
+              cause._tag === "PeerRejected" &&
+                (operation._tag === "policy" || cause.message.includes(ACCOUNT_RULE_REASON))
+              ? new AllocationError({ code: "invalid", detail: cause.message })
+              : unavailable(),
         ),
       );
     return yield* executeLocal(operation);
   });
+  const editPolicy = Effect.fn("ProviderAllocation.editPolicy")(function* (
+    edit: AllocationPolicyEdit,
+  ) {
+    const snapshot = (yield* execute({ _tag: "snapshot" })).snapshot;
+    if (!snapshot) return yield* unavailable();
+    const at = yield* now;
+    if (Object.values(edit).every((change) => change === undefined))
+      return allocationPolicyView(snapshot, at);
+    if (snapshot.accountRulesSupported !== true)
+      return yield* new AllocationError({
+        code: "invalid",
+        detail: "Update the allocation coordinator before changing its policy from here.",
+      });
+    const { policy } = yield* execute({
+      _tag: "policy",
+      input: {
+        expectedVersion: snapshot.policy.version,
+        policy: yield* editAllocationPolicy(snapshot, edit, at),
+      },
+    });
+    if (!policy) return yield* unavailable();
+    return allocationPolicyView({ ...snapshot, policy }, at);
+  });
   return ProviderAllocation.of({
     replacement,
     execute,
+    editPolicy,
     place,
     receive: Effect.fn("ProviderAllocation.receive")(function* (from, raw) {
       if (Option.isNone(yield* peers.resolve(from)))

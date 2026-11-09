@@ -1,4 +1,6 @@
 import {
+  AllocationPolicyEdit,
+  AllocationPolicyView,
   AllocationRequest,
   AllocationResult,
   AllocationStart,
@@ -41,14 +43,21 @@ const allocate = Tool.make("t3_allocate_account", {
 });
 const start = Tool.make("t3_start_allocated_assignment", {
   description:
-    'Start a fresh managed worker (kind=worker). Always score the assignment: request.assessment with selection=automatic, otherwise top-level assessment. Every start runs all three recommendations, model/effort from the difficulty/stakes table, account from allocation and computer advice, and records them next to the actual choice. Pin only what the user specified: selection=automatic with explicitInstanceId pins the account, override {driver, model, reason} pins the model with the table\'s effort, and override options pin the effort too; selection=explicit pins model and options. environmentId is always the chosen computer; compare computers first with t3_recommend_computer unless the user named one. A pinned choice that differs from its recommendation needs overrides.model/account/computer with the reason, such as "user specified ES Opus xhigh"; the error lists what differs. Recommendations, quota, pacing and stale/unknown warnings are advice, never an admission veto; unavailable advice is recorded and the start proceeds. Actual unsupported requests, ownership conflicts, transport and provider errors remain errors. After an attempted startup, retry the entire input unchanged to prevent duplicates. Does not replace native sessions. Returns the chosen profile and a compact recommended-vs-chosen summary.' +
-    MODEL_SCORING_RUBRIC,
+    "Start a fresh managed worker (kind=worker) on the recommendation: model/effort from the difficulty/stakes table, account from allocation and its account rules, and computer advice. Optional tier routine | normal | hard (default normal) picks the table entry; assessment {difficulty, difficultyReason, stakes, stakesReason} (request.assessment with selection=automatic) gives exact 0-10 scores instead. Pin only what the user specified: selection=automatic with explicitInstanceId pins the account, override {driver, model, reason} pins the model with the table's effort, and override options pin the effort too; selection=explicit pins model and options. environmentId is always the chosen computer; compare computers first with t3_recommend_computer unless the user named one. A pinned choice that differs from its recommendation starts as it is and the difference is recorded; overrides.model/account/computer may note why. A standing account preference belongs in t3_allocation_policy, not in each start. Quota, pacing and stale/unknown warnings are advice, never an admission veto; unavailable advice is recorded and the start proceeds. Refused: a pinned account that an account rule excludes or that is at its worker limit (the error names the rule), unsupported requests, ownership conflicts, transport and provider errors. After an attempted startup, retry the entire input unchanged to prevent duplicates. Does not replace native sessions. Returns the chosen profile and a compact recommended-vs-chosen summary.",
   parameters: Schema.Struct({ ...AllocationStart.fields, kind: Schema.Literal("worker") }),
   success: AllocationWorkerStartResult,
   failure: AllocationError,
   dependencies: [Assignments.AllocationAssignments, Invocation.McpInvocationContext],
 });
-export const AllocationToolkit = Toolkit.make(recommendComputer, allocate, start);
+const policy = Tool.make("t3_allocation_policy", {
+  description:
+    'Read or change the allocation policy that every worker start obeys, on the allocation coordinator. With no fields it returns the policy with accounts by label. When the user states a standing allocation rule, set it here once instead of repeating it per start. setRules entries are {account, kind, value?, expiresAt?, note?}: kind exclude keeps workers off the account ("never XL"); maxWorkers with value N allows at most N concurrent workers ("1 ARA max"); priority with value -100..100 (unset accounts are 0) prefers the higher account while it has quota headroom, and headroom orders equal priorities ("prefer ES"). Excluded accounts and accounts at their limit are never recommended, and a start pinned to one is refused. Give expiresAt (an ISO time) when the rule is for a duration; it then stops applying by itself. account is a display label such as ES or an instance ID and means that login on every computer. Each set replaces the account\'s rule of that kind; clearRules {account, kind?} removes them. curves {claude, codex, other} set pacing curves (null restores the default), setCaps/clearCaps set hard usage caps, and setOverrides/clearOverrides set a timed pacing override for one usage window (windowIds are listed per account). After "Policy changed", call again.',
+  parameters: AllocationPolicyEdit,
+  success: AllocationPolicyView,
+  failure: AllocationError,
+  dependencies: [Allocation.ProviderAllocation],
+});
+export const AllocationToolkit = Toolkit.make(recommendComputer, allocate, start, policy);
 export const handlers = AllocationToolkit.toLayer(
   Effect.gen(function* () {
     const allocation = yield* Allocation.ProviderAllocation;
@@ -86,6 +95,7 @@ export const handlers = AllocationToolkit.toLayer(
                   ),
             ),
           ),
+      t3_allocation_policy: (input) => allocation.editPolicy(input),
       t3_start_allocated_assignment: (input) =>
         Effect.flatMap(Invocation.McpInvocationContext, (caller) =>
           assignments.start(input, caller.threadId).pipe(Effect.map(compactAllocationStart)),

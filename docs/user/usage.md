@@ -87,12 +87,24 @@ or custom model provider, do not offer these controls. Cached subscription windo
 login are ignored rather than borrowed by that account. Caps also stay inactive while the quota
 source cannot be verified, rather than assuming a subscription applies.
 
-Recommendations subtract forecast running, queued, reserved and incoming work from the available
-budget, comparing the tightest short or weekly window. Account weights default equally to 50 and
-favor close choices within the **Account preference margin** under advanced estimation settings.
-The same margin favors the previous account; zero weight does not block an explicit choice. Family
-shares show relative preference, not guaranteed usage. Known shared identities count once across computers; unidentified
-accounts stay separate. Usage analytics show account allowance points/hour when measured. Model and
+**Account rules** are standing instructions that every worker start obeys, so you state them
+once instead of at each start. For each account you can set three rules, each with an optional
+end time, after which it stops applying by itself, and a note:
+
+- **Never used for workers**: the account is never recommended for a worker, and a worker
+  pinned to it is refused with the rule as the reason. Sessions you start yourself still run.
+- **Most concurrent workers**: once that many workers are running or starting on the account,
+  the next one goes elsewhere and a worker pinned to it is refused.
+- **Priority** (-100 to 100, 0 when unset): among the remaining accounts the higher priority
+  wins while the account has quota headroom, meaning its projected use fits every allowance
+  window. Out of headroom, the preference no longer counts. A negative priority is used last.
+
+Equal priorities are ordered by projected budget headroom: recommendations subtract forecast
+running, queued, reserved and incoming work from the available budget, comparing the tightest
+short or weekly window. The **Account preference margin** under advanced estimation settings
+favors the previous account among close choices. A rule covers the same login on every
+computer; unidentified accounts stay separate. Agents read and change the same rules, budgets,
+hard caps and temporary targets with the `t3_allocation_policy` tool. Usage analytics show account allowance points/hour when measured. Model and
 effort token samples are separate evidence, not subscription percentages; missing rates say
 **Not enough data**. Collection remains limited to accounts already opted into measurements.
 
@@ -107,7 +119,7 @@ A confirmed failed start remains recorded as an error. Stop or cancel running wo
 its accounting; unused reservations expire.
 
 History charts remain limited to accounts opted into usage retention. Native mobile displays saved
-numeric budgets, hard caps, weights, usage inspection and assignment preview; server enforcement is
+numeric budgets, hard caps, account rules, usage inspection and assignment preview; server enforcement is
 shared, but use the web page to edit settings and start human sessions.
 
 ## Set custom model prices
@@ -202,7 +214,8 @@ Assess the scoped assignment on two integer axes, each from 0 to 10, with a shor
 Difficulty measures reasoning, uncertainty and interactions. Stakes measures failure impact,
 reversibility and detectability. Use 0–3 for routine/low, 4–6 for moderate, 7 for
 demanding/high, 8 for very demanding/very high, 9 for extreme, and 10 only for exceptional
-assignments. Missing assessments cannot start automatic work.
+assignments. An assignment started without an assessment uses the `normal` tier, 5 on both
+axes; the `routine` and `hard` tiers use 2 and 8.
 
 The collapsed sections below the table hold the rest. **Test an assignment** previews the
 exact model, effort, rule, account recommendation and warnings using your unsaved table, and
@@ -217,10 +230,10 @@ requires explicit consent. Transport or installation failures alone are not reas
 escalate. **Connection** shows coordinator status and refreshes the saved version.
 
 Agents use the same preview and managed startup services through `t3_allocate_account` and
-`t3_start_allocated_assignment`. Every agent-created worker, including forks, carries the
-master's assessment; the server always records the table's model/effort, the recommended
-account and computer advice next to the actual choice, with the master's reason for each
-choice that differs. They read the same saved table. Retry the identical IDs and intent after a lost
+`t3_start_allocated_assignment`. Every agent-created worker, including forks, has an assessment
+or a tier; the server always records the table's model/effort, the recommended account and
+computer advice next to the actual choice. A choice that differs starts as it is, with the
+master's reason when it gave one. They read the same saved table. Retry the identical IDs and intent after a lost
 response; use new IDs for new work. Native mobile edits the same table in **Settings → Model
 selection**, including relay connections, with the same version and catalog checks. Use the web
 editor for human-session startup, exact-override and reassessment controls, previous-policy

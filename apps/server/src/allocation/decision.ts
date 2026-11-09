@@ -1,10 +1,11 @@
 import {
+  allocationAccountRule,
   allocationPreferenceKey,
-  allocationPreferenceWeight,
   WORKER_ACCOUNT_DISABLED_REASON,
 } from "@t3tools/contracts";
 import type {
   AllocationAccount,
+  AllocationAccountRule,
   AllocationCandidate,
   AllocationCurve,
   AllocationDecision,
@@ -94,29 +95,59 @@ function activeDemand(
       model: request.model,
       options: request.options,
       state: reservation.state === "consumed" ? "uncertain" : "pending",
+      ...(request.kind !== "session" ? { worker: true } : {}),
     });
   }
   return [...bySession.values()];
 }
 
-/** Weights and continuity can move a recommendation only within the live preference margin. */
+/** Sessions other than `self` that draw on this account identity. */
+export const accountDemand = (
+  account: Pick<AllocationAccount, "accountKey" | "environmentId" | "instanceId">,
+  demand: readonly AllocationDemand[],
+  self: { environmentId: string; threadId: string },
+) =>
+  demand.filter(
+    (d) =>
+      (account.accountKey !== null
+        ? d.accountKey === account.accountKey
+        : d.environmentId === account.environmentId && d.instanceId === account.instanceId) &&
+      !(d.threadId === self.threadId && d.environmentId === self.environmentId),
+  );
+
+export const ACCOUNT_RULE_REASON = "Account rule: ";
+/** Why an account rule keeps a new worker off this account, pinned or not, when one does. */
+export function accountRuleRefusal(
+  policy: AllocationPolicy,
+  account: Pick<
+    AllocationAccount,
+    "driver" | "accountKey" | "environmentId" | "instanceId" | "label"
+  >,
+  demand: readonly AllocationDemand[],
+  at: string,
+): string | undefined {
+  const key = allocationPreferenceKey(account);
+  const reason = (text: string, rule: AllocationAccountRule) =>
+    `${ACCOUNT_RULE_REASON}${account.label} ${text}${rule.expiresAt ? ` until ${rule.expiresAt}` : ""}${rule.note ? ` (${rule.note})` : ""}.`;
+  const excluded = allocationAccountRule(policy, key, "exclude", at);
+  if (excluded) return reason("is excluded from workers", excluded);
+  const limit = allocationAccountRule(policy, key, "maxWorkers", at);
+  const workers = demand.filter((d) => d.worker).length;
+  if (limit?.value !== undefined && workers >= limit.value)
+    return reason(`allows at most ${limit.value} concurrent workers and has ${workers}`, limit);
+  return undefined;
+}
+
+/** Continuity can move a recommendation only within the live preference margin. */
 export function allocationScore(
   candidate: AllocationCandidate,
   policy: AllocationPolicy,
-  driver: string,
   previousAccountKey?: string,
 ): number {
   const headroom = candidate.windows.length
     ? Math.min(...candidate.windows.map((w) => w.budgetHeadroomPoints ?? w.headroomPoints))
     : -Infinity;
-  const weight = allocationPreferenceWeight(
-    policy,
-    allocationPreferenceKey({ ...candidate, driver }),
-  );
-  return (
-    headroom +
-    policy.hysteresisPoints * (weight / 100 + (candidate.accountKey === previousAccountKey ? 1 : 0))
-  );
+  return headroom + (candidate.accountKey === previousAccountKey ? policy.hysteresisPoints : 0);
 }
 
 /** Pure replay boundary. Callers persist the exact policy, inventories and timestamp. */
@@ -281,13 +312,10 @@ export function decideAllocation(input: {
         else if (checked > now + 60_000)
           warnings.push("Evidence that no short window was reported is from the future.");
       }
-      const existing = demand.filter(
-        (d) =>
-          (account.accountKey !== null
-            ? d.accountKey === account.accountKey
-            : d.environmentId === account.environmentId && d.instanceId === account.instanceId) &&
-          !(d.threadId === request.threadId && d.environmentId === request.environmentId),
-      );
+      const existing = accountDemand(account, demand, request);
+      const refusal =
+        request.kind === "session" ? undefined : accountRuleRefusal(policy, account, existing, at);
+      if (refusal) reasons.push(refusal);
       const model = findCatalogModel(account.models, request.model)?.slug ?? request.model;
       const relevant = account.windows.filter((w) => !w.models || w.models.includes(model));
       if (!relevant.length) warnings.push("No measured allowance for this assignment.");
@@ -462,12 +490,20 @@ export function decideAllocation(input: {
       const resets = relevant
         .flatMap((w) => (w.resetsAt ? [(Date.parse(w.resetsAt) - now) / HOUR] : []))
         .filter((h) => h > 0);
+      const priority =
+        allocationAccountRule(policy, allocationPreferenceKey(account), "priority", at)?.value ?? 0;
+      // A preference holds only while the account can take the work; avoidance always holds.
+      const headroom =
+        account.available &&
+        !(account.limitedUntil && Date.parse(account.limitedUntil) > now) &&
+        windows.every((w) => w.headroomPoints >= 0);
       return {
         environmentId: account.environmentId,
         instanceId: account.instanceId,
         accountKey: account.accountKey,
         eligible: reasons.length === 0 && globalReasons.length === 0,
         reasons,
+        priority: headroom ? priority : Math.min(priority, 0),
         warnings,
         behindPoints: behind,
         resetInHours: resets.length ? Math.min(...resets) : null,
@@ -485,9 +521,10 @@ export function decideAllocation(input: {
     .filter((c) => c.eligible)
     .sort((a, b) => {
       return (
+        (b.priority ?? 0) - (a.priority ?? 0) ||
         (a.warnings?.length ?? 0) - (b.warnings?.length ?? 0) ||
-        allocationScore(b, policy, request.driver, input.previousAccountKey) -
-          allocationScore(a, policy, request.driver, input.previousAccountKey) ||
+        allocationScore(b, policy, input.previousAccountKey) -
+          allocationScore(a, policy, input.previousAccountKey) ||
         (a.resetInHours ?? Infinity) - (b.resetInHours ?? Infinity) ||
         compare(a.accountKey ?? "", b.accountKey ?? "") ||
         compare(a.instanceId, b.instanceId)
@@ -507,7 +544,7 @@ export function decideAllocation(input: {
           request.explicitInstanceId
             ? "Explicit compatible account selected. Forecasts are advisory; provider success is not guaranteed."
             : "Recommended compatible account. The master chooses whether to start.",
-          "Comparable warnings are ranked by the tightest projected budget headroom, with bounded account preferences.",
+          "Account priority rules rank first; equal priorities are ranked by warnings, then the tightest projected budget headroom.",
           ...(selected.warnings ?? []),
         ]
       : [

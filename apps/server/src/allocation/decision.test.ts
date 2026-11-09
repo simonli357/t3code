@@ -734,62 +734,132 @@ it("keeps known local demand when shared identity is missing without equating re
   ).toEqual(ongoing.candidates[0]!.windows);
 });
 
-describe("advisory account preferences", () => {
-  it("changes comparable recommendations deterministically without changing forecasts or warnings", () => {
-    const before = decideAllocation(input());
-    const weighted = {
+describe("account rules", () => {
+  const rule = (
+    id: string,
+    kind: "exclude" | "maxWorkers" | "priority",
+    patch: { value?: number; expiresAt?: string; note?: string } = {},
+  ) => ({ key: allocationPreferenceKey(account(id)), kind, ...patch });
+  const ruled = (
+    rules: ReturnType<typeof rule>[],
+    patch: Partial<Parameters<typeof decideAllocation>[0]> = {},
+  ) =>
+    decideAllocation({
       ...input(),
-      policy: {
-        ...defaultAllocationPolicy,
-        accountWeights: [
-          { key: allocationPreferenceKey(account("a")), weight: 10 },
-          { key: allocationPreferenceKey(account("b")), weight: 90 },
-        ],
-      },
-    };
-    const after = decideAllocation(weighted);
-    expect(before.selectedInstanceId).toBe("a");
-    expect(after.selectedInstanceId).toBe("b");
-    expect(after.candidates).toEqual(before.candidates);
-    expect(
-      decideAllocation({
-        ...weighted,
-        inventories: [inventory(inventory().accounts.toReversed())],
-      }),
-    ).toEqual(after);
+      policy: { ...defaultAllocationPolicy, accountRules: rules },
+      ...patch,
+    });
+  const pinned = (id: string) => ({ ...request, explicitInstanceId: ProviderInstanceId.make(id) });
+  const working = (id: string, threadId: string, worker = true): AllocationDemand => ({
+    environmentId: "host",
+    threadId: ThreadId.make(threadId),
+    instanceId: ProviderInstanceId.make(id),
+    accountKey: id,
+    model: request.model,
+    options: request.options,
+    state: "running",
+    ...(worker ? { worker } : {}),
   });
-  it("never rejects explicit, native or allowed zero-weight accounts, including all-zero preferences", () => {
-    const policy = {
-      ...defaultAllocationPolicy,
-      accountWeights: [
-        { key: allocationPreferenceKey(account("a")), weight: 0 },
-        { key: allocationPreferenceKey(account("b")), weight: 100 },
-      ],
-    };
+
+  it("never recommends an excluded account and refuses a start pinned to it, naming the rule", () => {
+    expect(decideAllocation(input()).selectedInstanceId).toBe("a");
+    const never = [rule("a", "exclude", { note: "never a" })];
+    expect(ruled(never).selectedInstanceId).toBe("b");
     for (const constraint of [
       { explicitInstanceId: ProviderInstanceId.make("a") },
-      { nativeInstanceId: ProviderInstanceId.make("a") },
       { allowedInstanceIds: [ProviderInstanceId.make("a")] },
     ]) {
-      const choice = decideAllocation({
-        ...input(),
-        policy,
-        request: { ...request, ...constraint },
-      });
-      expect(choice.selectedInstanceId).toBe("a");
-      expect(choice.request.model).toBe(request.model);
-      expect(choice.request.options).toEqual(request.options);
+      const refused = ruled(never, { request: { ...request, ...constraint } });
+      expect(refused.outcome).toBe("unavailable");
+      expect(refused.candidates.find((c) => c.instanceId === "a")?.reasons).toEqual([
+        "Account rule: a is excluded from workers (never a).",
+      ]);
     }
+    expect(ruled(never, { request: pinned("a") }).reasons).toContain(
+      "Account rule: a is excluded from workers (never a).",
+    );
+    // Only workers are kept off: a session the user starts there still runs.
+    expect(ruled(never, { request: { ...pinned("a"), kind: "session" } }).selectedInstanceId).toBe(
+      "a",
+    );
+    // Excluding every account leaves nothing to recommend rather than breaking the rule.
+    expect(ruled([...never, rule("b", "exclude")]).selectedInstanceId).toBeNull();
+  });
+
+  it("sends the next worker elsewhere while an account is at its concurrent worker limit", () => {
+    const max = [rule("a", "maxWorkers", { value: 1 })];
+    const withDemand = (demand: AllocationDemand[], patch = {}) =>
+      ruled(max, { inventories: [{ ...inventory(), demand }], ...patch });
+    expect(withDemand([]).selectedInstanceId).toBe("a");
+    expect(withDemand([working("a", "one")]).selectedInstanceId).toBe("b");
+    const refused = withDemand([working("a", "one")], { request: pinned("a") });
+    expect(refused.outcome).toBe("unavailable");
+    expect(refused.reasons).toContain(
+      "Account rule: a allows at most 1 concurrent workers and has 1.",
+    );
+    // A master or human session on the account is not a worker, and a retry does not count itself.
     expect(
-      decideAllocation({
-        ...input(),
-        policy: {
-          ...policy,
-          accountWeights: policy.accountWeights.map((w) => ({ ...w, weight: 0 })),
-        },
-      }).selectedInstanceId,
+      withDemand([working("a", "master", false)], { request: pinned("a") }).selectedInstanceId,
+    ).toBe("a");
+    expect(
+      withDemand([working("a", request.threadId)], { request: pinned("a") }).selectedInstanceId,
+    ).toBe("a");
+    // A worker that is reserved or starting counts before any computer reports it.
+    const held: AllocationReservation = {
+      assignmentId: "other",
+      request: { ...request, assignmentId: "other", threadId: ThreadId.make("other") },
+      accountKey: "a",
+      instanceId: ProviderInstanceId.make("a"),
+      createdAt: at,
+      expiresAt: "2026-10-23T12:05:00.000Z",
+      state: "starting",
+      decision: decideAllocation(input()),
+    };
+    expect(ruled(max, { reservations: [held] }).selectedInstanceId).toBe("b");
+    expect(
+      ruled([rule("a", "maxWorkers", { value: 2 })], { reservations: [held], request: pinned("a") })
+        .selectedInstanceId,
     ).toBe("a");
   });
+
+  it("prefers the higher priority while it has quota headroom, and reverts when the rule expires", () => {
+    const used = (b: number) => [
+      account("a"),
+      account("b", { windows: account("b").windows.map((w) => ({ ...w, usedPoints: b })) }),
+    ];
+    const prefer = [rule("b", "priority", { value: 10, expiresAt: "2026-10-24T00:00:00.000Z" })];
+    const choose = (b: number, patch = {}) =>
+      ruled(prefer, { inventories: [inventory(used(b))], ...patch });
+    // Without the rule the account with more headroom wins.
+    expect(decideAllocation({ ...input(), inventories: [inventory(used(40))] })).toMatchObject({
+      selectedInstanceId: "a",
+    });
+    const preferred = choose(40);
+    expect(preferred.selectedInstanceId).toBe("b");
+    expect(preferred.candidates.map((c) => [c.instanceId, c.priority])).toEqual([
+      ["a", 0],
+      ["b", 10],
+    ]);
+    // Out of headroom, the preference no longer holds; nothing is refused.
+    expect(choose(99).selectedInstanceId).toBe("a");
+    expect(choose(99, { request: pinned("b") }).selectedInstanceId).toBe("b");
+    expect(
+      ruled(prefer, {
+        inventories: [
+          inventory([account("a"), account("b", { limitedUntil: "2026-10-23T13:00:00.000Z" })]),
+        ],
+      }).selectedInstanceId,
+    ).toBe("a");
+    expect(choose(40, { at: "2026-10-24T00:00:00.000Z" }).selectedInstanceId).toBe("a");
+    // Equal priorities fall back to headroom; a negative priority is avoided even with headroom.
+    expect(
+      ruled([...prefer, rule("a", "priority", { value: 10 })], {
+        inventories: [inventory(used(40))],
+      }).selectedInstanceId,
+    ).toBe("a");
+    expect(ruled([rule("a", "priority", { value: -1 })]).selectedInstanceId).toBe("b");
+  });
+
   it("shares known identity across aliases but never guesses unknown identities or overrides actual incompatibility", () => {
     const a = account("a"),
       alias = account("remote-alias", { environmentId: "peer", accountKey: "a" });
@@ -797,15 +867,26 @@ describe("advisory account preferences", () => {
     expect(allocationPreferenceKey({ ...a, accountKey: null })).not.toBe(
       allocationPreferenceKey({ ...alias, accountKey: null }),
     );
-    const result = decideAllocation({
-      ...input(),
-      inventories: [inventory([account("a", { models: [] }), account("b")])],
-      policy: {
-        ...defaultAllocationPolicy,
-        accountWeights: [{ key: allocationPreferenceKey(a), weight: 100 }],
-      },
-    });
-    expect(result.selectedInstanceId).toBe("b");
+    expect(
+      ruled([rule("a", "priority", { value: 100 })], {
+        inventories: [inventory([account("a", { models: [] }), account("b")])],
+      }).selectedInstanceId,
+    ).toBe("b");
+    // A worker on the same login from another computer counts toward this account's limit.
+    expect(
+      ruled([rule("a", "maxWorkers", { value: 1 })], {
+        inventories: [
+          inventory(),
+          {
+            ...inventory([alias]),
+            environmentId: "peer",
+            demand: [
+              { ...working("remote-alias", "remote"), environmentId: "peer", accountKey: "a" },
+            ],
+          },
+        ],
+      }).selectedInstanceId,
+    ).toBe("b");
   });
 });
 
@@ -892,20 +973,12 @@ describe("projected budget recommendations", () => {
     ).toBe("SL");
   });
 
-  it("accounts for concurrent work despite a tiny pacing advantage or a maximum preference", () => {
+  it("accounts for concurrent work despite a tiny pacing advantage", () => {
     const accounts = [a("SL", 59), a("AD", 59.1)];
-    const weighted = {
-      ...policy,
-      accountWeights: [
-        { key: allocationPreferenceKey(accounts[0]!), weight: 100 },
-        { key: allocationPreferenceKey(accounts[1]!), weight: 0 },
-      ],
-    };
-    expect(run(accounts, [], { policy: weighted }).selectedInstanceId).toBe("SL");
-    expect(run(accounts, [load("SL")], { policy: weighted }).selectedInstanceId).toBe("AD");
+    expect(run(accounts).selectedInstanceId).toBe("SL");
+    expect(run(accounts, [load("SL")]).selectedInstanceId).toBe("AD");
     expect(
       run(accounts, [load("SL")], {
-        policy: weighted,
         request: { ...request, explicitInstanceId: accounts[0]!.instanceId },
       }).selectedInstanceId,
     ).toBe("SL");

@@ -1,5 +1,10 @@
 import * as Schema from "effect/Schema";
-import { AssignmentAssessment, ModelRoutingPolicy, ModelRoutingRequest } from "./modelRouting.ts";
+import {
+  AssignmentAssessment,
+  AssignmentTier,
+  ModelRoutingPolicy,
+  ModelRoutingRequest,
+} from "./modelRouting.ts";
 import {
   IsoDateTime,
   NonNegativeInt,
@@ -58,6 +63,12 @@ const Override = Schema.Struct({
   // Informational only: neither a plan nor a banked credit replenishes quota.
   resetPlan: Schema.optional(Schema.Literals(["possible", "planned", "manual-confirmed"])),
 });
+const accountCapFields = {
+  weeklyPercent: OptionalCapPercent,
+  fiveHourPercent: OptionalCapPercent,
+  stopWorkers: Schema.Boolean,
+  stopMasters: Schema.Boolean,
+};
 /**
  * Optional hard usage thresholds for one account identity. Weekly applies to
  * an account-wide weekly window; Claude also reports a five-hour session.
@@ -65,12 +76,27 @@ const Override = Schema.Struct({
  */
 export const AllocationAccountCap = Schema.Struct({
   key: TrimmedNonEmptyString,
-  weeklyPercent: OptionalCapPercent,
-  fiveHourPercent: OptionalCapPercent,
-  stopWorkers: Schema.Boolean,
-  stopMasters: Schema.Boolean,
+  ...accountCapFields,
 });
 export type AllocationAccountCap = typeof AllocationAccountCap.Type;
+const accountRuleFields = {
+  kind: Schema.Literals(["exclude", "maxWorkers", "priority"]),
+  /** `maxWorkers`: at least 1. `priority`: higher wins, unset accounts are 0. Absent for `exclude`. */
+  value: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: -100, maximum: 100 }))),
+  /** The rule stops applying by itself at this time. */
+  expiresAt: Schema.optional(IsoDateTime),
+  note: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(200))),
+};
+/**
+ * A standing instruction for one account identity, at most one per account and kind.
+ * `exclude` and `maxWorkers` keep workers off the account, including a pinned start;
+ * `priority` ranks the accounts that remain.
+ */
+export const AllocationAccountRule = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  ...accountRuleFields,
+});
+export type AllocationAccountRule = typeof AllocationAccountRule.Type;
 export const AllocationPolicy = Schema.Struct({
   version: NonNegativeInt,
   /** Legacy mode retained for saved policy compatibility; explicit Start always submits work. */
@@ -88,15 +114,8 @@ export const AllocationPolicy = Schema.Struct({
   minimumSamples: Schema.Int.check(Schema.isBetween({ minimum: 3, maximum: 100 })),
   reservationMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 15 })),
   hysteresisPoints: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 5 })),
-  /** Relative recommendation preference only; missing entries use equal weight 50. */
-  accountWeights: Schema.optional(
-    Schema.Array(
-      Schema.Struct({
-        key: TrimmedNonEmptyString,
-        weight: Points,
-      }),
-    ).check(Schema.isMaxLength(100)),
-  ),
+  /** Keyed by `allocationPreferenceKey`. */
+  accountRules: Schema.optional(Schema.Array(AllocationAccountRule).check(Schema.isMaxLength(300))),
   /** Hard stops keyed by `allocationPreferenceKey`; absent or null caps are disabled. */
   accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
   overrides: Schema.Array(Override).check(Schema.isMaxLength(100)),
@@ -157,8 +176,19 @@ export function allocationPreferenceKey(account: {
       : ["account", account.accountKey],
   ]);
 }
-export function allocationPreferenceWeight(policy: AllocationPolicy, key: string): number {
-  return policy.accountWeights?.find((entry) => entry.key === key)?.weight ?? 50;
+/** The account's rule of this kind, unless it has expired. */
+export function allocationAccountRule(
+  policy: AllocationPolicy,
+  key: string,
+  kind: AllocationAccountRule["kind"],
+  at: string,
+): AllocationAccountRule | undefined {
+  return policy.accountRules?.find(
+    (rule) =>
+      rule.key === key &&
+      rule.kind === kind &&
+      (rule.expiresAt === undefined || Date.parse(rule.expiresAt) > Date.parse(at)),
+  );
 }
 
 export const AllocationWindow = Schema.Struct({
@@ -233,6 +263,8 @@ export const AllocationDemand = Schema.Struct({
   model: Schema.String,
   options: Schema.Array(ProviderOptionSelection),
   state: Schema.Literals(["running", "pending", "uncertain"]),
+  /** A managed worker, counted by `maxWorkers` rules. Absent from older computers. */
+  worker: Schema.optional(Schema.Boolean),
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
 export const AllocationInventory = Schema.Struct({
@@ -356,6 +388,8 @@ export const AllocationCandidate = Schema.Struct({
   accountKey: Schema.NullOr(Schema.String),
   eligible: Schema.Boolean,
   reasons: Schema.Array(Schema.String),
+  /** The account's priority rule as ranked: a preference counts only with quota headroom. */
+  priority: Schema.optional(Schema.Number),
   behindPoints: Schema.Number,
   resetInHours: Schema.NullOr(Schema.Number),
   confidence: Schema.Literals(["low", "medium"]),
@@ -422,7 +456,7 @@ export const ModelRoutingSnapshot = Schema.Struct({
 });
 export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AllocationSnapshot = Schema.Struct({
-  accountWeightsSupported: Schema.optional(Schema.Boolean),
+  accountRulesSupported: Schema.optional(Schema.Boolean),
   accountCapsSupported: Schema.optional(Schema.Boolean),
   policy: AllocationPolicy,
   inventories: Schema.Array(AllocationInventory),
@@ -446,10 +480,7 @@ export const AllocationLifecycle = Schema.Struct({
   action: Schema.Literals(["start", "consume", "release"]),
 });
 const OverrideReason = TrimmedNonEmptyString.check(Schema.isMaxLength(500));
-/**
- * Why the master chose differently from a recommendation, per dimension, such as "user
- * specified ES Opus xhigh". Required only for a pinned choice that differs.
- */
+/** Optional notes on why the master chose differently from a recommendation, per dimension. */
 export const RecommendationOverrides = Schema.Struct({
   model: Schema.optional(OverrideReason),
   account: Schema.optional(OverrideReason),
@@ -489,12 +520,20 @@ export const ComputerAdviceHost = Schema.Struct({
 });
 export type ComputerAdviceHost = typeof ComputerAdviceHost.Type;
 export const AllocationStart = Schema.Struct({
-  request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
+  request: Schema.Union([
+    AllocationRequest,
+    Schema.Struct({
+      ...ModelRoutingRequest.fields,
+      assessment: Schema.optional(AssignmentAssessment),
+    }),
+  ]),
   kind: Schema.Literals(["session", "worker"]),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100000)),
-  /** Required for workers with an exact request; automatic requests carry their own. */
+  /** Shorthand for the assessment; `normal` when neither is given. */
+  tier: Schema.optional(AssignmentTier),
+  /** Exact scores instead of `tier`; automatic requests may carry them as `request.assessment`. */
   assessment: Schema.optional(AssignmentAssessment),
   overrides: Schema.optional(RecommendationOverrides),
 });
@@ -545,6 +584,73 @@ export function compactAllocationStart(result: AllocationStartResult): Allocatio
         : [...(result.selection?.reasons ?? []), ...(decision?.reasons ?? [])].slice(0, 10),
   };
 }
+/** An account by display label such as `ES`, or by instance ID; both name the shared login. */
+const AccountRef = TrimmedNonEmptyString;
+const overrideFields = {
+  windowId: TrimmedNonEmptyString,
+  expiresAt: IsoDateTime,
+  curve: Schema.optional(AllocationCurve),
+  useBy: Schema.optional(IsoDateTime),
+  resetPlan: Override.fields.resetPlan,
+};
+/** Changes to the allocation policy; with none, the policy is only read. */
+export const AllocationPolicyEdit = Schema.Struct({
+  /** Each entry replaces the account's rule of that kind. */
+  setRules: Schema.optional(
+    Schema.Array(Schema.Struct({ account: AccountRef, ...accountRuleFields })),
+  ),
+  /** Without `kind`, every rule of the account. */
+  clearRules: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ account: AccountRef, kind: Schema.optional(accountRuleFields.kind) }),
+    ),
+  ),
+  /** Pacing curve per provider family; null restores the default. */
+  curves: Schema.optional(
+    Schema.Struct({
+      claude: Schema.optional(Schema.NullOr(AllocationCurve)),
+      codex: Schema.optional(Schema.NullOr(AllocationCurve)),
+      other: Schema.optional(Schema.NullOr(AllocationCurve)),
+    }),
+  ),
+  setCaps: Schema.optional(
+    Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
+  ),
+  clearCaps: Schema.optional(Schema.Array(AccountRef)),
+  /** A timed pacing override for one usage window, replacing the account's override of it. */
+  setOverrides: Schema.optional(
+    Schema.Array(Schema.Struct({ account: AccountRef, ...overrideFields })),
+  ),
+  /** Without `windowId`, every override of the account. */
+  clearOverrides: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ account: AccountRef, windowId: Schema.optional(TrimmedNonEmptyString) }),
+    ),
+  ),
+});
+export type AllocationPolicyEdit = typeof AllocationPolicyEdit.Type;
+/** The allocation policy as agents read it: accounts by label, expired entries left out. */
+export const AllocationPolicyView = Schema.Struct({
+  version: NonNegativeInt,
+  curves: Schema.Struct({
+    claude: AllocationCurve,
+    codex: AllocationCurve,
+    other: AllocationCurve,
+  }),
+  rules: Schema.Array(Schema.Struct({ account: Schema.String, ...accountRuleFields })),
+  caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
+  overrides: Schema.Array(Schema.Struct({ account: Schema.String, ...overrideFields })),
+  /** Every account an edit can name, with the usage windows an override can target. */
+  accounts: Schema.Array(
+    Schema.Struct({
+      label: Schema.String,
+      driver: ProviderDriverKind,
+      instanceIds: Schema.Array(ProviderInstanceId),
+      windowIds: Schema.Array(Schema.String),
+    }),
+  ),
+});
+export type AllocationPolicyView = typeof AllocationPolicyView.Type;
 export const AllocationOperation = Schema.TaggedUnion({
   modelSnapshot: {},
   modelPolicy: { expectedVersion: NonNegativeInt, policy: ModelRoutingPolicy },

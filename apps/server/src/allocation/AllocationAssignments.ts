@@ -4,6 +4,8 @@ import {
   WORKER_ACCOUNT_DISABLED_REASON,
   AllocationError,
   AssignmentAssessment,
+  AssignmentTier,
+  tierAssessment,
   RecommendationOverrides,
   WorkerRecommendation,
   ComputerAdviceHost,
@@ -36,18 +38,18 @@ import * as Workers from "../orchestration/WorkerControls.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PeerLinks } from "../orchestration/PeerLinks.ts";
+import { ACCOUNT_RULE_REASON, accountDemand, accountRuleRefusal } from "./decision.ts";
 import {
   computerAdvice,
   compareRecommendation,
-  MISSING_ASSESSMENT,
-  missingOverridesMessage,
   profileLabel,
   type Dimension,
 } from "./recommendation.ts";
 
-/** `t3_worker_spawn` input: the worker plus the master's assessment and override reasons. */
+/** `t3_worker_spawn` input: the worker plus an optional tier or assessment and override notes. */
 export const ManagedSpawnInput = Schema.Struct({
   ...Workers.RemoteSpawnInput.fields,
+  tier: Schema.optional(AssignmentTier),
   assessment: Schema.optional(AssignmentAssessment),
   overrides: Schema.optional(RecommendationOverrides),
 });
@@ -241,6 +243,7 @@ const make = Effect.gen(function* () {
     return {
       environmentId,
       driver,
+      inventories,
       selection,
       model: profile
         ? { ...profile, label: profileLabel(profile.driver, profile.model, profile.options) }
@@ -314,10 +317,9 @@ const make = Effect.gen(function* () {
         );
       const managed = raw.kind === "worker";
       const automatic = raw.request.selection === "automatic" ? raw.request : undefined;
-      const assessment = automatic?.assessment ?? raw.assessment;
-      if (managed && !assessment) return yield* invalid(MISSING_ASSESSMENT);
+      const assessment = automatic?.assessment ?? raw.assessment ?? tierAssessment(raw.tier);
       if (
-        automatic &&
+        automatic?.assessment &&
         raw.assessment &&
         stableStringify(raw.assessment) !== stableStringify(automatic.assessment)
       )
@@ -330,7 +332,7 @@ const make = Effect.gen(function* () {
       const prior = managed ? yield* readStored(raw.request.threadId) : undefined;
       const reused = prior?.intent === startIntent ? decodeStored(prior.record_json) : undefined;
       const advice =
-        managed && assessment && !reused
+        managed && !reused
           ? yield* advise({
               environment: raw.request.environmentId,
               ...(raw.request.environmentId === local.environmentId
@@ -350,7 +352,8 @@ const make = Effect.gen(function* () {
                   : raw.request.model,
             })
           : undefined;
-      let routed = { ...raw.request };
+      let routed =
+        raw.request.selection === "automatic" ? { ...raw.request, assessment } : { ...raw.request };
       if (managed) delete routed.kind;
       else routed = { ...routed, kind: "session" };
       // A model-only pin takes the table's effort, resolved here so older coordinators
@@ -380,19 +383,7 @@ const make = Effect.gen(function* () {
         },
         computer: { chosen: raw.request.environmentId, pinned: true },
       });
-      const context = assessment && {
-        at: yield* now,
-        assessment,
-        overrides: raw.overrides,
-      };
-      if (advice && context) {
-        const { missing } = compare(
-          advice,
-          pins(advice.model?.label ?? "", advice.account ?? ""),
-          context,
-        );
-        if (missing.length) return yield* invalid(missingOverridesMessage(missing));
-      }
+      const context = { at: yield* now, assessment, overrides: raw.overrides };
       let selectionDecision: ModelRoutingDecision | undefined;
       let request: AllocationRequest;
       if (routed.selection === "automatic") {
@@ -403,10 +394,8 @@ const make = Effect.gen(function* () {
           return {
             allocation: selectionDecision.allocation,
             selection: selectionDecision,
-            ...(advice && context
-              ? {
-                  recommendation: compare(advice, pins("(none)", "(none)"), context).recommendation,
-                }
+            ...(advice
+              ? { recommendation: compare(advice, pins("(none)", "(none)"), context) }
               : {}),
             threadId: raw.request.threadId,
             state: "unavailable" as const,
@@ -433,22 +422,18 @@ const make = Effect.gen(function* () {
       const result = response.result;
       if (!result) return yield* invalid("Allocation returned no decision.");
       const chosenModel = profileLabel(request.driver, request.model, request.options);
-      if (
-        managed &&
-        request.explicitInstanceId &&
-        !result.decision.selectedInstanceId &&
-        result.decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
-      )
-        return yield* invalid(WORKER_ACCOUNT_DISABLED_REASON);
+      const refusal = result.decision.reasons.find(
+        (reason) =>
+          reason === WORKER_ACCOUNT_DISABLED_REASON || reason.startsWith(ACCOUNT_RULE_REASON),
+      );
+      if (managed && request.explicitInstanceId && !result.decision.selectedInstanceId && refusal)
+        return yield* invalid(refusal);
       if (!result.reservation || !result.decision.selectedInstanceId)
         return {
           allocation: result,
           ...(selectionDecision ? { selection: selectionDecision } : {}),
-          ...(advice && context
-            ? {
-                recommendation: compare(advice, pins(chosenModel, "(none)"), context)
-                  .recommendation,
-              }
+          ...(advice
+            ? { recommendation: compare(advice, pins(chosenModel, "(none)"), context) }
             : {}),
           threadId: input.request.threadId,
           state: "unavailable" as const,
@@ -456,14 +441,14 @@ const make = Effect.gen(function* () {
       const reservation = result.reservation;
       const stored =
         reused ??
-        (advice && context
+        (advice
           ? {
               recommendation: compare(advice, pins(chosenModel, reservation.instanceId), {
                 ...context,
                 warnings:
                   result.decision.candidates.find((c) => c.instanceId === reservation.instanceId)
                     ?.warnings ?? [],
-              }).recommendation,
+              }),
               computers: advice.computers?.hosts ?? [],
               request: { driver: request.driver, model: request.model, options: request.options },
             }
@@ -581,8 +566,7 @@ const make = Effect.gen(function* () {
     }, starts.withPermit),
     spawn: Effect.fn("AllocationAssignments.spawn")(
       function* (owner, input) {
-        const { assessment, overrides, ...spawnInput } = input;
-        if (!assessment) return yield* new Workers.WorkerError({ message: MISSING_ASSESSMENT });
+        const { tier, assessment = tierAssessment(tier), overrides, ...spawnInput } = input;
         const intent = intentOf({ spawn: input, owner });
         const prior = yield* readStored(input.threadId);
         let stored = prior?.intent === intent ? decodeStored(prior.record_json) : undefined;
@@ -598,8 +582,34 @@ const make = Effect.gen(function* () {
             instanceId: input.modelSelection.instanceId,
             model: input.modelSelection.model,
           });
+          // Spawns reserve nothing, so the coordinator's rules are checked against this read.
+          const account = advice.inventories
+            .flatMap((i) => i.accounts)
+            .find(
+              (a) =>
+                a.environmentId === advice.environmentId &&
+                a.instanceId === input.modelSelection.instanceId,
+            );
+          const policy = account
+            ? Option.getOrUndefined(yield* allocation.execute({ _tag: "caps" }).pipe(Effect.option))
+                ?.policy
+            : undefined;
+          const refusal =
+            account && policy
+              ? accountRuleRefusal(
+                  policy,
+                  account,
+                  accountDemand(
+                    account,
+                    advice.inventories.flatMap((i) => i.demand),
+                    { environmentId: advice.environmentId, threadId: input.threadId },
+                  ),
+                  yield* now,
+                )
+              : undefined;
+          if (refusal) return yield* new Workers.WorkerError({ message: refusal });
           const fork = input.sourceThreadId !== undefined;
-          const { recommendation, missing } = compare(
+          const recommendation = compare(
             advice,
             {
               model: {
@@ -628,8 +638,6 @@ const make = Effect.gen(function* () {
                 : {}),
             },
           );
-          if (missing.length)
-            return yield* new Workers.WorkerError({ message: missingOverridesMessage(missing) });
           stored = { recommendation, computers: advice.computers?.hosts ?? [] };
           yield* saveStored(input.threadId, intent, stored);
         }

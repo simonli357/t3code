@@ -59,31 +59,18 @@ const snapshot = (items = accounts): AllocationSnapshot => ({
     accounts: items.filter((a) => a.environmentId === environmentId),
   })),
 });
-it("counts known aliases once across three hosts and normalizes within provider families", () => {
-  const groups = allocationAccountGroups(snapshot(), defaultAllocationPolicy);
+it("counts known aliases once across three hosts in a stable order", () => {
+  const groups = allocationAccountGroups(snapshot());
   expect(groups).toHaveLength(5);
   expect(groups.find((a) => a.label === "SL")?.hosts).toHaveLength(3);
-  expect(groups.find((a) => a.label === "SL")?.share).toBeCloseTo(100 / 3);
-  expect(groups.find((a) => a.label === "ES")?.share).toBe(50);
-  const policy = {
-    ...defaultAllocationPolicy,
-    accountWeights: [{ key: allocationPreferenceKey(accounts[0]!), weight: 100 }],
-  };
-  expect(allocationAccountGroups(snapshot(), policy).find((a) => a.label === "SL")?.share).toBe(50);
-  expect(allocationAccountGroups(snapshot(accounts.toReversed()), policy)).toEqual(
-    allocationAccountGroups(snapshot(), policy),
-  );
+  expect(groups.find((a) => a.label === "SL")?.key).toBe(allocationPreferenceKey(accounts[0]!));
+  expect(allocationAccountGroups(snapshot(accounts.toReversed()))).toEqual(groups);
 });
-it("never merges unknown IDs by their human label and keeps all-zero pools usable", () => {
+it("never merges unknown IDs by their human label", () => {
   const unknown = [account("alien", "codex", "SL", null), account("acer", "codex", "SL", null)];
-  const policy = {
-    ...defaultAllocationPolicy,
-    accountWeights: unknown.map((a) => ({ key: allocationPreferenceKey(a), weight: 0 })),
-  };
-  const groups = allocationAccountGroups(snapshot(unknown), policy);
+  const groups = allocationAccountGroups(snapshot(unknown));
   expect(groups).toHaveLength(2);
   expect(groups[0]!.key).not.toBe(groups[1]!.key);
-  expect(groups.every((a) => a.share === 50 && a.equalFallback)).toBe(true);
 });
 it("does not turn account rates or model token throughput into model quota percentages", () => {
   const a = accounts[0]!;
