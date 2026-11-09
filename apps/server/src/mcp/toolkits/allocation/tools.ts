@@ -1,7 +1,6 @@
 import {
   AllocationPolicyEdit,
   AllocationPolicyView,
-  AllocationRequest,
   AllocationResult,
   AllocationStart,
   AllocationWorkerStartResult,
@@ -9,9 +8,8 @@ import {
   AllocationError,
   ComputerPlacement,
   ComputerPlacementRequest,
-  ModelRoutingRequest,
   ModelRoutingDecision,
-  MODEL_SCORING_RUBRIC,
+  tierAssessment,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -31,10 +29,10 @@ const recommendComputer = Tool.make("t3_recommend_computer", {
 });
 const allocate = Tool.make("t3_allocate_account", {
   description:
-    "Recommend compatible accounts and profiles with visible quota, pacing and load warnings. The master decides; forecasts and historical rejection projections never veto managed startup. Supply stable assignmentId/threadId and exact execution environment (when the user named no computer, choose it first with t3_recommend_computer). preview=true recommends without reserving or starting; otherwise records accounting for the proposed account. For model recommendations use selection=automatic with allowedDrivers and assessment; only configured capability alternatives apply, never quota-driven downgrades. Preview does not promise runtime success. t3_start_allocated_assignment runs every recommendation itself; preview is optional." +
-    MODEL_SCORING_RUBRIC,
+    "Recommend compatible accounts and profiles with visible quota, pacing and load warnings. The master decides; forecasts and historical rejection projections never veto managed startup. Supply stable assignmentId/threadId and exact execution environment (when the user named no computer, choose it first with t3_recommend_computer). preview=true recommends without reserving or starting; otherwise records accounting for the proposed account. For model recommendations use selection=automatic with allowedDrivers; optional tier routine | normal | hard (default normal) picks the table entry, and request.assessment {difficulty, difficultyReason, stakes, stakesReason} gives exact 0-10 scores instead. Only configured capability alternatives apply, never quota-driven downgrades. Preview does not promise runtime success. t3_start_allocated_assignment runs every recommendation itself; preview is optional.",
   parameters: Schema.Struct({
-    request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
+    request: AllocationStart.fields.request,
+    tier: AllocationStart.fields.tier,
     preview: Schema.optional(Schema.Boolean),
   }),
   success: Schema.Union([AllocationResult, ModelRoutingDecision]),
@@ -79,9 +77,13 @@ export const handlers = AllocationToolkit.toLayer(
         allocation
           .execute(
             input.request.selection === "automatic"
-              ? input.preview
-                ? { _tag: "modelPreview", request: input.request }
-                : { _tag: "modelAllocate", request: input.request }
+              ? {
+                  _tag: input.preview ? "modelPreview" : "modelAllocate",
+                  request: {
+                    ...input.request,
+                    assessment: input.request.assessment ?? tierAssessment(input.tier),
+                  },
+                }
               : input.preview
                 ? { _tag: "preview", request: input.request }
                 : { _tag: "allocate", request: input.request },

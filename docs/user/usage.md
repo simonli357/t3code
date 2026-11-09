@@ -53,8 +53,9 @@ policy says Observation. Actual unsupported profiles, ownership conflicts, unava
 connections and provider authentication/quota failures remain errors. Choose one shared coordinator
 for durable assignment accounting and keep it reachable; missing readings from other hosts are
 warnings. While the coordinator cannot be reached, or runs a version that cannot read the request,
-a start is decided on the requesting computer from its own readings and policy copy, and records
-that warning. A recommendation first refreshes quota readings older than the policy allows, for
+a start is decided on the requesting computer from its own readings and the policy it last read
+from the coordinator, so account rules still apply, and records that warning. A computer that has
+not read the policy since its server started records that account rules were not checked. A recommendation first refreshes quota readings older than the policy allows, for
 at most a few seconds. Existing threads, forks and retries retain their selections. Agents that were not told
 which computer to use can compare them first; see
 [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).

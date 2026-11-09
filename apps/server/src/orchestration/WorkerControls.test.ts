@@ -3550,6 +3550,17 @@ it.effect(
       expect(preview.isError).not.toBe(true);
       expect(encodeMcpResult(preview)).toContain("bounded borrowing");
       expect(yield* store.reservations).toHaveLength(0);
+      // Without scores, a preview uses the same tier default as a start.
+      const { assessment: _scores, ...unscored } = request;
+      const tiered = yield* call("t3_allocate_account", { request: unscored, preview: true });
+      expect(tiered.isError).not.toBe(true);
+      expect(encodeMcpResult(tiered)).toContain("Tier normal");
+      expect(
+        encodeMcpResult(
+          yield* call("t3_allocate_account", { request: unscored, tier: "hard", preview: true }),
+        ),
+      ).toContain("Tier hard");
+      expect(yield* store.reservations).toHaveLength(0);
       const input = {
         request,
         kind: "worker",

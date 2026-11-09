@@ -1294,6 +1294,63 @@ for (const failure of ["unreachable", "version-skew"] as const)
     },
   );
 
+it.effect(
+  "a local fallback applies the coordinator's last known account rules, or records that it has none",
+  () => {
+    const coordinator = fixture({ localId: "remote" });
+    let reachable = false;
+    return Effect.gen(function* () {
+      const authority = yield* coordinator.setup;
+      const own = (yield* authority.allocation.execute({ _tag: "snapshot" })).snapshot!
+        .inventories[0]!;
+      coordinator.state.peers = [
+        {
+          ...own,
+          environmentId: "local",
+          accounts: own.accounts.map((a) => ({ ...a, environmentId: "local" })),
+        },
+      ];
+      const caller = fixture({
+        remote: true,
+        peerCall: (id, request) =>
+          reachable
+            ? authority.allocation
+                .receive("local", request)
+                .pipe(Effect.mapError((e) => new PeerRejected({ message: `remote: ${e.message}` })))
+            : Effect.fail(
+                new PeerUnavailable({ environmentId: id, message: "remote: unreachable" }),
+              ),
+      });
+      yield* Effect.gen(function* () {
+        const client = yield* caller.setup;
+        const master = ThreadId.make("master");
+        const unchecked =
+          "Account rules were not checked: the coordinator's policy is unknown on this computer.";
+        // Nothing was ever read from the coordinator: the start proceeds and says so.
+        const blind = yield* client.assignments.start(pinnedStart("blind"), master);
+        expect(blind.state).toBe("submitted");
+        expect(blind.allocation?.decision.reasons).toContain(unchecked);
+        // The rule is saved on the coordinator only; this computer keeps what it last read.
+        reachable = true;
+        yield* client.allocation.editPolicy({
+          setRules: [{ account: "chosen", kind: "exclude" }],
+        });
+        expect((yield* client.store.policy).accountRules).toBeUndefined();
+        reachable = false;
+        const refused = yield* Effect.flip(client.assignments.start(pinnedStart("pinned"), master));
+        expect(refused.detail).toBe("Account rule: chosen is excluded from workers.");
+        const unpinned = yield* client.assignments.start(
+          { ...startInput, request: { ...startInput.request, assignmentId: "free" } },
+          master,
+        );
+        expect(unpinned.state).toBe("unavailable");
+        expect(unpinned.allocation?.decision.reasons ?? []).not.toContain(unchecked);
+        expect(caller.calls.map((call) => call.threadId)).toEqual(["blind"]);
+      }).pipe(Effect.provide(Layer.fresh(caller.layer)), Effect.scoped);
+    }).pipe(Effect.provide(coordinator.layer), Effect.scoped);
+  },
+);
+
 it.effect("a coordinator's deliberate refusal still fails the start", () => {
   const f = fixture({
     remote: true,
@@ -2085,13 +2142,18 @@ it.effect(
       );
       expect(loose.request.repositoryKey).toBeUndefined();
       expect(loose.reasons.join(" ")).toContain("The project has no repository identity");
-      const missing = yield* allocation
-        .execute({ _tag: "placement", request: { projectId: ProjectId.make("nowhere") } })
-        .pipe(Effect.flip);
-      expect(missing).toMatchObject({
-        code: "invalid",
-        detail: "Project nowhere was not found on this computer.",
-      });
+      // An unknown project, such as another computer's ID, still gets advice, with a warning.
+      const missing = placementOf(
+        yield* allocation.execute({
+          _tag: "placement",
+          request: { projectId: ProjectId.make("nowhere") },
+        }),
+      );
+      expect(missing.hosts.map((host) => host.label)).toEqual(["Local", "remote"]);
+      expect(missing.request).toEqual({});
+      expect(missing.reasons.at(-1)).toBe(
+        "Project nowhere was not found on this computer, so checkouts were not matched. Use a project ID of the computer you are asking.",
+      );
     }).pipe(Effect.provide(f.layer));
   },
 );
@@ -2591,6 +2653,50 @@ it.effect(
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   },
 );
+
+it.effect("usage recovery skips an excluded account and an account at its worker limit", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const sql = yield* SqlClient.SqlClient;
+    const account = (id: string) => ({
+      ...provider,
+      instanceId: ProviderInstanceId.make(id),
+      auth: { ...provider.auth, email: `${id}@example.test` },
+    });
+    const [excluded, full, free] = [account("a-excluded"), account("b-full"), account("c-free")];
+    const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+    const route = allocation
+      .reroute(ThreadId.make("worker"), selection, { rejected: true })
+      .pipe(Effect.map((r) => (r._tag === "switch" ? r.selection.instanceId : r._tag)));
+    // Another worker already runs on the second account.
+    f.state.threads = [
+      {
+        ...shell(),
+        id: ThreadId.make("busy"),
+        modelSelection: { ...shell().modelSelection, instanceId: full.instanceId },
+        session: { ...shell().session!, providerInstanceId: full.instanceId },
+      },
+    ];
+    yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json) VALUES ('busy', 'master', '{}')`;
+    f.state.providers = [provider, excluded, full];
+    expect(yield* route).toBe(excluded.instanceId);
+    yield* allocation.editPolicy({
+      setRules: [
+        { account: excluded.instanceId, kind: "exclude" },
+        { account: full.instanceId, kind: "maxWorkers", value: 1 },
+      ],
+    });
+    // Neither remaining account may take the worker, so it waits rather than break a rule.
+    expect(yield* route).toBe("wait");
+    f.state.providers = [provider, excluded, full, free];
+    expect(yield* route).toBe(free.instanceId);
+    // The limit, not the account, was in the way.
+    yield* allocation.editPolicy({ clearRules: [{ account: full.instanceId }] });
+    f.state.providers = [provider, excluded, full];
+    expect(yield* route).toBe(full.instanceId);
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
 
 it.effect("a reached cap closes its account to workers until the provider reset", () => {
   const f = fixture();

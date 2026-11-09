@@ -905,23 +905,35 @@ const make = Effect.gen(function* () {
   const withRepositoryKey = Effect.fn("ProviderAllocation.repositoryKey")(function* (
     request: ComputerPlacementRequest,
   ) {
-    if (request.projectId === undefined || request.repositoryKey !== undefined) return request;
+    if (request.projectId === undefined || request.repositoryKey !== undefined) return { request };
+    const { projectId, ...unmatched } = request;
     const project = (yield* projection
       .getShellSnapshot()
-      .pipe(Effect.mapError(unavailable))).projects.find(({ id }) => id === request.projectId);
+      .pipe(Effect.mapError(unavailable))).projects.find(({ id }) => id === projectId);
+    // Another computer's project ID is a common input; the advice is still worth having.
     if (!project)
-      return yield* new AllocationError({
-        code: "invalid",
-        detail: `Project ${request.projectId} was not found on this computer.`,
-      });
+      return {
+        request: unmatched,
+        warning: `Project ${projectId} was not found on this computer, so checkouts were not matched. Use a project ID of the computer you are asking.`,
+      };
     const repositoryKey = project.repositoryIdentity?.canonicalKey;
-    return repositoryKey === undefined ? request : { ...request, repositoryKey };
+    return { request: repositoryKey === undefined ? request : { ...request, repositoryKey } };
   });
   // Only this computer knows its project IDs; checkouts elsewhere match by repository.
   const place = Effect.fn("ProviderAllocation.place")(function* (
     request: ComputerPlacementRequest,
   ) {
-    return yield* placeLocal(yield* withRepositoryKey(request), yield* store.policy);
+    const resolved = yield* withRepositoryKey(request);
+    const advice = yield* placeLocal(resolved.request, yield* store.policy);
+    return resolved.warning === undefined
+      ? advice
+      : {
+          ...advice,
+          placement: {
+            ...advice.placement,
+            reasons: [...advice.placement.reasons, resolved.warning],
+          },
+        };
   });
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
     operation: AllocationOperation,
