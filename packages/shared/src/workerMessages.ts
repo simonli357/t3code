@@ -25,7 +25,7 @@ export function deliveredMessageIdPrefix(id: string): string | null {
   return DELIVERED_MESSAGE_ID.exec(id)?.[0] ?? null;
 }
 
-/** Guidance for new summaries; the transport still accepts legacy reports up to 500 characters. */
+/** Guidance for new summaries. Longer ones are accepted whole and clipped in the short view. */
 export const WORKER_REPORT_SUMMARY_MAX_LENGTH = 300;
 
 /** What a master reads after a report. Stored in message text, so keep each string byte-stable. */
@@ -51,7 +51,7 @@ const PEER_PREFIX = "[T3 session message";
 const DIGEST_HEADER = /^\[T3 worker reports — (\d+) finished\]\n\n/;
 // The line `workLine` writes after a report, in its exact form.
 const WORKING_TIME_LINE =
-  /^(?:Worker working time|Your working time as master): \d+\.\d h over \d+ turns?, \d+ compactions?\./;
+  /^(?:(?:Worker working time|Your working time as master): \d+\.\d h over \d+ turns?, \d+ compactions?|Worker context: \d+k tokens)\./;
 // The evidence field is one path or link, so an `Evidence:` line shaped like anything else is the
 // worker's own prose and stays in the summary.
 const EVIDENCE_LINE =
@@ -149,6 +149,8 @@ function reportStatus(outcome: string): NonNullable<WorkerMessageEntry["status"]
   switch (outcome) {
     case "done":
       return { label: "Done", attention: false };
+    case "done, needs review":
+      return { label: "Done — needs review", attention: false };
     case "blocked":
       return { label: "Blocked", attention: true };
     case "blocked, needs the user":

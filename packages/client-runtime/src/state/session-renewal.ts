@@ -9,6 +9,7 @@ export const renewalFields = [
   { key: "workerHardHours", label: "Worker automatic renewal (hours)" },
   { key: "codexScale", label: "Codex time multiplier" },
   { key: "toolWaitSeconds", label: "Exclude tool waits longer than (seconds)" },
+  { key: "workerContextTokens", label: "Worker fresh-session advice (context tokens)" },
 ] as const;
 
 /** Empty hard limits disable automation; blanks in other fields are not zero. */

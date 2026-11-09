@@ -44,6 +44,22 @@ describe("presentWorkerMessage: worker reports", () => {
     }
   });
 
+  it("labels finished work that needs review apart and hides T3's context line", () => {
+    const view = presentWorkerMessage(
+      message(
+        `[T3 worker report — w — 13:05]\nWorker: ${WORKER}\nOutcome: done, needs review\nBranch pushed; please merge.\n\n${WORKER_REVIEW_DONE}\n\nWorker working time: 1.0 h over 2 turns, 0 compactions.\nWorker context: 231k tokens. Over the 200k threshold: start a fresh worker for further unrelated work.`,
+      ),
+    );
+    expect(view?.attention).toBe(false);
+    expect(view?.entries).toEqual([
+      {
+        key: "0",
+        status: { label: "Done — needs review", attention: false },
+        text: "Branch pushed; please merge.",
+      },
+    ]);
+  });
+
   it.each([
     ["blocked, needs the user", "Blocked — needs you"],
     ["blocked, needs the master", "Blocked — needs the master"],

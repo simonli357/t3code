@@ -140,7 +140,6 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   workerFreshSessions: Schema.optionalKey(Schema.Boolean),
   providerAllocation: Schema.optionalKey(Schema.Boolean),
   boundedSessionHistory: Schema.optionalKey(Schema.Boolean),
-  sessionMessageConfirmation: Schema.optionalKey(Schema.Boolean),
   workerReclaim: Schema.optionalKey(Schema.Boolean),
   workerRetirementWarning: Schema.optionalKey(Schema.Boolean),
   nativeSessionMoves: Schema.optionalKey(Schema.Boolean),

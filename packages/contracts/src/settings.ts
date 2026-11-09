@@ -1191,6 +1191,9 @@ export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 const RenewalHours = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1000 }));
 const RenewalScale = Schema.Number.check(Schema.isBetween({ minimum: 0.1, maximum: 10 }));
 const RenewalWaitSeconds = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 86400 }));
+const RenewalContextTokens = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: 100_000_000 }),
+);
 const RenewalHardHours = Schema.NullOr(
   Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 1000 })),
 );
@@ -1203,6 +1206,10 @@ export const WorkerRenewalSettings = Schema.Struct({
   masterHardHours: RenewalHardHours.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   codexScale: RenewalScale.pipe(Schema.withDecodingDefault(Effect.succeed(1.5))),
   toolWaitSeconds: RenewalWaitSeconds.pipe(Schema.withDecodingDefault(Effect.succeed(60))),
+  /** Worker context size from which its reports advise a fresh worker. Zero disables. */
+  workerContextTokens: RenewalContextTokens.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200_000)),
+  ),
 });
 export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
 
@@ -1680,6 +1687,7 @@ export const ServerSettingsPatch = Schema.Struct({
       masterHardHours: Schema.optionalKey(RenewalHardHours),
       codexScale: Schema.optionalKey(RenewalScale),
       toolWaitSeconds: Schema.optionalKey(RenewalWaitSeconds),
+      workerContextTokens: Schema.optionalKey(RenewalContextTokens),
     }),
   ),
   storageCleanup: Schema.optionalKey(

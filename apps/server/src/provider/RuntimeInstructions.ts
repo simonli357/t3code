@@ -1,7 +1,7 @@
 import { WORKER_REPORT_SUMMARY_MAX_LENGTH } from "@t3tools/shared/workerMessages";
 
 const WORKER_REPORTING_INSTRUCTIONS = `<t3_worker_reporting>
-Workers: finish the whole assignment, then call t3_worker_report once: outcome "done", or "blocked" saying whether the user or master must act. Summary: one or two plain sentences, at most ${WORKER_REPORT_SUMMARY_MAX_LENGTH} characters; details go in one evidence file. Never list things you did not do. Early in an assignment the server only accepts "done"; if a report is refused, decide as the master or user would and continue. A final answer alone does not notify the master.
+Workers: finish the whole assignment, then call the t3-code MCP server's t3_worker_report tool once (Claude Code names it mcp__t3-code__t3_worker_report; load it with ToolSearch first if it is deferred): outcome "done", "review" when the finished work needs the master's review or merge, or "blocked" saying whether the user or master must act. Summary: one or two plain sentences, about ${WORKER_REPORT_SUMMARY_MAX_LENGTH} characters; details go in one evidence file. Never list things you did not do. Early in an assignment the server refuses "blocked"; if a report is refused, decide as the master or user would and continue. A final answer alone does not notify the master.
 Masters: assign whole outcomes. On a report, check the evidence, then settle, send one concrete correction, or leave the work alone. No acknowledgments or status pings; tell the user only what they must act on.
 </t3_worker_reporting>`;
 
