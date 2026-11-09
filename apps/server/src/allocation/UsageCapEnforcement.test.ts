@@ -25,7 +25,6 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import * as WorkerControl from "../orchestration/WorkerControls.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as Allocation from "./ProviderAllocation.ts";
@@ -41,7 +40,6 @@ type HarnessState = {
   policy: AllocationPolicy;
   policyUnavailable: boolean;
   commands: OrchestrationCommand[];
-  notifications: string[];
 };
 
 const provider = (
@@ -160,7 +158,6 @@ const makeState = (input: {
     },
     policyUnavailable: false,
     commands: [],
-    notifications: [],
   };
 };
 
@@ -234,14 +231,6 @@ const makeHarness = (state: HarnessState, input: { readonly checkedAt: string })
             return { sequence: state.commands.length };
           }),
       });
-      const workers = Layer.mock(WorkerControl.WorkerControls)({
-        notifyUsageCap: (_, notice) =>
-          Effect.sync(() => {
-            if (state.notifications.includes(notice.requestId)) return false;
-            state.notifications.push(notice.requestId);
-            return true;
-          }),
-      });
       const environment = Layer.mock(ServerEnvironment)({
         getEnvironmentId: Effect.succeed(EnvironmentId.make("host-a")),
       });
@@ -254,7 +243,6 @@ const makeHarness = (state: HarnessState, input: { readonly checkedAt: string })
             providerService,
             projection,
             engine,
-            workers,
             environment,
           ),
         ),
@@ -280,7 +268,6 @@ it.effect(
         yield* enforcement.evaluate();
         // The worker's running turn finishes: nothing is dispatched to it or its master.
         expect(state.commands).toEqual([]);
-        expect(state.notifications).toEqual([]);
 
         state.policy = {
           ...state.policy,
@@ -295,7 +282,6 @@ it.effect(
         expect(yield* enforcement.check(ThreadId.make("other"))).toBeNull();
         expect(yield* enforcement.check(ThreadId.make("human"))).toBeNull();
         expect(state.commands).toEqual([]);
-        expect(state.notifications).toEqual([]);
       }).pipe(Effect.provide(layer));
     }),
 );
@@ -500,7 +486,6 @@ it.effect.each(["unsupported", "unverified", "probeFailed"] as const)(
         const enforcement = yield* UsageCaps.UsageCapEnforcement;
         expect(yield* enforcement.check(ThreadId.make("worker"))).toBeNull();
         expect(state.commands).toEqual([]);
-        expect(state.notifications).toEqual([]);
       }).pipe(Effect.provide(layer));
     }),
 );
@@ -556,7 +541,6 @@ it.effect(
         expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
         yield* enforcement.evaluate();
         expect(state.commands).toEqual([]);
-        expect(state.notifications).toEqual([]);
       }).pipe(Effect.provide(layer));
     }),
 );
