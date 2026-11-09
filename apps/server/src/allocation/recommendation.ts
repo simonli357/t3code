@@ -44,9 +44,9 @@ export interface Dimension {
 type Key = "model" | "account" | "computer";
 
 /**
- * Records each recommended value next to the actual choice. A pinned choice that differs
- * needs a reason; `automatic` supplies reasons the server knows itself, such as fork
- * continuity. `missing` lists what the master must still explain.
+ * Records each recommended value next to the actual choice. A choice that differs is
+ * accepted as it is; its reason is the master's optional note, or one the server knows
+ * itself (`automatic`), such as fork continuity.
  */
 export function compareRecommendation(input: {
   readonly at: string;
@@ -57,8 +57,7 @@ export function compareRecommendation(input: {
   readonly overrides?: RecommendationOverrides | undefined;
   readonly automatic?: RecommendationOverrides | undefined;
   readonly warnings: readonly string[];
-}): { readonly recommendation: WorkerRecommendation; readonly missing: readonly string[] } {
-  const missing: string[] = [];
+}): WorkerRecommendation {
   const choice = (key: Key) => {
     const d = input[key];
     const differs = d.recommended !== null && d.recommended !== d.chosen;
@@ -67,8 +66,6 @@ export function compareRecommendation(input: {
       : (input.overrides?.[key] ??
         input.automatic?.[key] ??
         (d.pinned ? undefined : "Not pinned; follows the chosen model and computer."));
-    if (differs && !reason)
-      missing.push(`overrides.${key} (recommended ${d.recommended}, chosen ${d.chosen})`);
     return {
       recommended: d.recommended,
       chosen: d.chosen,
@@ -79,20 +76,11 @@ export function compareRecommendation(input: {
     };
   };
   return {
-    recommendation: {
-      at: input.at,
-      assessment: input.assessment,
-      model: choice("model"),
-      account: choice("account"),
-      computer: choice("computer"),
-      warnings: [...new Set(input.warnings)].slice(0, 10),
-    },
-    missing,
+    at: input.at,
+    assessment: input.assessment,
+    model: choice("model"),
+    account: choice("account"),
+    computer: choice("computer"),
+    warnings: [...new Set(input.warnings)].slice(0, 10),
   };
 }
-
-export const missingOverridesMessage = (missing: readonly string[]) =>
-  `Your choice differs from the recommendation. Add a reason for each, for example "user specified it", then retry: ${missing.join("; ")}. Recommendations are advice; any choice with a reason is accepted.`;
-
-export const MISSING_ASSESSMENT =
-  "Every worker creation needs the master's assessment. Add assessment: { difficulty: 0-10, difficultyReason, stakes: 0-10, stakesReason } scoring this assignment (selection=automatic requests carry it as request.assessment).";

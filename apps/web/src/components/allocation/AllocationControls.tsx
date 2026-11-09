@@ -1,9 +1,11 @@
 import { useId } from "react";
 import {
+  allocationAccountRule,
   defaultAllocationPolicy,
   PROVIDER_DISPLAY_NAMES,
   type AllocationAccount,
   type AllocationAccountCap,
+  type AllocationAccountRule,
   type AllocationPolicy,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
@@ -143,6 +145,118 @@ function OptionalCapControl({
   );
 }
 
+const RULE_KINDS = [
+  { kind: "exclude", label: "never used for workers" },
+  { kind: "maxWorkers", label: "most concurrent workers" },
+  { kind: "priority", label: "priority" },
+] as const;
+type RuleDraft = Omit<AllocationAccountRule, "key" | "kind">;
+const localTime = (iso: string) => {
+  const date = new Date(iso);
+  return Number.isFinite(date.getTime())
+    ? new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+    : "";
+};
+
+/** One account rule: its value and, once set, when it ends and why. */
+function AccountRuleControl({
+  name,
+  kind,
+  rule,
+  disabled,
+  onChange,
+}: {
+  name: string;
+  kind: AllocationAccountRule["kind"];
+  rule: RuleDraft | undefined;
+  disabled: boolean;
+  onChange: (rule: RuleDraft | undefined) => void;
+}) {
+  const min = kind === "maxWorkers" ? 1 : -100;
+  const invalid =
+    rule !== undefined &&
+    kind !== "exclude" &&
+    (rule.value === undefined || !Number.isInteger(rule.value) || rule.value < min);
+  return (
+    <div className="grid min-w-0 gap-2">
+      {kind === "exclude" ? (
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={rule !== undefined}
+            disabled={disabled}
+            onChange={(event) => onChange(event.currentTarget.checked ? {} : undefined)}
+          />
+          {name}
+        </label>
+      ) : (
+        <label className="grid min-w-0 gap-1">
+          <span className="font-medium">{name}</span>
+          <input
+            className={field}
+            type="number"
+            min={min}
+            max={100}
+            step={1}
+            value={rule?.value ?? ""}
+            aria-invalid={invalid}
+            disabled={disabled}
+            placeholder={kind === "maxWorkers" ? "No limit" : "0"}
+            onChange={(event) =>
+              onChange(
+                event.currentTarget.value === ""
+                  ? undefined
+                  : { ...rule, value: event.currentTarget.valueAsNumber },
+              )
+            }
+          />
+          {invalid && (
+            <span className="text-xs text-destructive">
+              Enter a whole number from {min} to 100.
+            </span>
+          )}
+        </label>
+      )}
+      {rule !== undefined && (
+        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+          <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+            {name} until (local time; blank for no end)
+            <input
+              className={field}
+              type="datetime-local"
+              value={rule.expiresAt ? localTime(rule.expiresAt) : ""}
+              disabled={disabled}
+              onChange={(event) => {
+                const { expiresAt: _until, ...rest } = rule;
+                const until = new Date(event.currentTarget.value);
+                onChange(
+                  Number.isFinite(until.getTime())
+                    ? { ...rest, expiresAt: until.toISOString() }
+                    : rest,
+                );
+              }}
+            />
+          </label>
+          <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
+            {name} note
+            <input
+              className={field}
+              maxLength={200}
+              value={rule.note ?? ""}
+              disabled={disabled}
+              onChange={(event) => {
+                const { note: _note, ...rest } = rule;
+                const note = event.currentTarget.value;
+                onChange(note.trim() ? { ...rest, note } : rest);
+              }}
+            />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function latestCapReading(
   members: readonly AllocationAccount[],
   kind: "weekly" | "fiveHour",
@@ -244,7 +358,9 @@ export function AllocationControls({
       </fieldset>
     );
   };
-  const groups = allocationAccountGroups(snapshot, policy);
+  const groups = allocationAccountGroups(snapshot);
+  // An expired rule no longer applies, so it shows as unset.
+  const now = new Date().toISOString();
   const setCap = (key: string, patch: Partial<Omit<AllocationAccountCap, "key">>) => {
     const current = allocationAccountCap(policy, key) ?? {
       key,
@@ -391,58 +507,63 @@ export function AllocationControls({
           })}
         </div>
       </section>
-      <section aria-label="Account preferences" className="grid min-w-0 gap-3">
-        <h2 className="font-semibold">Account preferences</h2>
+      <section aria-label="Account rules" className="grid min-w-0 gap-3">
+        <h2 className="font-semibold">Account rules</h2>
         <p className="text-sm text-muted-foreground">
-          Weights favor close choices within the account preference margin. Recommendations compare
-          projected budget headroom after running, queued and incoming work, using the tightest
-          allowance window. An explicit valid choice always wins.
+          Standing instructions that every worker start obeys on every computer. An account that is
+          never used for workers, or is at its concurrent worker limit, is not recommended and a
+          worker pinned to it is refused. Among the rest, the higher priority wins while the account
+          has quota headroom; equal priorities are ordered by projected budget headroom.
         </p>
         <p className="text-xs text-muted-foreground">
-          Equal defaults: 50 per account. Shares are normalized within each provider family,
-          counting known shared identities once. They describe preference, not promised usage
-          distribution. Available choices still depend on the selected computer and model.
+          Unset accounts have priority 0; a negative priority is used last. A rule with an end time
+          stops applying by itself. Agents set the same rules with the t3_allocation_policy tool.
         </p>
-        {snapshot && snapshot.accountWeightsSupported !== true && (
+        {snapshot && snapshot.accountRulesSupported !== true && (
           <p className="text-sm">
-            Update the coordinator to edit account preference weights. Existing budget settings are
-            still available.
+            Update the coordinator to edit account rules. Existing budget settings are still
+            available.
           </p>
         )}
         {!groups.length && (
-          <p className="text-sm">
-            Account preferences appear when account information is available.
-          </p>
+          <p className="text-sm">Account rules appear when account information is available.</p>
         )}
         <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
-          {groups.map((group) => (
-            <div key={group.key} className="min-w-0 rounded-lg border p-3">
-              <NumericControl
-                name={`${group.label}${group.members[0]?.accountKey === null ? ` (${group.hosts.join(", ")})` : ""} preference weight`}
-                unit="relative weight"
-                value={group.weight}
-                defaultValue={50}
-                max={100}
-                step={0.1}
-                disabled={disabled || snapshot?.accountWeightsSupported !== true}
-                help={`${PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver} · ${group.hosts.join(", ")} · ${number(group.share)}% family preference share${group.equalFallback ? " (all zero: equal tie-breaking)" : ""}`}
-                onChange={(weight) =>
-                  onChange({
-                    ...policy,
-                    accountWeights: [
-                      ...(policy.accountWeights ?? []).filter((w) => w.key !== group.key),
-                      { key: group.key, weight },
-                    ],
-                  })
-                }
-              />
-              {group.members[0]?.accountKey === null && (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Identity unknown; this computer’s account stays separate.
-                </p>
-              )}
-            </div>
-          ))}
+          {groups.map((group) => {
+            const name = `${group.label}${group.members[0]?.accountKey === null ? ` (${group.hosts.join(", ")})` : ""}`;
+            return (
+              <fieldset key={group.key} className="grid min-w-0 gap-3 rounded-lg border p-3">
+                <legend className="px-1 font-semibold">
+                  {name} · {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
+                </legend>
+                {RULE_KINDS.map(({ kind, label }) => (
+                  <AccountRuleControl
+                    key={kind}
+                    name={`${name} ${label}`}
+                    kind={kind}
+                    rule={allocationAccountRule(policy, group.key, kind, now)}
+                    disabled={disabled || snapshot?.accountRulesSupported !== true}
+                    onChange={(rule) =>
+                      onChange({
+                        ...policy,
+                        accountRules: [
+                          ...(policy.accountRules ?? []).filter(
+                            (r) => r.key !== group.key || r.kind !== kind,
+                          ),
+                          ...(rule ? [{ ...rule, key: group.key, kind }] : []),
+                        ],
+                      })
+                    }
+                  />
+                ))}
+                {group.members[0]?.accountKey === null && (
+                  <p className="text-xs text-muted-foreground">
+                    Identity unknown; this computer’s account stays separate.
+                  </p>
+                )}
+              </fieldset>
+            );
+          })}
         </div>
       </section>
       <details className="rounded-lg border p-4">
@@ -518,7 +639,7 @@ export function AllocationAnalytics({
   snapshot: AllocationSnapshot | null;
   policy: AllocationPolicy;
 }) {
-  const groups = allocationAccountGroups(snapshot, policy);
+  const groups = allocationAccountGroups(snapshot);
   return (
     <section aria-label="Usage analytics" className="grid min-w-0 gap-3">
       <h2 className="font-semibold">Usage analytics</h2>

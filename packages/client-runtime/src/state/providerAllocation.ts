@@ -1,7 +1,6 @@
 import {
   WS_METHODS,
   allocationPreferenceKey,
-  allocationPreferenceWeight,
   type AllocationAccount,
   type AllocationAccountCap,
   type AllocationWindow,
@@ -209,7 +208,7 @@ export const allocationEstimateFields = [
     min: 0,
     max: 5,
     step: 0.1,
-    help: "Maximum budget headroom points added by account weights (weight / 100). The previous account gets this many extra points. Changes apply immediately.",
+    help: "Budget headroom points added to the previous account, so close choices do not alternate. Changes apply immediately.",
   },
 ] as const;
 
@@ -246,10 +245,7 @@ export function allocationSupportsSubscriptionCaps(
   return source === "available" || source === "probeFailed";
 }
 
-export function allocationAccountGroups(
-  snapshot: AllocationSnapshot | null,
-  policy: AllocationPolicy,
-) {
+export function allocationAccountGroups(snapshot: AllocationSnapshot | null) {
   const groups = new Map<string, AllocationAccount[]>();
 
   for (const host of snapshot?.inventories ?? [])
@@ -266,8 +262,6 @@ export function allocationAccountGroups(
 
     label: [...new Set(members.map((m) => m.label))].sort().join(" / "),
 
-    weight: allocationPreferenceWeight(policy, key),
-
     hosts: [
       ...new Set(
         members.map(
@@ -279,24 +273,12 @@ export function allocationAccountGroups(
     ].sort(),
   }));
 
-  return rows
-    .sort(
-      (a, b) =>
-        a.driver.localeCompare(b.driver) ||
-        a.label.localeCompare(b.label) ||
-        a.key.localeCompare(b.key),
-    )
-    .map((row) => {
-      const pool = rows.filter((r) => r.driver === row.driver);
-
-      const total = pool.reduce((sum, r) => sum + r.weight, 0);
-
-      return {
-        ...row,
-        share: total > 0 ? (row.weight * 100) / total : 100 / pool.length,
-        equalFallback: total === 0,
-      };
-    });
+  return rows.sort(
+    (a, b) =>
+      a.driver.localeCompare(b.driver) ||
+      a.label.localeCompare(b.label) ||
+      a.key.localeCompare(b.key),
+  );
 }
 
 /** Keep observations from each host visible; do not sum overlapping account samples. */

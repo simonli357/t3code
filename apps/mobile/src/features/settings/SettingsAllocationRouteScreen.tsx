@@ -183,29 +183,39 @@ export function SettingsAllocationRouteScreen() {
                 ))}
               </View>
             ))}
-            <Text className="font-semibold">Account preferences</Text>
+            <Text className="font-semibold">Account rules</Text>
             <Text>
-              Weights favor close choices within the account preference margin. The tightest
-              projected budget headroom ranks accounts. Explicit valid choices always win.
+              Every worker start obeys these. An account that is never used for workers or is at its
+              worker limit is not recommended, and a worker pinned to it is refused. The higher
+              priority wins while the account has quota headroom. Edit in the web settings page.
             </Text>
-            <Text>
-              Account preference margin: {snapshot.policy.hysteresisPoints} / default{" "}
-              {defaultAllocationPolicy.hysteresisPoints} points. The previous account gets this
-              margin too. Edit in the web settings page.
-            </Text>
-            {allocationAccountGroups(snapshot, snapshot.policy).map((account) => (
-              <Text key={account.key}>
-                {account.label} · {PROVIDER_DISPLAY_NAMES[account.driver] ?? account.driver}: weight{" "}
-                {account.weight} / default 50 · {account.share.toFixed(1)}% family share ·{" "}
-                {account.hosts.join(", ")}
-              </Text>
-            ))}
+            {allocationAccountGroups(snapshot).map((account) => {
+              const rules = (snapshot.policy.accountRules ?? []).filter(
+                (rule) =>
+                  rule.key === account.key &&
+                  (rule.expiresAt === undefined || Date.parse(rule.expiresAt) > Date.now()),
+              );
+              return (
+                <Text key={account.key}>
+                  {account.label} · {PROVIDER_DISPLAY_NAMES[account.driver] ?? account.driver}:{" "}
+                  {rules.length
+                    ? rules
+                        .map(
+                          (rule) =>
+                            `${rule.kind === "exclude" ? "never used for workers" : rule.kind === "maxWorkers" ? `at most ${rule.value} workers` : `priority ${rule.value}`}${rule.expiresAt ? ` until ${new Date(rule.expiresAt).toLocaleString()}` : ""}${rule.note ? ` (${rule.note})` : ""}`,
+                        )
+                        .join("; ")
+                    : "no rules"}{" "}
+                  · {account.hosts.join(", ")}
+                </Text>
+              );
+            })}
             <Text className="font-semibold">Hard usage caps</Text>
             <Text>
               Hard caps are enforced by the server for workers and masters on this account. Edit
               thresholds and stop actions in the web settings page.
             </Text>
-            {allocationAccountGroups(snapshot, snapshot.policy).map((account) => {
+            {allocationAccountGroups(snapshot).map((account) => {
               const cap = allocationAccountCap(snapshot.policy, account.key);
               const capSource = allocationSubscriptionCapSource(account.members);
               if (!allocationSupportsSubscriptionCaps(account.members))

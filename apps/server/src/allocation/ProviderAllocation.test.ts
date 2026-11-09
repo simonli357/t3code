@@ -1756,32 +1756,140 @@ it.effect(
   },
 );
 
-it.effect("a zero preference weight never vetoes an explicit managed launch", () => {
+const pinnedStart = (id: string) => ({
+  ...startInput,
+  request: {
+    ...startInput.request,
+    assignmentId: id,
+    threadId: ThreadId.make(id),
+    explicitInstanceId: provider.instanceId,
+  },
+});
+
+it.effect("a start or fork pinned to an excluded account is refused with the rule", () => {
   const f = fixture();
   return Effect.gen(function* () {
-    const { assignments, store, allocation } = yield* f.setup;
-    const snapshot = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!;
-    const chosen = snapshot.inventories
-      .flatMap((host) => host.accounts)
-      .find((account) => account.instanceId === "chosen")!;
-    const policy = yield* store.policy;
-    yield* store.savePolicy({
-      expectedVersion: policy.version,
-      policy: { ...policy, accountWeights: [{ key: allocationPreferenceKey(chosen), weight: 0 }] },
+    const { assignments, allocation } = yield* f.setup;
+    const master = ThreadId.make("master");
+    const view = yield* allocation.editPolicy({
+      setRules: [{ account: "chosen", kind: "exclude", note: "never chosen" }],
     });
-    const request = {
-      ...startInput,
-      request: { ...startInput.request, explicitInstanceId: ProviderInstanceId.make("chosen") },
-    };
-    expect((yield* assignments.start(request, ThreadId.make("master"))).state).toBe("submitted");
-    expect(f.calls).toHaveLength(1);
-    expect(f.calls[0]?.modelSelection).toEqual({
-      instanceId: "chosen",
-      model: "astra",
-      options: startInput.request.options,
+    expect(view.rules).toEqual([{ account: "chosen", kind: "exclude", note: "never chosen" }]);
+    const rule = "Account rule: chosen is excluded from workers (never chosen).";
+    expect((yield* Effect.flip(assignments.start(pinnedStart("pinned"), master))).detail).toBe(
+      rule,
+    );
+    // It is the only account, so nothing is recommended in its place.
+    expect((yield* assignments.start(startInput, master)).state).toBe("unavailable");
+    const fork = yield* Effect.flip(
+      assignments.spawn(master, {
+        threadId: ThreadId.make("fork"),
+        sourceThreadId: ThreadId.make("source"),
+        title: "fork",
+        prompt: "task",
+        modelSelection: { instanceId: provider.instanceId, model: "astra" },
+      }),
+    );
+    expect(fork.message).toBe(rule);
+    expect(f.calls).toHaveLength(0);
+    // Avoiding an account ranks it last without refusing a start pinned to it.
+    yield* allocation.editPolicy({
+      clearRules: [{ account: "chosen" }],
+      setRules: [{ account: "chosen", kind: "priority", value: -100 }],
     });
+    expect((yield* assignments.start(pinnedStart("pinned"), master)).state).toBe("submitted");
+    expect(f.calls[0]?.modelSelection.instanceId).toBe("chosen");
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect("a worker limit counts the account's running workers, not other sessions", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, allocation } = yield* f.setup;
+    const sql = yield* SqlClient.SqlClient;
+    const master = ThreadId.make("master");
+    yield* allocation.editPolicy({
+      setRules: [{ account: "chosen", kind: "maxWorkers", value: 1 }],
+    });
+    // The master's own running session is on the account and is not a worker.
+    f.state.threads = [shell()];
+    expect((yield* assignments.start(pinnedStart("first"), master)).state).toBe("submitted");
+    yield* sql`INSERT INTO custom_workers (thread_id, owner_id, plan_json) VALUES ('worker', 'master', '{}')`;
+    const refused = yield* Effect.flip(assignments.start(pinnedStart("second"), master));
+    expect(refused.detail).toBe(
+      "Account rule: chosen allows at most 1 concurrent workers and has 2.",
+    );
+    const { explicitInstanceId: _unpinned, ...unpinned } = pinnedStart("second").request;
+    expect((yield* assignments.start({ ...startInput, request: unpinned }, master)).state).toBe(
+      "unavailable",
+    );
+    expect(f.calls.map((call) => call.threadId)).toEqual(["first"]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect(
+  "an agent sets account rules through the coordinator peer path and starts obey them",
+  () => {
+    const coordinator = fixture({ localId: "remote" });
+    return Effect.gen(function* () {
+      const authority = yield* coordinator.setup;
+      const own = (yield* authority.allocation.execute({ _tag: "snapshot" })).snapshot!
+        .inventories[0]!;
+      coordinator.state.peers = [
+        {
+          ...own,
+          environmentId: "local",
+          accounts: own.accounts.map((a) => ({ ...a, environmentId: "local" })),
+        },
+      ];
+      // PeerLinks reports the coordinator's refusal as its label and message.
+      const caller = fixture({
+        remote: true,
+        peerCall: (_id, request) =>
+          authority.allocation
+            .receive("local", request)
+            .pipe(Effect.mapError((e) => new PeerRejected({ message: `remote: ${e.message}` }))),
+      });
+      yield* Effect.gen(function* () {
+        const client = yield* caller.setup;
+        const master = ThreadId.make("master");
+        const until = "1970-01-02T00:00:00.000Z";
+        const set = yield* client.allocation.editPolicy({
+          setRules: [
+            { account: "CHOSEN", kind: "exclude", expiresAt: "1970-01-01T19:00:00-05:00" },
+          ],
+        });
+        expect(set.rules).toEqual([{ account: "chosen", kind: "exclude", expiresAt: until }]);
+        expect((yield* authority.store.policy).accountRules).toEqual([
+          { key: allocationPreferenceKey(own.accounts[0]!), kind: "exclude", expiresAt: until },
+        ]);
+        expect((yield* client.store.policy).accountRules).toBeUndefined();
+        expect((yield* client.allocation.editPolicy({})).rules).toEqual(set.rules);
+        expect(
+          (yield* Effect.flip(client.assignments.start(pinnedStart("pinned"), master))).detail,
+        ).toBe(`Account rule: chosen is excluded from workers until ${until}.`);
+        expect(caller.calls).toHaveLength(0);
+        // The coordinator's own reason for rejecting a save reaches the agent.
+        const invalid = yield* Effect.flip(
+          client.allocation.editPolicy({
+            setRules: [{ account: "chosen", kind: "maxWorkers", value: 0 }],
+          }),
+        );
+        expect(invalid.detail).toContain("maxWorkers value of at least 1");
+        expect(
+          (yield* Effect.flip(client.allocation.editPolicy({ clearRules: [{ account: "XL" }] })))
+            .detail,
+        ).toContain('No account matches "XL". Use a label or instance ID of: chosen (chosen).');
+        // The rule stops applying by itself once it expires.
+        yield* TestClock.adjust("1 day");
+        expect((yield* client.allocation.editPolicy({})).rules).toEqual([]);
+        expect((yield* client.assignments.start(pinnedStart("pinned"), master)).state).toBe(
+          "submitted",
+        );
+      }).pipe(Effect.provide(Layer.fresh(caller.layer)));
+    }).pipe(Effect.provide(coordinator.layer));
+  },
+);
 
 const linkedInventory = (
   id: string,
@@ -2098,52 +2206,94 @@ const storedRecommendations = Effect.gen(function* () {
   }));
 });
 
-it.effect("every managed start needs the master's assessment", () => {
+it.effect("a start without an assessment uses the normal tier, or the tier it names", () => {
   const f = fixture();
   return Effect.gen(function* () {
     const { assignments } = yield* f.setup;
-    const { assessment: _missing, ...unscored } = startInput;
-    const error = yield* Effect.flip(assignments.start(unscored, ThreadId.make("master")));
-    expect(error.detail).toContain("assessment: { difficulty");
-    const spawnError = yield* Effect.flip(
-      assignments.spawn(ThreadId.make("master"), {
-        threadId: ThreadId.make("fork"),
-        sourceThreadId: ThreadId.make("source"),
-        title: "fork",
-        prompt: "task",
-        modelSelection: { instanceId: provider.instanceId, model: "astra" },
-      }),
-    );
-    expect(spawnError.message).toContain("assessment: { difficulty");
-    expect(f.calls).toHaveLength(0);
+    const { assessment: _none, ...unscored } = startInput;
+    const started = yield* assignments.start(unscored, ThreadId.make("master"));
+    expect(started.state).toBe("submitted");
+    expect(started.recommendation?.assessment).toEqual({
+      difficulty: 5,
+      difficultyReason: "Tier normal",
+      stakes: 5,
+      stakesReason: "Tier normal",
+    });
+    const fork = yield* assignments.spawn(ThreadId.make("master"), {
+      threadId: ThreadId.make("fork"),
+      sourceThreadId: ThreadId.make("source"),
+      title: "fork",
+      prompt: "task",
+      modelSelection: { instanceId: provider.instanceId, model: "astra" },
+      tier: "hard",
+    });
+    expect(fork.recommendation?.assessment).toMatchObject({ difficulty: 8, stakes: 8 });
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[1]).not.toHaveProperty("tier");
   }).pipe(Effect.provide(f.layer));
 });
 
-it.effect("an exact choice records the table recommendation and the master's reason", () => {
+it.effect("an automatic start takes its table entry from the tier", () => {
   const f = fixture();
   return Effect.gen(function* () {
-    const { assignments, store } = yield* f.setup;
+    const { assignments } = yield* f.setup;
     f.state.providers = [{ ...provider, models: tableModels }];
-    const error = yield* Effect.flip(assignments.start(tableStart, ThreadId.make("master")));
-    expect(error.detail).toContain(
-      "overrides.model (recommended gpt-6.1-sol / high, chosen gpt-6-astra / xhigh)",
-    );
-    expect(yield* store.reservations).toHaveLength(0);
-    const result = yield* assignments.start(
-      { ...tableStart, overrides: { model: "user specified Astra xhigh" } },
-      ThreadId.make("master"),
-    );
+    const start = (id: string, tier?: "routine" | "hard") =>
+      assignments.start(
+        {
+          kind: "worker",
+          projectId: startInput.projectId,
+          title: startInput.title,
+          prompt: startInput.prompt,
+          ...(tier ? { tier } : {}),
+          request: {
+            selection: "automatic",
+            assignmentId: id,
+            threadId: ThreadId.make(id),
+            environmentId: "local",
+            allowedDrivers: [provider.driver],
+          },
+        },
+        ThreadId.make("master"),
+      );
+    const cell = (score: number) => {
+      const { model, effort } = defaultModelRoutingPolicy.codex.cells[score]![score]!;
+      return `${model} / ${effort}`;
+    };
+    expect((yield* start("routine", "routine")).recommendation?.model.chosen).toBe(cell(2));
+    expect((yield* start("normal")).recommendation?.model.chosen).toBe(cell(5));
+    expect((yield* start("hard", "hard")).recommendation?.model.chosen).toBe(cell(8));
+    expect(new Set([cell(2), cell(5), cell(8)]).size).toBe(3);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a choice that differs from the recommendation starts without a reason", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments } = yield* f.setup;
+    f.state.providers = [{ ...provider, models: tableModels }];
+    const result = yield* assignments.start(tableStart, ThreadId.make("master"));
     expect(result.state).toBe("submitted");
     expect(result.recommendation?.model).toEqual({
       recommended: "gpt-6.1-sol / high",
       chosen: "gpt-6-astra / xhigh",
-      overrideReason: "user specified Astra xhigh",
     });
     expect(result.recommendation?.account).toEqual({ recommended: "chosen", chosen: "chosen" });
     expect(result.recommendation?.computer).toEqual({ recommended: "local", chosen: "local" });
     expect(f.calls[0]?.modelSelection.model).toBe("gpt-6-astra");
-    const [stored] = yield* storedRecommendations;
-    expect(stored?.recommendation.model.overrideReason).toBe("user specified Astra xhigh");
+    // A reason is kept when the master gives one.
+    const noted = yield* assignments.start(
+      {
+        ...tableStart,
+        overrides: { model: "user specified Astra xhigh" },
+        request: { ...tableStart.request, assignmentId: "noted", threadId: ThreadId.make("noted") },
+      },
+      ThreadId.make("master"),
+    );
+    expect(noted.recommendation?.model.overrideReason).toBe("user specified Astra xhigh");
+    expect(
+      (yield* storedRecommendations).map((stored) => stored.recommendation.model.overrideReason),
+    ).toEqual([undefined, "user specified Astra xhigh"]);
   }).pipe(Effect.provide(f.layer));
 });
 

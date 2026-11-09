@@ -502,9 +502,9 @@ const make = Effect.gen(function* () {
               })
               .sort(
                 (a, b) =>
+                  (b.c.priority ?? 0) - (a.c.priority ?? 0) ||
                   (a.c.warnings?.length ?? 0) - (b.c.warnings?.length ?? 0) ||
-                  allocationScore(b.c, allocationPolicy, b.p.request.driver) -
-                    allocationScore(a.c, allocationPolicy, a.p.request.driver) ||
+                  allocationScore(b.c, allocationPolicy) - allocationScore(a.c, allocationPolicy) ||
                   (a.c.resetInHours ?? Infinity) - (b.c.resetInHours ?? Infinity) ||
                   compare(a.c.accountKey ?? "", b.c.accountKey ?? "") ||
                   compare(a.c.instanceId, b.c.instanceId) ||
@@ -616,24 +616,29 @@ const make = Effect.gen(function* () {
               });
             const next = {
               ...input.policy,
-              ...(input.policy.accountWeights === undefined && current.accountWeights !== undefined
-                ? { accountWeights: current.accountWeights }
+              ...(input.policy.accountRules === undefined && current.accountRules !== undefined
+                ? { accountRules: current.accountRules }
                 : {}),
               ...(input.policy.accountCaps === undefined && current.accountCaps !== undefined
                 ? { accountCaps: current.accountCaps }
                 : {}),
               version: current.version + 1,
             };
-            const weights = next.accountWeights ?? [];
+            const rules = next.accountRules ?? [];
             if (
-              new Set(weights.map((entry) => entry.key)).size !== weights.length ||
-              weights.some(
-                (entry) => !Number.isFinite(entry.weight) || entry.weight < 0 || entry.weight > 100,
+              new Set(rules.map((rule) => `${rule.kind}:${rule.key}`)).size !== rules.length ||
+              rules.some(
+                (rule) =>
+                  (rule.kind === "exclude"
+                    ? rule.value !== undefined
+                    : rule.value === undefined || (rule.kind === "maxWorkers" && rule.value < 1)) ||
+                  (rule.expiresAt !== undefined && !Number.isFinite(Date.parse(rule.expiresAt))),
               )
             )
               return yield* new AllocationError({
                 code: "invalid",
-                detail: "Account weights must be unique and between 0 and 100.",
+                detail:
+                  "Account rules need one rule per account and kind, a maxWorkers value of at least 1, a priority value from -100 to 100, no value for exclude, and a valid expiry time.",
               });
             const caps = next.accountCaps ?? [];
             if (

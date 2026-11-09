@@ -239,7 +239,12 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     canSave =
       policy.version === snapshot?.policy.version &&
       policy.defaultHours <= policy.maxForecastHours &&
-      capsValid;
+      capsValid &&
+      (policy.accountRules ?? []).every(
+        (rule) =>
+          rule.kind === "exclude" ||
+          (rule.value !== undefined && (rule.kind === "priority" || rule.value >= 1)),
+      );
   } catch {
     /* Validation appears when preview is requested. */
   }
@@ -306,8 +311,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          Tune advisory budgets and account preferences, plus optional hard caps that stop work.
-          Advisory estimates never veto a valid explicit account choice; an active hard cap does.
+          Tune advisory budgets and account rules, plus optional hard caps that stop work. Advisory
+          estimates never veto a valid explicit account choice; an active hard cap does.
         </p>
       </header>
       {error && (
@@ -362,7 +367,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
               version: policy.version,
               coordinatorEnvironmentId: policy.coordinatorEnvironmentId,
               mode: policy.mode,
-              accountWeights: [],
+              accountRules: [],
             });
             setOverrides("[]");
             setPreviewKey(null);

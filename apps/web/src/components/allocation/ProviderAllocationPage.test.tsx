@@ -53,7 +53,7 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }))
 import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
-  accountWeightsSupported: true,
+  accountRulesSupported: true,
   accountCapsSupported: true,
   policy: { ...defaultAllocationPolicy, version: 4, coordinatorEnvironmentId: "host" },
   authorityAvailable: true,
@@ -256,7 +256,7 @@ describe("Provider allocation editor", () => {
     expect(input("Codex Daily usage budget").value).toBe("10");
     expect(button("Save settings").disabled).toBe(false);
   });
-  it("shows primary numeric defaults first and saves edits, weights and resets without an assignment preview", async () => {
+  it("shows primary numeric defaults first and saves edits, account rules and resets without an assignment preview", async () => {
     let savedPolicy = snapshot.policy;
     const previous = state.execute.getMockImplementation()!;
     state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
@@ -278,17 +278,36 @@ describe("Provider allocation editor", () => {
     expect(input("Coordinator").closest("details")?.open).toBe(false);
     expect(input("Model").closest("details")?.open).toBe(false);
     await change("Claude Daily usage budget", "40");
-    await change("SL preference weight", "0");
+    await change("SL priority", "10");
+    await change("SL priority until", "2026-11-12T09:30");
+    await change("SL priority note", "prefer SL this week");
+    await change("SL most concurrent workers", "0");
+    expect(button("Save settings").disabled).toBe(true);
+    await change("SL most concurrent workers", "2");
+    await act(() => input("SL never used for workers").click());
     await act(() => button("Save settings").click());
     expect(readCalls("preview")).toHaveLength(0);
     expect(savedPolicy.claude.dailyPoints).toBe(40);
     expect(savedPolicy.claude.preset).toBe("custom");
-    expect(savedPolicy.accountWeights?.[0]?.weight).toBe(0);
+    const key = savedPolicy.accountRules?.[0]?.key;
+    expect(savedPolicy.accountRules).toEqual([
+      {
+        key,
+        kind: "priority",
+        value: 10,
+        expiresAt: new Date("2026-11-12T09:30").toISOString(),
+        note: "prefer SL this week",
+      },
+      { key, kind: "maxWorkers", value: 2 },
+      { key, kind: "exclude" },
+    ]);
+    expect(input("SL priority until").value).toBe("2026-11-12T09:30");
     expect(input("Claude Daily usage budget").value).toBe("40");
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Settings saved");
     await act(() => button("Reset to defaults").click());
     expect(input("Claude Daily usage budget").value).toBe("17");
-    expect(input("SL preference weight").value).toBe("50");
+    expect(input("SL priority").value).toBe("");
+    expect((input("SL never used for workers") as HTMLInputElement).checked).toBe(false);
     expect(savedPolicy.claude.dailyPoints).toBe(40);
     await act(() => button("Save settings").click());
     expect(savedPolicy.claude.dailyPoints).toBe(17);
@@ -773,22 +792,20 @@ it("labels unknown model quota rates honestly and displays measured account burn
   clock.mockRestore();
 });
 
-it("keeps account weights read-only when the coordinator cannot persist them", async () => {
+it("keeps account rules read-only when the coordinator cannot persist them", async () => {
   const previous = state.execute.getMockImplementation()!;
   state.execute.mockImplementation(async (arg) =>
     arg.input._tag === "snapshot"
       ? {
           _tag: "Success",
-          value: { snapshot: { ...snapshot, accountWeightsSupported: undefined } },
+          value: { snapshot: { ...snapshot, accountRulesSupported: undefined } },
         }
       : previous(arg),
   );
   await act(() => button("Refresh").click());
-  expect(input("SL preference weight").disabled).toBe(true);
+  expect(input("SL priority").disabled).toBe(true);
   expect(input("Claude Daily usage budget").disabled).toBe(false);
-  expect(container.textContent).toContain(
-    "Update the coordinator to edit account preference weights",
-  );
+  expect(container.textContent).toContain("Update the coordinator to edit account rules");
 });
 
 it("keeps hard caps read-only when the coordinator cannot persist them", async () => {

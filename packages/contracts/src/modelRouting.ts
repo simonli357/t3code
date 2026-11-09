@@ -13,6 +13,16 @@ export const AssignmentAssessment = Schema.Struct({
   stakesReason: Reason,
 });
 export type AssignmentAssessment = typeof AssignmentAssessment.Type;
+export const AssignmentTier = Schema.Literals(["routine", "normal", "hard"]);
+export type AssignmentTier = typeof AssignmentTier.Type;
+const TIER_SCORE = { routine: 2, normal: 5, hard: 8 } as const;
+/** A tier is one score for both axes of the difficulty/stakes table. */
+export const tierAssessment = (tier: AssignmentTier = "normal"): AssignmentAssessment => ({
+  difficulty: TIER_SCORE[tier],
+  difficultyReason: `Tier ${tier}`,
+  stakes: TIER_SCORE[tier],
+  stakesReason: `Tier ${tier}`,
+});
 export const MODEL_SCORING_RUBRIC =
   "Score the scoped assignment, not its project. Difficulty: reasoning, uncertainty and interactions. Stakes: failure impact, reversibility and detectability. Each axis is an integer 0–10 with a concise reason: 0–3 routine/low; 4–6 moderate; 7 demanding/high; 8 very demanding/very high; 9 extreme; 10 exceptional. Supply both assessments; the service never invents them.";
 /** The table has one entry for every (difficulty, stakes) score pair. */
