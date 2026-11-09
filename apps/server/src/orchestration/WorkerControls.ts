@@ -1779,12 +1779,16 @@ const make = Effect.gen(function* () {
     if (communicationTimer) yield* Fiber.interrupt(communicationTimer);
     communicationTimer = undefined;
     if (communicationDeadline !== undefined) {
-      const delay = Math.max(
-        0,
-        communicationDeadline - DateTime.toEpochMillis(yield* DateTime.now),
-      );
-      // Node's maximum timer delay is a platform limit, not a policy threshold.
-      communicationTimer = yield* Effect.sleep(Math.min(delay, 2_147_483_647)).pipe(
+      const deadline = communicationDeadline;
+      // The timer reads the clock when it starts running, not when it is forked: time that
+      // passes in between would otherwise be added to the wait.
+      communicationTimer = yield* DateTime.now.pipe(
+        Effect.flatMap((current) =>
+          // Node's maximum timer delay is a platform limit, not a policy threshold.
+          Effect.sleep(
+            Math.min(Math.max(0, deadline - DateTime.toEpochMillis(current)), 2_147_483_647),
+          ),
+        ),
         Effect.andThen(Queue.offer(drainRequests, undefined)),
         Effect.asVoid,
         Effect.forkIn(scope),

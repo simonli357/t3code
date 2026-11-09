@@ -1612,7 +1612,17 @@ it.layer(testLayer)("persistent workers", (it) => {
           SELECT state FROM custom_worker_jobs WHERE id = 'usage-cap:test:worker'
         `)[0]?.state,
       ).toBe("completed");
-    }),
+    }).pipe(
+      // The suite's other tests run with the window off.
+      Effect.ensuring(
+        Settings.ServerSettingsService.pipe(
+          Effect.flatMap((settings) =>
+            settings.updateSettings({ workerCommunicationWindowMinutes: 0 }),
+          ),
+          Effect.orDie,
+        ),
+      ),
+    ),
   );
   it.effect("delivers waiting reports after an outstanding master steer finishes", () =>
     Effect.gen(function* () {
