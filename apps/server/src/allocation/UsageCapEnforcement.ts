@@ -1,7 +1,5 @@
 import {
   allocationPreferenceKey,
-  CommandId,
-  EventId,
   type ProviderInstanceId,
   ThreadId,
   type UsageMeasurementsReport,
@@ -19,23 +17,19 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import * as WorkerControl from "../orchestration/WorkerControls.ts";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { allocationIdentity, allocationInventory } from "./inventory.ts";
 import * as Allocation from "./ProviderAllocation.ts";
 import {
   readUsageCapLatch,
   reconcileUsageCap,
-  usageCapDetail,
   usageCapLatchId,
   type UsageCapLatch,
   type UsageCapReach,
 } from "./usageCaps.ts";
 
 const CHECK_INTERVAL = "15 seconds";
-const CAP_NOTIFICATION_PREFIX = "usage-cap:";
 const NO_MEASUREMENTS: UsageMeasurementsReport = {
   observedAt: "1970-01-01T00:00:00.000Z",
   monitoredInstanceIds: [],
@@ -120,7 +114,10 @@ const reachFromLatch = (latch: UsageCapLatch): UsageCapReach => ({
 export class UsageCapEnforcement extends Context.Service<
   UsageCapEnforcement,
   {
-    /** Reconciles reports, persists crossings, and stops matching local sessions. */
+    /**
+     * Reconciles reports and persists crossings. A reached cap closes the account to new turns
+     * (`check`) and new worker assignments; turns already running finish.
+     */
     readonly evaluate: () => Effect.Effect<readonly UsageCapReach[], UsageCapError>;
     /** Null means this thread is eligible. A reach carries the durable stop reason. */
     readonly check: (
@@ -135,9 +132,7 @@ const make = Effect.gen(function* () {
   const allocation = yield* Allocation.ProviderAllocation;
   const providers = yield* ProviderRegistry;
   const providerService = yield* ProviderService;
-  const engine = yield* OrchestrationEngineService;
   const projection = yield* ProjectionSnapshotQuery;
-  const workers = yield* WorkerControl.WorkerControls;
   const environment = yield* ServerEnvironment;
   const sql = yield* SqlClient.SqlClient;
   const lock = yield* Semaphore.make(1);
@@ -242,138 +237,8 @@ const make = Effect.gen(function* () {
     };
   });
 
-  const stopLocalSessions = Effect.fn("UsageCapEnforcement.stopLocalSessions")(function* (input: {
-    readonly at: string;
-    readonly reaches: readonly UsageCapReach[];
-  }) {
-    if (!input.reaches.length) return;
-    const shell = yield* projection
-      .getShellSnapshot()
-      .pipe(Effect.mapError((cause) => failure("Could not inspect local sessions.", cause)));
-    const workerRows = yield* sql<{
-      thread_id: string;
-      owner_id: string;
-    }>`SELECT thread_id, owner_id FROM custom_workers`.pipe(
-      Effect.mapError((cause) => failure("Could not inspect managed workers.", cause)),
-    );
-    const owners = new Set(workerRows.map((worker) => worker.owner_id));
-    const workersById = new Map(workerRows.map((worker) => [worker.thread_id, worker]));
-    const providerRows = yield* providers.getProviders.pipe(
-      Effect.mapError((cause) => failure("Could not inspect local providers.", cause)),
-    );
-    const accountByInstance = new Map(
-      providerRows.map((provider) => [
-        provider.instanceId,
-        allocationPreferenceKey({
-          driver: provider.driver,
-          accountKey: allocationIdentity(provider),
-          environmentId: localEnvironmentId,
-          instanceId: provider.instanceId,
-        }),
-      ]),
-    );
-    const reachByAccount = new Map(input.reaches.map((reach) => [reach.accountKey, reach]));
-    const workerNotices: Array<{
-      readonly threadId: ThreadId;
-      readonly detail: string;
-      readonly requestId: string;
-    }> = [];
-
-    for (const thread of shell.threads) {
-      const instanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
-      const accountKey = accountByInstance.get(instanceId);
-      if (!accountKey) continue;
-      const reach = reachByAccount.get(accountKey);
-      if (!reach) continue;
-      const isMaster = owners.has(thread.id);
-      const isWorker = workersById.has(thread.id);
-      const stopsAsMaster = isMaster && reach.stopMasters;
-      const stopsAsWorker = isWorker && reach.stopWorkers;
-      const role =
-        stopsAsWorker && stopsAsMaster
-          ? "worker-master"
-          : stopsAsWorker
-            ? "worker"
-            : stopsAsMaster
-              ? "master"
-              : null;
-      if (!role) continue;
-      const detail = usageCapDetail(reach);
-      const suffix = `${reach.latchId}:${reach.enforcedAt}:${thread.id}`;
-      yield* engine
-        .dispatch({
-          type: "thread.activity.append",
-          commandId: CommandId.make(`${CAP_NOTIFICATION_PREFIX}${suffix}:activity`),
-          threadId: thread.id,
-          activity: {
-            id: EventId.make(`${CAP_NOTIFICATION_PREFIX}${suffix}:activity`),
-            tone: "error",
-            kind: "provider.usage-cap.stopped",
-            summary: `Account usage cap reached; ${role} stopped`,
-            payload: {
-              accountKey: reach.accountKey,
-              windowId: reach.windowId,
-              windowLabel: reach.windowLabel,
-              usedPercent: reach.usedPercent,
-              capPercent: reach.capPercent,
-              checkedAt: reach.checkedAt,
-              resetsAt: reach.resetsAt,
-              role,
-              detail,
-            },
-            turnId: thread.session?.activeTurnId ?? null,
-            createdAt: input.at,
-          },
-          createdAt: input.at,
-        })
-        .pipe(
-          Effect.mapError((cause) =>
-            failure("Could not record the account usage-cap stop.", cause),
-          ),
-        );
-      if (stopsAsWorker)
-        workerNotices.push({
-          threadId: thread.id,
-          detail,
-          requestId: `${CAP_NOTIFICATION_PREFIX}${suffix}`,
-        });
-      if (
-        thread.session &&
-        thread.session.status !== "stopped" &&
-        thread.session.status !== "error"
-      )
-        yield* engine
-          .dispatch({
-            type: "thread.session.stop",
-            commandId: CommandId.make(
-              `${CAP_NOTIFICATION_PREFIX}${suffix}:stop:${thread.session.activeTurnId ?? thread.session.updatedAt}`,
-            ),
-            threadId: thread.id,
-            createdAt: input.at,
-          })
-          .pipe(
-            Effect.mapError((cause) =>
-              failure("Could not stop the session stopped by its account usage cap.", cause),
-            ),
-          );
-    }
-    for (const notice of workerNotices)
-      yield* workers
-        .notifyUsageCap(notice.threadId, {
-          requestId: notice.requestId,
-          detail: notice.detail,
-        })
-        .pipe(
-          Effect.mapError((cause) =>
-            failure("Could not notify the worker's master about the usage cap.", cause),
-          ),
-        );
-  });
-
   const evaluateUnlocked = Effect.fn("UsageCapEnforcement.evaluate")(function* () {
-    const result = yield* reconcile();
-    yield* stopLocalSessions(result);
-    return result.reaches;
+    return (yield* reconcile()).reaches;
   });
   const evaluate = () => lock.withPermit(evaluateUnlocked());
 
@@ -456,7 +321,4 @@ const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(UsageCapEnforcement, make);
-export const liveLayer = layer.pipe(
-  Layer.provide(Allocation.liveLayer),
-  Layer.provide(WorkerControl.liveLayer),
-);
+export const liveLayer = layer.pipe(Layer.provide(Allocation.liveLayer));

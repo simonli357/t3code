@@ -52,7 +52,10 @@ Preview starts nothing. **Start** submits the selected profile, including when a
 policy says Observation. Actual unsupported profiles, ownership conflicts, unavailable execution
 connections and provider authentication/quota failures remain errors. Choose one shared coordinator
 for durable assignment accounting and keep it reachable; missing readings from other hosts are
-warnings. Existing threads, forks and retries retain their selections. Agents that were not told
+warnings. While the coordinator cannot be reached, or runs a version that cannot read the request,
+a start is decided on the requesting computer from its own readings and policy copy, and records
+that warning. A recommendation first refreshes quota readings older than the policy allows, for
+at most a few seconds. Existing threads, forks and retries retain their selections. Agents that were not told
 which computer to use can compare them first; see
 [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
@@ -68,15 +71,16 @@ version, **Reload saved settings** discards your old draft explicitly.
 
 Optional **Hard usage caps** apply per account identity. Weekly caps use the provider's
 account-wide weekly window; Claude accounts also support its 5-hour session. Enter a percentage
-and choose whether reaching it stops workers, masters, or both. Blank fields are disabled. A fresh
-reading at or above the cap stops matching provider sessions through T3's normal session-stop path
-and blocks queued, scheduled, renewal, and notification-triggered turns on that account. A stopped
-worker leaves one durable notice for its master. Turning both stop actions off keeps the threshold
-saved but inactive. The cap remains latched until the provider window resets, a newer reading is
-below the cap, the cap is raised or removed, or both stop actions are disabled. Missing,
-unsupported, or stale readings are shown honestly and cannot create a new hard stop; they also do
-not imply zero usage. Raising a cap or waiting for a reset makes the account eligible again, but
-does not restart stopped work.
+and choose whether reaching it blocks workers, masters, or both. Blank fields are disabled. A fresh
+reading at or above the cap blocks new turns on that account, including queued, scheduled, renewal,
+and notification-triggered ones. Turns that are already running finish. A worker assignment headed
+for a capped account moves to another account of the same provider that has headroom; otherwise it
+stays queued and starts by itself when the cap no longer applies. Turning both block actions off
+keeps the threshold saved but inactive. The cap remains latched until the provider window resets, a
+newer reading is below the cap, the cap is raised or removed, or both block actions are disabled.
+Missing, unsupported, or stale readings are shown honestly and cannot create a new hard stop; they
+also do not imply zero usage. Raising a cap or waiting for a reset makes the account eligible
+again, and held worker assignments start within about half a minute.
 
 A transient provider quota read failure keeps an already reached cap enforced until its reported
 reset, a below-cap verified reading, or a configuration change. A failed read cannot create a new

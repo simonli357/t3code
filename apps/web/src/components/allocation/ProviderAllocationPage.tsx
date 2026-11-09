@@ -311,8 +311,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          Tune advisory budgets and account rules, plus optional hard caps that stop work. Advisory
-          estimates never veto a valid explicit account choice; an active hard cap does.
+          Tune advisory budgets and account rules, plus optional hard caps that block new work.
+          Advisory estimates never veto a valid explicit account choice; an active hard cap does.
         </p>
       </header>
       {error && (

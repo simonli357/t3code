@@ -116,6 +116,8 @@ export const accountDemand = (
   );
 
 export const ACCOUNT_RULE_REASON = "Account rule: ";
+export const ACCOUNT_RULES_UNCHECKED =
+  "Account rules were not checked: the coordinator's policy is unknown on this computer.";
 /** Why an account rule keeps a new worker off this account, pinned or not, when one does. */
 export function accountRuleRefusal(
   policy: AllocationPolicy,
@@ -158,6 +160,8 @@ export function decideAllocation(input: {
   inventories: readonly AllocationInventory[];
   reservations: readonly AllocationReservation[];
   authorityAvailable: boolean;
+  /** Decided without the coordinator and without a copy of its policy. */
+  rulesUnchecked?: boolean;
   previousAccountKey?: string;
 }): AllocationDecision {
   const { at, policy, request, inventories } = input;
@@ -168,6 +172,7 @@ export function decideAllocation(input: {
     globalReasons.push("Duplicate option IDs are ambiguous; supply each requested option once.");
   if (!input.authorityAvailable)
     globalWarnings.push("Allocation coordinator unavailable or not configured.");
+  if (input.rulesUnchecked) globalWarnings.push(ACCOUNT_RULES_UNCHECKED);
   const incompleteLoad = inventories.some(
     (i) => !i.complete || now - Date.parse(i.observedAt) > policy.maxReadingAgeMinutes * 60_000,
   );

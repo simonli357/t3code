@@ -94,8 +94,8 @@ export function WorkerCommunicationSettings({
           />
         </View>
         <Text className="text-sm text-foreground-muted">
-          Retries the failed prompt once using another account with quota headroom. Masters never
-          switch automatically.
+          Retries the stopped assignment on another account with quota headroom, or holds it until
+          the provider reset. Masters never switch automatically.
         </Text>
         {error && (
           <Text accessibilityRole="alert" className="text-sm text-destructive">

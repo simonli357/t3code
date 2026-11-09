@@ -63,6 +63,7 @@ export class AllocationStore extends Context.Service<
       expectedPolicyVersion: number;
       expectedModelVersion: number;
       previewPolicy?: ModelRoutingPolicy;
+      coordinatorPolicy?: AllocationPolicy | null;
     }) => Effect.Effect<ModelRoutingDecision, AllocationError>;
     readonly policy: Effect.Effect<AllocationPolicy, AllocationError>;
     readonly reservations: Effect.Effect<readonly AllocationReservation[], AllocationError>;
@@ -79,6 +80,11 @@ export class AllocationStore extends Context.Service<
       reserve: boolean;
       expectedPolicyVersion?: number;
       previewPolicy?: AllocationPolicy;
+      /**
+       * Set when this computer decides because its coordinator cannot: the coordinator's last
+       * known policy, or null when none was read, which the decision then records.
+       */
+      coordinatorPolicy?: AllocationPolicy | null;
       stableSelection?: boolean;
     }) => Effect.Effect<
       {
@@ -144,7 +150,7 @@ const make = Effect.gen(function* () {
               detail:
                 "Policy changed while host capacity was being collected. Retry with fresh observations.",
             });
-          const effective = input.previewPolicy ?? current;
+          const effective = input.previewPolicy ?? input.coordinatorPolicy ?? current;
           const stored = [...(yield* reservations)];
           // Only unused reservations expire. A starting operation may have committed
           // remotely; it must be reconciled from execution receipts, never a timeout.
@@ -214,6 +220,7 @@ const make = Effect.gen(function* () {
             ...input,
             policy: effective,
             reservations: stored,
+            ...(input.coordinatorPolicy === null ? { rulesUnchecked: true } : {}),
             ...(previousAccountKey ? { previousAccountKey } : {}),
           };
           const decision = decideAllocation(replay);
@@ -238,6 +245,7 @@ const make = Effect.gen(function* () {
             policy: replay.policy,
             authorityAvailable: replay.authorityAvailable,
             reservations: replay.reservations,
+            ...(replay.rulesUnchecked ? { rulesUnchecked: true } : {}),
             ...(previousAccountKey ? { previousAccountKey } : {}),
             inventories: replay.inventories.map((i) => ({
               ...i,
@@ -396,14 +404,19 @@ const make = Effect.gen(function* () {
                 "This assignment identity already belongs to an explicit allocation.",
               );
             const current = yield* modelPolicy;
-            const allocationPolicy = yield* policy;
+            const saved = yield* policy;
             if (
               current.version !== input.expectedModelVersion ||
-              allocationPolicy.version !== input.expectedPolicyVersion
+              saved.version !== input.expectedPolicyVersion
             )
               return yield* conflict(
                 "Policy changed while collecting target catalogs. Refresh and retry.",
               );
+            const allocationPolicy = input.coordinatorPolicy ?? saved;
+            const fallback =
+              input.coordinatorPolicy === undefined
+                ? {}
+                : { coordinatorPolicy: input.coordinatorPolicy };
             const effective = input.previewPolicy ?? current;
             const retained =
               prior &&
@@ -488,6 +501,7 @@ const make = Effect.gen(function* () {
                 request: candidate.request,
                 reserve: false,
                 ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
+                ...fallback,
                 stableSelection: true,
               });
               proposals.push({ ...candidate, result });
@@ -523,6 +537,7 @@ const make = Effect.gen(function* () {
                   request: chosen.request,
                   stableSelection: true,
                   ...(input.previewPolicy ? { previewPolicy: allocationPolicy } : {}),
+                  ...fallback,
                 })
               : null;
             const decision: ModelRoutingDecision = {

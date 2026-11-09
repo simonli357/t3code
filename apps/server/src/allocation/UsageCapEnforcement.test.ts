@@ -263,7 +263,7 @@ const makeHarness = (state: HarnessState, input: { readonly checkedAt: string })
   );
 
 it.effect(
-  "stops the worker once, stops a matching master when enabled, and isolates other accounts",
+  "closes a capped account to new worker turns, and master turns when enabled, without stopping anything",
   () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
@@ -278,12 +278,9 @@ it.effect(
         expect(yield* enforcement.check(ThreadId.make("human"))).toBeNull();
         expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
         yield* enforcement.evaluate();
-        expect(
-          state.commands.flatMap((command) =>
-            command.type === "thread.session.stop" ? [command.threadId] : [],
-          ),
-        ).toEqual(["worker"]);
-        expect(state.notifications).toHaveLength(1);
+        // The worker's running turn finishes: nothing is dispatched to it or its master.
+        expect(state.commands).toEqual([]);
+        expect(state.notifications).toEqual([]);
 
         state.policy = {
           ...state.policy,
@@ -295,25 +292,10 @@ it.effect(
         yield* enforcement.evaluate();
         expect(yield* enforcement.check(ThreadId.make("master"))).not.toBeNull();
         yield* enforcement.evaluate();
-        expect(
-          state.commands.flatMap((command) =>
-            command.type === "thread.session.stop" ? [command.threadId] : [],
-          ),
-        ).toEqual(["worker", "master"]);
-        expect(
-          state.commands.filter((command) => command.type === "thread.activity.append"),
-        ).toHaveLength(2);
-        expect(state.notifications).toHaveLength(1);
-        expect(
-          state.commands.some(
-            (command) => "threadId" in command && command.threadId === ThreadId.make("other"),
-          ),
-        ).toBe(false);
-        expect(
-          state.commands.some(
-            (command) => "threadId" in command && command.threadId === ThreadId.make("human"),
-          ),
-        ).toBe(false);
+        expect(yield* enforcement.check(ThreadId.make("other"))).toBeNull();
+        expect(yield* enforcement.check(ThreadId.make("human"))).toBeNull();
+        expect(state.commands).toEqual([]);
+        expect(state.notifications).toEqual([]);
       }).pipe(Effect.provide(layer));
     }),
 );
@@ -339,13 +321,6 @@ it.effect("enforces a reached Claude 5-hour cap independently of the weekly cap"
         usedPercent: 80,
         capPercent: 80,
       });
-      expect(
-        state.commands.filter(
-          (command) =>
-            command.type === "thread.activity.append" &&
-            command.activity.kind === "provider.usage-cap.stopped",
-        ),
-      ).toHaveLength(1);
     }).pipe(Effect.provide(layer));
   }),
 );
@@ -368,12 +343,7 @@ it.effect("shares a cap across provider aliases of the same login identity", () 
       yield* sql`INSERT INTO custom_workers (thread_id, owner_id)
         VALUES ('alias-worker', 'alias-master'), ('other', 'other-master')`;
       yield* enforcement.evaluate();
-      expect(
-        state.commands.flatMap((command) =>
-          command.type === "thread.session.stop" ? [command.threadId] : [],
-        ),
-      ).toEqual(["worker", "alias-worker"]);
-      expect(state.notifications).toHaveLength(2);
+      expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
       expect(yield* enforcement.check(ThreadId.make("alias-worker"))).not.toBeNull();
       expect(yield* enforcement.check(ThreadId.make("other"))).toBeNull();
       expect(
@@ -397,12 +367,8 @@ it.effect(
       const layer = makeHarness(state, { checkedAt });
       yield* Effect.gen(function* () {
         const enforcement = yield* UsageCaps.UsageCapEnforcement;
-        const stops = () =>
-          state.commands.flatMap((command) =>
-            command.type === "thread.session.stop" ? [command.threadId] : [],
-          );
         yield* enforcement.evaluate();
-        expect(stops()).toEqual(["worker"]);
+        expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
 
         state.providers = state.providers.map((value) =>
           value.instanceId === "claude-a" && value.usageLimits
@@ -428,12 +394,11 @@ it.effect(
             : value,
         );
         yield* enforcement.evaluate();
-        expect(stops()).toEqual(["worker", "worker"]);
         expect(yield* enforcement.check(ThreadId.make("worker"))).toMatchObject({
           windowId: "weekly",
           usedPercent: 80,
         });
-        expect(state.notifications).toHaveLength(1);
+        expect(state.commands).toEqual([]);
 
         const recovered = provider("claude-a", "same@example.test", checkedAt, resetsAt);
         state.providers = [
@@ -471,9 +436,7 @@ it.effect.each(["unsupported", "unverified"] as const)(
         const enforcement = yield* UsageCaps.UsageCapEnforcement;
         const sql = yield* SqlClient.SqlClient;
         yield* enforcement.evaluate();
-        expect(
-          state.commands.filter((command) => command.type === "thread.session.stop"),
-        ).toHaveLength(1);
+        expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
 
         state.providers = state.providers.map((value) =>
           value.instanceId === "claude-a" && value.usageLimits
@@ -488,11 +451,7 @@ it.effect.each(["unsupported", "unverified"] as const)(
             : value,
         );
         yield* enforcement.evaluate();
-        expect(
-          state.commands.filter((command) => command.type === "thread.session.stop"),
-        ).toHaveLength(1);
         expect(yield* enforcement.check(ThreadId.make("worker"))).toBeNull();
-        expect(state.notifications).toHaveLength(1);
         expect(
           yield* sql<{ count: number }>`
             SELECT COUNT(*) AS count FROM provider_usage_cap_latches
@@ -502,7 +461,7 @@ it.effect.each(["unsupported", "unverified"] as const)(
     }),
 );
 
-it.effect("does not create a stop from stale telemetry or when the cap is disabled", () =>
+it.effect("does not close an account from stale telemetry or when the cap is disabled", () =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
     const checkedAt = DateTime.formatIso(DateTime.subtract(now, { hours: 1 }));
@@ -547,7 +506,7 @@ it.effect.each(["unsupported", "unverified", "probeFailed"] as const)(
 );
 
 it.effect(
-  "clears enforcement when actions are disabled and stops a new session after re-enable",
+  "clears enforcement when actions are disabled and closes the account again after re-enable",
   () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
@@ -558,14 +517,8 @@ it.effect(
       yield* Effect.gen(function* () {
         const enforcement = yield* UsageCaps.UsageCapEnforcement;
         const sql = yield* SqlClient.SqlClient;
-        const stops = () =>
-          state.commands.filter(
-            (command) =>
-              command.type === "thread.session.stop" &&
-              command.threadId === ThreadId.make("worker"),
-          );
         yield* enforcement.evaluate();
-        expect(stops()).toHaveLength(1);
+        expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
 
         state.policy = {
           ...state.policy,
@@ -602,8 +555,8 @@ it.effect(
         };
         expect(yield* enforcement.check(ThreadId.make("worker"))).not.toBeNull();
         yield* enforcement.evaluate();
-        expect(stops()).toHaveLength(2);
-        expect(state.notifications).toHaveLength(2);
+        expect(state.commands).toEqual([]);
+        expect(state.notifications).toEqual([]);
       }).pipe(Effect.provide(layer));
     }),
 );

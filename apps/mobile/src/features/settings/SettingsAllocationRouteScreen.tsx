@@ -213,7 +213,7 @@ export function SettingsAllocationRouteScreen() {
             <Text className="font-semibold">Hard usage caps</Text>
             <Text>
               Hard caps are enforced by the server for workers and masters on this account. Edit
-              thresholds and stop actions in the web settings page.
+              thresholds and block actions in the web settings page.
             </Text>
             {allocationAccountGroups(snapshot).map((account) => {
               const cap = allocationAccountCap(snapshot.policy, account.key);
@@ -242,7 +242,7 @@ export function SettingsAllocationRouteScreen() {
                       }`
                     : ""}
                   {cap
-                    ? ` Â· stop workers ${cap.stopWorkers ? "on" : "off"} Â· stop masters ${cap.stopMasters ? "on" : "off"}`
+                    ? ` Â· block workers ${cap.stopWorkers ? "on" : "off"} Â· block masters ${cap.stopMasters ? "on" : "off"}`
                     : ""}
                   {capSource === "probeFailed"
                     ? " Â· quota read failed; reached caps stay enforced"

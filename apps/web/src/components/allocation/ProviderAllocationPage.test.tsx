@@ -354,13 +354,13 @@ describe("Provider allocation editor", () => {
 
     expect(savedPolicy.accountCaps).toEqual([]);
     expect(input("SL weekly cap").value).toBe("");
-    expect(input("Stop workers").disabled).toBe(true);
+    expect(input("Block new worker turns").disabled).toBe(true);
     await change("SL weekly cap", "101");
     expect(input("SL weekly cap").getAttribute("aria-invalid")).toBe("true");
     expect(button("Save settings").disabled).toBe(true);
     await change("SL weekly cap", "80");
-    expect((input("Stop workers") as HTMLInputElement).checked).toBe(true);
-    expect((input("Stop masters") as HTMLInputElement).checked).toBe(false);
+    expect((input("Block new worker turns") as HTMLInputElement).checked).toBe(true);
+    expect((input("Block new master turns") as HTMLInputElement).checked).toBe(false);
     await act(() => button("Save settings").click());
     expect(savedPolicy.accountCaps).toHaveLength(1);
     expect(savedPolicy.accountCaps?.[0]).toMatchObject({
@@ -370,7 +370,7 @@ describe("Provider allocation editor", () => {
       stopMasters: false,
     });
 
-    await act(() => input("Stop workers").click());
+    await act(() => input("Block new worker turns").click());
     expect(button("Save settings").disabled).toBe(false);
     expect(container.textContent).toContain("saved but inactive");
     await act(() => button("Save settings").click());
@@ -378,7 +378,7 @@ describe("Provider allocation editor", () => {
       stopWorkers: false,
       stopMasters: false,
     });
-    await act(() => input("Stop masters").click());
+    await act(() => input("Block new master turns").click());
     await act(() => button("Save settings").click());
     expect(savedPolicy.accountCaps?.[0]).toMatchObject({
       stopWorkers: false,
