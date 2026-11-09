@@ -486,16 +486,6 @@ const seed = Effect.fn(function* (prefix: string, index = 0) {
     },
   };
 });
-const confirmedMessage = Effect.fn(function* (
-  service: Workers.WorkerControls["Service"],
-  sender: ThreadId,
-  input: typeof Workers.MessageInput.Type,
-) {
-  const preview = yield* service.message(sender, input);
-  return preview.confirmation
-    ? yield* service.message(sender, { ...input, confirmationToken: preview.confirmation.token })
-    : preview;
-});
 const session = Effect.fn(function* (
   threadId: ThreadId,
   status: "starting" | "running" | "ready" | "error" | "stopped" | "interrupted",
@@ -1686,75 +1676,33 @@ it.layer(testLayer)("persistent workers", (it) => {
       }),
     );
   }
-  it.effect("requires a message-specific confirmation and sends no warning to the recipient", () =>
+  it.effect("sends a peer message on the first call and never duplicates a retry", () =>
     Effect.gen(function* () {
       const service = yield* Workers.WorkerControls;
-      const sql = yield* SqlClient.SqlClient;
-      const sender = yield* seed("confirm-sender");
-      const target = yield* seed("confirm-target");
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const sender = yield* seed("direct-sender");
+      const target = yield* seed("direct-target");
       const input = {
         threadId: target.owner,
         clientRequestId: "review",
         prompt: "Please inspect the shared result.",
       };
-      const warning = yield* service.message(sender.owner, input);
-      expect(warning.state).toBe("confirmation_required");
-      expect(warning.confirmation?.recipient.projectId).toBe("confirm-target");
-      expect(warning.confirmation?.warning).toContain("is it necessary?");
+      const sent = yield* service.message(sender.owner, input);
+      expect(sent).toMatchObject({ state: "dispatched", threadId: target.owner });
+      // A retry in a later minute, or from a caller that still sends a token, is the same message.
+      yield* TestClock.adjust("2 minutes");
       expect(
-        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${warning.requestId}`,
-      ).toHaveLength(0);
-      const wrong = yield* service.message(sender.owner, {
-        ...input,
-        confirmationToken: "invented",
-      });
-      expect(wrong.state).toBe("confirmation_required");
+        (yield* service.message(sender.owner, { ...input, confirmationToken: "legacy" })).requestId,
+      ).toBe(sent.requestId);
       expect(
         (yield* service.message(sender.owner, { ...input, prompt: "changed" }).pipe(Effect.flip))
           .message,
       ).toContain("different message");
-      const confirmed = yield* service.message(sender.owner, {
-        ...input,
-        confirmationToken: warning.confirmation!.token,
-      });
-      expect(confirmed.state).toBe("dispatched");
-      yield* service.message(sender.owner, input);
-      expect(
-        yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${warning.requestId}`,
-      ).toHaveLength(1);
-    }),
-  );
-  it.effect("expires confirmations and requires a new review after recipient changes", () =>
-    Effect.gen(function* () {
-      const service = yield* Workers.WorkerControls;
-      const engine = yield* OrchestrationEngineService;
-      const { owner, source } = yield* seed("confirm-expiry");
-      const input = {
-        threadId: source,
-        clientRequestId: "expiring",
-        prompt: "Coordinate this task.",
-      };
-      const first = yield* service.message(owner, input);
-      yield* TestClock.adjust("11 minutes");
-      const expired = yield* service.message(owner, {
-        ...input,
-        confirmationToken: first.confirmation!.token,
-      });
-      expect(expired.state).toBe("confirmation_required");
-      expect(expired.confirmation!.token).not.toBe(first.confirmation!.token);
-      yield* engine.dispatch({
-        type: "thread.meta.update",
-        commandId: CommandId.make("rename-confirm"),
-        threadId: source,
-        title: "Different recipient title",
-      });
-      const changed = yield* service.message(owner, {
-        ...input,
-        confirmationToken: expired.confirmation!.token,
-      });
-      expect(changed.state).toBe("confirmation_required");
-      expect(changed.confirmation!.recipient.title).toBe("Different recipient title");
-      expect(changed.confirmation!.token).not.toBe(expired.confirmation!.token);
+      const received = Option.getOrThrow(
+        yield* snapshots.getThreadDetailById(target.owner),
+      ).messages.filter((message) => message.text.includes(input.prompt));
+      expect(received).toHaveLength(1);
+      expect(received[0]!.text).toContain(`From session: ${sender.owner}`);
     }),
   );
   it.effect("rechecks queued messages after handoff and permits retired peers", () =>
@@ -1770,7 +1718,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         threadId: target.owner,
         snoozedUntil: "2099-01-01T00:00:00.000Z",
       });
-      const message = yield* confirmedMessage(service, sender.owner, {
+      const message = yield* service.message(sender.owner, {
         threadId: target.owner,
         clientRequestId: "stale",
         prompt: "A queued message.",
@@ -1790,26 +1738,15 @@ it.layer(testLayer)("persistent workers", (it) => {
           state: string;
           error: string;
         }>`SELECT state, error FROM custom_worker_jobs WHERE id = ${message.requestId}`)[0],
-      ).toMatchObject({
-        state: "error",
-        error: expect.stringContaining("changed since confirmation"),
-      });
-      const preview = yield* service.message(target.owner, {
-        threadId: sender.owner,
-        clientRequestId: "old",
-        prompt: "New coordination",
-      });
-      expect(preview.state).toBe("confirmation_required");
-      expect(preview.warning).toContain(next);
+      ).toMatchObject({ state: "completed", error: null });
       const sent = yield* service.message(target.owner, {
         threadId: sender.owner,
         clientRequestId: "old",
         prompt: "New coordination",
-        confirmationToken: preview.confirmation!.token,
       });
       expect(sent.state).toBe("dispatched");
-      expect(sent.warning).toBeUndefined();
-      const received = yield* confirmedMessage(service, sender.owner, {
+      expect(sent.warning).toContain(next);
+      const received = yield* service.message(sender.owner, {
         threadId: target.owner,
         clientRequestId: "back-to-former-master",
         prompt: "Intentional reply",
@@ -2069,12 +2006,11 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect((yield* service.send(sender.owner, input).pipe(Effect.flip)).message).toContain(
         "not a worker owned",
       );
-      expect((yield* confirmedMessage(service, sender.owner, input)).state).toBe("dispatched");
-      yield* confirmedMessage(service, sender.owner, input);
+      expect((yield* service.message(sender.owner, input)).state).toBe("dispatched");
+      yield* service.message(sender.owner, input);
       expect(
-        (yield* confirmedMessage(service, sender.owner, { ...input, prompt: "different" }).pipe(
-          Effect.flip,
-        )).message,
+        (yield* service.message(sender.owner, { ...input, prompt: "different" }).pipe(Effect.flip))
+          .message,
       ).toContain("different message");
       const target = Option.getOrThrow(yield* snapshots.getThreadDetailById(recipient.worker));
       const messages = target.messages.filter((m) => m.text.includes("T3 session message"));
@@ -2097,14 +2033,14 @@ it.layer(testLayer)("persistent workers", (it) => {
       const { owner, source } = yield* seed("peer-idle");
       expect(Option.getOrThrow(yield* snapshots.getThreadShellById(owner)).session).toBeNull();
       expect(
-        (yield* confirmedMessage(service, source, {
+        (yield* service.message(source, {
           threadId: owner,
           clientRequestId: "idle",
           prompt: "Result ready.",
         })).state,
       ).toBe("dispatched");
       expect(
-        (yield* confirmedMessage(service, owner, {
+        (yield* service.message(owner, {
           threadId: source,
           clientRequestId: "reply",
           prompt: "Rerun the dense row.",
@@ -2130,7 +2066,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         createdAt: timestamp,
       });
       const input = { threadId: source, clientRequestId: "held", prompt: "Evidence is ready." };
-      expect((yield* confirmedMessage(service, owner, input)).state).toBe("queued");
+      expect((yield* service.message(owner, input)).state).toBe("queued");
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
           m.text.includes("Evidence is ready"),
@@ -2151,7 +2087,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       );
       // Retries do not wait for the background pass that is recording the delivery.
       yield* restarted.drain();
-      expect((yield* confirmedMessage(restarted, owner, input)).state).toBe("dispatched");
+      expect((yield* restarted.message(owner, input)).state).toBe("dispatched");
       expect(
         Option.getOrThrow(yield* snapshots.getThreadDetailById(source)).messages.filter((m) =>
           m.text.includes("Evidence is ready"),
@@ -2165,7 +2101,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const engine = yield* OrchestrationEngineService;
       const { owner, source } = yield* seed("peer-invalid");
       const input = { threadId: owner, clientRequestId: "invalid", prompt: "Coordination" };
-      expect((yield* confirmedMessage(service, owner, input).pipe(Effect.flip)).message).toContain(
+      expect((yield* service.message(owner, input).pipe(Effect.flip)).message).toContain(
         "another session",
       );
       expect(
@@ -2179,8 +2115,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         threadId: source,
       });
       expect(
-        (yield* confirmedMessage(service, owner, { ...input, threadId: source }).pipe(Effect.flip))
-          .message,
+        (yield* service.message(owner, { ...input, threadId: source }).pipe(Effect.flip)).message,
       ).toContain("archived");
     }),
   );
@@ -2278,13 +2213,112 @@ it.layer(testLayer)("persistent workers", (it) => {
       ).toBe(`[T3 worker report — ${input.title} — 23:55]`);
     }),
   );
-  it.effect("retains the 500-character report wire bound for legacy retries", () =>
-    Effect.sync(() => {
-      const decode = Schema.decodeUnknownExit(Workers.ReportInput);
-      const report = { clientRequestId: "long", outcome: "done" };
-      expect(Exit.isFailure(decode({ ...report, summary: "x".repeat(501) }))).toBe(true);
-      expect(Exit.isSuccess(decode({ ...report, summary: "x".repeat(500) }))).toBe(true);
-      expect(Exit.isSuccess(decode({ ...report, summary: "x".repeat(300) }))).toBe(true);
+  it.effect("accepts an over-long summary whole and shows the master a clipped lead", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("long-summary");
+      yield* service.spawn(owner, input);
+      const summary = "Every stage finished cleanly. ".repeat(40).trim();
+      yield* service.report(
+        worker,
+        yield* decodeReport({ clientRequestId: "long", outcome: "done", summary }),
+      );
+      yield* service.drain();
+      const [message] = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(message!.text).toContain(summary);
+      const lead = presentWorkerMessage(message!)!.entries[0]!.text;
+      expect(lead.length).toBeLessThanOrEqual(301);
+      expect(lead.endsWith("…")).toBe(true);
+    }),
+  );
+  it.effect("derives a stable report ID when the worker gives none", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const { owner, worker, input } = yield* seed("derived-report-id");
+      yield* service.spawn(owner, input);
+      const report = yield* decodeReport({ outcome: "done", summary: "First task finished." });
+      const first = yield* service.report(worker, report);
+      expect((yield* service.report(worker, report)).requestId).toBe(first.requestId);
+      // The same words for the next assignment are a new report.
+      yield* service.send(owner, {
+        threadId: worker,
+        clientRequestId: "second-task",
+        prompt: "second task",
+      });
+      expect((yield* service.report(worker, report)).requestId).not.toBe(first.requestId);
+    }),
+  );
+  it.effect("delivers a review report through the communication window, labelled apart", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const settings = yield* Settings.ServerSettingsService;
+      const { owner, worker, input } = yield* seed("review-report");
+      yield* service.spawn(owner, input);
+      yield* settings.updateSettings({ workerCommunicationWindowMinutes: 15 });
+      expect(
+        (yield* service
+          .report(worker, { outcome: "blocked", summary: "Please merge the branch." })
+          .pipe(Effect.flip)).code,
+      ).toBe("worker_communication_window");
+      yield* service.report(worker, { outcome: "review", summary: "Branch pushed; please merge." });
+      yield* settings.updateSettings({ workerCommunicationWindowMinutes: 0 });
+      yield* service.drain();
+      const [message] = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+      expect(message!.text).toContain(`Worker: ${worker}\nOutcome: done, needs review\n`);
+      expect(message!.text).toContain(WORKER_REVIEW_DONE);
+      expect(presentWorkerMessage(message!)).toMatchObject({
+        attention: false,
+        entries: [{ status: { label: "Done — needs review", attention: false } }],
+      });
+    }),
+  );
+  it.effect("states the worker's context size and advises a fresh worker over the threshold", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const settings = yield* Settings.ServerSettingsService;
+      const sql = yield* SqlClient.SqlClient;
+      const snapshots = yield* ProjectionSnapshotQuery;
+      const { owner, worker, input } = yield* seed("context-size");
+      yield* service.spawn(owner, input);
+      const report = (summary: string) => service.report(worker, { outcome: "done", summary });
+      const context = (id: string, usedTokens: number, createdAt: string) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${id}, ${worker}, NULL, 'info', 'context-window.updated', 'Context window updated', ${JSON.stringify({ usedTokens })}, ${createdAt})`;
+      yield* report("Context unknown.");
+      yield* context("context-small", 150_400, "2026-10-01T00:00:00.000Z");
+      yield* report("Context small.");
+      yield* context("context-large", 231_000, "2026-10-01T01:00:00.000Z");
+      yield* report("Context large.");
+      yield* settings.updateSettings({ workerRenewal: { workerContextTokens: 300_000 } });
+      yield* report("Context allowed.").pipe(
+        Effect.ensuring(
+          settings
+            .updateSettings({ workerRenewal: { workerContextTokens: 200_000 } })
+            .pipe(Effect.ignore),
+        ),
+      );
+      yield* service.drain();
+      const texts = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages.map(
+        (message) => message.text,
+      );
+      const line = (summary: string) =>
+        texts
+          .flatMap((text) => text.split("\n\n[T3 worker report"))
+          .find((text) => text.includes(summary))
+          ?.split("\n")
+          .find((line) => line.startsWith("Worker context"));
+      expect(line("Context unknown.")).toBeUndefined();
+      expect(line("Context small.")).toBe("Worker context: 150k tokens.");
+      expect(line("Context large.")).toBe(
+        "Worker context: 231k tokens. Over the 200k threshold: start a fresh worker for further unrelated work.",
+      );
+      expect(line("Context allowed.")).toBe("Worker context: 231k tokens.");
+      // The size and advice are T3's words, so the short view leaves them out.
+      for (const message of Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages)
+        for (const entry of presentWorkerMessage(message)!.entries)
+          expect(entry.text).not.toContain("Worker context");
     }),
   );
   it.effect("replays a legacy 500-character report without truncation or duplicate delivery", () =>
@@ -2470,7 +2504,7 @@ it.layer(testLayer)("persistent workers", (it) => {
       const body =
         "Please rescore against current main.\n\nReport: C:\\jobs\\x\\evidence\\r.md\nALPHA/BETA/DISABLED unchanged.";
       const input = { threadId: recipient.owner, clientRequestId: "concise-peer", prompt: body };
-      yield* confirmedMessage(service, sender.owner, input);
+      yield* service.message(sender.owner, input);
       // A retry in a later minute, after a rename, is the same message and sends nothing new.
       yield* (yield* OrchestrationEngineService).dispatch({
         type: "thread.meta.update",
@@ -2479,7 +2513,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         title: "renamed_sender",
       });
       yield* TestClock.adjust("3 minutes");
-      expect((yield* confirmedMessage(service, sender.owner, input)).state).toBe("dispatched");
+      expect((yield* service.message(sender.owner, input)).state).toBe("dispatched");
       const messages = Option.getOrThrow(
         yield* snapshots.getThreadDetailById(recipient.owner),
       ).messages.filter((m) => m.text.includes("T3 session message"));
@@ -3327,7 +3361,7 @@ it.layer(testLayer)("persistent workers", (it) => {
         summary: "Finished while the queue was busy.",
       });
       expect(report).toMatchObject({ state: "queued", held: false });
-      const message = yield* confirmedMessage(service, source, {
+      const message = yield* service.message(source, {
         threadId: owner,
         clientRequestId: "while-busy",
         prompt: "Peer note while the queue was busy.",
@@ -3698,20 +3732,6 @@ it.layer(mcpLayer)("worker MCP", (it) => {
               senderThreadId: "forged-sender",
             })).isError,
           ).not.toBe(true);
-          const preview = yield* (yield* Workers.WorkerControls).message(owner, {
-            threadId: peer.owner,
-            clientRequestId: "peer-auth",
-            prompt: "Coordinate with the actual sender.",
-          });
-          expect(
-            (yield* call("t3_session_send", {
-              threadId: peer.owner,
-              clientRequestId: "peer-auth",
-              prompt: "Coordinate with the actual sender.",
-              confirmationToken: preview.confirmation!.token,
-              senderThreadId: "forged-sender",
-            })).isError,
-          ).not.toBe(true);
           const peerSnapshot = Option.getOrThrow(
             yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(peer.owner),
           );
@@ -3958,18 +3978,11 @@ it.effect("messages a session in a linked environment, holding it while offline"
       prompt: "Is the shared build green?",
       environment: "beta",
     };
-    const preview = yield* alphaWorkers.message(sender, input);
-    expect(preview.state).toBe("confirmation_required");
     offline.add("env-beta");
-    expect(
-      (yield* alphaWorkers.message(sender, {
-        ...input,
-        confirmationToken: preview.confirmation!.token,
-      })).state,
-    ).toBe("queued");
+    expect((yield* alphaWorkers.message(sender, input)).state).toBe("queued");
     offline.delete("env-beta");
     yield* alphaWorkers.drain();
-    expect(yield* confirmedMessage(alphaWorkers, sender, input)).toMatchObject({
+    expect(yield* alphaWorkers.message(sender, input)).toMatchObject({
       threadId: recipient,
       state: "dispatched",
     });
@@ -3979,7 +3992,7 @@ it.effect("messages a session in a linked environment, holding it while offline"
     );
     expect(received).toHaveLength(1);
     expect(received[0]).toContain(`From session: ${sender} in environment alpha`);
-    yield* confirmedMessage(betaWorkers, recipient, {
+    yield* betaWorkers.message(recipient, {
       threadId: sender,
       clientRequestId: "reply",
       prompt: "Green on main.",
@@ -4013,7 +4026,7 @@ it.effect("names a linked sender and accepts a delivery repeated in a later minu
     };
     // Beta stores the message but its reply is lost, so alpha delivers it again later.
     lostReplies.add("env-beta:deliver");
-    yield* confirmedMessage(alphaWorkers, sender, input);
+    yield* alphaWorkers.message(sender, input);
     yield* TestClock.adjust("3 minutes");
     yield* alphaWorkers.drain();
     expect(
@@ -4347,26 +4360,25 @@ it.effect("routes a linked worker's reports to the master's handoff successor", 
 );
 
 it.effect(
-  "refuses unconfirmed linked delivery and reclaims a linked worker without restarting it",
+  "accepts a direct linked delivery and reclaims a linked worker without restarting it",
   () =>
     Effect.gen(function* () {
       const { alpha, beta, alphaWorkers, betaWorkers, alphaSnapshots, messages } =
         yield* linkedPair;
       const a = yield* seed("reclaim-linked-alpha").pipe(Effect.provide(alpha));
       const b = yield* seed("reclaim-linked-beta").pipe(Effect.provide(beta));
-      const rejected = yield* betaWorkers
+      // A linked server that sends directly attaches no confirmed policy.
+      const accepted = yield* betaWorkers
         .receive("env-alpha", {
           _tag: "deliver",
-          jobId: "unconfirmed",
+          jobId: "direct",
           kind: "message",
           senderThreadId: a.owner,
           recipientThreadId: b.owner,
-          prompt: "Bypass attempt",
+          prompt: "Sent on the first call",
         })
         .pipe(Effect.exit);
-      expect(Exit.isFailure(rejected)).toBe(true);
-      if (Exit.isFailure(rejected))
-        expect(String(rejected.cause)).toContain("requires confirmation");
+      expect(Exit.isSuccess(accepted)).toBe(true);
       const worker = ThreadId.make("reclaim-linked-worker");
       yield* alphaWorkers.spawn(a.owner, { ...b.input, threadId: worker, environment: "beta" });
       const next = ThreadId.make("reclaim-linked-next");

@@ -103,7 +103,8 @@ export const RemoteSpawnInput = Schema.Struct({
 export const MessageInput = Schema.Struct({
   ...SendInput.fields,
   environment: Schema.optional(TrimmedNonEmptyString),
-  confirmationToken: Schema.optional(TrimmedNonEmptyString),
+  /** Ignored legacy field retained for older callers. */
+  confirmationToken: Schema.optional(Schema.String),
 });
 const SessionAddress = Schema.Struct({ environmentId: Schema.String, threadId: ThreadId });
 const SessionInfo = Schema.Struct({
@@ -119,18 +120,8 @@ export const SessionMessageResult = Schema.Struct({
   warning: Schema.optional(Schema.String),
   requestId: Schema.String,
   threadId: ThreadId,
-  state: Schema.Literals(["confirmation_required", "queued", "dispatched", "error"]),
+  state: Schema.Literals(["queued", "dispatched", "error"]),
   error: Schema.NullOr(Schema.String),
-  confirmation: Schema.optional(
-    Schema.Struct({
-      token: Schema.String,
-      expiresAt: Schema.String,
-      warning: Schema.String,
-      sender: SessionInfo,
-      recipient: SessionInfo,
-      messagePreview: Schema.String,
-    }),
-  ),
 });
 export const ReclaimInput = Schema.Struct({
   clientRequestId: TrimmedNonEmptyString,
@@ -144,12 +135,14 @@ export const ReclaimResult = Schema.Struct({
   userMessageId: Schema.NullOr(MessageId),
 });
 export const ReportInput = Schema.Struct({
-  clientRequestId: TrimmedNonEmptyString,
-  outcome: Schema.Literals(["done", "blocked"]),
+  /** Omitted, the server derives one from the assignment and the report's content. */
+  clientRequestId: Schema.optional(TrimmedNonEmptyString),
+  /** `review` is finished work that needs the master's review or merge; it is delivered like `done`. */
+  outcome: Schema.Literals(["done", "review", "blocked"]),
   /** Who must act on a blocker. Defaults to the master. */
   needs: Schema.optional(Schema.Literals(["user", "master"])),
-  /** New reports should stay within 300; retain the wire bound for accepted legacy retries. */
-  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  /** New reports should stay within 300; a longer one is kept whole and clients clip what they show first. */
+  summary: TrimmedNonEmptyString,
   evidence: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(300))),
 });
 export const ReadInput = Schema.Struct({
@@ -284,17 +277,6 @@ type Authority = {
   retired_sequence: number;
   revision: number;
 };
-type Confirmation = {
-  id: string;
-  sender_id: string;
-  target_id: string;
-  prompt_hash: string;
-  token: string;
-  sender_state: string;
-  target_state: string;
-  expires_at: string;
-  confirmed: number;
-};
 type Worker = {
   thread_id: string;
   owner_id: string | null;
@@ -376,10 +358,7 @@ const decodeHosts = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(
 const decodePlan = Schema.decodeUnknownSync(Schema.fromJsonString(Plan));
 const encodeUnknown = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodePolicy = Schema.encodeSync(Schema.fromJsonString(MessagePolicy));
-const encodeSessionInfo = Schema.encodeSync(Schema.fromJsonString(SessionInfo));
-const decodePolicy = Schema.decodeUnknownSync(Schema.fromJsonString(MessagePolicy));
 const decodeSessionInfo = Schema.decodeUnknownSync(SessionInfo);
-const decodeSessionInfoFromJson = Schema.decodeUnknownSync(Schema.fromJsonString(SessionInfo));
 const decodeOwnershipResult = Schema.decodeUnknownSync(
   Schema.fromJsonString(SessionOwnershipResult),
 );
@@ -416,6 +395,12 @@ const workLine = (who: string, work: WorkTime, threshold: number, advice: string
   `${who}: ${work.hours.toFixed(1)} h over ${work.turns} turn${work.turns === 1 ? "" : "s"}, ${work.compactions} compaction${work.compactions === 1 ? "" : "s"}.` +
   (threshold > 0 && work.hours >= threshold
     ? ` Over the ${threshold} h renewal threshold: ${advice}`
+    : "");
+/** The worker's context size; from `threshold` tokens on, the master is told to start afresh. */
+const contextLine = (tokens: number, threshold: number) =>
+  `Worker context: ${Math.round(tokens / 1000)}k tokens.` +
+  (threshold > 0 && tokens >= threshold
+    ? ` Over the ${Math.round(threshold / 1000)}k threshold: start a fresh worker for further unrelated work.`
     : "");
 const decodeWorkerRenewal = Schema.decodeSync(WorkerRenewalSettings);
 // REVIEW_DONE and REVIEW_BLOCKED, the instructions a master receives with each report, live
@@ -492,7 +477,7 @@ const CommunicationStatus = Schema.Struct({
 });
 const decodeCommunicationStatus = Schema.decodeUnknownSync(CommunicationStatus);
 const communicationRefusal = (remainingMs: number, pendingDelivery: boolean) =>
-  `Worker communication window: ${Math.ceil(remainingMs / 1000)} seconds remaining${pendingDelivery ? " after the queued assignment starts" : ""}. What would you do if you were the master or user? Make reasonable decisions within your authority, investigate alternatives, and continue. Report done only when the entire assignment is finished. Only an explicit t3_worker_report outcome done may pass during this window; blockers and requests for the user or master cannot pass.`;
+  `Worker communication window: ${Math.ceil(remainingMs / 1000)} seconds remaining${pendingDelivery ? " after the queued assignment starts" : ""}. What would you do if you were the master or user? Make reasonable decisions within your authority, investigate alternatives, and continue. Report done only when the entire assignment is finished. Only an explicit t3_worker_report outcome done or review may pass during this window; blockers and requests for the user or master cannot pass.`;
 const decodePeerRequest = Schema.decodeUnknownSync(PeerRequest);
 const encodePeerRequest = Schema.encodeSync(PeerRequest);
 const decodeWorkerResult = Schema.decodeUnknownSync(WorkerResult);
@@ -810,7 +795,7 @@ const make = Effect.gen(function* () {
       try: () => decodeSessionInfo(raw),
       catch: () =>
         new WorkerError({
-          message: "The linked server does not support confirmed session messaging.",
+          message: "The linked server does not support session messaging.",
         }),
     });
   });
@@ -834,87 +819,6 @@ const make = Effect.gen(function* () {
       });
     }
     return { sender, recipient };
-  });
-  const validateMessage = Effect.fn(function* (job: Job) {
-    if (!job.policy_json)
-      return yield* new WorkerError({
-        message:
-          "This peer message needs sender confirmation before delivery. Send it again with a new request ID to review the warning.",
-      });
-    const policy = yield* messagePolicy(job.worker_id, job.target_id);
-    if (job.policy_json !== encodePolicy(policy))
-      return yield* new WorkerError({
-        message:
-          "The sender or recipient changed since confirmation. Review a new warning before sending.",
-      });
-    return policy;
-  });
-  const confirmMessage = Effect.fn(function* (
-    senderId: ThreadId,
-    targetId: string,
-    input: typeof MessageInput.Type,
-  ) {
-    const id = `message:${senderId}:${input.clientRequestId}`;
-    const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(input.prompt));
-    const promptHash = Buffer.from(digest).toString("hex");
-    let saved =
-      (yield* sql<Confirmation>`SELECT * FROM custom_session_message_confirmations WHERE id = ${id}`)[0];
-    if (saved && (saved.target_id !== targetId || saved.prompt_hash !== promptHash))
-      return yield* new WorkerError({
-        message: "This request ID already belongs to a different message. Use a new ID.",
-      });
-    const existing = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`)[0];
-    // Identical retries of accepted messages return their receipt, never resend.
-    if (existing && saved?.confirmed) return { id, policy: undefined };
-    const currentTime = yield* DateTime.now;
-    const nowMs = DateTime.toEpochMillis(currentTime);
-    const policy = yield* messagePolicy(senderId, targetId).pipe(
-      Effect.catchTag("PeerUnavailable", (error) =>
-        Effect.gen(function* () {
-          // A previously reviewed remote recipient may go offline before the
-          // confirmation arrives. Delivery still rechecks both ends when online.
-          if (
-            !saved ||
-            input.confirmationToken !== saved.token ||
-            Date.parse(saved.expires_at) <= nowMs
-          )
-            return yield* error;
-          const sender = yield* localSessionInfo(senderId);
-          if (encodeSessionInfo(sender) !== saved.sender_state) return yield* error;
-          return { sender, recipient: decodeSessionInfoFromJson(saved.target_state) };
-        }),
-      ),
-    );
-    const senderState = encodeSessionInfo(policy.sender);
-    const targetState = encodeSessionInfo(policy.recipient);
-    if (
-      !saved ||
-      Date.parse(saved.expires_at) <= nowMs ||
-      saved.sender_state !== senderState ||
-      saved.target_state !== targetState
-    ) {
-      const token = yield* crypto.randomUUIDv4;
-      const expiresAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 10 }));
-      yield* sql`INSERT INTO custom_session_message_confirmations
-        (id, sender_id, target_id, prompt_hash, token, sender_state, target_state, expires_at)
-        VALUES (${id}, ${senderId}, ${targetId}, ${promptHash}, ${token}, ${senderState}, ${targetState}, ${expiresAt})
-        ON CONFLICT(id) DO UPDATE SET token = excluded.token, sender_state = excluded.sender_state,
-          target_state = excluded.target_state, expires_at = excluded.expires_at, confirmed = 0`;
-      saved =
-        (yield* sql<Confirmation>`SELECT * FROM custom_session_message_confirmations WHERE id = ${id}`)[0]!;
-    } else if (input.confirmationToken === saved.token) {
-      return { id, policy };
-    }
-    return {
-      id,
-      confirmation: {
-        token: saved.token,
-        expiresAt: saved.expires_at,
-        warning: `You are messaging ${policy.recipient.title} (${policy.recipient.threadId}) in project ${policy.recipient.projectTitle}, outside your master/worker relationship. Are you sure this is what you want to do, and is it necessary? Check the recipient, project and relevance to your user's task before confirming.`,
-        ...policy,
-        messagePreview: Array.from(input.prompt).slice(0, 500).join(""),
-      },
-    };
   });
   // Sums started turns, counting only the latest one while it runs, then removes
   // long tool waits. Undefined for a thread that is not in this environment.
@@ -1380,26 +1284,61 @@ const make = Effect.gen(function* () {
         return yield* new WorkerError({
           message: "This session is not a managed T3 worker; it has no master to report to.",
         });
-      if (
-        input.outcome !== "done" &&
-        !(yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${`report:${workerId}:${input.clientRequestId}`}`)
-          .length
-      )
-        yield* assertCommunicationAllowed(workerId);
-      const source = yield* thread(workerId);
+      // A review is finished work: it is stored and delivered as done.
+      const kind = input.outcome === "blocked" ? "blocked" : "done";
       const outcome =
         input.outcome === "done"
           ? "done"
-          : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
-      const body = `\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${input.outcome === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
-      const reportId = `report:${workerId}:${input.clientRequestId}`;
+          : input.outcome === "review"
+            ? "done, needs review"
+            : `blocked, needs ${input.needs === "user" ? "the user" : "the master"}`;
+      const body = `\nWorker: ${workerId}\nOutcome: ${outcome}\n${input.summary}${input.evidence ? `\nEvidence: ${input.evidence}` : ""}\n\n${kind === "done" ? REVIEW_DONE : REVIEW_BLOCKED}`;
+      let requestId = input.clientRequestId;
+      if (!requestId) {
+        // The same result for the same assignment is the same report, so a retry never duplicates it.
+        const assignment = (yield* sql<{
+          id: string;
+        }>`SELECT id FROM custom_worker_jobs WHERE worker_id = ${workerId} AND kind = 'work' ORDER BY rowid DESC LIMIT 1`)[0]
+          ?.id;
+        const digest = yield* crypto.digest(
+          "SHA-256",
+          new TextEncoder().encode(`${assignment ?? ""}${body}`),
+        );
+        requestId = Buffer.from(digest).toString("hex").slice(0, 32);
+      }
+      const reportId = `report:${workerId}:${requestId}`;
+      if (
+        kind === "blocked" &&
+        !(yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${reportId}`).length
+      )
+        yield* assertCommunicationAllowed(workerId);
+      const source = yield* thread(workerId);
       const limits = yield* renewal;
       const work = yield* workOf(workerId, limits);
+      const context = (yield* sql<{
+        used: number | null;
+      }>`SELECT json_extract(payload_json, '$.usedTokens') AS used FROM projection_thread_activities
+        WHERE kind = 'context-window.updated' AND thread_id = ${workerId} ORDER BY created_at DESC LIMIT 1`)[0]
+        ?.used;
+      const workerLines = [
+        ...(work
+          ? [
+              workLine(
+                "Worker working time",
+                work,
+                limits.workerHours * work.renewalScale,
+                limits.workerHardHours === null
+                  ? "Consider renewing this worker; this warning does not stop work."
+                  : `Automatic renewal is configured at ${limits.workerHardHours * work.renewalScale} h and waits for a safe turn boundary.`,
+              ),
+            ]
+          : []),
+        ...(typeof context === "number" ? [contextLine(context, limits.workerContextTokens)] : []),
+      ];
       // A remote master adds its own line when the report arrives there.
       const usage =
-        (work
-          ? `\n\n${workLine("Worker working time", work, limits.workerHours * work.renewalScale, limits.workerHardHours === null ? "Consider renewing this worker; this warning does not stop work." : `Automatic renewal is configured at ${limits.workerHardHours * work.renewalScale} h and waits for a safe turn boundary.`)}`
-          : "") + (parsePeerRef(worker.owner_id) ? "" : yield* masterLine(worker.owner_id));
+        (workerLines.length ? `\n\n${workerLines.join("\n")}` : "") +
+        (parsePeerRef(worker.owner_id) ? "" : yield* masterLine(worker.owner_id));
       const createdAt = yield* now;
       const turnId = source.session?.activeTurnId ?? source.latestTurn?.turnId ?? null;
       // Persisted without the queue lock so a report is never lost behind a long
@@ -1408,7 +1347,7 @@ const make = Effect.gen(function* () {
       yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
         SELECT ${reportId}, thread_id, CASE WHEN json_extract(plan_json, '$.organizationHosts') IS NOT NULL
           AND json_extract(plan_json, '$.authorityEnvironmentId') != ${(yield* peers.localEnvironment).environmentId}
-          THEN 'peer:' || json_extract(plan_json, '$.authorityEnvironmentId') || ':' || thread_id ELSE owner_id END, ${input.outcome}, ${reportHeader(source.title, createdAt) + body + usage}, ${createdAt}, ${turnId}
+          THEN 'peer:' || json_extract(plan_json, '$.authorityEnvironmentId') || ':' || thread_id ELSE owner_id END, ${kind}, ${reportHeader(source.title, createdAt) + body + usage}, ${createdAt}, ${turnId}
         FROM custom_workers WHERE thread_id = ${workerId} AND owner_id IS NOT NULL
         ON CONFLICT(id) DO NOTHING`;
       const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${reportId}`)[0];
@@ -1416,7 +1355,7 @@ const make = Effect.gen(function* () {
       // while retaining its saved header, including reports from before timestamps.
       if (
         !job ||
-        job.kind !== input.outcome ||
+        job.kind !== kind ||
         !job.prompt.slice(job.prompt.indexOf(`\nWorker: ${workerId}\n`)).startsWith(body)
       )
         return yield* new WorkerError({
@@ -1430,11 +1369,10 @@ const make = Effect.gen(function* () {
   const submitMessage = Effect.fn("WorkerControls.message")(function* (
     senderId: ThreadId,
     input: typeof SendInput.Type,
-    policy: typeof MessagePolicy.Type,
   ) {
     if (senderId === input.threadId)
       return yield* new WorkerError({ message: "Choose another session as the recipient." });
-    yield* thread(senderId);
+    const sender = yield* thread(senderId);
     const target = yield* thread(input.threadId);
     if (target.archivedAt !== null)
       return yield* new WorkerError({
@@ -1447,12 +1385,11 @@ const make = Effect.gen(function* () {
       "message",
       formatPeerMessage({
         senderId,
-        senderTitle: policy.sender.title,
+        senderTitle: sender.title,
         time: reportClock(yield* now),
         body: input.prompt,
       }),
     );
-    yield* sql`UPDATE custom_worker_jobs SET policy_json = ${encodePolicy(policy)} WHERE id = ${job.id}`;
     watched.add(senderId);
     watched.add(target.id);
     return job.id;
@@ -1487,9 +1424,12 @@ const make = Effect.gen(function* () {
         const [head, tail = ""] = job.prompt.split(`\n\n${REVIEW_DONE}`);
         const lines = tail.split("\n");
         return {
-          body: [head, ...lines.filter((line) => line.startsWith("Worker working time"))].join(
-            "\n",
-          ),
+          body: [
+            head,
+            ...lines.filter(
+              (line) => line.startsWith("Worker working time") || line.startsWith("Worker context"),
+            ),
+          ].join("\n"),
           master: lines.find((line) => line.startsWith("Your working time as master")),
         };
       });
@@ -1619,20 +1559,20 @@ const make = Effect.gen(function* () {
           continue;
         }
       }
-      // Recheck at delivery: a queued message cannot outlive its confirmed
-      // ownership/project context. Internal successor startup is not peer mail.
+      // Recheck at delivery: a queued message cannot reach a session that has since
+      // become the sender's worker or master. Internal successor startup is not peer mail.
+      let policy: typeof MessagePolicy.Type | undefined;
       if (job.kind === "message" && !job.id.startsWith("handoff-start:")) {
-        const approved = yield* validateMessage(job).pipe(
-          Effect.as(true),
+        policy = yield* messagePolicy(job.worker_id, job.target_id).pipe(
           Effect.catch((cause) =>
             Effect.gen(function* () {
               const transient = "_tag" in cause && cause._tag === "PeerUnavailable";
               yield* sql`UPDATE custom_worker_jobs SET state = ${transient ? "queued" : "error"}, error = ${failure(cause).message} WHERE id = ${job.id}`;
-              return false;
+              return undefined;
             }),
           ),
         );
-        if (!approved) continue;
+        if (!policy) continue;
       }
       const remote = parsePeerRef(job.target_id);
       if (remote) {
@@ -1666,7 +1606,8 @@ const make = Effect.gen(function* () {
               senderThreadId: ThreadId.make(job.worker_id),
               recipientThreadId: remote.threadId,
               prompt: job.prompt,
-              ...(job.policy_json ? { policy: decodePolicy(job.policy_json) } : {}),
+              // Servers that still confirm peer messages compare this with their own check.
+              ...(policy ? { policy } : {}),
               ...(relocated ? { relayedFor: remote.threadId } : {}),
               ...(forwardedFrom ? { forwardedFrom } : {}),
             }),
@@ -2104,7 +2045,6 @@ const make = Effect.gen(function* () {
     senderId: ThreadId,
     environmentId: string,
     input: typeof SendInput.Type,
-    policy: typeof MessagePolicy.Type,
   ) {
     yield* thread(senderId);
     const job = yield* enqueue(
@@ -2114,7 +2054,6 @@ const make = Effect.gen(function* () {
       "message",
       input.prompt,
     );
-    yield* sql`UPDATE custom_worker_jobs SET policy_json = ${encodePolicy(policy)} WHERE id = ${job.id}`;
     watched.add(senderId);
     return job.id;
   }, Effect.mapError(failure));
@@ -4084,10 +4023,6 @@ const make = Effect.gen(function* () {
             peerRef(from, request.senderThreadId),
             request.recipientThreadId,
           );
-          if (!request.policy || encodePolicy(request.policy) !== encodePolicy(policy))
-            return yield* new WorkerError({
-              message: "Peer message requires confirmation for the current sender and recipient.",
-            });
           const recipient = yield* thread(request.recipientThreadId);
           if (recipient.archivedAt !== null)
             return yield* new WorkerError({
@@ -4349,32 +4284,39 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const peer = yield* peerFor(input.environment);
         const targetId = peer ? peerRef(peer.environmentId, input.threadId) : input.threadId;
-        const checked = yield* confirmMessage(sender, targetId, input);
-        if (checked.confirmation)
-          return {
-            requestId: checked.id,
-            threadId: input.threadId,
-            state: "confirmation_required" as const,
-            error: null,
-            confirmation: checked.confirmation,
-          };
-        if (checked.policy) {
-          const policy = checked.policy;
-          yield* sql.withTransaction(
-            Effect.gen(function* () {
-              yield* sql`UPDATE custom_session_message_confirmations SET confirmed = 1 WHERE id = ${checked.id}`;
-              if (peer) yield* submitRemoteMessage(sender, peer.environmentId, input, policy);
-              else yield* submitMessage(sender, input, policy);
-            }),
-          );
+        const id = `message:${sender}:${input.clientRequestId}`;
+        const existing = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`)[0];
+        // Identical retries of accepted messages return their receipt, never resend.
+        if (existing) {
+          const same = peer
+            ? existing.prompt === input.prompt
+            : afterFirstLine(existing.prompt) ===
+              afterFirstLine(
+                formatPeerMessage({
+                  senderId: sender,
+                  senderTitle: "",
+                  time: "",
+                  body: input.prompt,
+                }),
+              );
+          if (existing.target_id !== targetId || !same)
+            return yield* new WorkerError({
+              message: "This request ID already belongs to a different message. Use a new ID.",
+            });
+          return id;
         }
-        return checked.id;
+        // An offline linked recipient is checked when the message is delivered.
+        yield* messagePolicy(sender, targetId).pipe(
+          Effect.catchTag("PeerUnavailable", () => Effect.void),
+        );
+        if (peer) yield* submitRemoteMessage(sender, peer.environmentId, input);
+        else yield* submitMessage(sender, input);
+        return id;
       }).pipe(
         messageLock.withPermit,
         Effect.tap(() => kick()),
         Effect.flatMap((result) =>
           Effect.gen(function* () {
-            if (typeof result !== "string") return result;
             const rows = yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${result}`;
             const job = rows[0]!;
             return {

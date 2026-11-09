@@ -410,7 +410,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Session renewal",
     to: "/settings/general",
     scope: "environment-defaults",
-    searchTerms: ["master worker soft hard warning renewal working hours time limit"],
+    searchTerms: [
+      "master worker soft hard warning renewal working hours time limit context tokens",
+    ],
   },
   {
     id: "base-session-prompt",

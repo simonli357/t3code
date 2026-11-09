@@ -10,6 +10,13 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).toContain("call list_thread_pull_requests and link any PR");
   });
 
+  it("names the report tool as Claude Code lists it and offers the review outcome", () => {
+    const instructions = buildRuntimeInstructions({ harness: "Claude Code" });
+    expect(instructions).toContain("mcp__t3-code__t3_worker_report");
+    expect(instructions).toContain("ToolSearch");
+    expect(instructions).toContain('"review" when the finished work needs');
+  });
+
   it("keeps known model and effort metadata on one line", () => {
     expect(
       buildRuntimeInstructions({
