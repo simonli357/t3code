@@ -115,7 +115,7 @@ function OptionalCapControl({
     <label className="grid min-w-0 gap-1">
       <span className="font-medium">{name}</span>
       <span id={`${id}-availability`} className="text-xs text-muted-foreground">
-        % of allowance Â· blank disables this cap
+        % of allowance · blank disables this cap
       </span>
       <input
         className={field}
@@ -430,10 +430,10 @@ export function AllocationControls({
             return (
               <fieldset key={group.key} className="min-w-0 rounded-lg border p-3">
                 <legend className="px-1 font-semibold">
-                  {group.label} Â· {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
+                  {group.label} · {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
                 </legend>
                 <p className="mb-3 text-xs text-muted-foreground">
-                  {group.hosts.join(", ")} Â·{" "}
+                  {group.hosts.join(", ")} ·{" "}
                   {group.members[0]?.accountKey === null
                     ? "unknown identity; isolated to this computer account"
                     : "known identity shared across linked computers"}

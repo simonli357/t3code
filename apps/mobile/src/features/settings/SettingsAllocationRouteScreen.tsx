@@ -235,17 +235,17 @@ export function SettingsAllocationRouteScreen() {
                     ? "disabled"
                     : `${cap.weeklyPercent}%`}
                   {account.driver === "claudeAgent"
-                    ? ` Â· Claude 5-hour ${
+                    ? ` · Claude 5-hour ${
                         cap?.fiveHourPercent === null || cap?.fiveHourPercent === undefined
                           ? "disabled"
                           : `${cap.fiveHourPercent}%`
                       }`
                     : ""}
                   {cap
-                    ? ` Â· block workers ${cap.stopWorkers ? "on" : "off"} Â· block masters ${cap.stopMasters ? "on" : "off"}`
+                    ? ` · block workers ${cap.stopWorkers ? "on" : "off"} · block masters ${cap.stopMasters ? "on" : "off"}`
                     : ""}
                   {capSource === "probeFailed"
-                    ? " Â· quota read failed; reached caps stay enforced"
+                    ? " · quota read failed; reached caps stay enforced"
                     : ""}
                 </Text>
               );
