@@ -1,26 +1,34 @@
-import { useId } from "react";
+import { useId, type ReactNode } from "react";
 import {
-  allocationAccountRule,
+  allocationWorkerModel,
   defaultAllocationPolicy,
   PROVIDER_DISPLAY_NAMES,
-  type AllocationAccount,
   type AllocationAccountCap,
   type AllocationAccountRule,
   type AllocationPolicy,
   type AllocationSnapshot,
+  type AllocationWorkerModel,
 } from "@t3tools/contracts";
 import {
-  allocationAccountCap,
+  allocationAccountRows,
   allocationCurveFields,
+  allocationCurveValue,
   allocationEstimateFields,
   allocationAccountGroups,
+  allocationFamilies,
   allocationModelRows,
   allocationRateEvidence,
-  allocationSubscriptionCapSource,
+  allocationReadingAge,
   allocationSupportsFiveHourCap,
-  allocationSupportsSubscriptionCaps,
+  allocationWorkerModelChoices,
+  withAllocationTarget,
+  type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 
 const field =
   "block w-full min-w-0 rounded border bg-background px-2 py-2 text-sm disabled:opacity-60";
@@ -96,61 +104,8 @@ function NumericControl({
   );
 }
 
-function OptionalCapControl({
-  name,
-  value,
-  help,
-  disabled,
-  onChange,
-}: {
-  name: string;
-  value: number | null;
-  help: string;
-  disabled: boolean;
-  onChange: (value: number | null) => void;
-}) {
-  const id = useId();
-  const invalid = value !== null && (!Number.isFinite(value) || value < 0 || value > 100);
-  return (
-    <label className="grid min-w-0 gap-1">
-      <span className="font-medium">{name}</span>
-      <span id={`${id}-availability`} className="text-xs text-muted-foreground">
-        % of allowance · blank disables this cap
-      </span>
-      <input
-        className={field}
-        aria-label={`${name} current`}
-        aria-describedby={`${id}-availability ${id}-help`}
-        type="number"
-        min={0}
-        max={100}
-        step={0.1}
-        value={value ?? ""}
-        aria-invalid={invalid}
-        disabled={disabled}
-        placeholder="Disabled"
-        onChange={(event) =>
-          onChange(
-            event.currentTarget.value === "" || !Number.isFinite(event.currentTarget.valueAsNumber)
-              ? null
-              : event.currentTarget.valueAsNumber,
-          )
-        }
-      />
-      <span id={`${id}-help`} className="text-xs text-muted-foreground">
-        {help}
-      </span>
-      {invalid && <span className="text-xs text-destructive">Enter a cap from 0 to 100.</span>}
-    </label>
-  );
-}
-
-const RULE_KINDS = [
-  { kind: "exclude", label: "never used for workers" },
-  { kind: "maxWorkers", label: "most concurrent workers" },
-  { kind: "priority", label: "priority" },
-] as const;
-type RuleDraft = Omit<AllocationAccountRule, "key" | "kind">;
+const select =
+  "block h-7 w-full min-w-0 rounded-lg border border-input bg-background px-2 text-xs disabled:opacity-60";
 const localTime = (iso: string) => {
   const date = new Date(iso);
   return Number.isFinite(date.getTime())
@@ -158,411 +113,703 @@ const localTime = (iso: string) => {
     : "";
 };
 
-/** One account rule: its value and, once set, when it ends and why. */
-function AccountRuleControl({
+/** A compact field. Its name is what assistive technology reads; the caption is what shows. */
+function Field({
   name,
-  kind,
-  rule,
-  disabled,
-  onChange,
+  caption,
+  className,
+  children,
 }: {
   name: string;
-  kind: AllocationAccountRule["kind"];
-  rule: RuleDraft | undefined;
-  disabled: boolean;
-  onChange: (rule: RuleDraft | undefined) => void;
+  caption?: string;
+  /** Layout only: the width of the field in its row. */
+  className?: string;
+  children: ReactNode;
 }) {
-  const min = kind === "maxWorkers" ? 1 : -100;
-  const invalid =
-    rule !== undefined &&
-    kind !== "exclude" &&
-    (rule.value === undefined || !Number.isInteger(rule.value) || rule.value < min);
   return (
-    <div className="grid min-w-0 gap-2">
-      {kind === "exclude" ? (
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={rule !== undefined}
-            disabled={disabled}
-            onChange={(event) => onChange(event.currentTarget.checked ? {} : undefined)}
-          />
-          {name}
-        </label>
+    <label className={`grid min-w-0 gap-0.5 ${className ?? ""}`}>
+      {caption ? (
+        <span className="text-xs font-normal text-muted-foreground">
+          <span className="sr-only">{name}: </span>
+          {caption}
+        </span>
       ) : (
-        <label className="grid min-w-0 gap-1">
-          <span className="font-medium">{name}</span>
-          <input
-            className={field}
-            type="number"
-            min={min}
-            max={100}
-            step={1}
-            value={rule?.value ?? ""}
-            aria-invalid={invalid}
-            disabled={disabled}
-            placeholder={kind === "maxWorkers" ? "No limit" : "0"}
-            onChange={(event) =>
-              onChange(
-                event.currentTarget.value === ""
-                  ? undefined
-                  : { ...rule, value: event.currentTarget.valueAsNumber },
-              )
-            }
-          />
-          {invalid && (
-            <span className="text-xs text-destructive">
-              Enter a whole number from {min} to 100.
-            </span>
-          )}
-        </label>
+        <span className="sr-only">{name}</span>
       )}
-      {rule !== undefined && (
-        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
-          <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-            {name} until (local time; blank for no end)
-            <input
-              className={field}
-              type="datetime-local"
-              value={rule.expiresAt ? localTime(rule.expiresAt) : ""}
-              disabled={disabled}
-              onChange={(event) => {
-                const { expiresAt: _until, ...rest } = rule;
-                const until = new Date(event.currentTarget.value);
-                onChange(
-                  Number.isFinite(until.getTime())
-                    ? { ...rest, expiresAt: until.toISOString() }
-                    : rest,
-                );
-              }}
-            />
-          </label>
-          <label className="grid min-w-0 gap-1 text-xs text-muted-foreground">
-            {name} note
-            <input
-              className={field}
-              maxLength={200}
-              value={rule.note ?? ""}
-              disabled={disabled}
-              onChange={(event) => {
-                const { note: _note, ...rest } = rule;
-                const note = event.currentTarget.value;
-                onChange(note.trim() ? { ...rest, note } : rest);
-              }}
-            />
-          </label>
-        </div>
-      )}
-    </div>
+      {children}
+    </label>
   );
 }
 
-function latestCapReading(
-  members: readonly AllocationAccount[],
-  kind: "weekly" | "fiveHour",
-  maxAgeMinutes: number,
-) {
-  if (!allocationSupportsSubscriptionCaps(members))
-    return "This account has no verified subscription quota source, so this cap is inactive.";
-  if (allocationSubscriptionCapSource(members) === "probeFailed")
-    return "The provider quota refresh failed. An existing reached cap stays enforced until reset or a configuration change, but this failed reading cannot create a new stop.";
-  const windows = members
-    .filter((account) => account.usageLimitsUnavailableReason === undefined)
-    .flatMap((account) => account.windows)
-    .filter((window) =>
-      kind === "weekly"
-        ? window.kind === "weekly" && (window.models === undefined || window.models.length === 0)
-        : window.id === "five_hour",
-    )
-    .sort((left, right) => Date.parse(right.checkedAt) - Date.parse(left.checkedAt));
-  const window = windows[0];
-  if (!window) return "Provider did not report this window.";
-  if (window.resetsAt && Date.parse(window.resetsAt) <= Date.now())
-    return `Last read ${number(window.usedPoints)}%; the window has reset.`;
-  const stale = Date.now() - Date.parse(window.checkedAt) > maxAgeMinutes * 60_000;
-  return `Last read ${number(window.usedPoints)}% at ${time(window.checkedAt)}${stale ? ` (stale; this cannot create a new stop)` : ""}${window.resetsAt ? `; resets ${time(window.resetsAt)}` : "; reset time not reported"}.`;
+/** Blank is `undefined`: unset for an optional value, invalid for a required one. */
+function NumberField({
+  value,
+  required = false,
+  min,
+  max,
+  step = 1,
+  placeholder,
+  disabled,
+  onChange,
+  ...field
+}: {
+  name: string;
+  caption?: string;
+  className?: string;
+  value: number | undefined;
+  required?: boolean;
+  min: number;
+  max: number;
+  step?: number;
+  placeholder?: string;
+  disabled: boolean;
+  onChange: (value: number | undefined) => void;
+}) {
+  const blank = value === undefined || !Number.isFinite(value);
+  return (
+    <Field {...field}>
+      <Input
+        type="number"
+        size="compact"
+        min={min}
+        max={max}
+        step={step}
+        value={blank ? "" : value}
+        placeholder={placeholder}
+        aria-invalid={
+          (blank ? required || value !== undefined : value < min || value > max) || undefined
+        }
+        disabled={disabled}
+        onChange={(event) =>
+          onChange(event.currentTarget.value === "" ? undefined : event.currentTarget.valueAsNumber)
+        }
+      />
+    </Field>
+  );
+}
+
+function TimeField({
+  value,
+  disabled,
+  onChange,
+  ...field
+}: {
+  name: string;
+  caption?: string;
+  className?: string;
+  value: string | undefined;
+  disabled: boolean;
+  onChange: (iso: string | undefined) => void;
+}) {
+  return (
+    <Field {...field}>
+      <Input
+        type="datetime-local"
+        size="compact"
+        value={value ? localTime(value) : ""}
+        disabled={disabled}
+        onChange={(event) => {
+          const until = new Date(event.currentTarget.value);
+          onChange(Number.isFinite(until.getTime()) ? until.toISOString() : undefined);
+        }}
+      />
+    </Field>
+  );
+}
+
+function NoteField({
+  value,
+  disabled,
+  onChange,
+  ...field
+}: {
+  name: string;
+  caption?: string;
+  className?: string;
+  value: string | undefined;
+  disabled: boolean;
+  onChange: (note: string | undefined) => void;
+}) {
+  return (
+    <Field {...field}>
+      <Input
+        size="compact"
+        maxLength={200}
+        placeholder="Note"
+        value={value ?? ""}
+        disabled={disabled}
+        onChange={(event) =>
+          onChange(event.currentTarget.value.trim() ? event.currentTarget.value : undefined)
+        }
+      />
+    </Field>
+  );
+}
+
+/** Short enough to sit on one line above a narrow field. */
+const CURVE_CAPTIONS = {
+  burstPoints: "Initial budget",
+  dailyPoints: "Daily budget",
+  burstHours: "Release time",
+  reservePoints: "Reserve",
+  borrowPoints: "Borrow warning",
+};
+const RULE_KINDS = [
+  { kind: "exclude", label: "workers off" },
+  { kind: "maxWorkers", label: "max workers" },
+  { kind: "priority", label: "priority" },
+] as const;
+type RuleDraft = Omit<AllocationAccountRule, "key" | "kind">;
+/** A field left out, not set to `undefined`, so the saved policy stays exact. */
+const withField = <T extends object, K extends keyof T>(
+  value: T,
+  key: K,
+  next: T[K] | undefined,
+) => {
+  const { [key]: _old, ...rest } = value;
+  return (next === undefined ? rest : { ...rest, [key]: next }) as T;
+};
+
+function AccountsTable({
+  rows,
+  policy,
+  snapshot,
+  now,
+  disabled,
+  onChange,
+}: {
+  rows: readonly AllocationAccountRow[];
+  policy: AllocationPolicy;
+  snapshot: AllocationSnapshot | null;
+  now: number;
+  disabled: boolean;
+  onChange: (policy: AllocationPolicy) => void;
+}) {
+  const rulesDisabled = disabled || snapshot?.accountRulesSupported !== true;
+  const capsDisabled = disabled || snapshot?.accountCapsSupported !== true;
+  const setRule = (
+    row: AllocationAccountRow,
+    kind: AllocationAccountRule["kind"],
+    rule: RuleDraft | undefined,
+  ) =>
+    onChange({
+      ...policy,
+      accountRules: [
+        ...(policy.accountRules ?? []).filter((r) => !row.keys.includes(r.key) || r.kind !== kind),
+        ...(rule ? row.keys.map((key) => ({ ...rule, key, kind })) : []),
+      ],
+    });
+  const setCap = (row: AllocationAccountRow, patch: Partial<Omit<AllocationAccountCap, "key">>) => {
+    const next = {
+      ...(row.cap ?? {
+        weeklyPercent: null,
+        fiveHourPercent: null,
+        stopWorkers: true,
+        stopMasters: false,
+      }),
+      ...patch,
+    };
+    onChange({
+      ...policy,
+      accountCaps: [
+        ...(policy.accountCaps ?? []).filter((cap) => !row.keys.includes(cap.key)),
+        ...(next.weeklyPercent === null && next.fiveHourPercent === null
+          ? []
+          : row.keys.map((key) => ({ ...next, key }))),
+      ],
+    });
+  };
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Account</TableHead>
+          <TableHead>Usage now</TableHead>
+          <TableHead>Workers</TableHead>
+          <TableHead>Max workers</TableHead>
+          <TableHead>Priority</TableHead>
+          <TableHead>Budget %</TableHead>
+          <TableHead>Hard cap %</TableHead>
+          <TableHead>Rule end and note</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row) => {
+          const reading = row.usage.weekly ?? row.usage.short;
+          const family = policy[row.family];
+          const familyValue = (key: "burstPoints" | "dailyPoints") => {
+            const value = allocationCurveValue(family, key);
+            return value === null ? "auto" : number(value);
+          };
+          const fiveHour = allocationSupportsFiveHourCap(row.driver);
+          const capEnabled =
+            row.cap !== undefined &&
+            (row.cap.weeklyPercent !== null || (fiveHour && row.cap.fiveHourPercent !== null));
+          const setTarget = (patch: Parameters<typeof withAllocationTarget>[2]) =>
+            onChange(withAllocationTarget(policy, row, patch, Date.now()));
+          return (
+            <TableRow key={row.key}>
+              <TableCell>
+                <div className="font-medium">{row.label}</div>
+                <div className="text-muted-foreground">
+                  {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+                </div>
+                {row.login === null && (
+                  <div className="text-muted-foreground">login unknown; matched by label</div>
+                )}
+              </TableCell>
+              <TableCell>
+                {[
+                  { label: "Week", window: row.usage.weekly },
+                  {
+                    label: row.usage.short?.durationHours
+                      ? `${number(row.usage.short.durationHours)}h`
+                      : (row.usage.short?.label ?? ""),
+                    window: row.usage.short,
+                  },
+                ].map(
+                  ({ label, window }) =>
+                    window && (
+                      <div key={window.id}>
+                        {label} {number(window.usedPoints)}%
+                        {window.resetsAt && Date.parse(window.resetsAt) <= now ? " (reset)" : ""}
+                      </div>
+                    ),
+                )}
+                <div className="text-muted-foreground">
+                  {reading
+                    ? `${allocationReadingAge(reading.checkedAt, now)} ago${
+                        now - Date.parse(reading.checkedAt) > policy.maxReadingAgeMinutes * 60_000
+                          ? ", stale"
+                          : ""
+                      }`
+                    : row.capSource === "unsupported"
+                      ? "No subscription quota"
+                      : row.capSource === "probeFailed"
+                        ? "Quota read failed"
+                        : row.capSource === "unverified"
+                          ? "Quota unverified"
+                          : "No reading"}
+                </div>
+              </TableCell>
+              <TableCell>
+                <Switch
+                  size="sm"
+                  aria-label={`${row.name} workers allowed`}
+                  checked={row.rules.exclude === undefined}
+                  disabled={rulesDisabled}
+                  onCheckedChange={(allowed) => setRule(row, "exclude", allowed ? undefined : {})}
+                />
+                {row.workersOffOn.length > 0 && (
+                  <div className="text-muted-foreground">off on {row.workersOffOn.join(", ")}</div>
+                )}
+              </TableCell>
+              {(["maxWorkers", "priority"] as const).map((kind) => (
+                <TableCell key={kind}>
+                  <NumberField
+                    name={`${row.name} ${kind === "maxWorkers" ? "max workers" : "priority"}`}
+                    className="w-16"
+                    value={row.rules[kind] && (row.rules[kind].value ?? Number.NaN)}
+                    min={kind === "maxWorkers" ? 1 : -100}
+                    max={100}
+                    placeholder={kind === "maxWorkers" ? "Any" : "0"}
+                    disabled={rulesDisabled}
+                    onChange={(value) =>
+                      setRule(
+                        row,
+                        kind,
+                        value === undefined ? undefined : { ...row.rules[kind], value },
+                      )
+                    }
+                  />
+                </TableCell>
+              ))}
+              <TableCell>
+                {row.targetWindows.length ? (
+                  <div className="grid gap-1">
+                    <div className="flex gap-1">
+                      {(
+                        [
+                          { key: "burstPoints", caption: "Initial", name: "initial budget" },
+                          { key: "dailyPoints", caption: "Daily", name: "daily budget" },
+                        ] as const
+                      ).map(({ key, caption, name }) => (
+                        <NumberField
+                          key={key}
+                          name={`${row.name} ${name}`}
+                          caption={caption}
+                          className="w-16"
+                          value={row.target?.curve?.[key]}
+                          required={row.target !== undefined}
+                          min={0}
+                          max={100}
+                          step={0.1}
+                          placeholder={familyValue(key)}
+                          disabled={disabled}
+                          onChange={(value = Number.NaN) =>
+                            setTarget(
+                              key === "burstPoints"
+                                ? { burstPoints: value }
+                                : { dailyPoints: value },
+                            )
+                          }
+                        />
+                      ))}
+                    </div>
+                    {row.target ? (
+                      <>
+                        <TimeField
+                          name={`${row.name} budget until`}
+                          caption="Until"
+                          className="w-44"
+                          value={row.target.expiresAt}
+                          disabled={disabled}
+                          onChange={(expiresAt) => expiresAt && setTarget({ expiresAt })}
+                        />
+                        <div>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={disabled}
+                            onClick={() => setTarget(undefined)}
+                          >
+                            Use family default
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-muted-foreground">family default</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground">
+                    {familyValue("burstPoints")} / {familyValue("dailyPoints")} family default
+                  </div>
+                )}
+              </TableCell>
+              <TableCell>
+                {row.supportsCaps ? (
+                  <div className="grid gap-1">
+                    <div className="flex gap-1">
+                      <NumberField
+                        name={`${row.name} weekly cap`}
+                        caption="Week"
+                        className="w-16"
+                        value={row.cap?.weeklyPercent ?? undefined}
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        placeholder="Off"
+                        disabled={capsDisabled}
+                        onChange={(value) => setCap(row, { weeklyPercent: value ?? null })}
+                      />
+                      {fiveHour && (
+                        <NumberField
+                          name={`${row.name} 5-hour cap`}
+                          caption="5h"
+                          className="w-16"
+                          value={row.cap?.fiveHourPercent ?? undefined}
+                          min={0}
+                          max={100}
+                          step={0.1}
+                          placeholder="Off"
+                          disabled={capsDisabled}
+                          onChange={(value) => setCap(row, { fiveHourPercent: value ?? null })}
+                        />
+                      )}
+                    </div>
+                    {capEnabled &&
+                      (
+                        [
+                          { key: "stopWorkers", caption: "stops workers" },
+                          { key: "stopMasters", caption: "stops masters" },
+                        ] as const
+                      ).map(({ key, caption }) => (
+                        <div key={key} className="flex items-center gap-1.5">
+                          <Checkbox
+                            aria-label={`${row.name} cap ${caption}`}
+                            checked={row.cap?.[key] ?? false}
+                            disabled={capsDisabled}
+                            onCheckedChange={(checked) =>
+                              setCap(
+                                row,
+                                key === "stopWorkers"
+                                  ? { stopWorkers: checked }
+                                  : { stopMasters: checked },
+                              )
+                            }
+                          />
+                          {caption}
+                        </div>
+                      ))}
+                    {capEnabled && !row.cap?.stopWorkers && !row.cap?.stopMasters && (
+                      <div className="text-muted-foreground">stops nothing: inactive</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground">No quota reading</div>
+                )}
+              </TableCell>
+              <TableCell>
+                <div className="grid gap-1">
+                  {RULE_KINDS.map(({ kind, label }) => {
+                    const rule = row.rules[kind];
+                    return (
+                      rule && (
+                        <div key={kind} className="flex items-end gap-1">
+                          <TimeField
+                            name={`${row.name} ${label} until`}
+                            caption={`${label} until`}
+                            className="w-44"
+                            value={rule.expiresAt}
+                            disabled={rulesDisabled}
+                            onChange={(expiresAt) =>
+                              setRule(row, kind, withField(rule, "expiresAt", expiresAt))
+                            }
+                          />
+                          <NoteField
+                            name={`${row.name} ${label} note`}
+                            className="w-36"
+                            value={rule.note}
+                            disabled={rulesDisabled}
+                            onChange={(note) => setRule(row, kind, withField(rule, "note", note))}
+                          />
+                        </div>
+                      )
+                    );
+                  })}
+                </div>
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
+  );
 }
 
 export function AllocationControls({
   policy,
   snapshot,
+  now,
   disabled,
   onChange,
 }: {
   policy: AllocationPolicy;
   snapshot: AllocationSnapshot | null;
+  /** When the snapshot was read: reading ages and end times are judged against it. */
+  now: number;
   disabled: boolean;
   onChange: (policy: AllocationPolicy) => void;
 }) {
-  const curve = (family: "codex" | "claude" | "other", advanced = false) => {
-    const current = policy[family];
-    const title = family === "codex" ? "Codex" : family === "claude" ? "Claude" : "Other providers";
-    const fields = advanced ? allocationCurveFields : allocationCurveFields.slice(0, 2);
-    return (
-      <fieldset key={family} className="min-w-0 rounded-lg border p-4">
-        <legend className="px-1 font-semibold">{title}</legend>
-        <div className="grid min-w-0 gap-4">
-          {current.preset === "sustainable" && (
-            <p className="text-sm text-muted-foreground">
-              Saved cycle-based policy: usage is released evenly after the reserve, so daily and
-              initial budgets are derived. Your saved values remain unchanged.
-            </p>
-          )}
-          {fields.map((item) => (
-            <NumericControl
-              key={item.key}
-              name={`${title} ${item.label}`}
-              unit={item.unit}
-              value={
-                current.preset === "aggressive17" && item.key === "dailyPoints"
-                  ? 17
-                  : current.preset === "aggressive17" &&
-                      ["burstPoints", "burstHours"].includes(item.key)
-                    ? 0
-                    : current[item.key]
-              }
-              defaultValue={defaultAllocationPolicy[family][item.key]}
-              max={item.max}
-              help={item.help}
-              disabled={disabled}
-              derived={
-                current.preset === "sustainable" &&
-                ["dailyPoints", "burstPoints", "burstHours"].includes(item.key)
-              }
-              onChange={(value) =>
-                onChange({
-                  ...policy,
-                  [family]: {
-                    ...current,
-                    ...(current.preset === "aggressive17"
-                      ? { dailyPoints: 17, burstPoints: 0, burstHours: 0 }
-                      : {}),
-                    ...(current.preset !== "sustainable" ? { preset: "custom" as const } : {}),
-                    [item.key]: value,
-                  },
-                })
-              }
-            />
-          ))}
-          {current.preset === "sustainable" && (
-            <Button
-              size="sm-multiline"
-              variant="outline"
-              disabled={disabled}
-              onClick={() => onChange({ ...policy, [family]: { ...current, preset: "custom" } })}
-            >
-              Use saved numeric budgets for {title}
-            </Button>
-          )}
-        </div>
-      </fieldset>
-    );
-  };
-  const groups = allocationAccountGroups(snapshot);
-  // An expired rule no longer applies, so it shows as unset.
-  const now = new Date().toISOString();
-  const setCap = (keys: readonly string[], patch: Partial<Omit<AllocationAccountCap, "key">>) => {
-    const current = keys.map((key) => allocationAccountCap(policy, key)).find(Boolean) ?? {
-      key: keys[0]!,
-      weeklyPercent: null,
-      fiveHourPercent: null,
-      stopWorkers: true,
-      stopMasters: false,
-    };
-    const next = { ...current, ...patch };
-    const disabled = next.weeklyPercent === null && next.fiveHourPercent === null;
+  type Family = "codex" | "claude" | "other";
+  type CurveField = (typeof allocationCurveFields)[number];
+  const setCurve = (family: Family, key: CurveField["key"], value: number) =>
     onChange({
       ...policy,
-      accountCaps: [
-        ...(policy.accountCaps ?? []).filter((cap) => !keys.includes(cap.key)),
-        ...(disabled ? [] : keys.map((key) => ({ ...next, key }))),
-      ],
+      [family]: {
+        ...policy[family],
+        ...(policy[family].preset === "aggressive17"
+          ? { dailyPoints: 17, burstPoints: 0, burstHours: 0 }
+          : {}),
+        ...(policy[family].preset !== "sustainable" ? { preset: "custom" as const } : {}),
+        [key]: value,
+      },
     });
-  };
+  const curveControl = (family: Family, title: string, item: CurveField) => (
+    <NumericControl
+      key={item.key}
+      name={`${title} ${item.label}`}
+      unit={item.unit}
+      value={allocationCurveValue(policy[family], item.key) ?? policy[family][item.key]}
+      defaultValue={defaultAllocationPolicy[family][item.key]}
+      max={item.max}
+      help={item.help}
+      disabled={disabled}
+      derived={allocationCurveValue(policy[family], item.key) === null}
+      onChange={(value) => setCurve(family, item.key, value)}
+    />
+  );
+  const rows = allocationAccountRows(snapshot, policy, now);
+  const others = rows.filter((row) => row.other);
+  const table = (accounts: readonly AllocationAccountRow[]) => (
+    <AccountsTable
+      rows={accounts}
+      policy={policy}
+      snapshot={snapshot}
+      now={now}
+      disabled={disabled}
+      onChange={onChange}
+    />
+  );
+  // An expired default no longer applies, so it shows as unset.
+  const at = new Date(now).toISOString();
+  const modelsDisabled = disabled || snapshot?.workerModelsSupported !== true;
   return (
     <>
-      <section aria-label="Usage budgets" className="grid min-w-0 gap-3">
-        <h2 className="font-semibold">Usage budgets</h2>
+      <section aria-label="Accounts" className="grid min-w-0 gap-3">
+        <h2 className="font-semibold">Accounts</h2>
         <p className="text-sm text-muted-foreground">
-          Each number is a percentage of the provider’s allowance. The initial budget plus the daily
-          budget builds a target from the weekly reset, capped below the reserve. Claude’s 17 points
-          per day can use a week’s allowance before seven days.
+          Every worker start obeys these on every computer; a blank budget follows the family
+          default.
         </p>
-        <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
-          {curve("codex")}
-          {curve("claude")}
-        </div>
-      </section>
-      <section aria-label="Hard usage caps" className="grid min-w-0 gap-3">
-        <h2 className="font-semibold">Hard usage caps</h2>
-        <p className="text-sm text-muted-foreground">
-          Optional per-account stops, independent of the advisory budgets above. Supported readings
-          are an account-wide weekly window and Claude&rsquo;s 5-hour session. A fresh provider
-          reading at or above a cap is checked immediately and at least every 15 seconds. Missing,
-          unsupported, stale, or failed readings never invent a reached cap.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          A reached cap stays enforced until the provider window resets, a newer reading is below
-          the cap, the cap is raised or removed, or both stop actions are disabled. A transient
-          provider read failure keeps an existing reached cap enforced without creating a new one.
-          Stopped work is not restarted automatically. Stopping a worker also leaves one durable
-          notice for its owning master; a stopped master still receives that notice without an
-          automatic wake-up.
-        </p>
+        {snapshot && snapshot.accountRulesSupported !== true && (
+          <p className="text-sm">Update the coordinator to edit account rules.</p>
+        )}
         {snapshot && snapshot.accountCapsSupported !== true && (
           <p className="text-sm">
             Update the coordinator to edit hard caps. Existing saved caps remain enforced.
           </p>
         )}
-        {!groups.length && (
-          <p className="text-sm">Hard caps appear when account information is available.</p>
+        {rows.length ? (
+          table(rows.filter((row) => !row.other))
+        ) : (
+          <p className="text-sm">Accounts appear when account information is available.</p>
         )}
-        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
-          {groups.map((group) => {
-            const cap = group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean);
-            const capSource = allocationSubscriptionCapSource(group.members);
-            const supportsSubscriptionCaps = allocationSupportsSubscriptionCaps(group.members);
-            const supportsFiveHour = allocationSupportsFiveHourCap(group.driver);
-            const capEnabled =
-              cap !== undefined &&
-              (cap.weeklyPercent !== null || (supportsFiveHour && cap.fiveHourPercent !== null));
-            const noAction = Boolean(capEnabled && cap && !cap.stopWorkers && !cap.stopMasters);
-            return (
-              <fieldset key={group.key} className="min-w-0 rounded-lg border p-3">
-                <legend className="px-1 font-semibold">
-                  {group.label} · {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
-                </legend>
-                <p className="mb-3 text-xs text-muted-foreground">
-                  {group.hosts.join(", ")} ·{" "}
-                  {group.members[0]?.accountKey === null
-                    ? "unknown identity; matched by label on every computer"
-                    : "known identity shared across linked computers"}
-                </p>
-                {!supportsSubscriptionCaps ? (
-                  <p className="text-sm text-muted-foreground">
-                    {capSource === "unsupported"
-                      ? "Subscription quota is unsupported for this account."
-                      : "The subscription quota source is not verified right now."}{" "}
-                    Weekly and session caps are unavailable, and any saved cap remains inactive.
-                  </p>
-                ) : (
-                  <div className="grid min-w-0 gap-4">
-                    <OptionalCapControl
-                      name={`${group.label} weekly cap`}
-                      value={cap?.weeklyPercent ?? null}
-                      help={latestCapReading(group.members, "weekly", policy.maxReadingAgeMinutes)}
-                      disabled={disabled || snapshot?.accountCapsSupported !== true}
-                      onChange={(weeklyPercent) => setCap(group.keys, { weeklyPercent })}
-                    />
-                    {supportsFiveHour && (
-                      <OptionalCapControl
-                        name={`${group.label} Claude 5-hour cap`}
-                        value={cap?.fiveHourPercent ?? null}
-                        help={latestCapReading(
-                          group.members,
-                          "fiveHour",
-                          policy.maxReadingAgeMinutes,
-                        )}
-                        disabled={disabled || snapshot?.accountCapsSupported !== true}
-                        onChange={(fiveHourPercent) => setCap(group.keys, { fiveHourPercent })}
-                      />
-                    )}
-                    <div className="grid gap-2">
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={cap?.stopWorkers ?? true}
-                          disabled={
-                            disabled || snapshot?.accountCapsSupported !== true || !capEnabled
-                          }
-                          onChange={(event) =>
-                            setCap(group.keys, { stopWorkers: event.currentTarget.checked })
-                          }
-                        />
-                        Block new worker turns, for any master
-                      </label>
-                      <label className="flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={cap?.stopMasters ?? false}
-                          disabled={
-                            disabled || snapshot?.accountCapsSupported !== true || !capEnabled
-                          }
-                          onChange={(event) =>
-                            setCap(group.keys, { stopMasters: event.currentTarget.checked })
-                          }
-                        />
-                        Block new master turns on this account
-                      </label>
-                    </div>
-                    {noAction && (
-                      <p className="text-xs text-muted-foreground">
-                        No stop actions selected; this cap is saved but inactive.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </fieldset>
-            );
-          })}
-        </div>
+        {others.length > 0 && (
+          <details className="min-w-0 rounded-lg border p-3">
+            <summary className="cursor-pointer font-medium">
+              Other accounts ({others.length})
+            </summary>
+            <p className="my-2 text-sm text-muted-foreground">
+              Provider turned off, or no subscription quota reading and nothing saved.
+            </p>
+            {table(others)}
+          </details>
+        )}
       </section>
-      <section aria-label="Account rules" className="grid min-w-0 gap-3">
-        <h2 className="font-semibold">Account rules</h2>
+      <section aria-label="Family defaults" className="grid min-w-0 gap-3">
+        <h2 className="font-semibold">Family defaults</h2>
         <p className="text-sm text-muted-foreground">
-          Standing instructions that every worker start obeys on every computer. An account that is
-          never used for workers, or is at its concurrent worker limit, is not recommended and a
-          worker pinned to it is refused. Among the rest, the higher priority wins while the account
-          has quota headroom; equal priorities are ordered by projected budget headroom.
+          Budgets in percent of the weekly allowance, and the model of a worker that pins none.
         </p>
-        <p className="text-xs text-muted-foreground">
-          Unset accounts have priority 0; a negative priority is used last. A rule with an end time
-          stops applying by itself. Agents set the same rules with the t3_allocation_policy tool.
-        </p>
-        {snapshot && snapshot.accountRulesSupported !== true && (
-          <p className="text-sm">
-            Update the coordinator to edit account rules. Existing budget settings are still
-            available.
-          </p>
+        {snapshot && snapshot.workerModelsSupported !== true && (
+          <p className="text-sm">Update the coordinator to set a default worker model.</p>
         )}
-        {!groups.length && (
-          <p className="text-sm">Account rules appear when account information is available.</p>
-        )}
-        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
-          {groups.map((group) => {
-            const name = `${group.label}${group.members[0]?.accountKey === null ? ` (${group.hosts.join(", ")})` : ""}`;
+        <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
+          {allocationFamilies.map(({ family, driver, label }) => {
+            const current = policy[family];
+            const worker = allocationWorkerModel(policy, driver, at);
+            const choices = allocationWorkerModelChoices(snapshot, driver);
+            const efforts = choices.find((choice) => choice.model === worker?.model)?.efforts ?? [];
+            const setWorker = (next: AllocationWorkerModel | undefined) =>
+              onChange({
+                ...policy,
+                workerModels: withField(policy.workerModels ?? {}, family, next),
+              });
             return (
-              <fieldset key={group.key} className="grid min-w-0 gap-3 rounded-lg border p-3">
-                <legend className="px-1 font-semibold">
-                  {name} · {PROVIDER_DISPLAY_NAMES[group.driver] ?? group.driver}
-                </legend>
-                {RULE_KINDS.map(({ kind, label }) => (
-                  <AccountRuleControl
-                    key={kind}
-                    name={`${name} ${label}`}
-                    kind={kind}
-                    rule={group.keys
-                      .map((key) => allocationAccountRule(policy, key, kind, now))
-                      .find(Boolean)}
-                    disabled={disabled || snapshot?.accountRulesSupported !== true}
-                    onChange={(rule) =>
-                      onChange({
-                        ...policy,
-                        accountRules: [
-                          ...(policy.accountRules ?? []).filter(
-                            (r) => !group.keys.includes(r.key) || r.kind !== kind,
-                          ),
-                          ...(rule ? group.keys.map((key) => ({ ...rule, key, kind })) : []),
-                        ],
-                      })
+              <fieldset key={family} className="grid min-w-0 gap-3 rounded-lg border p-3">
+                <legend className="px-1 font-semibold">{label}</legend>
+                <div className="grid min-w-0 grid-cols-2 gap-3 sm:grid-cols-4">
+                  {allocationCurveFields
+                    .filter((item) => item.key !== "burstHours")
+                    .map((item) => {
+                      const value = allocationCurveValue(current, item.key);
+                      return (
+                        <div key={item.key} className="grid min-w-0 content-start gap-0.5">
+                          {value === null ? (
+                            <Field
+                              name={`${label} ${item.label}`}
+                              caption={CURVE_CAPTIONS[item.key]}
+                            >
+                              <Input size="compact" readOnly disabled value="Derived" />
+                            </Field>
+                          ) : (
+                            <NumberField
+                              name={`${label} ${item.label}`}
+                              caption={CURVE_CAPTIONS[item.key]}
+                              value={value}
+                              required
+                              min={0}
+                              max={item.max}
+                              step={0.1}
+                              disabled={disabled}
+                              onChange={(next) => setCurve(family, item.key, next ?? Number.NaN)}
+                            />
+                          )}
+                          <span className="text-xs text-muted-foreground">
+                            default {number(defaultAllocationPolicy[family][item.key])}
+                          </span>
+                        </div>
+                      );
+                    })}
+                </div>
+                {current.preset === "sustainable" && (
+                  <Button
+                    size="sm-multiline"
+                    variant="outline"
+                    disabled={disabled}
+                    onClick={() =>
+                      onChange({ ...policy, [family]: { ...current, preset: "custom" } })
+                    }
+                  >
+                    Use saved numeric budgets for {label}
+                  </Button>
+                )}
+                <div className="grid min-w-0 grid-cols-2 gap-3">
+                  <Field name={`${label} default worker model`} caption="Worker model">
+                    <select
+                      className={select}
+                      value={worker?.model ?? ""}
+                      disabled={modelsDisabled}
+                      onChange={(event) => {
+                        const choice = choices.find((c) => c.model === event.currentTarget.value);
+                        setWorker(
+                          choice && {
+                            ...worker,
+                            model: choice.model,
+                            effort:
+                              [worker?.effort, "medium"].find(
+                                (effort) => effort !== undefined && choice.efforts.includes(effort),
+                              ) ?? choice.efforts[0]!,
+                          },
+                        );
+                      }}
+                    >
+                      <option value="">Difficulty table</option>
+                      {worker && !choices.some((choice) => choice.model === worker.model) && (
+                        <option value={worker.model}>{worker.model} (not offered now)</option>
+                      )}
+                      {choices.map((choice) => (
+                        <option key={choice.model}>{choice.model}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field name={`${label} default worker effort`} caption="Effort">
+                    <select
+                      className={select}
+                      value={worker?.effort ?? ""}
+                      disabled={modelsDisabled || !worker}
+                      onChange={(event) =>
+                        worker && setWorker({ ...worker, effort: event.currentTarget.value })
+                      }
+                    >
+                      {!worker && <option value="">From the table</option>}
+                      {worker && !efforts.includes(worker.effort) && (
+                        <option>{worker.effort}</option>
+                      )}
+                      {efforts.map((effort) => (
+                        <option key={effort}>{effort}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <TimeField
+                    name={`${label} default worker model until`}
+                    caption="Until"
+                    value={worker?.expiresAt}
+                    disabled={modelsDisabled || !worker}
+                    onChange={(expiresAt) =>
+                      worker && setWorker(withField(worker, "expiresAt", expiresAt))
                     }
                   />
-                ))}
-                {group.members[0]?.accountKey === null && (
-                  <p className="text-xs text-muted-foreground">
-                    Identity unknown; this applies to every computer’s account with this label.
-                  </p>
-                )}
+                  <NoteField
+                    name={`${label} default worker model note`}
+                    caption="Note"
+                    value={worker?.note}
+                    disabled={modelsDisabled || !worker}
+                    onChange={(note) => worker && setWorker(withField(worker, "note", note))}
+                  />
+                </div>
               </fieldset>
             );
           })}
@@ -571,41 +818,32 @@ export function AllocationControls({
       <details className="rounded-lg border p-4">
         <summary className="cursor-pointer font-medium">Advanced budgets and estimation</summary>
         <div className="mt-4 grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2">
-          {(["codex", "claude"] as const).map((family) => (
+          {allocationFamilies.map(({ family, label }) => (
             <fieldset key={family} className="grid min-w-0 gap-4 rounded border p-3">
-              <legend>{family === "codex" ? "Codex" : "Claude"}</legend>
-              {allocationCurveFields.slice(2).map((item) => (
-                <NumericControl
-                  key={item.key}
-                  name={`${family === "codex" ? "Codex" : "Claude"} ${item.label}`}
-                  unit={item.unit}
-                  value={
-                    policy[family].preset === "aggressive17" && item.key === "burstHours"
-                      ? 0
-                      : policy[family][item.key]
-                  }
-                  defaultValue={defaultAllocationPolicy[family][item.key]}
-                  max={item.max}
-                  help={item.help}
-                  disabled={disabled}
-                  derived={policy[family].preset === "sustainable" && item.key === "burstHours"}
-                  onChange={(value) =>
-                    onChange({
-                      ...policy,
-                      [family]: {
-                        ...policy[family],
-                        ...(policy[family].preset === "aggressive17"
-                          ? { preset: "custom", dailyPoints: 17, burstPoints: 0, burstHours: 0 }
-                          : {}),
-                        [item.key]: value,
-                      },
-                    })
-                  }
-                />
-              ))}
+              <legend>{label}</legend>
+              {allocationCurveFields
+                .filter((item) => item.key === "burstHours")
+                .map((item) => curveControl(family, label, item))}
             </fieldset>
           ))}
-          {curve("other", true)}
+          <fieldset className="min-w-0 rounded-lg border p-4">
+            <legend className="px-1 font-semibold">Other providers</legend>
+            <div className="grid min-w-0 gap-4">
+              {allocationCurveFields.map((item) => curveControl("other", "Other providers", item))}
+              {policy.other.preset === "sustainable" && (
+                <Button
+                  size="sm-multiline"
+                  variant="outline"
+                  disabled={disabled}
+                  onClick={() =>
+                    onChange({ ...policy, other: { ...policy.other, preset: "custom" } })
+                  }
+                >
+                  Use saved numeric budgets for Other providers
+                </Button>
+              )}
+            </div>
+          </fieldset>
           <div className="grid min-w-0 gap-4">
             {allocationEstimateFields.map((item) => (
               <NumericControl
@@ -625,9 +863,7 @@ export function AllocationControls({
           </div>
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          Short-window forecasts use their own observed rate or fallback burn. Family reserve and
-          warning settings apply to each allowance window. These estimates never prevent an explicit
-          Start.
+          These estimates never prevent an explicit Start.
         </p>
       </details>
     </>
@@ -646,9 +882,7 @@ export function AllocationAnalytics({
     <section aria-label="Usage analytics" className="grid min-w-0 gap-3">
       <h2 className="font-semibold">Usage analytics</h2>
       <p className="text-sm text-muted-foreground">
-        Allowance burn is measured for an account as a whole. Model and effort token samples cannot
-        establish a subscription burn rate when account traffic is mixed. Measurements use the
-        existing account opt-in.
+        Allowance burn is measured per account, for accounts opted into usage measurements.
       </p>
       {!groups.length && <p>No account readings yet.</p>}
       {groups.map((group) => (
@@ -706,10 +940,8 @@ export function AllocationAnalytics({
               <details>
                 <summary className="cursor-pointer text-sm">Model and effort burn evidence</summary>
                 <p className="my-2 text-xs text-muted-foreground">
-                  No attributable model quota rate is available from the current measurements. Token
-                  throughput below is a separate observed metric, never allowance points. The weekly
-                  planning fallback is {number(policy.coldLongPointsPerHour)} points/hour per
-                  account.
+                  Token throughput, never allowance points; the weekly planning fallback is{" "}
+                  {number(policy.coldLongPointsPerHour)} points/hour per account.
                 </p>
                 <ul className="grid min-w-0 gap-2">
                   {allocationModelRows(account).map((row) => (

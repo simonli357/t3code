@@ -7,7 +7,7 @@ function AllocationRoute() {
   const { environment, environments } = useSettingsScope();
   const target = environment ?? environments[0];
   return (
-    <SettingsPageContainer className="min-w-0" width="wide">
+    <SettingsPageContainer className="min-w-0" width="expanded">
       {target ? (
         <ProviderAllocationPage key={target.environmentId} environmentId={target.environmentId} />
       ) : (

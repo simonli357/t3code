@@ -59,6 +59,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const projects = useProjects().filter((p) => p.environmentId === environmentId);
   const navigate = useNavigate();
   const [snapshot, setSnapshot] = useState<AllocationSnapshot | null>(null);
+  const [readAt, setReadAt] = useState(0);
   const ready = connection === "connected" && snapshotEpoch === connectionState.epoch;
   const [policy, setPolicy] = useState<AllocationPolicy>(defaultAllocationPolicy);
   const [decision, setDecision] = useState<AllocationDecision | null>(null);
@@ -79,7 +80,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [projectId, setProjectId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("Allocated session");
-  const [overrides, setOverrides] = useState("[]");
+  // The JSON view's text while it is being typed; null shows the draft's overrides.
+  const [overridesText, setOverridesText] = useState<string | null>(null);
+  const overrides = overridesText ?? JSON.stringify(policy.overrides, null, 2);
   const [overrideAccount, setOverrideAccount] = useState("");
   const [overrideWindow, setOverrideWindow] = useState("");
   const [useBy, setUseBy] = useState("");
@@ -115,10 +118,11 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const response = await call({ _tag: "snapshot" });
     if (epoch !== generation.current || !response?.snapshot) return;
     setSnapshot(response.snapshot);
+    setReadAt(Date.now());
     setSnapshotEpoch(connectionState.epoch);
     if (replaceDraft || !hydrated.current) {
       setPolicy(response.snapshot.policy);
-      setOverrides(JSON.stringify(response.snapshot.policy.overrides, null, 2));
+      setOverridesText(null);
     }
     hydrated.current = true;
     setPreviewKey(null);
@@ -149,15 +153,11 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       }
       if (result._tag === "Success" && result.value.snapshot) {
         setSnapshot(result.value.snapshot);
+        setReadAt(Date.now());
         setSnapshotEpoch(connectionState.epoch);
         if (!hydrated.current) {
           setPolicy((current) =>
             current === defaultAllocationPolicy ? result.value.snapshot!.policy : current,
-          );
-          setOverrides((current) =>
-            current === "[]"
-              ? JSON.stringify(result.value.snapshot!.policy.overrides, null, 2)
-              : current,
           );
           hydrated.current = true;
         }
@@ -195,14 +195,20 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const overrideSource = snapshot?.inventories
     .flatMap((i) => i.accounts)
     .find((a) => a.accountKey === overrideAccount);
+  // Typed JSON is the newest edit, whether or not the table could show it.
+  const draft = () =>
+    decodePolicy(
+      overridesText === null ? policy : { ...policy, overrides: JSON.parse(overridesText) },
+    );
   const addOverride = () => {
     try {
       const source = overrideSource?.windows.find((w) => w.id === overrideWindow);
       if (!source || !expires) throw new Error("Missing window or expiry");
+      const current = draft();
       const value = decodePolicy({
-        ...policy,
+        ...current,
         overrides: [
-          ...JSON.parse(overrides),
+          ...current.overrides,
           {
             accountKey: overrideAccount,
             windowId: overrideWindow,
@@ -214,13 +220,13 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           },
         ],
       });
-      setOverrides(JSON.stringify(value.overrides, null, 2));
+      setPolicy(value);
+      setOverridesText(null);
       setPreviewKey(null);
     } catch {
       setError("Choose an account, window and valid expiry before adding a temporary target.");
     }
   };
-  const draft = () => decodePolicy({ ...policy, overrides: JSON.parse(overrides) });
   let previewCurrent = false;
   let canSave = false;
   try {
@@ -269,7 +275,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       if (response?.policy) {
         setNotice("Settings saved.");
         setPolicy(response.policy);
-        setOverrides(JSON.stringify(response.policy.overrides, null, 2));
+        setOverridesText(null);
         await load();
       }
     } catch {
@@ -311,8 +317,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          Tune advisory budgets and account rules, plus optional hard caps that block new work.
-          Advisory estimates never veto a valid explicit account choice; an active hard cap does.
+          What every worker start obeys: budgets and priorities advise, account rules and hard caps
+          block.
         </p>
       </header>
       {error && (
@@ -343,9 +349,11 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <AllocationControls
         policy={policy}
         snapshot={snapshot}
+        now={readAt}
         disabled={busy || !ready || !snapshot?.authorityAvailable}
         onChange={(next) => {
           setPolicy(next);
+          if (next.overrides !== policy.overrides) setOverridesText(null);
           setPreviewKey(null);
         }}
       />
@@ -368,8 +376,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
               coordinatorEnvironmentId: policy.coordinatorEnvironmentId,
               mode: policy.mode,
               accountRules: [],
+              workerModels: {},
             });
-            setOverrides("[]");
+            setOverridesText(null);
             setPreviewKey(null);
             setNotice(
               "Defaults restored in your draft. Save settings to apply; recommendations remain advisory.",
@@ -405,8 +414,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 </p>
               ))}
               <p className="text-sm">
-                Quota history and charts are retained only for accounts already opted into usage
-                measurements. Shared accounts retain allocation choices and reservation metadata.
+                Quota history and charts cover only accounts opted into usage measurements.
               </p>
             </details>
           )}
@@ -456,8 +464,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Choose this computer or a linked environment from Connections. Linked environments may
-            be offline; the connection must succeed before their coordinator can be used.
+            The coordinator is this computer or a linked one, and must be reachable to connect.
           </p>
           <details>
             <summary>Advanced connection details</summary>
@@ -648,9 +655,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   Request allocation and start
                 </Button>
                 <p className="text-xs text-muted-foreground">
-                  Preview starts nothing. Start submits your chosen profile, even with advisory
-                  warnings. Actual provider errors remain visible. Existing sessions, forks and
-                  retries retain their selection.
+                  Preview starts nothing; Start submits your chosen profile, even with advisory
+                  warnings.
                 </p>
               </div>
             </details>
@@ -735,8 +741,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 </Button>
               </div>
               <p className="my-2 text-sm">
-                Reset plans never replenish quota or change the normal reset schedule. Provider
-                readings must confirm replenishment. Targets expire automatically.
+                A reset plan never replenishes quota; targets expire by themselves.
               </p>
               <details>
                 <summary>Advanced override values and removal</summary>
@@ -746,10 +751,35 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                     className={`${field} w-full font-mono`}
                     rows={7}
                     value={overrides}
-                    onChange={(e) => setOverrides(e.target.value)}
+                    onChange={(e) => {
+                      setOverridesText(e.target.value);
+                      setPreviewKey(null);
+                      try {
+                        const parsed: unknown = JSON.parse(e.target.value);
+                        // Shown in the table at once; the schema checks it on preview and save.
+                        if (
+                          Array.isArray(parsed) &&
+                          parsed.every((entry) => entry !== null && typeof entry === "object")
+                        )
+                          setPolicy({
+                            ...policy,
+                            overrides: parsed as AllocationPolicy["overrides"],
+                          });
+                      } catch {
+                        /* Save stays disabled until the text parses. */
+                      }
+                    }}
                   />
                 </label>
-                <Button size="sm-multiline" variant="outline" onClick={() => setOverrides("[]")}>
+                <Button
+                  size="sm-multiline"
+                  variant="outline"
+                  onClick={() => {
+                    setPolicy({ ...policy, overrides: [] });
+                    setOverridesText(null);
+                    setPreviewKey(null);
+                  }}
+                >
                   End all temporary targets on save
                 </Button>
               </details>
@@ -929,8 +959,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <section className="flex flex-col gap-2">
             <h2 className="font-semibold">Reservations</h2>
             <p className="text-sm">
-              Starting and running capacity remains protected until an execution receipt confirms
-              completion. Stop or cancel the session to release it.
+              Capacity stays reserved until the session completes, is stopped or is cancelled.
             </p>
             {snapshot?.reservations
               .filter((r) => ["reserved", "starting", "consumed"].includes(r.state))

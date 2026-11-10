@@ -1,7 +1,10 @@
 import {
   AllocationError,
+  accountSupportsRoutingProfile,
   allocationPreferenceKey,
+  allocationWorkerModel,
   defaultAllocationPolicy,
+  routingEffortOptionId,
   type AllocationPolicy,
   type AllocationPolicyEdit,
   type AllocationPolicyView,
@@ -59,6 +62,11 @@ function identities(snapshot: AllocationSnapshot) {
   }));
 }
 
+const WORKER_FAMILIES = [
+  { family: "claude", driver: "claudeAgent" },
+  { family: "codex", driver: "codex" },
+] as const;
+
 /** An account's rule on each computer reads back as one. */
 const once = <T>(entries: readonly T[]) => [
   ...new Map(entries.map((entry) => [JSON.stringify(entry), entry])).values(),
@@ -93,6 +101,12 @@ export function allocationPolicyView(
         ...(useBy ? { useBy } : {}),
         ...(resetPlan ? { resetPlan } : {}),
       })),
+    workerModels: Object.fromEntries(
+      WORKER_FAMILIES.flatMap(({ family, driver }) => {
+        const model = allocationWorkerModel(policy, driver, at);
+        return model ? [[family, model]] : [];
+      }),
+    ),
     accounts: known.map(({ label, driver, instanceIds, windows }) => ({
       label,
       driver,
@@ -194,6 +208,37 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
       ];
     }
   }
+  const workerModels = { ...policy.workerModels };
+  for (const { family, driver } of WORKER_FAMILIES) {
+    const model = edit.workerModels?.[family];
+    if (model === undefined) continue;
+    delete workerModels[family];
+    if (model === null) continue;
+    const accounts = snapshot.inventories
+      .flatMap((i) => i.accounts)
+      .filter((a) => a.driver === driver);
+    if (!accounts.some((a) => accountSupportsRoutingProfile(a, model))) {
+      const offered = new Map<string, Set<string>>();
+      for (const { slug, capabilities } of accounts.flatMap((a) => a.models)) {
+        const effort = capabilities?.optionDescriptors?.find(
+          (o) => o.id === routingEffortOptionId(driver),
+        );
+        if (effort?.type !== "select") continue;
+        const efforts = offered.get(slug) ?? new Set();
+        for (const option of effort.options) efforts.add(option.id);
+        offered.set(slug, efforts);
+      }
+      return yield* invalid(
+        `No ${family} account offers ${model.model} / ${model.effort}. Use an exact model and effort of: ${[...offered].map(([slug, efforts]) => `${slug} (${[...efforts].join(", ")})`).join("; ") || "none reported"}.`,
+      );
+    }
+    workerModels[family] = {
+      ...model,
+      ...(model.expiresAt
+        ? { expiresAt: yield* time(model.expiresAt, "A default worker model's expiresAt") }
+        : {}),
+    };
+  }
   const curve = (family: "claude" | "codex" | "other") =>
     edit.curves?.[family] === undefined
       ? policy[family]
@@ -205,6 +250,7 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     other: curve("other"),
     accountRules: rules,
     accountCaps: caps,
+    workerModels,
     overrides,
   } satisfies AllocationPolicy;
 });

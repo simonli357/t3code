@@ -60,21 +60,43 @@ at most a few seconds. Existing threads, forks and retries retain their selectio
 which computer to use can compare them first; see
 [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
-The page opens with numeric budgets, showing the default beside your current value. Codex defaults
-to 30% initially plus 10 allowance percentage points per 24 hours since reset; Claude defaults to
-0% initially plus 17 points per 24 hours. The target is capped below the reserve. Claude's 17-point
-rate can use a weekly allowance before seven days. Existing saved policies keep their values,
-including cycle-based pacing, until you edit or reset them.
+The page opens with the **Accounts** table: one row per account that can run workers, the same
+login on several computers counted once. Each row shows the account's usage now (weekly and
+5-hour percent when the provider reports them, with the age of the reading) and every value you
+can tune for it, editable in place: whether workers are allowed, the most concurrent workers, the
+priority, the budget, the hard cap, and the end time and note of each rule. Accounts whose
+provider is turned off, or that report no subscription quota and have nothing saved, are folded
+into **Other accounts** below the table; they can still be given a rule there.
+
+**Family defaults** sit under the table. Each number is a percentage of the provider's weekly
+allowance: the initial budget plus the daily budget builds a target from the weekly reset, capped
+below the reserve, and the borrowing allowance is how far projected use may exceed the target
+before a warning. Codex defaults to 30% initially plus 10 points per 24 hours since reset; Claude
+defaults to 0% initially plus 17 points per 24 hours, which can use a weekly allowance before
+seven days. Existing saved policies keep their values, including cycle-based pacing, until you
+edit or reset them.
+
+An account follows its family's budget unless you type an initial or daily budget in its row.
+That is a **temporary budget** for that account's weekly windows: it ends by itself at the time
+shown, by default the next weekly reset, and **Use family default** ends it at once. It needs a
+known login and a weekly usage reading.
+
+Each family can also have a **default worker model**: a model and effort, with an optional end
+time and note. A worker start that names no model then uses it instead of the difficulty/stakes
+table on the [Model selection](#model-selection) page, even a model the table never chooses, and
+after the end time the table applies again. A start that names its model, and sessions you start
+yourself, are unaffected.
 
 Use **Save settings** to apply changes; no assignment preview is required. **Reset to defaults**
 changes the draft, then Save applies it. Reconnecting keeps unsaved edits. If someone saved a newer
 version, **Reload saved settings** discards your old draft explicitly.
 
-Optional **Hard usage caps** apply per account identity. Weekly caps use the provider's
+Optional **hard caps** apply per account identity. Weekly caps use the provider's
 account-wide weekly window; Claude accounts also support its 5-hour session. Enter a percentage
-and choose whether reaching it blocks workers, masters, or both. Blank fields are disabled. A fresh
-reading at or above the cap blocks new turns on that account, including queued, scheduled, renewal,
-and notification-triggered ones. Turns that are already running finish. A worker assignment headed
+and choose whether reaching it stops workers, masters, or both. Blank fields are disabled. A fresh
+reading at or above the cap is checked immediately and at least every 15 seconds, and blocks new
+turns on that account, including queued, scheduled, renewal, and notification-triggered ones.
+Turns that are already running finish. Stopping a worker leaves one notice for its owning master. A worker assignment headed
 for a capped account moves to another account of the same provider that has headroom; otherwise it
 stays queued and starts by itself when the cap no longer applies. Turning both block actions off
 keeps the threshold saved but inactive. The cap remains latched until the provider window resets, a
@@ -96,9 +118,11 @@ source cannot be verified, rather than assuming a subscription applies.
 once instead of at each start. For each account you can set three rules, each with an optional
 end time, after which it stops applying by itself, and a note:
 
-- **Never used for workers**: the account is never recommended for a worker, and a worker
+- **Workers** off: the account is never recommended for a worker, and a worker
   pinned to it is refused with the rule as the reason. Sessions you start yourself still run.
-- **Most concurrent workers**: once that many workers are running or starting on the account,
+  A computer's own **Available for workers** switch, under the advanced account details, shows
+  beside it when it is off.
+- **Max workers**: once that many workers are running or starting on the account,
   the next one goes elsewhere and a worker pinned to it is refused.
 - **Priority** (-100 to 100, 0 when unset): among the remaining accounts the higher priority
   wins while the account has quota headroom, meaning its projected use fits every allowance
@@ -109,13 +133,14 @@ running, queued, reserved and incoming work from the available budget, comparing
 short or weekly window. The **Account preference margin** under advanced estimation settings
 favors the previous account among close choices. A rule covers the same login on every
 computer; unidentified accounts stay separate. Agents read and change the same rules, budgets,
-hard caps and temporary targets with the `t3_allocation_policy` tool. Usage analytics show account allowance points/hour when measured. Model and
+hard caps, temporary budgets and default worker models with the `t3_allocation_policy` tool. Usage analytics show account allowance points/hour when measured. Model and
 effort token samples are separate evidence, not subscription percentages; missing rates say
 **Not enough data**. Collection remains limited to accounts already opted into measurements.
 
-Advanced sections contain forecast estimates, connection setup, the assignment simulator, temporary
-targets and diagnostics. Reset plans do not replenish quota; allocation never redeems credits or
-enables overage.
+Advanced sections contain forecast estimates, connection setup, the assignment simulator, use-by
+targets, reset plans, the JSON view of every temporary override, and diagnostics. Short-window
+forecasts use their own observed rate or the fallback burn. Reset plans do not replenish quota or
+change the reset schedule; allocation never redeems credits or enables overage.
 
 An earlier denied or observation-only proposal can start with the same assignment and thread IDs.
 The master may choose an account before startup. After startup is attempted, retry the entire input
@@ -123,9 +148,9 @@ unchanged if a response is lost; this reconciles its durable receipt without dup
 A confirmed failed start remains recorded as an error. Stop or cancel running work before releasing
 its accounting; unused reservations expire.
 
-History charts remain limited to accounts opted into usage retention. Native mobile displays saved
-numeric budgets, hard caps, account rules, usage inspection and assignment preview; server enforcement is
-shared, but use the web page to edit settings and start human sessions.
+History charts remain limited to accounts opted into usage retention. Native mobile shows the
+same account rows and family defaults read-only, with usage inspection and assignment preview;
+server enforcement is shared, but use the web page to edit settings and start human sessions.
 
 ## Set custom model prices
 
@@ -196,7 +221,9 @@ using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 Open **Settings → Model selection** beside Provider allocation, or find it through
 Settings search or the command palette. Choose the shared coordinator in Provider
 allocation first. Automatic selection is opt-in through this page or an agent automatic
-request; ordinary model pickers keep their explicit choices.
+request; ordinary model pickers keep their explicit choices. While a provider family has a
+default worker model in [Provider allocation](#allocate-accounts-for-new-work), workers that
+name no model use that instead of this table, and a preview here says so.
 
 The page is one lookup table per provider, on separate Codex and Claude tabs. Columns are
 an assignment's difficulty and rows are its stakes, each scored 0–10. Each cell is the model

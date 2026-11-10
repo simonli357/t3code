@@ -1,9 +1,11 @@
 import {
   ProviderDriverKind,
   accountSupportsRoutingProfile,
+  allocationWorkerModel,
   automaticModelAllowed,
   routingEffortOptionId,
   type AllocationInventory,
+  type AllocationPolicy,
   type AllocationRequest,
   type ModelRoutingPolicy,
   type ModelRoutingRequest,
@@ -11,12 +13,17 @@ import {
   type RoutingProfile,
 } from "@t3tools/contracts";
 
-/** Resolves capabilities only. Allowance pressure cannot activate an alternative profile. */
+/**
+ * Resolves capabilities only. Allowance pressure cannot activate an alternative profile.
+ * `workers` carries the allocation policy whose default worker model replaces the table for a
+ * worker that pins no model.
+ */
 export function modelCandidates(
   policy: ModelRoutingPolicy,
   request: ModelRoutingRequest,
   inventories: readonly AllocationInventory[],
   retained?: ModelRoutingDecision,
+  workers?: { readonly policy: AllocationPolicy; readonly at: string },
 ) {
   const { difficulty, stakes } = request.assessment;
   const rule = `Difficulty ${difficulty}, stakes ${stakes}`;
@@ -104,11 +111,31 @@ export function modelCandidates(
       reasons,
     };
   }
+  const defaults: string[] = [];
   for (const driver of [...allowedDrivers].sort()) {
     if (driver !== "codex" && driver !== "claudeAgent") {
       reasons.push(
         `${driver}: automatic model selection is unsupported; use exact explicit selection.`,
       );
+      continue;
+    }
+    // The user's standing default is exact, like an override: no table, allowlist or alternative.
+    const standing =
+      workers && request.kind !== "session"
+        ? allocationWorkerModel(workers.policy, driver, workers.at)
+        : undefined;
+    if (standing) {
+      candidates.push({
+        request: {
+          ...constraints,
+          driver: ProviderDriverKind.make(driver),
+          model: standing.model,
+          options: [{ id: routingEffortOptionId(driver), value: standing.effort }],
+        },
+        profile: null,
+        reason: `${driver}: default worker model ${standing.model} / ${standing.effort}${standing.expiresAt ? ` until ${standing.expiresAt}` : ""}${standing.note ? ` (${standing.note})` : ""}.`,
+      });
+      defaults.push(driver);
       continue;
     }
     const table = driver === "codex" ? policy.codex : policy.claudeAgent;
@@ -158,7 +185,11 @@ export function modelCandidates(
         `${driver}: no approved capability is available; no quota-based downgrade is permitted.`,
       );
   }
-  return { rule, candidates, reasons };
+  return {
+    rule: defaults.length ? `${rule}; default worker model for ${defaults.join(", ")}` : rule,
+    candidates,
+    reasons,
+  };
 }
 
 /** Validate edits without destroying retained choices that a catalog no longer offers. */

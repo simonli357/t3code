@@ -275,3 +275,100 @@ it.effect("lists an account with no known login once and applies its rules on ev
     expect(override.detail).toContain("has no known login");
   }),
 );
+
+it.effect("sets and clears a family's default worker model, checked against the catalog", () =>
+  Effect.gen(function* () {
+    const offered = snapshot();
+    const models = [
+      {
+        slug: "claude-fable-5",
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select" as const,
+              options: [
+                { id: "medium", label: "Medium" },
+                { id: "high", label: "High" },
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    const catalog = {
+      ...offered,
+      inventories: offered.inventories.map((host) => ({
+        ...host,
+        accounts: host.accounts.map((a) => ({ ...a, models })),
+      })),
+    };
+    const set = yield* editAllocationPolicy(
+      catalog,
+      {
+        workerModels: {
+          claude: {
+            model: "claude-fable-5",
+            effort: "medium",
+            expiresAt: "2026-11-10T05:00:00Z",
+            note: "workers on Fable medium today",
+          },
+        },
+      },
+      at,
+    );
+    const standing = {
+      model: "claude-fable-5",
+      effort: "medium",
+      expiresAt: "2026-11-10T05:00:00.000Z",
+      note: "workers on Fable medium today",
+    };
+    expect(set.workerModels).toEqual({ claude: standing });
+    expect(allocationPolicyView({ ...catalog, policy: set }, at).workerModels).toEqual({
+      claude: standing,
+    });
+    // Past its end time it is no longer read back, and another edit leaves it alone.
+    expect(
+      allocationPolicyView({ ...catalog, policy: set }, "2026-11-10T05:00:00.000Z").workerModels,
+    ).toEqual({});
+    const kept = yield* editAllocationPolicy(
+      { ...catalog, policy: set },
+      { setRules: [{ account: "XL", kind: "exclude" }] },
+      at,
+    );
+    expect(kept.workerModels).toEqual({ claude: standing });
+    const cleared = yield* editAllocationPolicy(
+      { ...catalog, policy: set },
+      { workerModels: { claude: null } },
+      at,
+    );
+    expect(cleared.workerModels).toEqual({});
+    for (const claude of [
+      { model: "fable", effort: "medium" },
+      { model: "claude-fable-5", effort: "xhigh" },
+    ])
+      expect(
+        (yield* Effect.flip(editAllocationPolicy(catalog, { workerModels: { claude } }, at)))
+          .detail,
+      ).toContain("claude-fable-5 (medium, high)");
+    // Codex has no account here, so nothing can be its default.
+    expect(
+      (yield* Effect.flip(
+        editAllocationPolicy(
+          catalog,
+          { workerModels: { codex: { model: "gpt-6-astra", effort: "high" } } },
+          at,
+        ),
+      )).detail,
+    ).toContain("none reported");
+    const past = yield* Effect.flip(
+      editAllocationPolicy(
+        catalog,
+        { workerModels: { claude: { ...standing, expiresAt: "2026-11-09T11:00:00Z" } } },
+        at,
+      ),
+    );
+    expect(past.detail).toContain("must be a time after now");
+  }),
+);

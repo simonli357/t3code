@@ -1,14 +1,18 @@
 import {
   WS_METHODS,
+  allocationAccountRule,
   allocationPreferenceKey,
+  routingEffortOptionId,
   type AllocationAccount,
   type AllocationAccountCap,
+  type AllocationCurve,
   type AllocationWindow,
   type AllocationPolicy,
   type AllocationSnapshot,
   type AllocationRequest,
   type AllocationDecision,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import type { Atom } from "effect/unstable/reactivity";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
@@ -288,6 +292,198 @@ export function allocationAccountGroups(snapshot: AllocationSnapshot | null) {
       a.label.localeCompare(b.label) ||
       a.key.localeCompare(b.key),
   );
+}
+
+/** The provider families that have their own pacing curve and default worker model. */
+export const allocationFamilies = [
+  { family: "claude", driver: "claudeAgent", label: "Claude" },
+  { family: "codex", driver: "codex", label: "Codex" },
+] as const;
+
+const isoTime = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+
+/** A curve field as it applies: null when the preset derives it from each cycle. */
+export function allocationCurveValue(
+  curve: AllocationCurve,
+  key: (typeof allocationCurveFields)[number]["key"],
+): number | null {
+  const paced = key === "dailyPoints" || key === "burstPoints" || key === "burstHours";
+  if (curve.preset === "sustainable" && paced) return null;
+  if (curve.preset === "aggressive17" && paced) return key === "dailyPoints" ? 17 : 0;
+  return curve[key];
+}
+
+/** "4 min", "3 h" or "2 d": how old a reading is. */
+export function allocationReadingAge(checkedAt: string, now: number): string {
+  const minutes = Math.max(0, Math.round((now - Date.parse(checkedAt)) / 60_000));
+  if (!Number.isFinite(minutes)) return "age unknown";
+  return minutes < 60
+    ? `${minutes} min`
+    : minutes < 2880
+      ? `${Math.round(minutes / 60)} h`
+      : `${Math.round(minutes / 1440)} d`;
+}
+
+/**
+ * One row per account for the settings table: what the account reads now and every policy value
+ * that applies to it. `other` accounts cannot usefully take a setting: their provider is turned
+ * off, or it reports no subscription quota and nothing is saved for it.
+ */
+export function allocationAccountRows(
+  snapshot: AllocationSnapshot | null,
+  policy: AllocationPolicy,
+  now: number,
+) {
+  const at = isoTime(now);
+  return allocationAccountGroups(snapshot).map((group) => {
+    const login = group.members[0]!.accountKey;
+    const windows = group.members
+      .filter((account) => account.usageLimitsUnavailableReason === undefined)
+      .flatMap((account) => account.windows)
+      .sort((left, right) => Date.parse(right.checkedAt) - Date.parse(left.checkedAt));
+    const rule = (source: AllocationPolicy, kind: "exclude" | "maxWorkers" | "priority") =>
+      group.keys.map((key) => allocationAccountRule(source, key, kind, at)).find(Boolean);
+    // A temporary budget replaces the family curve on the weekly windows of a known login.
+    const targetWindows =
+      login === null
+        ? []
+        : [
+            ...new Map(
+              windows.filter((w) => w.kind === "weekly").map((w) => [w.id, w] as const),
+            ).values(),
+          ];
+    const targets = (source: AllocationPolicy) =>
+      source.overrides.filter(
+        (o) =>
+          o.accountKey === login &&
+          targetWindows.some((w) => w.id === o.windowId) &&
+          Date.parse(o.expiresAt) > now,
+      );
+    const supportsCaps = allocationSupportsSubscriptionCaps(group.members);
+    const saved = snapshot?.policy ?? policy;
+    return {
+      ...group,
+      login,
+      // An account with no known login is told apart by its computers.
+      name: `${group.label}${login === null ? ` (${group.hosts.join(", ")})` : ""}`,
+      family:
+        allocationFamilies.find((family) => family.driver === group.driver)?.family ??
+        ("other" as const),
+      usage: {
+        weekly: windows.find((w) => w.kind === "weekly" && !w.models?.length),
+        short: windows.find((w) => w.kind === "session"),
+      },
+      supportsCaps,
+      capSource: allocationSubscriptionCapSource(group.members),
+      /** Computers whose own settings keep workers off this account. */
+      workersOffOn: group.members.flatMap((member) =>
+        member.availableForWorkers === false
+          ? [
+              snapshot?.inventories.find((i) => i.environmentId === member.environmentId)
+                ?.environmentLabel ?? member.environmentId,
+            ]
+          : [],
+      ),
+      rules: {
+        exclude: rule(policy, "exclude"),
+        maxWorkers: rule(policy, "maxWorkers"),
+        priority: rule(policy, "priority"),
+      },
+      cap: group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean),
+      targetWindows,
+      target: targets(policy).findLast((o) => o.curve !== undefined),
+      // Decided from the saved policy, so a row does not move while it is being edited.
+      other:
+        group.members.every((member) => member.enabled === false) ||
+        (!supportsCaps &&
+          !(["exclude", "maxWorkers", "priority"] as const).some((kind) => rule(saved, kind)) &&
+          !group.keys.some((key) => allocationAccountCap(saved, key)) &&
+          !targets(saved).length),
+    };
+  });
+}
+export type AllocationAccountRow = ReturnType<typeof allocationAccountRows>[number];
+
+/**
+ * The policy with this account's temporary budget changed, or removed when `patch` is undefined.
+ * A new one copies the family curve and ends at the weekly reset, or in a week.
+ */
+export function withAllocationTarget(
+  policy: AllocationPolicy,
+  row: Pick<AllocationAccountRow, "login" | "family" | "target" | "targetWindows">,
+  patch:
+    | { readonly burstPoints?: number; readonly dailyPoints?: number; readonly expiresAt?: string }
+    | undefined,
+  now: number,
+): AllocationPolicy {
+  const mine = (o: AllocationPolicy["overrides"][number]) =>
+    o.accountKey === row.login && row.targetWindows.some((w) => w.id === o.windowId);
+  if (row.login === null || !row.targetWindows.length) return policy;
+  if (!patch)
+    return {
+      ...policy,
+      // A use-by plan on the same window is a separate instruction and stays.
+      overrides: policy.overrides.flatMap((o) => {
+        if (!mine(o) || !o.curve) return [o];
+        const { curve: _curve, ...plan } = o;
+        return plan.useBy ? [plan] : [];
+      }),
+    };
+  const { expiresAt, ...points } = patch;
+  const family = policy[row.family];
+  const curve = {
+    ...(row.target?.curve ?? {
+      ...family,
+      preset: "custom" as const,
+      dailyPoints: family.preset === "aggressive17" ? 17 : family.dailyPoints,
+      burstPoints: family.preset === "aggressive17" ? 0 : family.burstPoints,
+      burstHours: family.preset === "aggressive17" ? 0 : family.burstHours,
+    }),
+    ...points,
+  };
+  const reset = Date.parse(row.targetWindows[0]!.resetsAt ?? "");
+  const until =
+    expiresAt ?? row.target?.expiresAt ?? isoTime(reset > now ? reset : now + 7 * 86_400_000);
+  const createdAt = isoTime(now);
+  return {
+    ...policy,
+    overrides: [
+      ...policy.overrides.filter((o) => !mine(o)),
+      ...row.targetWindows.map((window) => {
+        const existing = policy.overrides.findLast(
+          (o) => o.accountKey === row.login && o.windowId === window.id,
+        );
+        return {
+          accountKey: row.login!,
+          windowId: window.id,
+          createdAt: existing?.createdAt ?? createdAt,
+          baselineUsedPoints: existing?.baselineUsedPoints ?? window.usedPoints,
+          ...(existing?.useBy ? { useBy: existing.useBy } : {}),
+          ...(existing?.resetPlan ? { resetPlan: existing.resetPlan } : {}),
+          expiresAt: until,
+          curve,
+        };
+      }),
+    ],
+  };
+}
+
+/** The models a provider family's accounts offer, each with the efforts it can run at. */
+export function allocationWorkerModelChoices(snapshot: AllocationSnapshot | null, driver: string) {
+  const choices = new Map<string, Set<string>>();
+  for (const account of snapshot?.inventories.flatMap((i) => i.accounts) ?? []) {
+    if (account.driver !== driver) continue;
+    for (const model of account.models) {
+      const effort = model.capabilities?.optionDescriptors?.find(
+        (option) => option.id === routingEffortOptionId(driver),
+      );
+      if (effort?.type !== "select") continue;
+      const efforts = choices.get(model.slug) ?? new Set<string>();
+      for (const option of effort.options) efforts.add(option.id);
+      choices.set(model.slug, efforts);
+    }
+  }
+  return [...choices].map(([model, efforts]) => ({ model, efforts: [...efforts] }));
 }
 
 /** Keep observations from each host visible; do not sum overlapping account samples. */

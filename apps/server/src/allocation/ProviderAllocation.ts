@@ -492,6 +492,8 @@ const make = Effect.gen(function* () {
           allowedDrivers: [family],
         },
         inventories,
+        undefined,
+        { policy, at },
       ).candidates;
       for (const { request } of candidates) {
         const instanceId = decide(request);
@@ -757,6 +759,7 @@ const make = Effect.gen(function* () {
         operation.request,
         inventories,
         retained,
+        { policy: standIn.coordinatorPolicy ?? policy, at: yield* now },
       ).candidates) {
         const measured = yield* collect(candidate.request);
         inventories = inventories.map((host) => ({
@@ -871,6 +874,7 @@ const make = Effect.gen(function* () {
         snapshot: {
           accountRulesSupported: true,
           accountCapsSupported: true,
+          workerModelsSupported: true,
           policy,
           inventories,
           reservations: yield* store.reservations,
@@ -1099,6 +1103,11 @@ const make = Effect.gen(function* () {
       return yield* new AllocationError({
         code: "invalid",
         detail: "Update the allocation coordinator before changing its policy from here.",
+      });
+    if (edit.workerModels && snapshot.workerModelsSupported !== true)
+      return yield* new AllocationError({
+        code: "invalid",
+        detail: "Update the allocation coordinator before setting a default worker model.",
       });
     const { policy } = yield* execute({
       _tag: "policy",

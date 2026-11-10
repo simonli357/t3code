@@ -4,6 +4,7 @@ import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 
 import {
   EnvironmentId,
+  allocationWorkerModel,
   defaultAllocationPolicy,
   ProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
@@ -14,13 +15,14 @@ import {
 
 import {
   createAllocationCommands,
+  allocationAccountRows,
   allocationCurveFields,
-  allocationAccountGroups,
-  allocationAccountCap,
-  allocationSubscriptionCapSource,
-  allocationSupportsSubscriptionCaps,
+  allocationCurveValue,
+  allocationFamilies,
+  allocationReadingAge,
   allocationSummary,
   allocationAccountLabel,
+  type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
 
 import { connectionAtomRuntime } from "../../connection/runtime";
@@ -36,6 +38,11 @@ import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
+const points = (value: number) => Number(value.toFixed(2)).toString();
+const until = (expiresAt: string | undefined) =>
+  expiresAt ? ` until ${new Date(expiresAt).toLocaleString()}` : "";
+const rule = (entry: { expiresAt?: string | undefined; note?: string | undefined }) =>
+  `${until(entry.expiresAt)}${entry.note ? ` (${entry.note})` : ""}`;
 
 export function SettingsAllocationRouteScreen() {
   const { selectedTargets } = useSettingsEnvironmentFilter();
@@ -46,6 +53,8 @@ export function SettingsAllocationRouteScreen() {
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
 
   const [snapshot, setSnapshot] = useState<AllocationSnapshot | null>(null);
+  // When the snapshot was read: reading ages and end times are judged against it.
+  const [now, setNow] = useState(0);
 
   const [decision, setDecision] = useState<AllocationDecision | null>(null);
 
@@ -61,6 +70,8 @@ export function SettingsAllocationRouteScreen() {
 
   const [advanced, setAdvanced] = useState(false);
 
+  const [showOthers, setShowOthers] = useState(false);
+
   const refresh = async () => {
     if (!target) return;
 
@@ -74,6 +85,7 @@ export function SettingsAllocationRouteScreen() {
 
     if (result._tag === "Success" && result.value.snapshot) {
       setSnapshot(result.value.snapshot);
+      setNow(Date.now());
 
       setMessage("");
     } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
@@ -92,6 +104,7 @@ export function SettingsAllocationRouteScreen() {
 
         if (result._tag === "Success" && result.value.snapshot) {
           setSnapshot(result.value.snapshot);
+          setNow(Date.now());
 
           setMessage("");
         } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
@@ -102,6 +115,62 @@ export function SettingsAllocationRouteScreen() {
       active = false;
     };
   }, [target, execute]);
+
+  const at = new Date(now).toISOString();
+  const rows = snapshot ? allocationAccountRows(snapshot, snapshot.policy, now) : [];
+  const others = rows.filter((row) => row.other);
+  const accountRow = (row: AllocationAccountRow) => {
+    const reading = row.usage.weekly ?? row.usage.short;
+    const family = snapshot!.policy[row.family];
+    const curve = row.target?.curve ?? family;
+    const { exclude, maxWorkers, priority } = row.rules;
+    return (
+      <View key={row.key} className="gap-1 rounded border border-border p-3">
+        <Text className="font-semibold">
+          {row.label} · {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+        </Text>
+        <Text>
+          {reading
+            ? `${[
+                row.usage.weekly ? `Week ${points(row.usage.weekly.usedPoints)}%` : "",
+                row.usage.short
+                  ? `${row.usage.short.durationHours ? `${points(row.usage.short.durationHours)}h` : row.usage.short.label} ${points(row.usage.short.usedPoints)}%`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")} · ${allocationReadingAge(reading.checkedAt, now)} ago`
+            : row.capSource === "unsupported"
+              ? "No subscription quota"
+              : row.capSource === "probeFailed"
+                ? "Quota read failed"
+                : "No verified quota reading"}
+        </Text>
+        <Text>
+          Workers {exclude ? `off${rule(exclude)}` : "on"}
+          {row.workersOffOn.length ? ` (off on ${row.workersOffOn.join(", ")})` : ""}
+          {maxWorkers ? ` · max ${maxWorkers.value}${rule(maxWorkers)}` : ""}
+          {priority ? ` · priority ${priority.value}${rule(priority)}` : ""}
+        </Text>
+        <Text>
+          Budget {allocationCurveValue(curve, "burstPoints") ?? "derived"} initial ·{" "}
+          {allocationCurveValue(curve, "dailyPoints") ?? "derived"} daily ·{" "}
+          {row.target ? `temporary${until(row.target.expiresAt)}` : "family default"}
+        </Text>
+        {row.supportsCaps && row.cap ? (
+          <Text>
+            Hard cap week {row.cap.weeklyPercent === null ? "off" : `${row.cap.weeklyPercent}%`}
+            {row.driver === "claudeAgent"
+              ? ` · 5h ${row.cap.fiveHourPercent === null ? "off" : `${row.cap.fiveHourPercent}%`}`
+              : ""}{" "}
+            · stops{" "}
+            {[row.cap.stopWorkers ? "workers" : "", row.cap.stopMasters ? "masters" : ""]
+              .filter(Boolean)
+              .join(" and ") || "nothing"}
+          </Text>
+        ) : null}
+      </View>
+    );
+  };
 
   const preview = async () => {
     if (!target) return;
@@ -141,10 +210,7 @@ export function SettingsAllocationRouteScreen() {
   return (
     <SettingsScreen title="Provider allocation">
       <ScrollView contentContainerClassName="gap-4 p-4">
-        <Text>
-          Recommendations only. Quota and pacing warnings do not prevent an explicit Start; provider
-          errors remain visible.
-        </Text>
+        <Text>Budgets and priorities advise; account rules and hard caps block.</Text>
         <Text>{target?.label ?? "Choose a connected environment in Settings."}</Text>
         <Text>
           {snapshot
@@ -157,97 +223,43 @@ export function SettingsAllocationRouteScreen() {
         {message ? <Text accessibilityRole="alert">{message}</Text> : null}
         {snapshot && (
           <View className="gap-4">
-            <Text className="font-semibold">Usage budgets · current / default</Text>
-            <Text>
-              Read-only on native mobile. Edit these numbers in the web settings page. Estimates
-              remain advisory.
-            </Text>
-            {(["codex", "claude"] as const).map((family) => (
-              <View key={family} className="gap-2 rounded border border-border p-3">
-                <Text className="font-semibold">{family === "codex" ? "Codex" : "Claude"}</Text>
-                {allocationCurveFields.map((field) => (
-                  <Text key={field.key}>
-                    {field.label}:{" "}
-                    {snapshot.policy[family].preset === "sustainable" &&
-                    ["dailyPoints", "burstPoints", "burstHours"].includes(field.key)
-                      ? "Derived per cycle"
-                      : snapshot.policy[family].preset === "aggressive17" &&
-                          field.key === "dailyPoints"
-                        ? 17
-                        : snapshot.policy[family].preset === "aggressive17" &&
-                            ["burstPoints", "burstHours"].includes(field.key)
-                          ? 0
-                          : snapshot.policy[family][field.key]}{" "}
-                    / {defaultAllocationPolicy[family][field.key]} {field.unit}
-                  </Text>
-                ))}
-              </View>
-            ))}
-            <Text className="font-semibold">Account rules</Text>
-            <Text>
-              Every worker start obeys these. An account that is never used for workers or is at its
-              worker limit is not recommended, and a worker pinned to it is refused. The higher
-              priority wins while the account has quota headroom. Edit in the web settings page.
-            </Text>
-            {allocationAccountGroups(snapshot).map((account) => {
-              const rules = (snapshot.policy.accountRules ?? []).filter(
-                (rule) =>
-                  rule.key === account.key &&
-                  (rule.expiresAt === undefined || Date.parse(rule.expiresAt) > Date.now()),
-              );
+            <Text className="font-semibold">Accounts</Text>
+            <Text>Read-only on native mobile. Edit in the web settings page.</Text>
+            {rows.filter((row) => !row.other).map(accountRow)}
+            {others.length > 0 && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: showOthers }}
+                onPress={() => setShowOthers(!showOthers)}
+              >
+                <Text className="text-primary">Other accounts ({others.length})</Text>
+              </Pressable>
+            )}
+            {showOthers && others.map(accountRow)}
+            <Text className="font-semibold">Family defaults</Text>
+            {allocationFamilies.map(({ family, driver, label }) => {
+              const worker = allocationWorkerModel(snapshot.policy, driver, at);
               return (
-                <Text key={account.key}>
-                  {account.label} · {PROVIDER_DISPLAY_NAMES[account.driver] ?? account.driver}:{" "}
-                  {rules.length
-                    ? rules
-                        .map(
-                          (rule) =>
-                            `${rule.kind === "exclude" ? "never used for workers" : rule.kind === "maxWorkers" ? `at most ${rule.value} workers` : `priority ${rule.value}`}${rule.expiresAt ? ` until ${new Date(rule.expiresAt).toLocaleString()}` : ""}${rule.note ? ` (${rule.note})` : ""}`,
-                        )
-                        .join("; ")
-                    : "no rules"}{" "}
-                  · {account.hosts.join(", ")}
-                </Text>
-              );
-            })}
-            <Text className="font-semibold">Hard usage caps</Text>
-            <Text>
-              Hard caps are enforced by the server for workers and masters on this account. Edit
-              thresholds and block actions in the web settings page.
-            </Text>
-            {allocationAccountGroups(snapshot).map((account) => {
-              const cap = allocationAccountCap(snapshot.policy, account.key);
-              const capSource = allocationSubscriptionCapSource(account.members);
-              if (!allocationSupportsSubscriptionCaps(account.members))
-                return (
-                  <Text key={`cap:${account.key}`}>
-                    {account.label}:{" "}
-                    {capSource === "unsupported"
-                      ? "subscription quota is unsupported"
-                      : "subscription quota source is not verified"}
-                    ; hard caps are inactive.
+                <View key={family} className="gap-1 rounded border border-border p-3">
+                  <Text className="font-semibold">{label}</Text>
+                  <Text>
+                    {allocationCurveFields
+                      .filter((field) => field.key !== "burstHours")
+                      .map(
+                        (field) =>
+                          `${field.label} ${
+                            allocationCurveValue(snapshot.policy[family], field.key) ?? "derived"
+                          } (default ${points(defaultAllocationPolicy[family][field.key])})`,
+                      )
+                      .join(" · ")}
                   </Text>
-                );
-              return (
-                <Text key={`cap:${account.key}`}>
-                  {account.label}: weekly{" "}
-                  {cap?.weeklyPercent === null || cap?.weeklyPercent === undefined
-                    ? "disabled"
-                    : `${cap.weeklyPercent}%`}
-                  {account.driver === "claudeAgent"
-                    ? ` · Claude 5-hour ${
-                        cap?.fiveHourPercent === null || cap?.fiveHourPercent === undefined
-                          ? "disabled"
-                          : `${cap.fiveHourPercent}%`
-                      }`
-                    : ""}
-                  {cap
-                    ? ` · block workers ${cap.stopWorkers ? "on" : "off"} · block masters ${cap.stopMasters ? "on" : "off"}`
-                    : ""}
-                  {capSource === "probeFailed"
-                    ? " · quota read failed; reached caps stay enforced"
-                    : ""}
-                </Text>
+                  <Text>
+                    Worker model:{" "}
+                    {worker
+                      ? `${worker.model} / ${worker.effort}${until(worker.expiresAt)}${worker.note ? ` (${worker.note})` : ""}`
+                      : "difficulty table"}
+                  </Text>
+                </View>
               );
             })}
           </View>
@@ -438,11 +450,7 @@ export function SettingsAllocationRouteScreen() {
             ))}
           </View>
         ))}
-        <Text>
-          Native inspection shows saved budgets, account preferences and usage. Per-model allowance
-          burn is not attributable from mixed account traffic. Open the web page to edit settings,
-          inspect model samples and manage temporary targets.
-        </Text>
+        <Text>Open the web page to edit settings and inspect model samples.</Text>
         {target?.displayUrl ? (
           <Pressable
             accessibilityRole="link"

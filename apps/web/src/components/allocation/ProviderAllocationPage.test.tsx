@@ -55,6 +55,7 @@ import { ProviderAllocationPage } from "./ProviderAllocationPage";
 const snapshot: AllocationSnapshot = {
   accountRulesSupported: true,
   accountCapsSupported: true,
+  workerModelsSupported: true,
   policy: { ...defaultAllocationPolicy, version: 4, coordinatorEnvironmentId: "host" },
   authorityAvailable: true,
   reservations: [],
@@ -103,6 +104,10 @@ const snapshot: AllocationSnapshot = {
     },
   ],
 };
+const localTime = (iso: string) => {
+  const date = new Date(iso);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+};
 const decision = (request: AllocationRequest) => ({
   at: "2026-10-23T12:00:00.000Z",
   policyVersion: 4,
@@ -125,6 +130,7 @@ const input = (text: string) =>
     | HTMLInputElement
     | HTMLSelectElement
     | HTMLTextAreaElement;
+const named = (label: string) => container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
 async function change(label: string, value: string) {
   const control = input(label);
   await act(() => {
@@ -272,19 +278,21 @@ describe("Provider allocation editor", () => {
     expect(input("Claude Initial weekly budget").value).toBe("0");
     expect(input("Codex Daily usage budget").value).toBe("10");
     expect(input("Claude Daily usage budget").value).toBe("17");
-    const budgets = container.querySelector('[aria-label="Usage budgets"]')!;
-    expect(budgets.textContent).toContain("points / 24h · Default 17");
+    const budgets = container.querySelector('[aria-label="Family defaults"]')!;
+    expect(budgets.textContent).toContain("default 17");
     expect(budgets.closest("details")).toBeNull();
+    expect(container.querySelector("section")?.getAttribute("aria-label")).toBe("Accounts");
     expect(input("Coordinator").closest("details")?.open).toBe(false);
     expect(input("Model").closest("details")?.open).toBe(false);
     await change("Claude Daily usage budget", "40");
     await change("SL priority", "10");
     await change("SL priority until", "2026-11-12T09:30");
     await change("SL priority note", "prefer SL this week");
-    await change("SL most concurrent workers", "0");
+    await change("SL max workers", "0");
     expect(button("Save settings").disabled).toBe(true);
-    await change("SL most concurrent workers", "2");
-    await act(() => input("SL never used for workers").click());
+    await change("SL max workers", "2");
+    await act(() => named("SL workers allowed").click());
+    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("false");
     await act(() => button("Save settings").click());
     expect(readCalls("preview")).toHaveLength(0);
     expect(savedPolicy.claude.dailyPoints).toBe(40);
@@ -307,7 +315,7 @@ describe("Provider allocation editor", () => {
     await act(() => button("Reset to defaults").click());
     expect(input("Claude Daily usage budget").value).toBe("17");
     expect(input("SL priority").value).toBe("");
-    expect((input("SL never used for workers") as HTMLInputElement).checked).toBe(false);
+    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("true");
     expect(savedPolicy.claude.dailyPoints).toBe(40);
     await act(() => button("Save settings").click());
     expect(savedPolicy.claude.dailyPoints).toBe(17);
@@ -329,7 +337,7 @@ describe("Provider allocation editor", () => {
         : previous(arg),
     );
     await act(() => button("Reload saved settings").click());
-    expect(input("Claude Daily usage budget").value).toBe("Derived from each cycle");
+    expect(input("Claude Daily usage budget").value).toBe("Derived");
     expect(input("Claude Daily usage budget").disabled).toBe(true);
     expect(readCalls("policy")).toHaveLength(0);
     await act(() => button("Use saved numeric budgets for Claude").click());
@@ -354,13 +362,13 @@ describe("Provider allocation editor", () => {
 
     expect(savedPolicy.accountCaps).toEqual([]);
     expect(input("SL weekly cap").value).toBe("");
-    expect(input("Block new worker turns").disabled).toBe(true);
+    expect(named("SL cap stops workers")).toBeNull();
     await change("SL weekly cap", "101");
     expect(input("SL weekly cap").getAttribute("aria-invalid")).toBe("true");
     expect(button("Save settings").disabled).toBe(true);
     await change("SL weekly cap", "80");
-    expect((input("Block new worker turns") as HTMLInputElement).checked).toBe(true);
-    expect((input("Block new master turns") as HTMLInputElement).checked).toBe(false);
+    expect(named("SL cap stops workers").getAttribute("aria-checked")).toBe("true");
+    expect(named("SL cap stops masters").getAttribute("aria-checked")).toBe("false");
     await act(() => button("Save settings").click());
     expect(savedPolicy.accountCaps).toHaveLength(1);
     expect(savedPolicy.accountCaps?.[0]).toMatchObject({
@@ -370,22 +378,24 @@ describe("Provider allocation editor", () => {
       stopMasters: false,
     });
 
-    await act(() => input("Block new worker turns").click());
+    await act(() => named("SL cap stops workers").click());
     expect(button("Save settings").disabled).toBe(false);
-    expect(container.textContent).toContain("saved but inactive");
+    expect(container.textContent).toContain("stops nothing: inactive");
     await act(() => button("Save settings").click());
     expect(savedPolicy.accountCaps?.[0]).toMatchObject({
       stopWorkers: false,
       stopMasters: false,
     });
-    await act(() => input("Block new master turns").click());
+    await act(() => named("SL cap stops masters").click());
     await act(() => button("Save settings").click());
     expect(savedPolicy.accountCaps?.[0]).toMatchObject({
       stopWorkers: false,
       stopMasters: true,
     });
   });
-  it("shows the Claude 5-hour cap only for Claude and reports missing telemetry", async () => {
+  it("offers the 5-hour cap only for Claude and shows the account's reading and its age", async () => {
+    expect(container.querySelector('[aria-label="Accounts"]')?.textContent).not.toContain("5h");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:04:00.000Z"));
     const previous = state.execute.getMockImplementation()!;
     const host = snapshot.inventories[0]!;
     state.execute.mockImplementation(async (arg) => {
@@ -424,10 +434,11 @@ describe("Provider allocation editor", () => {
       };
     });
     await act(() => button("Refresh").click());
-    expect(container.textContent).toContain("Claude 5-hour cap");
-    expect(container.textContent).toContain("Provider did not report this window.");
-    expect(container.textContent).toContain("Last read");
-    expect(input("SL Claude 5-hour cap").value).toBe("");
+    const accounts = container.querySelector('[aria-label="Accounts"]')!;
+    expect(accounts.textContent).toContain("Week 42%");
+    expect(accounts.textContent).toContain("4 min ago");
+    expect(input("SL 5-hour cap").value).toBe("");
+    clock.mockRestore();
   });
   it("does not offer subscription caps for an API-key account with cached windows", async () => {
     const previous = state.execute.getMockImplementation()!;
@@ -458,8 +469,47 @@ describe("Provider allocation editor", () => {
       };
     });
     await act(() => button("Refresh").click());
-    expect(container.querySelector('[aria-label="SL weekly cap"]')).toBeNull();
-    expect(container.textContent).toContain("Subscription quota is unsupported for this account.");
+    const other = [...container.querySelectorAll("details")].find((d) =>
+      d.querySelector("summary")?.textContent?.startsWith("Other accounts (1)"),
+    )!;
+    expect(other.open).toBe(false);
+    expect(other.textContent).toContain("No subscription quota");
+    expect(other.textContent).not.toContain("SL weekly cap");
+    // Its rules stay editable, and an account with a saved rule is listed with the rest.
+    expect(input("SL priority").closest("details")).toBe(other);
+  });
+  it("lists a quota-less account with the rest once a rule is saved for it, unless its provider is off", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    const host = snapshot.inventories[0]!;
+    const account = {
+      ...host.accounts[0]!,
+      usageLimitsUnavailableReason: "unsupported" as const,
+    };
+    const key = JSON.stringify(["codex", ["account", "identity"]]);
+    const read = (enabled: boolean) =>
+      state.execute.mockImplementation(async (arg) =>
+        arg.input._tag === "snapshot"
+          ? {
+              _tag: "Success",
+              value: {
+                snapshot: {
+                  ...snapshot,
+                  policy: { ...snapshot.policy, accountRules: [{ key, kind: "exclude" }] },
+                  inventories: [{ ...host, accounts: [{ ...account, enabled }] }],
+                },
+              },
+            }
+          : previous(arg),
+      );
+    read(true);
+    await act(() => button("Reload saved settings").click());
+    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("false");
+    expect(named("SL workers allowed").closest("details")).toBeNull();
+    read(false);
+    await act(() => button("Reload saved settings").click());
+    expect(named("SL workers allowed").closest("details")?.textContent).toContain(
+      "Other accounts (1)",
+    );
   });
   it("does not offer subscription caps until quota provenance is verified", async () => {
     const previous = state.execute.getMockImplementation()!;
@@ -486,10 +536,9 @@ describe("Provider allocation editor", () => {
       };
     });
     await act(() => button("Refresh").click());
-    expect(container.querySelector('[aria-label="SL weekly cap"]')).toBeNull();
-    expect(container.textContent).toContain(
-      "The subscription quota source is not verified right now.",
-    );
+    const accounts = container.querySelector('[aria-label="Accounts"]')!;
+    expect(accounts.textContent).not.toContain("SL weekly cap");
+    expect(accounts.textContent).toContain("Quota unverified");
   });
   it("keeps cap controls available through a transient probe failure", async () => {
     const previous = state.execute.getMockImplementation()!;
@@ -524,9 +573,110 @@ describe("Provider allocation editor", () => {
     const weekly = input("SL weekly cap") as HTMLInputElement;
     expect(weekly).not.toBeNull();
     expect(weekly.disabled).toBe(false);
-    expect(container.textContent).toContain(
-      "An existing reached cap stays enforced until reset or a configuration change",
+    expect(container.textContent).toContain("Quota read failed");
+  });
+  it("edits an account's temporary budget in place and ends it without touching JSON", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:00:00.000Z"));
+    let savedPolicy = snapshot.policy;
+    const previous = state.execute.getMockImplementation()!;
+    const host = snapshot.inventories[0]!;
+    const weekly = {
+      id: "seven_day",
+      label: "Weekly",
+      kind: "weekly" as const,
+      usedPoints: 42,
+      checkedAt: host.observedAt,
+      resetsAt: "2026-10-28T12:00:00.000Z",
+      cycleStartedAt: "2026-10-21T12:00:00.000Z",
+      durationHours: 168,
+      ratePointsPerHour: null,
+      samples: 0,
+      rateAgeMinutes: null,
+    };
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+      if (arg.input._tag === "snapshot")
+        return {
+          _tag: "Success",
+          value: {
+            snapshot: {
+              ...snapshot,
+              policy: savedPolicy,
+              inventories: [
+                { ...host, accounts: host.accounts.map((a) => ({ ...a, windows: [weekly] })) },
+              ],
+            },
+          },
+        };
+      if (arg.input._tag === "policy") {
+        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
+        return { _tag: "Success", value: { policy: savedPolicy } };
+      }
+      return previous(arg);
+    });
+    await act(() => button("Reload saved settings").click());
+    // Blank follows the family: Codex starts at 30 and adds 10 a day.
+    expect(input("SL initial budget").value).toBe("");
+    expect((input("SL initial budget") as HTMLInputElement).placeholder).toBe("30");
+    await change("SL daily budget", "25");
+    expect(input("SL initial budget").value).toBe("30");
+    expect(input("SL budget until").value).toBe(localTime("2026-10-28T12:00:00.000Z"));
+    expect(input("Temporary overrides (JSON)").value).toContain('"dailyPoints": 25');
+    await change("SL budget until", "2026-10-25T09:30");
+    await change("SL initial budget", "");
+    expect(button("Save settings").disabled).toBe(true);
+    await change("SL initial budget", "5");
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.overrides).toEqual([
+      {
+        accountKey: "identity",
+        windowId: "seven_day",
+        createdAt: "2026-10-23T12:00:00.000Z",
+        baselineUsedPoints: 42,
+        expiresAt: new Date("2026-10-25T09:30").toISOString(),
+        curve: { ...snapshot.policy.codex, preset: "custom", burstPoints: 5, dailyPoints: 25 },
+      },
+    ]);
+    await act(() => button("Use family default").click());
+    expect(input("SL daily budget").value).toBe("");
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.overrides).toEqual([]);
+    clock.mockRestore();
+  });
+  it("sets, times and clears a provider family's default worker model", async () => {
+    let savedPolicy = snapshot.policy;
+    const previous = state.execute.getMockImplementation()!;
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+      if (arg.input._tag === "snapshot")
+        return { _tag: "Success", value: { snapshot: { ...snapshot, policy: savedPolicy } } };
+      if (arg.input._tag === "policy") {
+        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
+        return { _tag: "Success", value: { policy: savedPolicy } };
+      }
+      return previous(arg);
+    });
+    expect(input("Codex default worker model").value).toBe("");
+    expect(input("Codex default worker effort").disabled).toBe(true);
+    // Claude has no account here, so it has no model to offer.
+    expect([...(input("Claude default worker model") as HTMLSelectElement).options]).toHaveLength(
+      1,
     );
+    await change("Codex default worker model", "astra");
+    expect(input("Codex default worker effort").value).toBe("high");
+    await change("Codex default worker model until", "2099-11-12T09:30");
+    await change("Codex default worker model note", "today only");
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.workerModels).toEqual({
+      codex: {
+        model: "astra",
+        effort: "high",
+        expiresAt: new Date("2099-11-12T09:30").toISOString(),
+        note: "today only",
+      },
+    });
+    expect(input("Codex default worker model").value).toBe("astra");
+    await change("Codex default worker model", "");
+    await act(() => button("Save settings").click());
+    expect(savedPolicy.workerModels).toEqual({});
   });
   it("rejects empty or out-of-range numbers and retains offline last-known drafts", async () => {
     await change("Codex Daily usage budget", "");
@@ -821,4 +971,20 @@ it("keeps hard caps read-only when the coordinator cannot persist them", async (
   await act(() => button("Refresh").click());
   expect(input("SL weekly cap").disabled).toBe(true);
   expect(container.textContent).toContain("Update the coordinator to edit hard caps.");
+});
+
+it("keeps the default worker model read-only when the coordinator cannot persist it", async () => {
+  const previous = state.execute.getMockImplementation()!;
+  state.execute.mockImplementation(async (arg) =>
+    arg.input._tag === "snapshot"
+      ? {
+          _tag: "Success",
+          value: { snapshot: { ...snapshot, workerModelsSupported: undefined } },
+        }
+      : previous(arg),
+  );
+  await act(() => button("Refresh").click());
+  expect(input("Codex default worker model").disabled).toBe(true);
+  expect(input("Codex Daily usage budget").disabled).toBe(false);
+  expect(container.textContent).toContain("Update the coordinator to set a default worker model");
 });

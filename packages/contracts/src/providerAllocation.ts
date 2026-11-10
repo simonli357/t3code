@@ -4,6 +4,7 @@ import {
   AssignmentTier,
   ModelRoutingPolicy,
   ModelRoutingRequest,
+  RoutingProfile,
 } from "./modelRouting.ts";
 import {
   IsoDateTime,
@@ -97,6 +98,18 @@ export const AllocationAccountRule = Schema.Struct({
   ...accountRuleFields,
 });
 export type AllocationAccountRule = typeof AllocationAccountRule.Type;
+const workerModelFields = {
+  ...RoutingProfile.fields,
+  /** The default stops applying by itself at this time. */
+  expiresAt: Schema.optional(IsoDateTime),
+  note: accountRuleFields.note,
+};
+/**
+ * The model and effort of a worker start that pins no model, instead of the difficulty/stakes
+ * table. A standing user instruction, so it is exact and not limited to the table's models.
+ */
+export const AllocationWorkerModel = Schema.Struct(workerModelFields);
+export type AllocationWorkerModel = typeof AllocationWorkerModel.Type;
 export const AllocationPolicy = Schema.Struct({
   version: NonNegativeInt,
   /** Legacy mode retained for saved policy compatibility; explicit Start always submits work. */
@@ -118,6 +131,13 @@ export const AllocationPolicy = Schema.Struct({
   accountRules: Schema.optional(Schema.Array(AllocationAccountRule).check(Schema.isMaxLength(300))),
   /** Hard stops keyed by `allocationPreferenceKey`; absent or null caps are disabled. */
   accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
+  /** Default worker model per provider family; a family without one uses the table. */
+  workerModels: Schema.optional(
+    Schema.Struct({
+      claude: Schema.optional(AllocationWorkerModel),
+      codex: Schema.optional(AllocationWorkerModel),
+    }),
+  ),
   overrides: Schema.Array(Override).check(Schema.isMaxLength(100)),
 });
 export type AllocationPolicy = typeof AllocationPolicy.Type;
@@ -190,6 +210,22 @@ export function allocationAccountRule(
       (rule.expiresAt === undefined || Date.parse(rule.expiresAt) > Date.parse(at)),
   );
 }
+/** The provider family's default worker model, unless it has expired. */
+export function allocationWorkerModel(
+  policy: AllocationPolicy,
+  driver: string,
+  at: string,
+): AllocationWorkerModel | undefined {
+  const model =
+    driver === "codex"
+      ? policy.workerModels?.codex
+      : driver === "claudeAgent"
+        ? policy.workerModels?.claude
+        : undefined;
+  return model && (model.expiresAt === undefined || Date.parse(model.expiresAt) > Date.parse(at))
+    ? model
+    : undefined;
+}
 
 export const AllocationWindow = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -211,6 +247,8 @@ export const AllocationAccount = Schema.Struct({
   /** Missing on older environments means available for workers. */
   availableForWorkers: Schema.optional(Schema.Boolean),
   retainHistory: Schema.optional(Schema.Boolean),
+  /** The provider is turned on in settings. Missing on older environments means enabled. */
+  enabled: Schema.optional(Schema.Boolean),
   environmentId: Schema.String,
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
@@ -458,6 +496,7 @@ export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AllocationSnapshot = Schema.Struct({
   accountRulesSupported: Schema.optional(Schema.Boolean),
   accountCapsSupported: Schema.optional(Schema.Boolean),
+  workerModelsSupported: Schema.optional(Schema.Boolean),
   policy: AllocationPolicy,
   inventories: Schema.Array(AllocationInventory),
   reservations: Schema.Array(AllocationReservation),
@@ -499,7 +538,7 @@ export type RecommendedChoice = typeof RecommendedChoice.Type;
 export const WorkerRecommendation = Schema.Struct({
   at: IsoDateTime,
   assessment: AssignmentAssessment,
-  /** `model / effort` from the difficulty/stakes table. */
+  /** `model / effort` from the default worker model, or else the difficulty/stakes table. */
   model: RecommendedChoice,
   /** Provider instance ID from allocation. */
   account: RecommendedChoice,
@@ -627,6 +666,13 @@ export const AllocationPolicyEdit = Schema.Struct({
       Schema.Struct({ account: AccountRef, windowId: Schema.optional(TrimmedNonEmptyString) }),
     ),
   ),
+  /** Default worker model per provider family; null clears it, so the table applies again. */
+  workerModels: Schema.optional(
+    Schema.Struct({
+      claude: Schema.optional(Schema.NullOr(AllocationWorkerModel)),
+      codex: Schema.optional(Schema.NullOr(AllocationWorkerModel)),
+    }),
+  ),
 });
 export type AllocationPolicyEdit = typeof AllocationPolicyEdit.Type;
 /** The allocation policy as agents read it: accounts by label, expired entries left out. */
@@ -640,6 +686,10 @@ export const AllocationPolicyView = Schema.Struct({
   rules: Schema.Array(Schema.Struct({ account: Schema.String, ...accountRuleFields })),
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
   overrides: Schema.Array(Schema.Struct({ account: Schema.String, ...overrideFields })),
+  workerModels: Schema.Struct({
+    claude: Schema.optional(AllocationWorkerModel),
+    codex: Schema.optional(AllocationWorkerModel),
+  }),
   /** Every account an edit can name, with the usage windows an override can target. */
   accounts: Schema.Array(
     Schema.Struct({
