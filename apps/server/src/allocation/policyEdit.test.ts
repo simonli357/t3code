@@ -10,6 +10,7 @@ import {
   type AllocationSnapshot,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { accountRuleRefusal } from "./decision.ts";
 import { allocationPolicyView, editAllocationPolicy } from "./policyEdit.ts";
 
 const at = "2026-11-09T12:00:00.000Z";
@@ -223,3 +224,54 @@ it("reads the policy with accounts by label and without expired entries", () => 
     { label: "ES", driver: "claudeAgent", instanceIds: ["local"], windowIds: ["weekly"] },
   ]);
 });
+
+// DS has no known login on any of three computers, so each computer keys it separately.
+const threeComputers = ["desk", "laptop", "server"].map((environmentId) => ({
+  environmentId,
+  observedAt: at,
+  complete: true,
+  demand: [],
+  notices: [],
+  accounts: [account(environmentId, "ds", "DS", null)],
+}));
+const everywhere = { ...snapshot(), inventories: threeComputers };
+const blocked = (policy: AllocationPolicy) =>
+  threeComputers.map(({ accounts: [ds] }) => accountRuleRefusal(policy, ds!, [], at) !== undefined);
+
+it.effect("lists an account with no known login once and applies its rules on every computer", () =>
+  Effect.gen(function* () {
+    expect(allocationPolicyView(everywhere, at).accounts).toEqual([
+      { label: "DS", driver: "claudeAgent", instanceIds: ["ds"], windowIds: ["weekly"] },
+    ]);
+    const cap = { weeklyPercent: 80, fiveHourPercent: null, stopWorkers: true, stopMasters: false };
+    const set = yield* editAllocationPolicy(
+      everywhere,
+      { setRules: [{ account: "DS", kind: "exclude" }], setCaps: [{ account: "ds", ...cap }] },
+      at,
+    );
+    expect(set.accountRules).toHaveLength(3);
+    expect(blocked(set)).toEqual([true, true, true]);
+    // Three stored rules read back as one.
+    const view = allocationPolicyView({ ...everywhere, policy: set }, at);
+    expect(view.rules).toEqual([{ account: "DS", kind: "exclude" }]);
+    expect(view.caps).toEqual([{ account: "DS", ...cap }]);
+    const cleared = yield* editAllocationPolicy(
+      { ...everywhere, policy: set },
+      { clearRules: [{ account: "DS" }], clearCaps: ["DS"] },
+      at,
+    );
+    expect(cleared.accountRules).toEqual([]);
+    expect(cleared.accountCaps).toEqual([]);
+    expect(blocked(cleared)).toEqual([false, false, false]);
+    const override = yield* Effect.flip(
+      editAllocationPolicy(
+        everywhere,
+        {
+          setOverrides: [{ account: "DS", windowId: "weekly", expiresAt: "2026-11-12T00:00:00Z" }],
+        },
+        at,
+      ),
+    );
+    expect(override.detail).toContain("has no known login");
+  }),
+);

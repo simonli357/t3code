@@ -66,11 +66,20 @@ it("counts known aliases once across three hosts in a stable order", () => {
   expect(groups.find((a) => a.label === "SL")?.key).toBe(allocationPreferenceKey(accounts[0]!));
   expect(allocationAccountGroups(snapshot(accounts.toReversed()))).toEqual(groups);
 });
-it("never merges unknown IDs by their human label", () => {
-  const unknown = [account("alien", "codex", "SL", null), account("acer", "codex", "SL", null)];
+it("lists an account with no known login once, holding each computer's rule key", () => {
+  const unknown = [
+    account("alien", "codex", "SL", null),
+    account("acer", "codex", "SL", null),
+    account("sliara", "codex", "SL", null),
+    account("sliara", "claude", "SL", null, "claudeAgent"),
+  ];
   const groups = allocationAccountGroups(snapshot(unknown));
   expect(groups).toHaveLength(2);
-  expect(groups[0]!.key).not.toBe(groups[1]!.key);
+  const codex = groups.find((g) => g.driver === "codex")!;
+  expect(codex.hosts).toEqual(["acer", "alien", "sliara"]);
+  expect(codex.keys).toEqual(unknown.slice(0, 3).map(allocationPreferenceKey).sort());
+  expect(codex.key).toBe(codex.keys[0]);
+  expect(allocationAccountGroups(snapshot(unknown.toReversed()))).toEqual(groups);
 });
 it("does not turn account rates or model token throughput into model quota percentages", () => {
   const a = accounts[0]!;

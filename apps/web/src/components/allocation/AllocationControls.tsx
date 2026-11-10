@@ -361,9 +361,9 @@ export function AllocationControls({
   const groups = allocationAccountGroups(snapshot);
   // An expired rule no longer applies, so it shows as unset.
   const now = new Date().toISOString();
-  const setCap = (key: string, patch: Partial<Omit<AllocationAccountCap, "key">>) => {
-    const current = allocationAccountCap(policy, key) ?? {
-      key,
+  const setCap = (keys: readonly string[], patch: Partial<Omit<AllocationAccountCap, "key">>) => {
+    const current = keys.map((key) => allocationAccountCap(policy, key)).find(Boolean) ?? {
+      key: keys[0]!,
       weeklyPercent: null,
       fiveHourPercent: null,
       stopWorkers: true,
@@ -374,8 +374,8 @@ export function AllocationControls({
     onChange({
       ...policy,
       accountCaps: [
-        ...(policy.accountCaps ?? []).filter((cap) => cap.key !== key),
-        ...(disabled ? [] : [next]),
+        ...(policy.accountCaps ?? []).filter((cap) => !keys.includes(cap.key)),
+        ...(disabled ? [] : keys.map((key) => ({ ...next, key }))),
       ],
     });
   };
@@ -419,7 +419,7 @@ export function AllocationControls({
         )}
         <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
           {groups.map((group) => {
-            const cap = allocationAccountCap(policy, group.key);
+            const cap = group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean);
             const capSource = allocationSubscriptionCapSource(group.members);
             const supportsSubscriptionCaps = allocationSupportsSubscriptionCaps(group.members);
             const supportsFiveHour = allocationSupportsFiveHourCap(group.driver);
@@ -435,7 +435,7 @@ export function AllocationControls({
                 <p className="mb-3 text-xs text-muted-foreground">
                   {group.hosts.join(", ")} ·{" "}
                   {group.members[0]?.accountKey === null
-                    ? "unknown identity; isolated to this computer account"
+                    ? "unknown identity; matched by label on every computer"
                     : "known identity shared across linked computers"}
                 </p>
                 {!supportsSubscriptionCaps ? (
@@ -452,7 +452,7 @@ export function AllocationControls({
                       value={cap?.weeklyPercent ?? null}
                       help={latestCapReading(group.members, "weekly", policy.maxReadingAgeMinutes)}
                       disabled={disabled || snapshot?.accountCapsSupported !== true}
-                      onChange={(weeklyPercent) => setCap(group.key, { weeklyPercent })}
+                      onChange={(weeklyPercent) => setCap(group.keys, { weeklyPercent })}
                     />
                     {supportsFiveHour && (
                       <OptionalCapControl
@@ -464,7 +464,7 @@ export function AllocationControls({
                           policy.maxReadingAgeMinutes,
                         )}
                         disabled={disabled || snapshot?.accountCapsSupported !== true}
-                        onChange={(fiveHourPercent) => setCap(group.key, { fiveHourPercent })}
+                        onChange={(fiveHourPercent) => setCap(group.keys, { fiveHourPercent })}
                       />
                     )}
                     <div className="grid gap-2">
@@ -476,7 +476,7 @@ export function AllocationControls({
                             disabled || snapshot?.accountCapsSupported !== true || !capEnabled
                           }
                           onChange={(event) =>
-                            setCap(group.key, { stopWorkers: event.currentTarget.checked })
+                            setCap(group.keys, { stopWorkers: event.currentTarget.checked })
                           }
                         />
                         Block new worker turns, for any master
@@ -489,7 +489,7 @@ export function AllocationControls({
                             disabled || snapshot?.accountCapsSupported !== true || !capEnabled
                           }
                           onChange={(event) =>
-                            setCap(group.key, { stopMasters: event.currentTarget.checked })
+                            setCap(group.keys, { stopMasters: event.currentTarget.checked })
                           }
                         />
                         Block new master turns on this account
@@ -541,16 +541,18 @@ export function AllocationControls({
                     key={kind}
                     name={`${name} ${label}`}
                     kind={kind}
-                    rule={allocationAccountRule(policy, group.key, kind, now)}
+                    rule={group.keys
+                      .map((key) => allocationAccountRule(policy, key, kind, now))
+                      .find(Boolean)}
                     disabled={disabled || snapshot?.accountRulesSupported !== true}
                     onChange={(rule) =>
                       onChange({
                         ...policy,
                         accountRules: [
                           ...(policy.accountRules ?? []).filter(
-                            (r) => r.key !== group.key || r.kind !== kind,
+                            (r) => !group.keys.includes(r.key) || r.kind !== kind,
                           ),
-                          ...(rule ? [{ ...rule, key: group.key, kind }] : []),
+                          ...(rule ? group.keys.map((key) => ({ ...rule, key, kind })) : []),
                         ],
                       })
                     }
@@ -558,7 +560,7 @@ export function AllocationControls({
                 ))}
                 {group.members[0]?.accountKey === null && (
                   <p className="text-xs text-muted-foreground">
-                    Identity unknown; this computer’s account stays separate.
+                    Identity unknown; this applies to every computer’s account with this label.
                   </p>
                 )}
               </fieldset>
