@@ -250,28 +250,37 @@ export function allocationAccountGroups(snapshot: AllocationSnapshot | null) {
 
   for (const host of snapshot?.inventories ?? [])
     for (const account of host.accounts) {
-      const key = allocationPreferenceKey(account);
+      // An account with no known login is one account per driver and label on every computer.
+      const key =
+        account.accountKey === null
+          ? JSON.stringify([account.driver, "label", account.label])
+          : allocationPreferenceKey(account);
 
       groups.set(key, [...(groups.get(key) ?? []), account]);
     }
 
-  const rows = [...groups].map(([key, members]) => ({
-    key,
-    members,
-    driver: members[0]!.driver,
+  const rows = [...groups.values()].map((members) => {
+    // Rules and caps are stored per computer for an unknown login; edits write every key.
+    const keys = [...new Set(members.map(allocationPreferenceKey))].sort();
+    return {
+      key: keys[0]!,
+      keys,
+      members,
+      driver: members[0]!.driver,
 
-    label: [...new Set(members.map((m) => m.label))].sort().join(" / "),
+      label: [...new Set(members.map((m) => m.label))].sort().join(" / "),
 
-    hosts: [
-      ...new Set(
-        members.map(
-          (m) =>
-            snapshot?.inventories.find((i) => i.environmentId === m.environmentId)
-              ?.environmentLabel ?? m.environmentId,
+      hosts: [
+        ...new Set(
+          members.map(
+            (m) =>
+              snapshot?.inventories.find((i) => i.environmentId === m.environmentId)
+                ?.environmentLabel ?? m.environmentId,
+          ),
         ),
-      ),
-    ].sort(),
-  }));
+      ].sort(),
+    };
+  });
 
   return rows.sort(
     (a, b) =>

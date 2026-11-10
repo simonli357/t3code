@@ -15,12 +15,15 @@ const invalid = (detail: string) => new AllocationError({ code: "invalid", detai
 const live = (expiresAt: string | undefined, at: string) =>
   expiresAt === undefined || Date.parse(expiresAt) > Date.parse(at);
 
-/** One entry per account identity, however many computers and aliases reach it. */
+/**
+ * One entry per account identity, however many computers and aliases reach it. An account with
+ * no known login is one identity per driver and label, holding each computer's rule key.
+ */
 function identities(snapshot: AllocationSnapshot) {
   const byKey = new Map<
     string,
     {
-      key: string;
+      keys: Set<string>;
       accountKey: string | null;
       driver: AllocationPolicyView["accounts"][number]["driver"];
       labels: Set<string>;
@@ -29,15 +32,19 @@ function identities(snapshot: AllocationSnapshot) {
     }
   >();
   for (const account of snapshot.inventories.flatMap((i) => i.accounts)) {
-    const key = allocationPreferenceKey(account);
+    const key =
+      account.accountKey === null
+        ? JSON.stringify([account.driver, "label", account.label])
+        : allocationPreferenceKey(account);
     const identity = byKey.get(key) ?? {
-      key,
+      keys: new Set<string>(),
       accountKey: account.accountKey,
       driver: account.driver,
       labels: new Set(),
       instanceIds: new Set(),
       windows: new Map(),
     };
+    identity.keys.add(allocationPreferenceKey(account));
     identity.labels.add(account.label);
     identity.instanceIds.add(account.instanceId);
     for (const window of account.windows) {
@@ -52,6 +59,11 @@ function identities(snapshot: AllocationSnapshot) {
   }));
 }
 
+/** An account's rule on each computer reads back as one. */
+const once = <T>(entries: readonly T[]) => [
+  ...new Map(entries.map((entry) => [JSON.stringify(entry), entry])).values(),
+];
+
 /** The policy with every account named by its label and expired entries left out. */
 export function allocationPolicyView(
   snapshot: AllocationSnapshot,
@@ -59,14 +71,18 @@ export function allocationPolicyView(
 ): AllocationPolicyView {
   const { policy } = snapshot;
   const known = identities(snapshot);
-  const label = (key: string) => known.find((i) => i.key === key)?.label ?? key;
+  const label = (key: string) => known.find((i) => i.keys.has(key))?.label ?? key;
   return {
     version: policy.version,
     curves: { claude: policy.claude, codex: policy.codex, other: policy.other },
-    rules: (policy.accountRules ?? [])
-      .filter((rule) => live(rule.expiresAt, at))
-      .map(({ key, ...rule }) => ({ account: label(key), ...rule })),
-    caps: (policy.accountCaps ?? []).map(({ key, ...cap }) => ({ account: label(key), ...cap })),
+    rules: once(
+      (policy.accountRules ?? [])
+        .filter((rule) => live(rule.expiresAt, at))
+        .map(({ key, ...rule }) => ({ account: label(key), ...rule })),
+    ),
+    caps: once(
+      (policy.accountCaps ?? []).map(({ key, ...cap }) => ({ account: label(key), ...cap })),
+    ),
     overrides: policy.overrides
       .filter((override) => live(override.expiresAt, at))
       .map(({ accountKey, windowId, expiresAt, curve, useBy, resetPlan }) => ({
@@ -100,7 +116,7 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     const name = account.toLowerCase();
     const matches = known.filter(
       (i) =>
-        i.key === account ||
+        i.keys.has(account) ||
         [...i.labels, ...i.instanceIds].some((value) => value.toLowerCase() === name),
     );
     if (matches.length) return matches;
@@ -117,13 +133,13 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
   const { policy } = snapshot;
   let rules = (policy.accountRules ?? []).filter((rule) => live(rule.expiresAt, at));
   for (const { account, kind } of edit.clearRules ?? []) {
-    const keys = new Set((yield* resolve(account)).map((i) => i.key));
+    const keys = new Set((yield* resolve(account)).flatMap((i) => [...i.keys]));
     rules = rules.filter(
       (rule) => !keys.has(rule.key) || (kind !== undefined && rule.kind !== kind),
     );
   }
   for (const { account, expiresAt, ...rule } of edit.setRules ?? []) {
-    const keys = (yield* resolve(account)).map((i) => i.key);
+    const keys = (yield* resolve(account)).flatMap((i) => [...i.keys]);
     const until = expiresAt ? { expiresAt: yield* time(expiresAt, "A rule's expiresAt") } : {};
     rules = [
       ...rules.filter((r) => !keys.includes(r.key) || r.kind !== rule.kind),
@@ -132,11 +148,11 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
   }
   let caps = policy.accountCaps ?? [];
   for (const account of edit.clearCaps ?? []) {
-    const keys = new Set((yield* resolve(account)).map((i) => i.key));
+    const keys = new Set((yield* resolve(account)).flatMap((i) => [...i.keys]));
     caps = caps.filter((cap) => !keys.has(cap.key));
   }
   for (const { account, ...cap } of edit.setCaps ?? []) {
-    const keys = (yield* resolve(account)).map((i) => i.key);
+    const keys = (yield* resolve(account)).flatMap((i) => [...i.keys]);
     caps = [...caps.filter((c) => !keys.includes(c.key)), ...keys.map((key) => ({ key, ...cap }))];
   }
   let overrides = policy.overrides;
