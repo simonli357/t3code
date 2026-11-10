@@ -79,6 +79,9 @@ const USAGE_RESUME_PROMPT =
   "Your previous turn was stopped by a provider usage limit before it finished. Continue the assignment from where it left off.";
 /** How long to wait when a switch could not be applied or the reset time is unknown. */
 const USAGE_RETRY_MS = 30 * 60_000;
+// Names the tool the way RuntimeInstructions does.
+const UNREPORTED_REMINDER =
+  "[T3 reminder] Your turn ended without a report to your master. If the assignment is finished, needs review or is blocked, call the t3-code MCP server's t3_worker_report tool now (Claude Code names it mcp__t3-code__t3_worker_report; load it with ToolSearch first if it is deferred). If you are still waiting on background work, do nothing.";
 
 export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError", {
   message: Schema.String,
@@ -666,7 +669,9 @@ const make = Effect.gen(function* () {
       const originalId =
         noticeAt >= 0 ? jobId.slice(noticeAt) : reportAt >= 0 ? jobId.slice(reportAt) : jobId;
       const job = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${originalId}`)[0];
-      if (job?.kind === "notice") {
+      if (job?.kind === "notice" && originalId.endsWith(":unreported")) {
+        relevant &&= !(yield* superseded(originalId));
+      } else if (job?.kind === "notice") {
         const latest = (yield* sql<Job>`SELECT * FROM custom_worker_jobs
           WHERE worker_id = ${workerId} AND kind = 'work' ORDER BY rowid DESC LIMIT 1`)[0];
         const source = latest && originalId.startsWith(`notice:${latest.id}:`) ? latest : undefined;
@@ -1041,7 +1046,13 @@ const make = Effect.gen(function* () {
       });
     yield* checkSelection(plan.modelSelection);
   });
-  const report = Effect.fn(function* (worker: Worker, job: Job, suffix: string, detail: string) {
+  const report = Effect.fn(function* (
+    worker: Worker,
+    job: Job,
+    suffix: string,
+    detail: string,
+    review = `${REVIEW_BLOCKED} A runtime failure is not task completion.`,
+  ) {
     if (!worker.notify || worker.owner_id === null) return;
     const plan = decodePlan(worker.plan_json);
     const current = yield* snapshots.getThreadShellById(plan.threadId);
@@ -1052,7 +1063,74 @@ const make = Effect.gen(function* () {
       worker,
       worker.owner_id,
       "notice",
-      `${reportHeader(title, createdAt)}\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${REVIEW_BLOCKED} A runtime failure is not task completion.`,
+      `${reportHeader(title, createdAt)}\nWorker: ${worker.thread_id}\nAssignment: ${job.id}\n${detail}\n${review}`,
+    );
+  });
+  /** A report or a newer assignment has arrived since this job was queued. */
+  const superseded = (id: string) =>
+    sql`SELECT 1 FROM custom_worker_jobs old JOIN custom_worker_jobs newer
+      ON newer.worker_id = old.worker_id AND newer.rowid > old.rowid
+      WHERE old.id = ${id} AND (newer.kind IN ('done', 'blocked')
+        OR (newer.kind = 'work' AND newer.id NOT LIKE 'direct:%')) LIMIT 1`.pipe(
+      Effect.map((rows) => rows.length > 0),
+    );
+  /**
+   * A worker's turn ended normally. With its assignment unreported and nothing queued or running
+   * for it or its own workers, remind it once. When a later turn ends the same way and no
+   * background work is known, tell the master once.
+   */
+  const followUpUnreported = Effect.fn(function* (
+    worker: Worker,
+    job: Job,
+    target: OrchestrationThreadShell,
+    reply: string,
+  ) {
+    const assignment = (yield* sql<Job>`SELECT * FROM custom_worker_jobs
+      WHERE worker_id = ${worker.thread_id} AND kind = 'work' AND id NOT LIKE 'direct:%'
+      ORDER BY rowid DESC LIMIT 1`)[0];
+    if (!assignment || (assignment.id !== job.id && assignment.state !== "completed")) return;
+    if (yield* superseded(assignment.id)) return;
+    const waiting = yield* sql`SELECT 1 FROM custom_worker_jobs
+      WHERE kind = 'work' AND state IN ('queued', 'submitted') AND id != ${job.id}
+        AND worker_id IN (SELECT ${worker.thread_id} UNION ALL
+          SELECT thread_id FROM custom_workers WHERE owner_id = ${worker.thread_id})
+      LIMIT 1`;
+    // A session being renewed is replaced, not reminded.
+    const renewing = yield* sql`SELECT 1 FROM custom_session_renewals
+      WHERE thread_id = ${worker.thread_id} AND checkpoint_id IS NOT NULL`;
+    if (waiting.length || renewing.length) return;
+    const nudgeId = `nudge:${assignment.id}`;
+    const nudge = (yield* sql<{ state: string; answered: number }>`SELECT state,
+        rowid < (SELECT rowid FROM custom_worker_jobs WHERE id = ${job.id}) AS answered
+      FROM custom_worker_jobs WHERE id = ${nudgeId}`)[0];
+    if (!nudge) {
+      // Not an assignment: it neither restarts the communication window nor becomes the latest request.
+      yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+        VALUES (${nudgeId}, ${worker.thread_id}, ${worker.thread_id}, 'nudge', ${UNREPORTED_REMINDER}, ${yield* now})
+        ON CONFLICT(id) DO NOTHING`;
+      return;
+    }
+    const noticeId = `notice:${assignment.id}:unreported`;
+    if (
+      nudge.state !== "completed" ||
+      !nudge.answered ||
+      target.backgroundLiveness != null ||
+      (yield* sql`SELECT 1 FROM custom_worker_jobs WHERE id = ${noticeId}`).length
+    )
+      return;
+    // An ending without words quotes what the worker said before it.
+    const last =
+      reply.trim() ||
+      (yield* sql<{ text: string }>`SELECT text FROM projection_thread_messages
+        WHERE thread_id = ${worker.thread_id} AND role = 'assistant' AND trim(text) != ''
+        ORDER BY created_at DESC, message_id DESC LIMIT 1`)[0]?.text.trim() ||
+      "";
+    yield* report(
+      worker,
+      assignment,
+      "unreported",
+      `Runtime state: completed without a report, also after a reminder\n${last.split(/\n\s*\n/)[0]!.slice(0, 600)}`,
+      "Review: read the worker with t3_worker_read, then settle verified finished work or send one concrete correction with t3_worker_send. An ended turn is not a completion report.",
     );
   });
 
@@ -1325,6 +1403,8 @@ const make = Effect.gen(function* () {
         session.value.settledAt === null &&
         session.value.snoozedUntil == null &&
         !(yield* busy(session.value)) &&
+        // The reminder is not work to resume; its failure reaches the master as a runtime notice.
+        job.prompt !== UNREPORTED_REMINDER &&
         // A turn the worker started itself after reporting done has nothing left to resume.
         (job.prompt.trim() !== "" ||
           (yield* sql<{ kind: string }>`SELECT kind FROM custom_worker_jobs
@@ -1393,6 +1473,17 @@ const make = Effect.gen(function* () {
                 "terminal",
                 `Runtime state: ${state}${selfStarted ? " (turn started by the worker)" : ""}${error ? `\nError: ${error}` : ""}\n${(replies[0]?.text ?? "").slice(0, 600)}`,
               );
+            if (
+              state === "completed" &&
+              !job.reported &&
+              worker.notify &&
+              worker.state === "ready" &&
+              worker.owner_id !== null &&
+              Option.isSome(session) &&
+              session.value.archivedAt === null &&
+              session.value.settledAt === null
+            )
+              yield* followUpUnreported(worker, job, session.value, replies[0]?.text ?? "");
             yield* sql`UPDATE custom_worker_jobs SET state = ${state}, error = ${error},
             turn_id = ${turn?.turn_id ?? job.turn_id}, reported = ${worker.notify ? 1 : job.reported} WHERE id = ${job.id}`;
           }),
@@ -1695,6 +1786,10 @@ const make = Effect.gen(function* () {
         // A master's record of a peer worker receives that worker's forwarded reports.
         if (!worker || (worker.state !== "ready" && worker.state !== "remote")) continue;
         if (job.kind !== "work" && (!worker.notify || worker.owner_id === null)) continue;
+      }
+      if (job.kind === "nudge" && (yield* superseded(job.id))) {
+        yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled' WHERE id = ${job.id}`;
+        continue;
       }
       if (
         worker &&

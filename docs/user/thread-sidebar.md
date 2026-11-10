@@ -76,7 +76,11 @@ controls it. Changes recalculate existing windows immediately without a restart
 or reload. All-computer scope edits the selected connected computers. The master
 can always inspect the worker and send new instructions, which restart the window.
 Ownership, queued assignments, read positions, and the window anchor survive a
-server restart. A completed turn alone does not mean the assignment is done.
+server restart. A completed turn alone does not mean the assignment is done:
+workers also end turns while they wait. When a turn ends without a report and nothing
+is queued or running for the worker, T3 reminds it once per assignment to report. If
+a later turn also ends without one and no background work is known, the master is
+told once, with the start of the worker's last message.
 
 The same settings include an advisory active-agent cap (default **6** per computer).
 Computer recommendations prefer hosts below their cap; the cap never prevents a start.

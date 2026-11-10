@@ -951,6 +951,10 @@ it.layer(testLayer)("persistent workers", (it) => {
         yield* session(worker, "ready", "original-idle", selections[1]!.instanceId);
         yield* reply(worker, "original-work", "Partial work is ready for continuation.");
         yield* service.drain();
+        // The reminder to report is answered before the renewal checkpoint.
+        yield* session(worker, "running", "original-reminder", selections[1]!.instanceId);
+        yield* session(worker, "ready", "original-reminder-idle", selections[1]!.instanceId);
+        yield* service.drain();
         yield* workHistory(worker, "aged-worker", [3]);
         yield* (yield* Settings.ServerSettingsService).updateSettings({
           workerRenewal: { workerHardHours: 2, codexScale: 1 },
@@ -1334,26 +1338,29 @@ it.layer(testLayer)("persistent workers", (it) => {
         ).toContain("different");
       }),
   );
-  it.effect("does not notify for progress-only endings, empty turns, or restart completions", () =>
-    Effect.gen(function* () {
-      const service = yield* Workers.WorkerControls;
-      const snapshots = yield* ProjectionSnapshotQuery;
-      const { owner, worker, input } = yield* seed("no-progress-report");
-      yield* service.spawn(owner, input);
-      for (const [id, text] of [
-        ["progress", "Build running; waiting for capacity."],
-        ["empty", ""],
-        ["restart", "Restarting the interrupted work."],
-      ]) {
-        yield* session(worker, "running", id!);
-        if (text) yield* reply(worker, id!, text);
-        yield* session(worker, "ready", `${id}-end`);
-        yield* service.drain();
-      }
-      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages).toHaveLength(
-        0,
-      );
-    }),
+  it.effect(
+    "never reports progress-only endings, empty turns, or restart completions as done",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const { owner, worker, input } = yield* seed("no-progress-report");
+        yield* service.spawn(owner, input);
+        for (const [id, text] of [
+          ["progress", "Build running; waiting for capacity."],
+          ["empty", ""],
+          ["restart", "Restarting the interrupted work."],
+        ]) {
+          yield* session(worker, "running", id!);
+          if (text) yield* reply(worker, id!, text);
+          yield* session(worker, "ready", `${id}-end`);
+          yield* service.drain();
+        }
+        // The master hears once that the worker keeps ending without a report, and nothing else.
+        const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
+        expect(messages).toHaveLength(1);
+        expect(messages[0]!.text).toContain("completed without a report");
+      }),
   );
   it.effect("authenticates self reports and delivers immediately with idempotent retries", () =>
     Effect.gen(function* () {
@@ -2786,7 +2793,10 @@ it.layer(testLayer)("persistent workers", (it) => {
       });
       yield* service.drain();
       const messages = Option.getOrThrow(yield* snapshots.getThreadDetailById(owner)).messages;
-      expect(messages.filter((m) => m.text.includes("latest-direct"))).toHaveLength(0);
+      // Only the notice that the reminded worker ended unreported, quoting its last message.
+      expect(messages.filter((m) => !m.text.includes("completed without a report"))).toHaveLength(
+        0,
+      );
       expect(messages.filter((m) => m.text.includes("old-direct"))).toHaveLength(0);
     }),
   );
@@ -3483,6 +3493,160 @@ it.layer(testLayer)("persistent workers", (it) => {
       ).toHaveLength(1);
     }),
   );
+  const texts = Effect.fn(function* (threadId: ThreadId, part: string) {
+    const detail = yield* (yield* ProjectionSnapshotQuery).getThreadDetailById(threadId);
+    return Option.getOrThrow(detail)
+      .messages.map((message) => message.text)
+      .filter((text) => text.includes(part));
+  });
+  const endUnreported = Effect.fn(function* (worker: ThreadId, turn: string, text: string) {
+    yield* session(worker, "running", turn);
+    yield* reply(worker, turn, text);
+    yield* session(worker, "ready", `${turn}-end`);
+    yield* (yield* Workers.WorkerControls).drain();
+  });
+  it.effect("reminds a worker once when its turn ends without a report", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("unreported-once");
+      yield* service.spawn(owner, input);
+      yield* session(worker, "running", "unreported-once-turn");
+      yield* service.drain();
+      const anchor = sql<{
+        at: string | null;
+      }>`SELECT communication_anchor_at AS at FROM custom_workers WHERE thread_id = ${worker}`;
+      const before = yield* anchor;
+      yield* reply(worker, "unreported-once-turn", "Branch pushed.");
+      yield* session(worker, "ready", "unreported-once-end");
+      yield* service.drain();
+      yield* service.drain();
+      const reminders = yield* texts(worker, "[T3 reminder]");
+      expect(reminders).toHaveLength(1);
+      expect(reminders[0]).toContain("mcp__t3-code__t3_worker_report");
+      expect(yield* texts(owner, "")).toHaveLength(0);
+      expect(yield* anchor).toEqual(before);
+      expect((yield* service.list(owner))[0]!.latestRequest?.requestId).toBe(`spawn:${worker}`);
+    }),
+  );
+  it.effect("sends no notice when the worker reports after the reminder", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const { owner, worker, input } = yield* seed("unreported-then-report");
+      yield* service.spawn(owner, input);
+      yield* endUnreported(worker, "unreported-then-report-turn", "Branch pushed.");
+      yield* session(worker, "running", "unreported-then-report-answer");
+      yield* replyAndReport(worker, "unreported-then-report-answer", "Reported after reminder.");
+      yield* session(worker, "ready", "unreported-then-report-end");
+      yield* service.drain();
+      yield* endUnreported(worker, "unreported-then-report-later", "Anything else?");
+      expect(yield* texts(worker, "[T3 reminder]")).toHaveLength(1);
+      expect(yield* texts(owner, "Reported after reminder.")).toHaveLength(1);
+      expect(yield* texts(owner, "")).toHaveLength(1);
+    }),
+  );
+  it.effect("tells the master once when a reminded worker still does not report", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const liveness = yield* ThreadBackgroundLiveness.ThreadBackgroundLivenessService;
+      const { owner, worker, input } = yield* seed("unreported-twice");
+      yield* service.spawn(owner, input);
+      yield* endUnreported(worker, "unreported-twice-turn", "Branch pushed.");
+      // Known background work holds the notice back until a turn ends without any.
+      const build = { threadId: worker, taskId: "unreported-build", taskType: undefined };
+      liveness.recordTaskLiveness({ ...build, status: "running", kind: "started" });
+      yield* endUnreported(worker, "unreported-twice-waiting", "Waiting for the build.");
+      expect(yield* texts(owner, "")).toHaveLength(0);
+      liveness.recordTaskLiveness({ ...build, status: "completed", kind: "completed" });
+      yield* endUnreported(
+        worker,
+        "unreported-twice-answer",
+        "All work is pushed.\n\nSecond paragraph.",
+      );
+      yield* endUnreported(worker, "unreported-twice-later", "Still nothing to add.");
+      const notices = yield* texts(owner, "completed without a report");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain(`Assignment: spawn:${worker}`);
+      expect(notices[0]).toContain("All work is pushed.");
+      expect(notices[0]).not.toContain("Second paragraph.");
+      expect(yield* texts(owner, "")).toHaveLength(1);
+      expect(yield* texts(worker, "[T3 reminder]")).toHaveLength(1);
+    }),
+  );
+  it.effect(
+    "sends no reminder while an assignment is queued, after an error, or with reports off",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* Workers.WorkerControls;
+        const queued = yield* seed("unreported-queued");
+        yield* service.spawn(queued.owner, queued.input);
+        yield* service.send(queued.owner, {
+          threadId: queued.worker,
+          clientRequestId: "next",
+          prompt: "second task",
+        });
+        yield* endUnreported(queued.worker, "unreported-queued-first", "First task done.");
+        expect(yield* texts(queued.worker, "[T3 reminder]")).toHaveLength(0);
+        yield* endUnreported(queued.worker, "unreported-queued-second", "Second task done.");
+        expect(yield* texts(queued.worker, "[T3 reminder]")).toHaveLength(1);
+
+        const failed = yield* seed("unreported-error");
+        yield* service.spawn(failed.owner, failed.input);
+        yield* session(failed.worker, "running", "unreported-error-turn");
+        yield* session(failed.worker, "error", "unreported-error-end");
+        yield* service.drain();
+        expect(yield* texts(failed.worker, "[T3 reminder]")).toHaveLength(0);
+
+        const paused = yield* seed("unreported-paused");
+        yield* service.spawn(paused.owner, paused.input);
+        yield* service.control(paused.owner, { threadId: paused.worker, notifications: false });
+        yield* endUnreported(paused.worker, "unreported-paused-turn", "Done quietly.");
+        expect(yield* texts(paused.worker, "[T3 reminder]")).toHaveLength(0);
+      }),
+  );
+  it.effect("does not wake a stopped or snoozed worker with the reminder", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const wakes = (worker: ThreadId) =>
+        sql`SELECT 1 FROM orchestration_events WHERE stream_id = ${worker}
+          AND event_type = 'thread.turn-start-requested' AND command_id LIKE 'worker-job:nudge:%'`;
+      const snoozed = yield* seed("unreported-snoozed");
+      yield* service.spawn(snoozed.owner, snoozed.input);
+      yield* session(snoozed.worker, "running", "unreported-snoozed-turn");
+      yield* session(snoozed.worker, "ready", "unreported-snoozed-end");
+      yield* engine.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("unreported-snooze"),
+        threadId: snoozed.worker,
+        snoozedUntil: "2099-01-01T00:00:00.000Z",
+      });
+      yield* service.drain();
+      expect(yield* wakes(snoozed.worker)).toHaveLength(0);
+      yield* engine.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("unreported-unsnooze"),
+        threadId: snoozed.worker,
+        reason: "user",
+      });
+      yield* service.drain();
+      expect(yield* wakes(snoozed.worker)).toHaveLength(1);
+
+      const stopped = yield* seed("unreported-stopped");
+      yield* service.spawn(stopped.owner, stopped.input);
+      yield* session(stopped.worker, "running", "unreported-stopped-turn");
+      yield* session(stopped.worker, "ready", "unreported-stopped-end");
+      yield* engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("unreported-stop"),
+        threadId: stopped.worker,
+        createdAt: timestamp,
+      });
+      yield* service.drain();
+      expect(yield* wakes(stopped.worker)).toHaveLength(0);
+    }),
+  );
 });
 
 const encodeMcpResult = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -4093,6 +4257,10 @@ it.effect("creates local and linked workers using the target host's real configu
         );
         yield* session(threadId, "running", `original-${host}`);
         yield* session(threadId, "ready", `idle-${host}`);
+        yield* service.drain();
+        // The reminder to report is answered before the renewal checkpoint.
+        yield* session(threadId, "running", `reminder-${host}`);
+        yield* session(threadId, "ready", `reminder-idle-${host}`);
         yield* service.drain();
         const communicationAnchor = (yield* sql<{ communication_anchor_at: string | null }>`
           SELECT communication_anchor_at FROM custom_workers WHERE thread_id = ${threadId}`)[0]!
@@ -6178,6 +6346,9 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
       yield* service.spawn(owner, input);
       yield* session(worker, "running", "self-usage-assignment");
       yield* session(worker, "ready", "self-usage-assignment-finished");
+      yield* service.drain();
+      yield* session(worker, "running", "self-usage-reminder");
+      yield* session(worker, "ready", "self-usage-reminder-finished");
       yield* service.drain();
       // The worker wakes itself, for example when a background build ends, and hits the limit.
       yield* session(worker, "running", "self-usage-wake");
