@@ -111,6 +111,7 @@ export function allocationInventory(input: {
     return {
       availableForWorkers: !input.workerDisabledInstanceIds?.includes(p.instanceId),
       retainHistory: measurements.monitoredInstanceIds.includes(p.instanceId),
+      enabled: p.enabled,
       environmentId,
       instanceId: p.instanceId,
       driver: p.driver,

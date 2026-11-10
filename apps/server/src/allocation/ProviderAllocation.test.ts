@@ -2380,6 +2380,84 @@ it.effect("an automatic start takes its table entry from the tier", () => {
   }).pipe(Effect.provide(f.layer));
 });
 
+it.effect("a worker start that pins no model takes the default worker model until it ends", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, allocation } = yield* f.setup;
+    // Luna is never in the table, so only the standing default can choose it.
+    f.state.providers = [
+      { ...provider, models: [...tableModels, { ...tableModels[0]!, slug: "gpt-luna" }] },
+    ];
+    const start = (id: string, override?: { model: string; effort: string }) =>
+      assignments.start(
+        {
+          kind: "worker",
+          projectId: startInput.projectId,
+          title: startInput.title,
+          prompt: startInput.prompt,
+          request: {
+            selection: "automatic",
+            assignmentId: id,
+            threadId: ThreadId.make(id),
+            environmentId: "local",
+            allowedDrivers: [provider.driver],
+            ...(override
+              ? {
+                  override: {
+                    driver: provider.driver,
+                    model: override.model,
+                    options: [{ id: "reasoningEffort", value: override.effort }],
+                    reason: "User named the model",
+                  },
+                }
+              : {}),
+          },
+        },
+        ThreadId.make("master"),
+      );
+    const { model, effort } = defaultModelRoutingPolicy.codex.cells[5]![5]!;
+    const table = `${model} / ${effort}`;
+    expect((yield* start("table")).recommendation?.model.chosen).toBe(table);
+    const unknown = yield* Effect.flip(
+      allocation.editPolicy({ workerModels: { codex: { model: "luna", effort: "medium" } } }),
+    );
+    expect(unknown.detail).toContain("gpt-luna (medium, high, max, xhigh)");
+    const standing = {
+      model: "gpt-luna",
+      effort: "medium",
+      expiresAt: "1970-01-02T00:00:00.000Z",
+      note: "today",
+    };
+    const view = yield* allocation.editPolicy({ workerModels: { codex: standing } });
+    expect(view.workerModels).toEqual({ codex: standing });
+    const defaulted = yield* start("default");
+    expect(defaulted.state).toBe("submitted");
+    expect(defaulted.recommendation?.model).toEqual({
+      recommended: "gpt-luna / medium",
+      chosen: "gpt-luna / medium",
+    });
+    expect(f.calls.at(-1)?.modelSelection).toMatchObject({
+      model: "gpt-luna",
+      options: [{ id: "reasoningEffort", value: "medium" }],
+    });
+    // A model the master pins still wins.
+    const pinned = yield* start("pinned", { model: "gpt-6-astra", effort: "xhigh" });
+    expect(pinned.recommendation?.model.chosen).toBe("gpt-6-astra / xhigh");
+    yield* TestClock.adjust("1 day");
+    expect((yield* start("after")).recommendation?.model.chosen).toBe(table);
+    expect((yield* allocation.editPolicy({})).workerModels).toEqual({});
+    // Without an end time it stands until it is cleared.
+    yield* allocation.editPolicy({
+      workerModels: { codex: { model: "gpt-luna", effort: "high" } },
+    });
+    expect((yield* start("standing")).recommendation?.model.chosen).toBe("gpt-luna / high");
+    expect((yield* allocation.editPolicy({ workerModels: { codex: null } })).workerModels).toEqual(
+      {},
+    );
+    expect((yield* start("cleared")).recommendation?.model.chosen).toBe(table);
+  }).pipe(Effect.provide(f.layer));
+});
+
 it.effect("a choice that differs from the recommendation starts without a reason", () => {
   const f = fixture();
   return Effect.gen(function* () {

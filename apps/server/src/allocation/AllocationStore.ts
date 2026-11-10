@@ -480,7 +480,16 @@ const make = Effect.gen(function* () {
                 );
               anchor = predecessor;
             }
-            const resolved = modelCandidates(effective, input.request, input.inventories, retained);
+            const resolved = modelCandidates(
+              effective,
+              input.request,
+              input.inventories,
+              retained,
+              {
+                policy: allocationPolicy,
+                at: input.at,
+              },
+            );
             const proposals = [];
             for (const candidate of resolved.candidates) {
               if (
@@ -636,6 +645,9 @@ const make = Effect.gen(function* () {
                 : {}),
               ...(input.policy.accountCaps === undefined && current.accountCaps !== undefined
                 ? { accountCaps: current.accountCaps }
+                : {}),
+              ...(input.policy.workerModels === undefined && current.workerModels !== undefined
+                ? { workerModels: current.workerModels }
                 : {}),
               version: current.version + 1,
             };

@@ -28,6 +28,7 @@ const view: AllocationPolicyView = {
   rules: [{ account: "XL", kind: "exclude", note: "never XL" }],
   caps: [],
   overrides: [],
+  workerModels: { claude: { model: "claude-fable-5", effort: "medium", note: "today" } },
   accounts: [],
 };
 
@@ -75,6 +76,21 @@ it.effect("agents edit the policy and start workers without an assessment or rea
     };
     expect((yield* call("t3_allocation_policy", rules)).isError).not.toBe(true);
     expect(edits).toEqual([{}, rules]);
+    // "Workers on Fable medium today", and back to the table.
+    const models = [
+      {
+        workerModels: {
+          claude: { model: "claude-fable-5", effort: "medium", expiresAt: "2026-11-10T05:00:00Z" },
+        },
+      },
+      { workerModels: { claude: null } },
+    ];
+    for (const model of models) {
+      const set = yield* call("t3_allocation_policy", model);
+      expect(set.isError).not.toBe(true);
+      expect(encode(set)).toContain("claude-fable-5");
+    }
+    expect(edits.slice(2)).toEqual(models);
     const unknownKind = yield* Effect.flip(
       call("t3_allocation_policy", { setRules: [{ account: "XL", kind: "never" }] }),
     );

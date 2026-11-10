@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
   AssignmentAssessment,
+  defaultAllocationPolicy,
   defaultModelRoutingPolicy,
   MODEL_SCORES,
   ModelRoutingPolicy,
@@ -307,5 +308,62 @@ describe("deterministic model policy", () => {
     expect(modelPolicyIssues(repeated, defaultModelRoutingPolicy, [inventory]).join(" ")).toContain(
       "alternatives must be unique",
     );
+  });
+});
+
+describe("default worker model", () => {
+  const at = "2026-11-09T12:00:00.000Z";
+  const workers = (expiresAt?: string) => ({
+    at,
+    policy: {
+      ...defaultAllocationPolicy,
+      workerModels: {
+        claude: { model: "claude-fable-5", effort: "medium", ...(expiresAt ? { expiresAt } : {}) },
+      },
+    },
+  });
+  const both: ModelRoutingRequest = {
+    ...request,
+    allowedDrivers: [ProviderDriverKind.make("codex"), ProviderDriverKind.make("claudeAgent")],
+  };
+  const chosen = (input: ModelRoutingRequest, standing = workers()) =>
+    modelCandidates(
+      defaultModelRoutingPolicy,
+      input,
+      [inventory],
+      undefined,
+      standing,
+    ).candidates.map((candidate) => `${candidate.request.driver}:${candidate.request.model}`);
+  const table = defaultModelRoutingPolicy.claudeAgent.cells[0]![0]!.model;
+
+  it("replaces the table for its family only, exactly as the user named it", () => {
+    // Fable is outside the table and the catalog: the default is the user's exact instruction.
+    expect(chosen(both)).toEqual(["claudeAgent:claude-fable-5", "codex:gpt-6.1-sol"]);
+    const [claude] = modelCandidates(
+      defaultModelRoutingPolicy,
+      both,
+      [inventory],
+      undefined,
+      workers(),
+    ).candidates;
+    expect(claude?.request.options).toEqual([{ id: "effort", value: "medium" }]);
+    expect(claude?.reason).toContain("default worker model claude-fable-5 / medium");
+  });
+  it("leaves human sessions, pinned models and starts after its end time to the table", () => {
+    expect(chosen({ ...both, kind: "session" })).toContain(`claudeAgent:${table}`);
+    expect(chosen(both, workers(at))).toContain(`claudeAgent:${table}`);
+    expect(chosen(both, workers("2026-11-09T12:00:01.000Z"))).toContain(
+      "claudeAgent:claude-fable-5",
+    );
+    expect(
+      chosen({
+        ...both,
+        override: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          model: "claude-opus-5-5",
+          reason: "User named Opus",
+        },
+      }),
+    ).toEqual(["claudeAgent:claude-opus-5-5"]);
   });
 });
