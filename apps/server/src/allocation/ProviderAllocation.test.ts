@@ -465,6 +465,39 @@ function fixture(
   return { layer, calls, dispatched, setup, state, peerCalls };
 }
 
+/**
+ * Room for every test account: a Codex worker costs a dollar an hour and Codex accounts may use
+ * their whole weekly limit each day, so the preference order and margin decide between them.
+ */
+const roomy = Effect.gen(function* () {
+  const store = yield* Store.AllocationStore;
+  yield* store.saveLearned({
+    learnedAt: at,
+    costs: [
+      {
+        driver: ProviderDriverKind.make("codex"),
+        model: "astra",
+        effort: "high",
+        kind: "worker",
+        dollarsPerHour: 1,
+        perHundredK: 0,
+        contextTokens: 0,
+        samples: 1,
+        hours: 1,
+        source: "measured",
+      },
+    ],
+    limits: [],
+    workerHours: null,
+    notes: [],
+  });
+  const policy = yield* store.policy;
+  yield* store.savePolicy({
+    expectedVersion: policy.version,
+    policy: { ...policy, codex: { ...policy.codex, dailyPoints: 100 } },
+  });
+});
+
 for (const observation of ["hung", "offline"] as const) {
   it.effect(
     `explicit managed start does not spend its authority deadline on an unrelated ${observation} observer`,
@@ -1768,8 +1801,10 @@ it.effect("a local fallback decides by the coordinator's policy as last read", (
           : Effect.fail(new PeerUnavailable({ environmentId: id, message: "remote: unreachable" })),
     });
     caller.state.providers = [provider, spareProvider];
+    yield* roomy;
     yield* Effect.gen(function* () {
       const client = yield* caller.setup;
+      yield* roomy;
       // The coordinator reads this computer's accounts over the link.
       coordinator.state.peers = [
         (yield* client.allocation.receive("remote", {
@@ -1816,6 +1851,7 @@ it.effect(
           ),
       });
       caller.state.providers = [provider, spareProvider];
+      yield* roomy;
       yield* Effect.gen(function* () {
         const client = yield* caller.setup;
         coordinator.state.peers = [
@@ -1965,6 +2001,97 @@ it.effect(
         });
         // The table edit is still there.
         expect(yield* chosen(authority)).toBe("gpt-6-astra / xhigh");
+      }).pipe(Effect.provide(Layer.fresh(caller.layer)));
+    }).pipe(Effect.provide(coordinator.layer));
+  },
+);
+
+it.effect(
+  "a computer that cannot reach the coordinator decides with the copy it stored, after a restart too, and says how old it is",
+  () => {
+    const coordinator = fixture({ localId: "remote", label: "Remote" });
+    let reachable = false;
+    return Effect.gen(function* () {
+      const authority = yield* coordinator.setup;
+      const learned = {
+        learnedAt: at,
+        costs: [],
+        limits: [],
+        workerHours: 3,
+        notes: ["learned on the coordinator"],
+      };
+      yield* authority.store.saveLearned(learned);
+      const caller = fixture({
+        remote: true,
+        peerCall: (id, request) =>
+          reachable
+            ? authority.allocation.receive("local", wire(request)).pipe(
+                Effect.map(wire),
+                Effect.mapError((e) => new PeerRejected({ message: `remote: ${e.message}` })),
+              )
+            : Effect.fail(
+                new PeerUnavailable({ environmentId: id, message: "remote: unreachable" }),
+              ),
+      });
+      caller.state.providers = [{ ...provider, models: tableModels }];
+      yield* Effect.gen(function* () {
+        const client = yield* caller.setup;
+        coordinator.state.peers = [
+          (yield* client.allocation.receive("remote", {
+            _tag: "allocationInventory",
+          })) as AllocationInventory,
+        ];
+        const request: ModelRoutingRequest = {
+          selection: "automatic",
+          assignmentId: "copy",
+          threadId: ThreadId.make("copy"),
+          environmentId: "local",
+          allowedDrivers: [provider.driver],
+          assessment: { difficulty: 3, stakes: 4 },
+        };
+        const preview = (from: typeof client.allocation) =>
+          from.execute({ _tag: "modelPreview", request }).pipe(
+            Effect.map((response) => {
+              const profile = response.selection?.allocation?.decision.request;
+              return {
+                chosen: profile ? `${profile.model} / ${String(profile.options[0]?.value)}` : null,
+                notes: response.selection?.notes ?? [],
+              };
+            }),
+          );
+        // Nothing ever came from the coordinator: this computer's own settings decide, and say so.
+        expect(yield* preview(client.allocation)).toEqual({
+          chosen: "gpt-6.1-sol / high",
+          notes: [
+            "The coordinator could not be reached and never sent its settings here: decided with this computer's own settings.",
+          ],
+        });
+        yield* authority.allocation.editPolicy({
+          setCells: [
+            { table: "codex", difficulty: 3, stakes: 4, model: "gpt-6-astra", effort: "xhigh" },
+          ],
+        });
+        // The regular read of the coordinator's settings stores them here with what it learned.
+        reachable = true;
+        yield* TestClock.adjust("1 minute");
+        expect((yield* client.allocation.execute({ _tag: "caps" })).learned).toEqual(learned);
+        expect(yield* client.store.copy).toMatchObject({
+          coordinatorEnvironmentId: "remote",
+          learned,
+        });
+        expect((yield* client.store.modelPolicy).version).toBe(0);
+        reachable = false;
+        yield* TestClock.adjust("7 minutes");
+        // A restarted server starts from the stored copy, never from built-in defaults.
+        yield* Effect.gen(function* () {
+          const restarted = yield* Allocation.ProviderAllocation;
+          expect(yield* preview(restarted)).toEqual({
+            chosen: "gpt-6-astra / xhigh",
+            notes: [
+              "The coordinator could not be reached: decided here with the settings and learned numbers it last sent, 7m ago.",
+            ],
+          });
+        }).pipe(Effect.provide(Layer.fresh(Allocation.layer)));
       }).pipe(Effect.provide(Layer.fresh(caller.layer)));
     }).pipe(Effect.provide(coordinator.layer));
   },
@@ -2471,6 +2598,7 @@ it.effect(
     const f = fixture();
     return Effect.gen(function* () {
       const { allocation } = yield* f.setup;
+      yield* roomy;
       const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
       const route = allocation.reroute(ThreadId.make("worker"), selection, { rejected: true });
       const used = (base: ServerProvider, windowId?: string): ServerProvider => ({
@@ -2596,6 +2724,7 @@ it.effect(
     const f = fixture();
     return Effect.gen(function* () {
       const { allocation } = yield* f.setup;
+      yield* roomy;
       const settings = yield* Settings.ServerSettingsService;
       const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
       const spare = {

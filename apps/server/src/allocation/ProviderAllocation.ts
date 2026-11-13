@@ -242,7 +242,7 @@ const make = Effect.gen(function* () {
   /** Said with a choice made here because the coordinator could not be reached. */
   const copyNote = Effect.gen(function* () {
     if (copySyncedAt === undefined || !coordinatorPolicy)
-      return "The coordinator could not be reached and never sent its settings here: decided with built-in defaults.";
+      return "The coordinator could not be reached and never sent its settings here: decided with this computer's own settings.";
     const age = ((yield* Clock.currentTimeMillis) - copySyncedAt) / 3_600_000;
     return `The coordinator could not be reached: decided here with the settings and learned numbers it last sent, ${span(Math.max(0, age))} ago.`;
   });
@@ -949,8 +949,9 @@ const make = Effect.gen(function* () {
         ...(learned && learned.learnedAt !== operation.learnedAt ? { learned } : {}),
       };
     }
-    // The coordinator decides with what it learned; a stand-in with the copy it last received.
-    const learned = fallback ? coordinatorLearned : yield* store.learned;
+    // The coordinator decides with what it learned; a stand-in with the copy it last received,
+    // else with what it learned itself.
+    const learned = (fallback ? coordinatorLearned : undefined) ?? (yield* store.learned);
     const notes = fallback ? [yield* copyNote] : [];
     if (
       operation._tag === "modelSnapshot" ||
