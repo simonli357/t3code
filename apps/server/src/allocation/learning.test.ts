@@ -204,5 +204,23 @@ describe("share of a limit per dollar", () => {
     const other = learned.limits.find((l) => l.key === "other")!;
     expect(other).toMatchObject({ source: "estimated", samples: 0, basis: "AC × 0.25 by plan" });
     expect(other.percentPerDollar).toBeCloseTo(0.025, 6);
+    // Without a plan to compare, the account is taken to be as large as the measured one.
+    const unknown = learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: [
+        history(
+          () => 0.1,
+          () => "Max 5x",
+        ),
+      ],
+      accounts: [account("acct", "Max 5x"), account("other", "Gift plan")],
+      profiles: [],
+      price,
+    }).limits.find((l) => l.key === "other")!;
+    expect(unknown).toMatchObject({
+      source: "estimated",
+      basis: "AC × 1 (plan size unknown) by plan",
+    });
+    expect(unknown.percentPerDollar).toBeCloseTo(0.1, 6);
   });
 });

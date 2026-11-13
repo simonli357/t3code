@@ -450,7 +450,7 @@ function measuredLimit(
 
 /**
  * A limit for an account without history: a measured account's share of the same window,
- * scaled by the two plans' published sizes.
+ * scaled by the two plans' published sizes, or as large when either size is unknown.
  */
 export function estimateLimit(
   account: Pick<LearningAccount, "key" | "label" | "driver" | "plan">,
@@ -458,17 +458,15 @@ export function estimateLimit(
   measured: readonly LearnedLimit[],
 ): LearnedLimit | undefined {
   const size = publishedPlanSize(account.driver, account.plan);
+  const known = (m: LearnedLimit) => publishedPlanSize(m.driver, m.plan) !== null;
   const source = measured
     .filter(
-      (m) =>
-        m.source === "measured" &&
-        m.driver === account.driver &&
-        m.windowId === window.id &&
-        publishedPlanSize(m.driver, m.plan) !== null,
+      (m) => m.source === "measured" && m.driver === account.driver && m.windowId === window.id,
     )
-    .toSorted((a, b) => b.samples - a.samples)[0];
+    .toSorted((a, b) => Number(known(b)) - Number(known(a)) || b.samples - a.samples)[0];
   if (!source) return undefined;
-  const scale = size === null ? 1 : publishedPlanSize(source.driver, source.plan)! / size;
+  const sourceSize = publishedPlanSize(source.driver, source.plan);
+  const scale = size === null || sourceSize === null ? 1 : sourceSize / size;
   return {
     key: account.key,
     label: account.label,
