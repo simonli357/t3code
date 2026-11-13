@@ -50,20 +50,6 @@ export const LearnedLimit = Schema.Struct({
    * and 18–24 UTC.
    */
   backgroundByQuarter: Schema.optional(Schema.Array(Schema.Number)),
-  /** Standard error of `percentPerDollar` relative to it, from the fit's residuals. */
-  relativeError: Schema.optional(Schema.Number),
-  /** How much of the meter's movement T3's own spend explains; the rest is background. */
-  explained: Schema.optional(Schema.Number),
-  /** End of the newest reading pair the fit used. */
-  lastPairAt: Schema.optional(IsoDateTime),
-  /**
-   * The share per dollar meets `ownShareRule`, so T3's own use can be told apart from the meter's
-   * total and the daily goal is measured against it.
-   */
-  ownTrusted: Schema.optional(Schema.Boolean),
-  /** What T3's own sessions used of the cycle that ends at `cycleResetsAt`, in percent. */
-  ownPercent: Schema.optional(Schema.Number),
-  cycleResetsAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Reading pairs the fit used. */
   samples: NonNegativeInt,
   hours: Schema.Number,
@@ -79,15 +65,6 @@ export const AllocationLearned = Schema.Struct({
   limits: Schema.Array(LearnedLimit),
   /** Median length of a worker's job, for starts that give none. */
   workerHours: Schema.NullOr(Schema.Number),
-  /** When a share per dollar is trusted enough to measure the goal against T3's own use. */
-  ownShareRule: Schema.optional(
-    Schema.Struct({
-      minPairs: NonNegativeInt,
-      maxRelativeError: Schema.Number,
-      minExplained: Schema.Number,
-      maxAgeHours: Schema.Number,
-    }),
-  ),
   /** Computers whose history could not be read, and similar gaps. */
   notes: Schema.Array(Schema.String),
 });

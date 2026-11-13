@@ -26,7 +26,10 @@ const QuotaSample = Schema.Struct({
     usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
     resetsAt: Schema.optional(Schema.String),
     windowDurationMins: Schema.optional(Schema.Number),
+    modelScope: Schema.optional(Schema.String),
   }),
+  /** The plan the provider reported with this reading. */
+  plan: Schema.optional(Schema.String),
 });
 const StoredMeasurements = Schema.Struct({
   version: Schema.Literal(1),
@@ -127,6 +130,7 @@ export class MeasurementHistory {
           instanceId: provider.instanceId,
           checkedAt: window.checkedAt ?? limits.checkedAt,
           window,
+          ...(provider.auth.label ? { plan: provider.auth.label } : {}),
         });
       }
     }
@@ -144,7 +148,8 @@ export class MeasurementHistory {
       // new snapshot timestamp is NOT proof it was remeasured. Keep its age.
       if (
         previous.window.usedPercent === sample.window.usedPercent &&
-        previous.window.resetsAt === sample.window.resetsAt
+        previous.window.resetsAt === sample.window.resetsAt &&
+        previous.plan === sample.plan
       )
         return;
     }
@@ -260,7 +265,10 @@ export class MeasurementHistory {
             ? "completed"
             : "failed";
       turn.tokens = event.payload.tokenUsage ?? null;
-      if (event.type === "turn.completed") turn.apiDurationMs = event.payload.apiDurationMs ?? null;
+      if (event.type === "turn.completed") {
+        turn.apiDurationMs = event.payload.apiDurationMs ?? null;
+        if (event.payload.turnCostUsd !== undefined) turn.costUsd = event.payload.turnCostUsd;
+      }
     }
   }
 
@@ -275,6 +283,17 @@ export class MeasurementHistory {
       .filter((s) => Date.parse(s.checkedAt) >= now - RETENTION)
       .slice(-MAX_SAMPLES);
     if (this.contexts.size > MAX_TURNS) this.contexts.clear();
+  }
+
+  /** Every retained finished turn and limit reading, for learning. */
+  evidence(now: number) {
+    this.prune(now);
+    return {
+      turns: [...this.turns.values()].filter(
+        (t) => t.state !== "running" && t.startedAt !== null && t.endedAt !== null,
+      ),
+      quotas: [...this.quotas],
+    };
   }
 
   report(input: UsageMeasurementsInput, now: number): UsageMeasurementsReport {

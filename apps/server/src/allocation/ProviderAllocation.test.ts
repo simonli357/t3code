@@ -375,7 +375,10 @@ function fixture(
       getThreadShellById: (id) =>
         Effect.succeed(Option.fromNullishOr(state.threads.find((t) => t.id === id))),
     }),
-    Layer.succeed(UsageMeasurements, { read: () => Effect.succeed(report) }),
+    Layer.succeed(UsageMeasurements, {
+      evidence: Effect.succeed({ turns: [], quotas: [] }),
+      read: () => Effect.succeed(report),
+    }),
     Layer.mock(Computers.Computers)({
       capacity: (input) =>
         Effect.sync(() => {

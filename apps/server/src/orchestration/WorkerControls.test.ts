@@ -245,6 +245,7 @@ const allocatedWorkerLayer = AllocationAssignments.layer.pipe(
   Layer.provide(computersStub),
   Layer.provide(
     Layer.succeed(UsageMeasurements, {
+      evidence: Effect.succeed({ turns: [], quotas: [] }),
       read: () =>
         Effect.succeed({
           observedAt: "1970-01-01T00:00:00.000Z",
@@ -5406,6 +5407,7 @@ for (const automatic of [false, true])
           Layer.provide(computersStub),
           Layer.provide(
             Layer.succeed(UsageMeasurements, {
+              evidence: Effect.succeed({ turns: [], quotas: [] }),
               read: () =>
                 Effect.succeed({
                   observedAt: "1970-01-01T00:00:00.000Z",

@@ -89,11 +89,6 @@ export function limitShare(
         }
         return total;
       },
-      ownPercent:
-        entry.ownPercent !== undefined && entry.cycleResetsAt !== undefined
-          ? { percent: entry.ownPercent, resetsAt: entry.cycleResetsAt }
-          : undefined,
-      ownTrusted: entry.ownTrusted === true,
       source: entry.source,
     };
   const size = publishedPlanSize(account.driver, account.plan) ?? 1;
@@ -107,8 +102,6 @@ export function limitShare(
   return {
     percentPerDollar: 100 / (unit * size),
     background: () => 0,
-    ownPercent: undefined,
-    ownTrusted: false,
     source: "estimated" as const,
   };
 }
@@ -117,33 +110,18 @@ export function limitShare(
 export const paced = (w: Pick<AllocationWindow, "kind" | "models">) =>
   (w.kind === "weekly" || w.kind === "monthly") && !w.models?.length;
 
-/**
- * What the daily goal is compared with: T3's own use once the account's share per dollar is
- * trusted (see `OWN_SHARE_RULE`), else the meter's total, everyone's use included.
- */
-const goalUse = (w: {
-  readonly basis: "own" | "total";
-  readonly projected: number;
-  readonly projectedOwn: number;
-}) => (w.basis === "own" ? w.projectedOwn : w.projected);
-
 export interface WindowProjection {
   readonly window: AllocationWindow;
   /** The hard cap, or 100. */
   readonly limit: number;
   readonly used: number;
   readonly resetsAt: number | null;
-  /** Use at the job's end or the window's reset, whichever is first. */
+  /** Use at the job's end or the window's reset, whichever is first; everyone's use included. */
   readonly projected: number;
-  readonly projectedOwn: number;
   readonly fits: boolean;
   /** The daily goal's budget at that time; null without a goal. */
   readonly goal: number | null;
   readonly goalPerDay: number | null;
-  /** What the goal is measured against. */
-  readonly basis: "own" | "total";
-  /** The used percent the goal is compared with now. */
-  readonly goalUsed: number;
   readonly withinGoal: boolean | null;
   readonly overGoal: number;
   /** Dollars per hour left until the reset after the job, against the goal where there is one. */
@@ -235,12 +213,7 @@ export function projectAccount(input: {
           .reduce((sum, s) => sum + costPerHour(learned, s).dollarsPerHour, 0) + rate;
       const reset = resetsAt === null ? null : (resetsAt - at) / HOUR;
       const span = reset === null ? hours : Math.min(hours, reset);
-      const own =
-        share.ownPercent && share.ownPercent.resetsAt === (w.resetsAt ?? null) && used > 0
-          ? share.ownPercent.percent
-          : 0;
       const projected = used + share.percentPerDollar * dollars * span + share.background(at, span);
-      const projectedOwn = own + share.percentPerDollar * dollars * span;
       const fits = projected <= limit + 1e-9;
       // After the job: what is left of this cycle, or of the next one when it resets first.
       const resetsFirst = reset !== null && reset < hours;
@@ -265,15 +238,8 @@ export function projectAccount(input: {
                   DAY),
             )
           : null;
-      const basis = share.ownTrusted && share.ownPercent ? ("own" as const) : ("total" as const);
-      const measured = resetsFirst
-        ? {
-            basis,
-            projected: after,
-            projectedOwn: after - share.background(resetsAt!, hours - reset),
-          }
-        : { basis, projected, projectedOwn };
-      const withinGoal = goalBudget === null ? null : goalUse(measured) <= goalBudget + 1e-9;
+      // The goal is measured against the meter's total, everyone's use included.
+      const withinGoal = goalBudget === null ? null : after <= goalBudget + 1e-9;
       const burn = share.percentPerDollar * dollars + share.background(at, 1);
       const runsOut = burn > 0 ? Math.max(0, limit - used) / burn : null;
       return {
@@ -282,14 +248,11 @@ export function projectAccount(input: {
         used,
         resetsAt,
         projected,
-        projectedOwn,
         fits,
         goal: goalBudget,
         goalPerDay: goalBudget === null ? null : input.goal,
-        basis,
-        goalUsed: basis === "own" ? own : used,
         withinGoal,
-        overGoal: goalBudget === null ? 0 : Math.max(0, goalUse(measured) - goalBudget),
+        overGoal: goalBudget === null ? 0 : Math.max(0, after - goalBudget),
         spareDollarsPerHour:
           Math.max(0, (goalBudget ?? limit) - after) / share.percentPerDollar / hoursLeft,
         lastsHours: runsOut === null || (reset !== null && runsOut >= reset) ? null : runsOut,
@@ -340,11 +303,7 @@ export function runwayText(
     w.resetsAt === null ? "" : ` in ${span((w.resetsAt - at) / HOUR)}`;
   const goal = p.windows.find((w) => w.goal !== null);
   const goalText = goal
-    ? `; ${goal.window.label} ${
-        goal.basis === "own"
-          ? `own use ${Math.round(goal.goalUsed)}%`
-          : `total use ${Math.round(goal.goalUsed)}% (own share not yet measured)`
-      } against a goal of ${Math.round(goal.goalPerDay!)}% a day (${Math.round(goal.goal!)}% by the job's end)`
+    ? `; ${goal.window.label} ${Math.round(goal.used)}% used against a goal of ${Math.round(goal.goalPerDay!)}% a day (${Math.round(goal.goal!)}% by the job's end)`
     : "";
   if (!p.fits) {
     const out = p.windows

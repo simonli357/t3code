@@ -1,5 +1,6 @@
 import {
   AllocationError,
+  AllocationLearned,
   AllocationPolicy,
   AllocationReservation,
   AllocationDecision,
@@ -28,6 +29,25 @@ const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const policyJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationPolicy));
 const reservationJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationReservation));
 const decisionJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationDecision));
+const learnedJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationLearned));
+/** What a computer keeps of its coordinator, to decide by when the coordinator cannot answer. */
+export const PolicyCopy = Schema.Struct({
+  coordinatorEnvironmentId: Schema.String,
+  syncedAt: Schema.String,
+  policy: AllocationPolicy,
+  modelPolicy: Schema.optional(ModelRoutingPolicy),
+  learned: Schema.optional(AllocationLearned),
+});
+export type PolicyCopy = typeof PolicyCopy.Type;
+const copyJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      policy: AllocationPolicy,
+      modelPolicy: Schema.optional(ModelRoutingPolicy),
+      learned: Schema.optional(AllocationLearned),
+    }),
+  ),
+);
 // Before startup, the master may choose another account for the same exact task.
 // Once a start intent exists, lost responses must replay that identical intent.
 export const withoutAccountChoice = <T extends { explicitInstanceId?: unknown }>(request: T) => {
@@ -70,7 +90,16 @@ export class AllocationStore extends Context.Service<
       coordinatorPolicy?: AllocationPolicy | null;
       /** The coordinator's model policy as last read, when this computer decides in its place. */
       coordinatorModelPolicy?: ModelRoutingPolicy;
+      learned?: AllocationLearned | undefined;
+      /** Said with the choice, such as the age of the settings copy it was made with. */
+      notes?: readonly string[];
     }) => Effect.Effect<ModelRoutingDecision, AllocationError>;
+    /** The coordinator's learned numbers; absent before the first learning. */
+    readonly learned: Effect.Effect<AllocationLearned | undefined, AllocationError>;
+    readonly saveLearned: (learned: AllocationLearned) => Effect.Effect<void, AllocationError>;
+    /** This computer's last copy of its coordinator's policies and learned numbers. */
+    readonly copy: Effect.Effect<PolicyCopy | undefined, AllocationError>;
+    readonly saveCopy: (copy: PolicyCopy) => Effect.Effect<void, AllocationError>;
     readonly policy: Effect.Effect<AllocationPolicy, AllocationError>;
     readonly reservations: Effect.Effect<readonly AllocationReservation[], AllocationError>;
     readonly history: Effect.Effect<readonly AllocationDecision[], AllocationError>;
@@ -91,6 +120,7 @@ export class AllocationStore extends Context.Service<
        * known policy, or null when none was read, which the decision then records.
        */
       coordinatorPolicy?: AllocationPolicy | null;
+      learned?: AllocationLearned | undefined;
     }) => Effect.Effect<
       {
         decision: AllocationDecision;
@@ -225,6 +255,7 @@ const make = Effect.gen(function* () {
             policy: replay.policy,
             authorityAvailable: replay.authorityAvailable,
             reservations: replay.reservations,
+            ...(input.learned ? { learned: input.learned } : {}),
             inventories: replay.inventories.map((i) => ({
               ...i,
               accounts: i.accounts.map((a) =>
@@ -321,9 +352,43 @@ const make = Effect.gen(function* () {
       Effect.map((rows) => (rows[0] ? decodeModelDecision(rows[0].decision_json) : undefined)),
       Effect.mapError(failure),
     );
+  const learned = sql<{
+    learned_json: string;
+  }>`SELECT learned_json FROM allocation_learned WHERE id = 1`.pipe(
+    Effect.map((rows) => (rows[0] ? learnedJson(rows[0].learned_json) : undefined)),
+    Effect.mapError(failure),
+  );
+  const copy = sql<{
+    coordinator_environment_id: string;
+    synced_at: string;
+    copy_json: string;
+  }>`SELECT coordinator_environment_id, synced_at, copy_json FROM allocation_policy_copy WHERE id = 1`.pipe(
+    Effect.map((rows) =>
+      rows[0]
+        ? {
+            coordinatorEnvironmentId: rows[0].coordinator_environment_id,
+            syncedAt: rows[0].synced_at,
+            ...copyJson(rows[0].copy_json),
+          }
+        : undefined,
+    ),
+    Effect.mapError(failure),
+  );
   const invalid = (detail: string) => new AllocationError({ code: "invalid", detail });
   const conflict = (detail: string) => new AllocationError({ code: "conflict", detail });
   return AllocationStore.of({
+    learned,
+    saveLearned: (value) =>
+      sql`INSERT INTO allocation_learned (id, learned_at, learned_json) VALUES (1, ${value.learnedAt}, ${json(value)}) ON CONFLICT(id) DO UPDATE SET learned_at = excluded.learned_at, learned_json = excluded.learned_json`.pipe(
+        Effect.asVoid,
+        Effect.mapError(failure),
+      ),
+    copy,
+    saveCopy: ({ coordinatorEnvironmentId, syncedAt, ...rest }) =>
+      sql`INSERT INTO allocation_policy_copy (id, coordinator_environment_id, synced_at, copy_json) VALUES (1, ${coordinatorEnvironmentId}, ${syncedAt}, ${json(rest)}) ON CONFLICT(id) DO UPDATE SET coordinator_environment_id = excluded.coordinator_environment_id, synced_at = excluded.synced_at, copy_json = excluded.copy_json`.pipe(
+        Effect.asVoid,
+        Effect.mapError(failure),
+      ),
     modelPolicy,
     modelPolicies,
     modelHistory,
@@ -475,6 +540,7 @@ const make = Effect.gen(function* () {
               inventories: input.inventories,
               reservations: yield* reservations,
               authorityAvailable: input.authorityAvailable,
+              learned: input.learned,
             });
             const chosen = choice.decision?.request;
             // A reassessment may not move to another provider family without consent.
@@ -493,6 +559,7 @@ const make = Effect.gen(function* () {
                     reserve: input.reserve,
                     expectedPolicyVersion: input.expectedPolicyVersion,
                     request: chosen,
+                    learned: input.learned,
                     ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
                     ...fallback,
                   })
@@ -536,6 +603,10 @@ const make = Effect.gen(function* () {
                 : {}),
               ...(choice.drainedUntil !== undefined ? { drainedUntil: choice.drainedUntil } : {}),
               accounts: choice.accounts,
+              ...(choice.startAt && allocation ? { startAt: choice.startAt } : {}),
+              ...(choice.notes.length || input.notes?.length
+                ? { notes: [...choice.notes, ...(input.notes ?? [])] }
+                : {}),
             };
             // Diagnostic history contains assessments and choices, never private prompts. Keep
             // the original resolved intent until admission commits; failed attempts are audited
@@ -575,18 +646,36 @@ const make = Effect.gen(function* () {
             // new fields: those keep what is stored.
             const { accountRules: _rules, workerModels: _workerModels, ...kept } = input.policy;
             const carried = (
-              name: "accountCaps" | "accountOrder" | "closeMarginPoints" | "longWaitHours",
+              name:
+                | "accountCaps"
+                | "accountOrder"
+                | "closeMarginPoints"
+                | "longWaitHours"
+                | "fableWorkers"
+                | "accountGoals",
             ) =>
               kept[name] === undefined && current[name] !== undefined
                 ? { [name]: current[name] }
                 : {};
+            // The family daily goals (`claude`, `codex`, `other`) and the other legacy values are
+            // the user's: a save keeps what it sends, else what is stored, never a constant.
+            const legacy = Object.fromEntries(
+              Object.entries(legacyAllocationPolicyFields).map(([name, value]) => [
+                name,
+                kept[name as keyof typeof legacyAllocationPolicyFields] ??
+                  current[name as keyof typeof legacyAllocationPolicyFields] ??
+                  value,
+              ]),
+            );
             const next: AllocationPolicy = {
               ...kept,
               ...carried("accountCaps"),
               ...carried("accountOrder"),
               ...carried("closeMarginPoints"),
               ...carried("longWaitHours"),
-              ...legacyAllocationPolicyFields,
+              ...carried("fableWorkers"),
+              ...carried("accountGoals"),
+              ...legacy,
               version: current.version + 1,
             };
             if (new Set(next.accountOrder).size !== (next.accountOrder ?? []).length)

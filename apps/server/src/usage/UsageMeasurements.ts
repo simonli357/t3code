@@ -16,7 +16,6 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { MeasurementHistory } from "./measurementHistory.ts";
-import * as ServerSettings from "../serverSettings.ts";
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
@@ -25,6 +24,8 @@ export class UsageMeasurements extends Context.Service<
   UsageMeasurements,
   {
     readonly read: (input: UsageMeasurementsInput) => Effect.Effect<UsageMeasurementsReport>;
+    /** Every retained finished turn and limit reading, for allocation learning. */
+    readonly evidence: Effect.Effect<ReturnType<MeasurementHistory["evidence"]>>;
   }
 >()("t3/usage/UsageMeasurements") {}
 
@@ -35,7 +36,6 @@ const make = Effect.gen(function* () {
   const providers = yield* ProviderRegistry;
   const runtime = yield* ProviderService;
   const projection = yield* ProjectionSnapshotQuery;
-  const settings = yield* ServerSettings.ServerSettingsService;
   const history = new MeasurementHistory();
   const file = path.join(config.stateDir, "usage-measurements.json");
   let persistenceError: string | null = null;
@@ -51,9 +51,9 @@ const make = Effect.gen(function* () {
     );
   }
   let allowed = new Set<string>();
+  // Every account is measured: allocation learns each one's cost and size from this.
   const updateScope = Effect.gen(function* () {
-    const current = yield* settings.getSettings.pipe(Effect.catchCause(() => Effect.succeed(null)));
-    allowed = new Set(current?.usageMeasurementInstanceIds ?? []);
+    allowed = new Set((yield* providers.getProviders).map((p) => p.instanceId));
     history.setAllowed([...allowed]);
   });
   yield* updateScope;
@@ -128,6 +128,10 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
   return UsageMeasurements.of({
+    evidence: Effect.gen(function* () {
+      history.recordProviders(yield* providers.getProviders);
+      return history.evidence(yield* Clock.currentTimeMillis);
+    }),
     read: (input) =>
       Effect.gen(function* () {
         yield* updateScope;

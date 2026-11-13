@@ -383,6 +383,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
           Layer.provide(Layer.mock(SessionMoves)({})),
           Layer.provide(
             Layer.succeed(UsageMeasurements.UsageMeasurements, {
+              evidence: Effect.succeed({ turns: [], quotas: [] }),
               read: (input) => Effect.sync(() => new MeasurementHistory().report(input, 0)),
             }),
           ),

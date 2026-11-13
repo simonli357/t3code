@@ -477,7 +477,7 @@ export const ModelRoutingSnapshot = Schema.Struct({
   authorityAvailable: Schema.Boolean,
 });
 export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
-/** One login in the accounts table: what its meters say, what T3's own sessions used, its runway. */
+/** One login in the accounts table: what its meters say, its size and its runway. */
 export const AccountRunway = Schema.Struct({
   key: Schema.String,
   label: Schema.String,
@@ -489,8 +489,6 @@ export const AccountRunway = Schema.Struct({
       label: Schema.String,
       /** What the provider's meter says, everyone's use included. */
       meterPercent: Schema.Number,
-      /** What T3's own sessions used this cycle: their cost times the learned share per dollar. */
-      ownPercent: Schema.NullOr(Schema.Number),
       /** The daily goal's budget now; null for windows without a goal. */
       goalPercent: Schema.NullOr(Schema.Number),
       /** Dollars of use the whole window holds, from the learned share per dollar. */

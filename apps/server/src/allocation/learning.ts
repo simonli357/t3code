@@ -9,7 +9,6 @@ import {
   type LearnedLimit,
   type SessionKind,
 } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -26,16 +25,6 @@ const MIN_LIMIT_PAIRS = 5;
 const MIN_PAIR_MINUTES = 20;
 /** Two readings name the same reset when they are this close. */
 const SAME_RESET_MS = 5 * 60_000;
-/**
- * A share per dollar this well measured separates T3's own use from the meter's total. Set from
- * the first two weeks of history: see the replay in the change's evidence.
- */
-export const OWN_SHARE_RULE = {
-  minPairs: 30,
-  maxRelativeError: 0.15,
-  minExplained: 0.6,
-  maxAgeHours: 24,
-};
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const effortRank = (effort: string | null) => {
   const index = EFFORTS.indexOf(effort ?? "");
@@ -338,35 +327,6 @@ function quarterHours(start: number, end: number) {
  */
 export function nonNegativeFit(
   rows: readonly { readonly x: readonly number[]; readonly y: number; readonly w: number }[],
-): { coefficients: number[]; relativeError: number } | undefined {
-  const coefficients = nonNegativeSolve(rows);
-  if (!coefficients) return undefined;
-  // Standard error of the first coefficient over the coefficients left free.
-  const free = coefficients.flatMap((c, i) => (c > 0 || i === 0 ? [i] : []));
-  const weightSum = rows.reduce((s, r) => s + r.w, 0);
-  const residual = rows.reduce(
-    (s, r) => s + r.w * (r.y - r.x.reduce((t, x, i) => t + x * coefficients[i]!, 0)) ** 2,
-    0,
-  );
-  const dof = rows.length - free.length;
-  const scale = rows.length / weightSum;
-  const variance = dof > 0 ? (residual * scale) / dof : Infinity;
-  const normal = free.map((i) =>
-    free.map((j) => rows.reduce((s, r) => s + r.w * scale * r.x[i]! * r.x[j]!, 0)),
-  );
-  const unit = solve(
-    normal,
-    free.map((_, k) => (k === 0 ? 1 : 0)),
-  );
-  const error = unit ? Math.sqrt(Math.max(0, variance * unit[0]!)) : Infinity;
-  return {
-    coefficients,
-    relativeError: coefficients[0]! > 0 ? error / coefficients[0]! : Infinity,
-  };
-}
-
-function nonNegativeSolve(
-  rows: readonly { readonly x: readonly number[]; readonly y: number; readonly w: number }[],
 ) {
   const size = rows[0]?.x.length ?? 0;
   const free = new Set(Array.from({ length: size }, (_, i) => i));
@@ -422,20 +382,19 @@ function measuredLimit(
   turns: ReturnType<typeof workingTurns>,
   at: number,
 ): LearnedLimit | undefined {
-  let own = readings.filter((r) => r.key === account.key && r.windowId === window.id);
+  let mine = readings.filter((r) => r.key === account.key && r.windowId === window.id);
   // A new plan is a new allowance: learning starts again from the first reading under it.
-  const latestPlan = account.plan ?? own.findLast((r) => r.plan !== null)?.plan ?? null;
-  const changed = own.findLast((r) => r.plan !== null && r.plan !== latestPlan);
-  if (changed) own = own.filter((r) => r.checkedAt > changed.checkedAt);
-  const latest = own.at(-1);
-  const models = latest?.models;
+  const latestPlan = account.plan ?? mine.findLast((r) => r.plan !== null)?.plan ?? null;
+  const changed = mine.findLast((r) => r.plan !== null && r.plan !== latestPlan);
+  if (changed) mine = mine.filter((r) => r.checkedAt > changed.checkedAt);
+  const models = mine.at(-1)?.models;
   const relevant = turns.filter(
     ({ turn, start }) =>
       turn.key === account.key &&
       (!models?.length || models.includes(turn.model)) &&
       (!changed || start > Date.parse(changed.checkedAt)),
   );
-  const pairs = readingPairs(own).map((pair) => ({
+  const pairs = readingPairs(mine).map((pair) => ({
     ...pair,
     cost: spend(relevant, pair.start, pair.end),
     hours: (pair.end - pair.start) / HOUR,
@@ -459,21 +418,14 @@ function measuredLimit(
       w: p.w,
     })),
   );
-  const share = fit?.coefficients[0];
+  const share = fit?.[0];
   if (!fit || !(share! > 0)) return undefined;
-  const quarters = byQuarter ? fit.coefficients.slice(1) : undefined;
+  const quarters = byQuarter ? fit.slice(1) : undefined;
   const totalHours = pairs.reduce((s, p) => s + p.hours, 0);
   const background = quarters
     ? quarters.reduce((s, b, q) => s + b * pairs.reduce((h, p) => h + p.quarters[q]!, 0), 0) /
       totalHours
-    : fit.coefficients[1]!;
-  const lastPairAt = Math.max(...pairs.map((p) => p.end));
-  const moved = pairs.reduce((s, p) => s + p.w * p.delta, 0);
-  const explained = moved > 0 ? (share! * pairs.reduce((s, p) => s + p.w * p.cost, 0)) / moved : 0;
-  const cycleStart =
-    latest?.resetsAt && latest.durationHours
-      ? Date.parse(latest.resetsAt) - latest.durationHours * HOUR
-      : undefined;
+    : fit[1]!;
   return {
     key: account.key,
     label: account.label,
@@ -484,20 +436,6 @@ function measuredLimit(
     percentPerDollar: share!,
     backgroundPercentPerHour: background,
     ...(quarters ? { backgroundByQuarter: quarters } : {}),
-    relativeError: fit.relativeError,
-    explained,
-    lastPairAt: DateTime.formatIso(DateTime.makeUnsafe(lastPairAt)),
-    ownTrusted:
-      pairs.length >= OWN_SHARE_RULE.minPairs &&
-      fit.relativeError <= OWN_SHARE_RULE.maxRelativeError &&
-      explained >= OWN_SHARE_RULE.minExplained &&
-      at - lastPairAt <= OWN_SHARE_RULE.maxAgeHours * HOUR,
-    ...(cycleStart !== undefined && cycleStart <= at
-      ? {
-          ownPercent: share! * spend(relevant, cycleStart, at),
-          cycleResetsAt: latest!.resetsAt,
-        }
-      : {}),
     samples: pairs.length,
     hours: totalHours,
     source: "measured",
@@ -609,7 +547,6 @@ export function learnAllocation(input: {
       (a, b) => a.label.localeCompare(b.label) || a.windowId.localeCompare(b.windowId),
     ),
     workerHours: jobHours.length >= 3 ? median(jobHours) : null,
-    ownShareRule: OWN_SHARE_RULE,
     notes: [...(input.notes ?? [])],
   };
 }
