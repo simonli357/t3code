@@ -5577,7 +5577,7 @@ for (const automatic of [false, true])
         const retried = yield* assignments.start(accepted, owner);
         expect(retried.state).toBe("submitted");
         expect(retried.allocation?.decision.reasons.join(" ")).toContain(
-          "the only account that is not drained.",
+          "the only account that is not out.",
         );
         yield* betaWorkers.drain();
         yield* assignments.start(accepted, owner);
