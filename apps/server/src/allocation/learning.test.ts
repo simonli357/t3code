@@ -166,6 +166,28 @@ describe("share of a limit per dollar", () => {
     expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
   });
 
+  it("starts again when the limit's length changes, as when a weekly limit becomes monthly", () => {
+    const { turns, readings } = history(
+      (h) => (h < 24 ? 0.4 : 0.1),
+      () => "Max 5x",
+    );
+    const learned = learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: [
+        evidence(
+          [...turns],
+          readings.map((r, h) => (h < 24 ? r : { ...r, durationHours: 720 })),
+        ),
+      ],
+      accounts: [account("acct", "Max 5x")],
+      profiles: [],
+      price,
+    });
+    const limit = learned.limits.find((l) => l.key === "acct")!;
+    expect(limit.samples).toBe(24);
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
+  });
+
   it("estimates an account without readings from a measured one, scaled by published plan size", () => {
     const learned = learnAllocation({
       at: iso(base + 48 * HOUR),

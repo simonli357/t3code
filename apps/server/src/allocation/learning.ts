@@ -383,9 +383,15 @@ function measuredLimit(
   at: number,
 ): LearnedLimit | undefined {
   let mine = readings.filter((r) => r.key === account.key && r.windowId === window.id);
-  // A new plan is a new allowance: learning starts again from the first reading under it.
+  // A new plan is a new allowance: learning starts again from the first reading under it. A
+  // window whose length changed (a weekly limit now monthly) is a new allowance too.
   const latestPlan = account.plan ?? mine.findLast((r) => r.plan !== null)?.plan ?? null;
-  const changed = mine.findLast((r) => r.plan !== null && r.plan !== latestPlan);
+  const length = mine.findLast((r) => r.durationHours !== null)?.durationHours ?? null;
+  const changed = mine.findLast(
+    (r) =>
+      (r.plan !== null && r.plan !== latestPlan) ||
+      (r.durationHours !== null && length !== null && r.durationHours !== length),
+  );
   if (changed) mine = mine.filter((r) => r.checkedAt > changed.checkedAt);
   const models = mine.at(-1)?.models;
   const relevant = turns.filter(
