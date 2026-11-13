@@ -17,6 +17,7 @@ import {
 import { ComputerCapacity } from "./computers.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderOptionSelection, ModelCapabilities } from "./model.ts";
+import { AllocationLearned } from "./allocationLearning.ts";
 
 const Points = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
 const Hours = Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 }));
@@ -39,8 +40,10 @@ export const AllocationRequest = Schema.Struct({
   allowedInstanceIds: Schema.optional(Schema.Array(ProviderInstanceId)),
   // A native resume can only stay on its bound instance. Reselection is opt-in.
   nativeInstanceId: Schema.optional(ProviderInstanceId),
-  /** Unused. Requests from builds before smart allocation may carry them. */
+  /** How long the job is expected to run: the projection's horizon. */
   expectedHours: Schema.optional(Hours),
+  /** A start queued for a limit's reset: decided as of then. */
+  startAt: Schema.optional(IsoDateTime),
   workClass: Schema.optional(Schema.Literals(["interactive", "batch", "long"])),
   contextTokens: Schema.optional(NonNegativeInt),
 });
@@ -127,7 +130,21 @@ export const AllocationPolicy = Schema.Struct({
   longWaitHours: Schema.optional(
     Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 168 })),
   ),
+  /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
+  fableWorkers: Schema.optional(Schema.Boolean),
+  /**
+   * Daily goals by `allocationPreferenceKey`: the percentage of the account's weekly (or
+   * monthly) window to use per day. An account without one takes its family's stored
+   * `dailyPoints` (`claude`, `codex`, `other`). A goal only ranks accounts; it never refuses,
+   * queues or changes a start.
+   */
+  accountGoals: Schema.optional(
+    Schema.Array(Schema.Struct({ key: TrimmedNonEmptyString, percentPerDay: Points })).check(
+      Schema.isMaxLength(100),
+    ),
+  ),
   // See `legacyAllocationPolicyFields`. Rules, worker models and overrides are dropped on save.
+  // `dailyPoints` of `claude`, `codex` and `other` are the family daily goals and are kept.
   claude: Legacy,
   codex: Legacy,
   other: Legacy,
@@ -194,6 +211,8 @@ export const AllocationAccount = Schema.Struct({
   retainHistory: Schema.optional(Schema.Boolean),
   /** The provider is turned on in settings. Missing on older environments means enabled. */
   enabled: Schema.optional(Schema.Boolean),
+  /** The plan the provider reports, such as `Claude Max Subscription`. */
+  plan: Schema.optional(Schema.String),
   environmentId: Schema.String,
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
@@ -255,6 +274,8 @@ export const AllocationDemand = Schema.Struct({
   state: Schema.Literals(["running", "pending", "uncertain"]),
   /** A managed worker. Absent from older computers. */
   worker: Schema.optional(Schema.Boolean),
+  /** The session's current context. Absent when unknown or from older computers. */
+  contextTokens: Schema.optional(NonNegativeInt),
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
 export const AllocationInventory = Schema.Struct({
@@ -357,6 +378,16 @@ export const AllocationCandidate = Schema.Struct({
   resetInHours: Schema.NullOr(Schema.Number),
   /** Active workers on this login, on every computer that was read. */
   workers: Schema.optional(NonNegativeInt),
+  /** No limit or hard cap runs out before the job ends or the window resets. */
+  fits: Schema.optional(Schema.Boolean),
+  /** Inside its daily goal at the job's end; absent without a goal. */
+  withinGoal: Schema.optional(Schema.Boolean),
+  /** How many more workers like this one the tightest limit has room for until its reset. */
+  roomWorkers: Schema.optional(Schema.NullOr(Schema.Number)),
+  /** Hours until the first limit runs out at the projected load; null when none does. */
+  lastsHours: Schema.optional(Schema.NullOr(Schema.Number)),
+  /** When it does not fit: the reset that clears the limit in its way; null when unknown. */
+  fitsFrom: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** The numbers above as one line. */
   line: Schema.optional(Schema.String),
   // Only in decisions from before smart allocation, or required by those builds.
@@ -432,6 +463,10 @@ export const ModelRoutingDecision = Schema.Struct({
   drainedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** One line per account of the wanted family on the computer. */
   accounts: Schema.optional(Schema.Array(Schema.String)),
+  /** The start waits for a limit's reset and begins then. */
+  startAt: Schema.optional(IsoDateTime),
+  /** What else shaped the choice: the Fable switch, a settings copy used without the coordinator. */
+  notes: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ModelRoutingDecision = typeof ModelRoutingDecision.Type;
 export const ModelRoutingSnapshot = Schema.Struct({
@@ -442,6 +477,29 @@ export const ModelRoutingSnapshot = Schema.Struct({
   authorityAvailable: Schema.Boolean,
 });
 export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
+/** One login in the accounts table: what its meters say, what T3's own sessions used, its runway. */
+export const AccountRunway = Schema.Struct({
+  key: Schema.String,
+  label: Schema.String,
+  /** How long it lasts at the current load, and its size, in words. */
+  line: Schema.String,
+  windows: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      label: Schema.String,
+      /** What the provider's meter says, everyone's use included. */
+      meterPercent: Schema.Number,
+      /** What T3's own sessions used this cycle: their cost times the learned share per dollar. */
+      ownPercent: Schema.NullOr(Schema.Number),
+      /** The daily goal's budget now; null for windows without a goal. */
+      goalPercent: Schema.NullOr(Schema.Number),
+      /** Dollars of use the whole window holds, from the learned share per dollar. */
+      sizeDollars: Schema.NullOr(Schema.Number),
+      source: Schema.NullOr(Schema.Literals(["measured", "estimated"])),
+    }),
+  ),
+});
+export type AccountRunway = typeof AccountRunway.Type;
 export const AllocationSnapshot = Schema.Struct({
   accountCapsSupported: Schema.optional(Schema.Boolean),
   /** The coordinator ranks by room and keeps `accountOrder`; absent on older coordinators. */
@@ -452,6 +510,9 @@ export const AllocationSnapshot = Schema.Struct({
   history: Schema.Array(AllocationDecision),
   authorityAvailable: Schema.Boolean,
   notices: Schema.Array(Schema.String),
+  learned: Schema.optional(AllocationLearned),
+  /** Each login's measured size, its use and how long it lasts at the current load. */
+  runways: Schema.optional(Schema.Array(AccountRunway)),
 });
 export type AllocationSnapshot = typeof AllocationSnapshot.Type;
 export const AllocationPolicyUpdate = Schema.Struct({
@@ -509,6 +570,8 @@ const workerChoiceFields = {
   account: Schema.optional(ProviderInstanceId),
   model: Schema.optional(TrimmedNonEmptyString),
   effort: Schema.optional(TrimmedNonEmptyString),
+  /** The master's estimate of the job's length in hours. */
+  hours: Schema.optional(Hours),
 };
 /** What a master gives to preview a worker's account, model and effort. */
 export const WorkerChoiceInput = Schema.Struct(workerChoiceFields);
@@ -535,6 +598,7 @@ export function workerChoiceRequest(
     threadId: input.threadId,
     assessment: { difficulty: input.difficulty, stakes: input.stakes },
     allowedDrivers: [driver],
+    ...(input.hours ? { expectedHours: input.hours } : {}),
     ...(input.account ? { explicitInstanceId: input.account } : {}),
     ...(input.model
       ? {
@@ -566,6 +630,9 @@ export const WorkerChoice = Schema.Struct({
   reason: Schema.String,
   /** The earliest reset when drained; null when unknown. */
   drainedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Chosen but waiting for a limit's reset: the worker begins then. */
+  startAt: Schema.optional(IsoDateTime),
+  notes: Schema.optional(Schema.Array(Schema.String)),
   accounts: Schema.Array(Schema.String),
 });
 export type WorkerChoice = typeof WorkerChoice.Type;
@@ -612,6 +679,8 @@ export function workerChoice(selection: ModelRoutingDecision): WorkerChoice {
       : {}),
     reason: selection.reasons[0] ?? decision?.reasons[0] ?? "No reason was recorded.",
     ...(drained ? { drainedUntil: selection.drainedUntil ?? null } : {}),
+    ...(chosen && selection.startAt ? { startAt: selection.startAt } : {}),
+    ...(selection.notes?.length ? { notes: selection.notes } : {}),
     accounts:
       selection.accounts ??
       (decision?.candidates ?? []).map((candidate) => candidate.line ?? candidate.instanceId),
@@ -633,6 +702,13 @@ export const AllocationPolicyEdit = Schema.Struct({
     Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
   ),
   clearCaps: Schema.optional(Schema.Array(AccountRef)),
+  /** Daily goals: percent of the weekly window per day. */
+  setGoals: Schema.optional(
+    Schema.Array(Schema.Struct({ account: AccountRef, percentPerDay: Points })),
+  ),
+  /** Back to the family's goal. */
+  clearGoals: Schema.optional(Schema.Array(AccountRef)),
+  fableWorkers: AllocationPolicy.fields.fableWorkers,
   /** The whole Claude ladder, weakest first. */
   ladder: ModelRoutingPolicy.fields.ladder,
   /** Null turns the fallback off. */
@@ -662,6 +738,25 @@ export const AllocationPolicyView = Schema.Struct({
   closeMarginPoints: Schema.Number,
   longWaitHours: Schema.Number,
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
+  /** Each account's daily goal in percent of its weekly window, and where it comes from. */
+  goals: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        account: Schema.String,
+        percentPerDay: Schema.Number,
+        from: Schema.Literals(["account", "family"]),
+      }),
+    ),
+  ),
+  fableWorkers: Schema.optional(Schema.Boolean),
+  /** The learned numbers, one line each, and when they were learned. */
+  learned: Schema.optional(
+    Schema.Struct({
+      at: Schema.String,
+      costs: Schema.Array(Schema.String),
+      limits: Schema.Array(Schema.String),
+    }),
+  ),
   /** `model / effort`, weakest first. */
   ladder: Schema.Array(Schema.String),
   fallback: Schema.NullOr(Schema.String),
@@ -686,8 +781,11 @@ export const AllocationOperation = Schema.TaggedUnion({
   modelPreview: { request: ModelRoutingRequest, policy: Schema.optional(ModelRoutingPolicy) },
   modelAllocate: { request: ModelRoutingRequest },
   connections: {},
-  /** Policy-only read for background enforcement; it never collects quota or demand. */
-  caps: {},
+  /**
+   * Policy-only read for background enforcement; it never collects quota or demand. With
+   * `learnedAt`, the answer carries the learned numbers only when they are newer.
+   */
+  caps: { learnedAt: Schema.optional(Schema.String) },
   snapshot: {},
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
   allocate: { request: AllocationRequest },
@@ -700,6 +798,8 @@ export const AllocationResponse = Schema.Struct({
   modelSnapshot: Schema.optional(ModelRoutingSnapshot),
   /** Also in a `caps` answer, so a computer can follow the coordinator's ladder. */
   modelPolicy: Schema.optional(ModelRoutingPolicy),
+  /** In a `caps` answer when newer than the asker's copy. */
+  learned: Schema.optional(AllocationLearned),
   /** What a model policy save accepted but could not confirm. */
   warnings: Schema.optional(Schema.Array(Schema.String)),
   selection: Schema.optional(ModelRoutingDecision),
