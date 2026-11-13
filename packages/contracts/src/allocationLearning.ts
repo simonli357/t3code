@@ -28,6 +28,11 @@ export const LearnedCost = Schema.Struct({
   hours: Schema.Number,
   source: LearnedSource,
   basis: Schema.optional(Schema.String),
+  /**
+   * A thin measurement's weight against its price-based estimate, below 1: the rate is this
+   * share measured and the rest estimated. Absent when fully measured or fully estimated.
+   */
+  measuredShare: Schema.optional(Schema.Number),
 });
 export type LearnedCost = typeof LearnedCost.Type;
 
@@ -121,14 +126,16 @@ export type AllocationEvidence = typeof AllocationEvidence.Type;
 
 /**
  * Published plan sizes relative to the provider's smallest paid plan, for an account without
- * history (claude.com/pricing, OpenAI's Codex plan pages, November 2026). Claude: Pro 1, Max
- * 5x 5, Max 20x 20, a Team seat that runs Claude Code (Premium) 6.25; a plan reported only as
- * "Max" counts as 5x until its own readings say more. Codex: Plus 1, Pro 5x 5, Pro 20x 20,
- * Pro Max 25, Business and Team about Plus.
+ * history: the 5-hour size, then the weekly one when it differs (claude.com/pricing, Claude's
+ * plan help pages, OpenAI's Codex plan pages, November 2026). Claude: Pro 1; Max 5x 5 for both;
+ * Max 20x, now called Ultra, 20 every five hours but 10 every week; the Fable limit is half the
+ * weekly one on every plan, so it scales like the weekly. A Team seat that runs Claude Code
+ * (Premium) 6.25; a plan reported only as "Max" counts as 5x until its own readings say more.
+ * Codex: Plus 1, Pro 5x 5, Pro 20x 20, Pro Max 25, Business and Team about Plus.
  */
-const PLAN_SIZES: Record<string, readonly (readonly [RegExp, number])[]> = {
+const PLAN_SIZES: Record<string, readonly (readonly [RegExp, number, number?])[]> = {
   claudeAgent: [
-    [/20x/i, 20],
+    [/20x/i, 20, 10],
     [/5x/i, 5],
     [/\bmax\b/i, 5],
     [/team|enterprise/i, 6.25],
@@ -143,8 +150,16 @@ const PLAN_SIZES: Record<string, readonly (readonly [RegExp, number])[]> = {
     [/free|\bgo\b/i, 0.2],
   ],
 };
-export const publishedPlanSize = (driver: string, plan: string | null | undefined) =>
-  plan ? (PLAN_SIZES[driver]?.find(([pattern]) => pattern.test(plan))?.[1] ?? null) : null;
+export const publishedPlanSize = (
+  driver: string,
+  plan: string | null | undefined,
+  /** The limit's kind: `session` is the 5-hour limit, anything else counts as weekly. */
+  kind?: string | null,
+) => {
+  const entry = plan ? PLAN_SIZES[driver]?.find(([pattern]) => pattern.test(plan)) : undefined;
+  if (!entry) return null;
+  return kind === "session" ? entry[1] : (entry[2] ?? entry[1]);
+};
 
 /** A session counts as working until this long after its last turn ends. */
 export const IDLE_AFTER_MINUTES = 15;

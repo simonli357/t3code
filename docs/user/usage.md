@@ -60,9 +60,10 @@ estimate of the job's length in hours. T3 then picks the account, model and effo
 4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
    (45 at stakes 8 or more); otherwise it takes the nearest ladder model that fits, at most two
    rungs away; otherwise, below the fallback's threshold, the **fallback** model; otherwise the
-   wanted model on the account that lasts longest. It is refused only when every account is
-   really out, with the earliest reset time. Codex is used only when a start asks for it and
-   never changes model.
+   wanted model on the account that lasts longest. When every account is out now but a limit
+   resets within that wait, the same choice is made as of the reset and the start waits for it.
+   It is refused only when everything stays out beyond the wait, with the earliest reset time.
+   Codex is used only when a start asks for it and never changes model.
 
 The result names the choice, the table's choice when it differs, when a waiting start begins,
 one reason line with the numbers (for example "XY: room for about 3 more Fable-medium workers
@@ -88,8 +89,10 @@ The numbers behind these choices are learned, not set: what an hour of work cost
 for each model, effort and context, and how much of each account's limit a dollar of use takes,
 including use T3 does not see. Every computer records its turns and the limit readings it
 already fetches; the coordinator learns from all of them and sends the result to every computer.
-A model or account without enough history uses an estimate scaled from a measured one, marked
-as estimated.
+A model without history is estimated from a measured one by price; one with only a little
+history is marked thin and leans on that estimate until it has enough turns and hours. An
+account without history is sized from a measured one by plan tier (Pro, Max 5x, Max 20x), marked
+as estimated, until its own readings replace it.
 
 Open **Settings > Provider allocation** for the accounts: each one's usage windows with their
 resets, what each limit holds, how long the account lasts at the current load, its workers now,

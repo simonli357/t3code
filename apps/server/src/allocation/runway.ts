@@ -91,7 +91,7 @@ export function limitShare(
       },
       source: entry.source,
     };
-  const size = publishedPlanSize(account.driver, account.plan) ?? 1;
+  const size = publishedPlanSize(account.driver, account.plan, window.kind) ?? 1;
   const unit = window.models?.length
     ? SEED_WINDOW_DOLLARS_PER_PLAN.scoped
     : window.kind === "session"

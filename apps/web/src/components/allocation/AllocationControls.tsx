@@ -167,7 +167,8 @@ function AccountsTable({
               <TableCell>
                 <div className="font-medium">{row.label}</div>
                 <div className="text-muted-foreground">
-                  {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+                  {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver}
+                  {row.plan && ` ${row.plan}`} · {row.hosts.join(", ")}
                 </div>
                 {row.login === null && (
                   <div className="text-muted-foreground">login unknown; matched by label</div>
@@ -355,7 +356,7 @@ function LearnedNumbers({ learned, now }: { learned: AllocationLearned; now: num
                 {cost.samples} over {number(cost.hours)} h
               </TableCell>
               <TableCell>
-                {cost.source}
+                {cost.measuredShare === undefined ? cost.source : "thin"}
                 {cost.basis && <div className="text-muted-foreground">{cost.basis}</div>}
               </TableCell>
             </TableRow>

@@ -182,6 +182,8 @@ export function allocationAccountRows(
       login,
       // A login that is not known is told apart by its computers.
       name: `${group.label}${login === null ? ` (${group.hosts.join(", ")})` : ""}`,
+      /** The plan and its usage tier as the provider reports them, such as Max 20x. */
+      plan: group.members.find((member) => member.plan)?.plan ?? null,
       instances: group.members.map((member) => ({
         environmentId: member.environmentId,
         computer: computer(member.environmentId),

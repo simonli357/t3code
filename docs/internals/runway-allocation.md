@@ -20,9 +20,13 @@ quarter has enough reading pairs.
 (a weekly Codex limit that became monthly), discards the readings before it.
 
 **Unmeasured means estimated, never a default.** A missing model is repriced from a measured
-model's token mix; a missing account takes a measured account's share, scaled by published plan
-sizes when both are known and as large otherwise. The seeds in `runway.ts` are for an install
-that has learned nothing at all.
+model's token mix. A thin one (under 20 turns or 10 working hours) is blended with that estimate
+in proportion to its evidence, at the blended context, so half an hour at small context cannot
+undercut the model above it. A missing account takes a measured account's share, scaled by plan
+tier: the SDK reports only "Claude Max", so the tier comes from the login record's
+`rateLimitTier` (never anything else in that file), and Max 20x (now Ultra) is 20 Pros per five
+hours but 10 per week and per Fable limit. Unknown sizes count as equal. The seeds in
+`runway.ts` are for an install that has learned nothing at all.
 
 **Every computer keeps a copy.** The coordinator's policy, model policy and learned numbers are
 stored on each computer (`allocation_policy_copy`) whenever they change and at most every

@@ -198,7 +198,8 @@ export function SettingsAllocationRouteScreen() {
     <View key={row.key} className="gap-1 rounded border border-border p-3">
       <Text className="font-semibold">
         {position === undefined ? "" : `${position + 1}. `}
-        {row.label} · {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+        {row.label} · {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver}
+        {row.plan ? ` ${row.plan}` : ""} · {row.hosts.join(", ")}
       </Text>
       {position !== undefined && editable && (
         <View className="flex-row gap-4">
@@ -418,7 +419,7 @@ export function SettingsAllocationRouteScreen() {
                   <Text key={`${c.driver}:${c.model}:${c.effort}:${c.kind}`}>
                     {c.model} / {c.effort ?? "default"} {c.kind}: ${c.dollarsPerHour.toFixed(2)} an
                     hour at {Math.round(c.contextTokens / 1000)}k context · {c.samples} turns ·{" "}
-                    {c.source}
+                    {c.measuredShare === undefined ? c.source : `thin: ${c.basis}`}
                   </Text>
                 ))}
                 {snapshot.learned.limits.map((l) => (
@@ -426,6 +427,7 @@ export function SettingsAllocationRouteScreen() {
                     {l.label} {l.windowLabel}: holds about {dollars(100 / l.percentPerDollar)} ·
                     outside use {points(l.backgroundPercentPerHour)}% an hour · {l.samples} reading
                     pairs · {l.source}
+                    {l.basis ? ` from ${l.basis}` : ""}
                   </Text>
                 ))}
               </View>

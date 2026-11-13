@@ -18,6 +18,9 @@ const LIMIT_HALF_LIFE_DAYS = 3;
 /** Below these a cost has one best estimate and no context slope. */
 const MIN_FIT_TURNS = 20;
 const MIN_CONTEXT_SPREAD = 30_000;
+/** A cost is fully measured from this many turns over this many working hours; thinner leans on its estimate. */
+const SOLID_COST_TURNS = 20;
+const SOLID_COST_HOURS = 10;
 /** A limit is measured once this much spend moved it over this many reading pairs. */
 const MIN_LIMIT_DOLLARS = 20;
 const MIN_LIMIT_PAIRS = 5;
@@ -44,7 +47,12 @@ export interface LearningAccount {
   readonly label: string;
   readonly driver: string;
   readonly plan: string | null;
-  readonly windows: readonly { readonly id: string; readonly label: string }[];
+  readonly windows: readonly {
+    readonly id: string;
+    readonly label: string;
+    /** `session` for the 5-hour limit; plans scale it differently from the weekly ones. */
+    readonly kind?: string;
+  }[];
 }
 export interface Profile {
   readonly driver: string;
@@ -169,6 +177,28 @@ function measuredCosts(turns: ReturnType<typeof workingTurns>, at: number) {
   });
 }
 
+/** How much of a solid measurement's evidence a cost has: turns and working hours both count. */
+const evidenceShare = (cost: LearnedCost) =>
+  Math.min(1, cost.samples / SOLID_COST_TURNS, cost.hours / SOLID_COST_HOURS);
+
+/**
+ * A thin measurement weighed against its price-based estimate by its evidence, both taken at
+ * the blended typical context so a short sample at small context cannot undercut the estimate.
+ */
+function blendCost(measured: LearnedCost, estimate: LearnedCost, share: number): LearnedCost {
+  const context = share * measured.contextTokens + (1 - share) * estimate.contextTokens;
+  const at = (c: LearnedCost) =>
+    c.dollarsPerHour + (c.perHundredK * (context - c.contextTokens)) / 100_000;
+  return {
+    ...measured,
+    dollarsPerHour: share * at(measured) + (1 - share) * at(estimate),
+    perHundredK: share * measured.perHundredK + (1 - share) * estimate.perHundredK,
+    contextTokens: Math.round(context),
+    measuredShare: share,
+    basis: `${Math.round(share * 100)}% measured, the rest estimated from ${estimate.basis}`,
+  };
+}
+
 /**
  * A cost for a profile nothing measured: another model at the same effort repriced by its
  * token mix, else the same model at the nearest effort, else the other kind of session
@@ -216,7 +246,7 @@ function estimateCost(
       ...sameModel.cost,
       effort: profile.effort,
       source: "estimated",
-      basis: `as ${sameModel.cost.model} / ${sameModel.cost.effort ?? "default"}`,
+      basis: `${sameModel.cost.model} / ${sameModel.cost.effort ?? "default"}, the nearest effort`,
     };
   const other = kind === "worker" ? "master" : "worker";
   const pairs = measured.flatMap((m) => {
@@ -450,22 +480,26 @@ function measuredLimit(
 
 /**
  * A limit for an account without history: a measured account's share of the same window,
- * scaled by the two plans' published sizes, or as large when either size is unknown.
+ * scaled by the two plans' published sizes for that kind of limit, or as large when either
+ * size is unknown.
  */
 export function estimateLimit(
   account: Pick<LearningAccount, "key" | "label" | "driver" | "plan">,
   window: LearningAccount["windows"][number],
   measured: readonly LearnedLimit[],
 ): LearnedLimit | undefined {
-  const size = publishedPlanSize(account.driver, account.plan);
-  const known = (m: LearnedLimit) => publishedPlanSize(m.driver, m.plan) !== null;
+  const sizeOf = (plan: string | null) => publishedPlanSize(account.driver, plan, window.kind);
+  const size = sizeOf(account.plan);
   const source = measured
     .filter(
       (m) => m.source === "measured" && m.driver === account.driver && m.windowId === window.id,
     )
-    .toSorted((a, b) => Number(known(b)) - Number(known(a)) || b.samples - a.samples)[0];
+    .toSorted(
+      (a, b) =>
+        Number(sizeOf(b.plan) !== null) - Number(sizeOf(a.plan) !== null) || b.samples - a.samples,
+    )[0];
   if (!source) return undefined;
-  const sourceSize = publishedPlanSize(source.driver, source.plan);
+  const sourceSize = sizeOf(source.plan);
   const scale = size === null || sourceSize === null ? 1 : sourceSize / size;
   return {
     key: account.key,
@@ -479,7 +513,10 @@ export function estimateLimit(
     samples: 0,
     hours: 0,
     source: "estimated",
-    basis: `${source.label} × ${scale === 1 ? "1 (plan size unknown)" : scale.toFixed(2)} by plan`,
+    basis:
+      size === null || sourceSize === null
+        ? `${source.label}, as large (plan size unknown)`
+        : `plan: ${account.plan} holds ${Number((size / sourceSize).toFixed(2))}× ${source.label}'s ${source.plan}`,
   };
 }
 
@@ -499,7 +536,23 @@ export function learnAllocation(input: {
     at,
   );
   const readings = input.evidence.flatMap((e) => e.readings);
-  const measured = measuredCosts(turns, at);
+  const raw = measuredCosts(turns, at);
+  const solid = raw.filter((m) => evidenceShare(m.cost) === 1);
+  const measured = raw.map((m) => {
+    const share = evidenceShare(m.cost);
+    if (share === 1) return m;
+    const estimate = estimateCost(m.cost, m.cost.kind, solid, input.price);
+    return {
+      ...m,
+      cost: estimate
+        ? blendCost(m.cost, estimate, share)
+        : {
+            ...m.cost,
+            measuredShare: share,
+            basis: `${Math.round(share * 100)}% of a solid measurement, nothing to weigh it against`,
+          },
+    };
+  });
   const costs = measured.map((m) => m.cost);
   for (const profile of input.profiles)
     for (const kind of ["worker", "master"] as const) {

@@ -6,7 +6,7 @@ import {
   type EvidenceReading,
   type EvidenceTurn,
 } from "@t3tools/contracts";
-import { learnAllocation, quarterOf, type PriceOf } from "./learning.ts";
+import { estimateLimit, learnAllocation, quarterOf, type PriceOf } from "./learning.ts";
 
 const HOUR = 3_600_000;
 const base = Date.parse("2026-11-08T00:00:00.000Z");
@@ -69,7 +69,7 @@ describe("cost per working hour", () => {
       tokens: { input: 1_000, cacheRead: 0, cacheWrite: 0, output: 1_000 },
     }),
   );
-  const master = Array.from({ length: 10 }, (_, i) =>
+  const master = Array.from({ length: 20 }, (_, i) =>
     turn("master", i, 0.75 * 2, { kind: "master", contextTokens: 120_000 }),
   );
   const learned = learnAllocation({
@@ -98,6 +98,39 @@ describe("cost per working hour", () => {
     expect(cost("opus", "high", "master")!.dollarsPerHour).toBeCloseTo(2, 6);
   });
 
+  it("weighs a thin measurement against its price-based estimate by its evidence", () => {
+    // Three cheap Sonnet turns: 3 of 20 turns, 2.25 of 10 hours, so 15% measured.
+    const thin = Array.from({ length: 3 }, (_, i) =>
+      turn("thin", i, 0.75, { model: "sonnet", contextTokens: 60_000 }),
+    );
+    const costs = learnAllocation({
+      at: iso(base + 100 * HOUR),
+      evidence: [evidence([...worker, ...thin])],
+      accounts: [],
+      profiles: [],
+      price,
+    }).costs;
+    const opus = costs.find((c) => c.model === "opus" && c.kind === "worker")!;
+    const sonnet = costs.find((c) => c.model === "sonnet" && c.kind === "worker")!;
+    expect(opus.measuredShare).toBeUndefined();
+    expect(sonnet).toMatchObject({
+      source: "measured",
+      samples: 3,
+      measuredShare: 0.15,
+      basis: "15% measured, the rest estimated from opus / high repriced",
+    });
+    // Both at the blended context: the thin rate's own $1 an hour, Opus's repriced to Sonnet.
+    const context = 0.15 * 60_000 + 0.85 * opus.contextTokens;
+    expect(sonnet.contextTokens).toBe(Math.round(context));
+    expect(sonnet.dollarsPerHour).toBeCloseTo(
+      0.15 * 1 +
+        0.85 *
+          0.6 *
+          (opus.dollarsPerHour + (opus.perHundredK * (context - opus.contextTokens)) / 1e5),
+      6,
+    );
+  });
+
   it("estimates an unmeasured model by price and an unmeasured effort from the nearest one, marked estimated", () => {
     const sonnet = cost("sonnet", "high", "worker")!;
     expect(sonnet).toMatchObject({ source: "estimated", basis: "opus / high repriced" });
@@ -107,7 +140,7 @@ describe("cost per working hour", () => {
     );
     expect(cost("opus", "max", "worker")).toMatchObject({
       source: "estimated",
-      basis: "as opus / high",
+      basis: "opus / high, the nearest effort",
     });
   });
 });
@@ -188,7 +221,7 @@ describe("share of a limit per dollar", () => {
     expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
   });
 
-  it("estimates an account without readings from a measured one, scaled by published plan size", () => {
+  it("estimates an account without readings from a measured one, scaled by plan tier", () => {
     const learned = learnAllocation({
       at: iso(base + 48 * HOUR),
       evidence: [
@@ -197,13 +230,27 @@ describe("share of a limit per dollar", () => {
           () => "Max 5x",
         ),
       ],
-      accounts: [account("acct", "Max 5x"), account("other", "Max 20x")],
+      accounts: [account("acct", "Max 5x"), account("other", "Max 20x"), account("pro", "Pro")],
       profiles: [],
       price,
     });
+    // A weekly limit: Max 20x (now Ultra) holds twice Max 5x's, Pro a fifth.
     const other = learned.limits.find((l) => l.key === "other")!;
-    expect(other).toMatchObject({ source: "estimated", samples: 0, basis: "AC × 0.25 by plan" });
-    expect(other.percentPerDollar).toBeCloseTo(0.025, 6);
+    expect(other).toMatchObject({
+      source: "estimated",
+      samples: 0,
+      basis: "plan: Max 20x holds 2× AC's Max 5x",
+    });
+    expect(other.percentPerDollar).toBeCloseTo(0.05, 6);
+    expect(learned.limits.find((l) => l.key === "pro")!.percentPerDollar).toBeCloseTo(0.5, 6);
+    // The 5-hour limit scales by the full tier: four times Max 5x's.
+    const session = estimateLimit(
+      { key: "other", label: "XY", driver, plan: "Max 20x" },
+      { id: "weekly", label: "Weekly", kind: "session" },
+      learned.limits.filter((l) => l.key === "acct"),
+    )!;
+    expect(session.basis).toBe("plan: Max 20x holds 4× AC's Max 5x");
+    expect(session.percentPerDollar).toBeCloseTo(0.025, 6);
     // Without a plan to compare, the account is taken to be as large as the measured one.
     const unknown = learnAllocation({
       at: iso(base + 48 * HOUR),
@@ -219,7 +266,7 @@ describe("share of a limit per dollar", () => {
     }).limits.find((l) => l.key === "other")!;
     expect(unknown).toMatchObject({
       source: "estimated",
-      basis: "AC × 1 (plan size unknown) by plan",
+      basis: "AC, as large (plan size unknown)",
     });
     expect(unknown.percentPerDollar).toBeCloseTo(0.1, 6);
   });

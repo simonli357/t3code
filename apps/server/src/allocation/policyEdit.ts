@@ -121,8 +121,16 @@ const money = (dollars: number) =>
   dollars >= 100 ? `$${Math.round(dollars).toLocaleString("en-US")}` : `$${dollars.toFixed(2)}`;
 /** The learned numbers, one line each, as agents and the settings page read them. */
 export function learnedLines(learned: AllocationLearned) {
-  const source = (entry: { source: string; basis?: string | undefined }) =>
-    entry.source === "measured" ? "measured" : `estimated from ${entry.basis ?? "plan size"}`;
+  const source = (entry: {
+    source: string;
+    basis?: string | undefined;
+    measuredShare?: number | undefined;
+  }) =>
+    entry.source !== "measured"
+      ? `estimated from ${entry.basis ?? "plan size"}`
+      : entry.measuredShare !== undefined
+        ? `thin: ${entry.basis}`
+        : "measured";
   return {
     at: learned.learnedAt,
     costs: learned.costs.map(

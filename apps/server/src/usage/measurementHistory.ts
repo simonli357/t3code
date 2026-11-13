@@ -130,7 +130,9 @@ export class MeasurementHistory {
           instanceId: provider.instanceId,
           checkedAt: window.checkedAt ?? limits.checkedAt,
           window,
-          ...(provider.auth.label ? { plan: provider.auth.label } : {}),
+          ...(provider.auth.tier || provider.auth.label
+            ? { plan: provider.auth.tier ?? provider.auth.label }
+            : {}),
         });
       }
     }
