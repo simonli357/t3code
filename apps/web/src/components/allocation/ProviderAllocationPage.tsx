@@ -270,8 +270,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          A worker starts on the account with the most room. Hard caps and the workers switch block
-          an account.
+          A worker starts on the account with the most room for its job, accounts within their daily
+          goal first. Only hard caps, real limits and the workers switch block an account.
         </p>
       </header>
       {error && (

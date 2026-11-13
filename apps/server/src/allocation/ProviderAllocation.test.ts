@@ -14,6 +14,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   defaultAllocationPolicy,
+  legacyAllocationPolicyFields,
   defaultModelLadder,
   defaultModelRoutingPolicy,
   ProviderInstanceId,
@@ -494,7 +495,7 @@ const roomy = Effect.gen(function* () {
   const policy = yield* store.policy;
   yield* store.savePolicy({
     expectedVersion: policy.version,
-    policy: { ...policy, codex: { ...policy.codex, dailyPoints: 100 } },
+    policy: { ...policy, codex: { ...legacyAllocationPolicyFields.codex, dailyPoints: 100 } },
   });
 });
 

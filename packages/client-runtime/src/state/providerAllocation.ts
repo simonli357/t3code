@@ -1,5 +1,6 @@
 import {
   WS_METHODS,
+  allocationFamilyGoal,
   allocationPreferenceKey,
   modelLadder,
   routingEffortOptionId,
@@ -171,6 +172,8 @@ export function allocationAccountRows(
       if (!newest.has(window.id)) newest.set(window.id, window);
     const supportsCaps = allocationSupportsSubscriptionCaps(group.members);
     const saved = snapshot?.policy ?? policy;
+    const ownGoal = policy.accountGoals?.find((goal) => group.keys.includes(goal.key));
+    const familyGoal = allocationFamilyGoal(policy, group.driver);
     const workersOffOn = group.members.flatMap((member) =>
       member.availableForWorkers === false ? [computer(member.environmentId)] : [],
     );
@@ -212,6 +215,14 @@ export function allocationAccountRows(
       supportsCaps,
       capSource: allocationSubscriptionCapSource(group.members),
       cap: group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean),
+      /** Percent of the weekly limit a day; the provider family's unless the account has its own. */
+      goal: ownGoal
+        ? { percentPerDay: ownGoal.percentPerDay, own: true }
+        : familyGoal === null
+          ? null
+          : { percentPerDay: familyGoal, own: false },
+      /** How long the account lasts and what each limit holds, from the coordinator. */
+      runway: snapshot?.runways?.find((runway) => group.keys.includes(runway.key)) ?? null,
       // Decided from the saved policy, so a row does not move while it is being edited.
       other:
         group.members.every((member) => member.enabled === false) ||
@@ -220,6 +231,21 @@ export function allocationAccountRows(
   });
 }
 export type AllocationAccountRow = ReturnType<typeof allocationAccountRows>[number];
+
+/** The policy with the login's own daily goal set, or cleared so it uses its family's. */
+export function withAllocationAccountGoal(
+  policy: AllocationPolicy,
+  row: Pick<AllocationAccountRow, "keys">,
+  percentPerDay: number | undefined,
+): AllocationPolicy {
+  return {
+    ...policy,
+    accountGoals: [
+      ...(policy.accountGoals ?? []).filter((goal) => !row.keys.includes(goal.key)),
+      ...(percentPerDay === undefined ? [] : row.keys.map((key) => ({ key, percentPerDay }))),
+    ],
+  };
+}
 
 type OrderRow = Pick<AllocationAccountRow, "key" | "keys">;
 /** The preference order: logins the policy lists, in its order, then the rest as given. */

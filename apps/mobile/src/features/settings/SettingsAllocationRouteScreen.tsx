@@ -20,6 +20,7 @@ import {
   allocationAccountRows,
   allocationSummary,
   allocationAccountLabel,
+  withAllocationAccountGoal,
   withAllocationAccountMoved,
   type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
@@ -38,6 +39,7 @@ import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const points = (value: number) => Number(value.toFixed(2)).toString();
+const dollars = (value: number) => `$${Math.round(value).toLocaleString()}`;
 const field = "rounded border border-border p-2 text-foreground";
 
 export function SettingsAllocationRouteScreen() {
@@ -59,6 +61,8 @@ export function SettingsAllocationRouteScreen() {
   const [numbers, setNumbers] = useState<{ closeMarginPoints?: string; longWaitHours?: string }>(
     {},
   );
+  // Daily goals as typed, by account row; blank uses the provider's default.
+  const [goals, setGoals] = useState<Record<string, string>>({});
 
   const [model, setModel] = useState("");
 
@@ -128,12 +132,13 @@ export function SettingsAllocationRouteScreen() {
     : [];
   const others = rows.filter((row) => row.other);
   const editable = snapshot?.accountOrderSupported === true && snapshot.authorityAvailable;
-  const dirty = draft !== null || Object.keys(numbers).length > 0;
+  const goalsEditable = editable && snapshot?.runways !== undefined;
+  const dirty = draft !== null || Object.keys(numbers).length > 0 || Object.keys(goals).length > 0;
   const numberFields = [
     {
       key: "closeMarginPoints",
-      label: "Closeness margin (points)",
-      help: "Accounts whose room differs by at most this much count as close; among those the preference order decides.",
+      label: "Closeness margin (%)",
+      help: "Accounts whose room is within this percent of the best account's count as close; among those the preference order decides.",
       fallback: DEFAULT_CLOSE_MARGIN_POINTS,
     },
     {
@@ -155,20 +160,33 @@ export function SettingsAllocationRouteScreen() {
       setMessage("Enter a number for the margin and the long wait.");
       return;
     }
+    let next: AllocationPolicy = {
+      ...policy,
+      closeMarginPoints: values[0]!,
+      longWaitHours: values[1]!,
+    };
+    for (const row of rows) {
+      const typed = goals[row.key];
+      if (typed === undefined) continue;
+      const goal = typed.trim() === "" ? undefined : Number(typed);
+      if (goal !== undefined && !(goal >= 0 && goal <= 100)) {
+        setMessage(`Enter a daily goal between 0 and 100 for ${row.label}, or leave it blank.`);
+        return;
+      }
+      next = withAllocationAccountGoal(next, row, goal);
+    }
     setBusy(true);
     const result = await execute({
       environmentId: target.environmentId,
       input: {
         _tag: "policy",
-        input: {
-          expectedVersion: policy.version,
-          policy: { ...policy, closeMarginPoints: values[0]!, longWaitHours: values[1]! },
-        },
+        input: { expectedVersion: policy.version, policy: next },
       },
     });
     if (result._tag === "Success" && result.value.policy) {
       setDraft(null);
       setNumbers({});
+      setGoals({});
       await refresh();
     } else {
       setMessage("Could not save. Check the numbers, refresh and retry.");
@@ -198,12 +216,19 @@ export function SettingsAllocationRouteScreen() {
         </View>
       )}
       {row.windows.length ? (
-        row.windows.map((w) => (
-          <Text key={w.id}>
-            {w.label}: {points(w.usedPercent)}% used · resets{" "}
-            {w.resetsAt ? new Date(w.resetsAt).toLocaleString() : "unknown"} · read {w.age} ago
-          </Text>
-        ))
+        row.windows.map((w) => {
+          const runway = row.runway?.windows.find((r) => r.id === w.id);
+          return (
+            <Text key={w.id}>
+              {w.label}: {points(w.usedPercent)}% used · resets{" "}
+              {w.resetsAt ? new Date(w.resetsAt).toLocaleString() : "unknown"} · read {w.age} ago
+              {runway?.sizeDollars != null
+                ? ` · holds about ${dollars(runway.sizeDollars)}${runway.source === "estimated" ? " (estimated)" : ""}`
+                : ""}
+              {runway?.goalPercent != null ? ` · goal ${points(runway.goalPercent)}% by now` : ""}
+            </Text>
+          );
+        })
       ) : (
         <Text>
           {row.capSource === "unsupported"
@@ -213,7 +238,23 @@ export function SettingsAllocationRouteScreen() {
               : "No verified quota reading"}
         </Text>
       )}
+      {row.runway && row.windows.length > 0 ? <Text>{row.runway.line}</Text> : null}
       <Text>Workers now: {row.workers}</Text>
+      <View className="gap-1">
+        <Text>
+          Daily goal (% of the week a day)
+          {row.goal && !row.goal.own ? ` · provider default ${points(row.goal.percentPerDay)}` : ""}
+        </Text>
+        <TextInput
+          accessibilityLabel={`Daily goal for ${row.label}`}
+          keyboardType="decimal-pad"
+          editable={goalsEditable}
+          placeholder={row.goal ? points(row.goal.percentPerDay) : "Off"}
+          value={goals[row.key] ?? (row.goal?.own ? String(row.goal.percentPerDay) : "")}
+          onChangeText={(value) => setGoals({ ...goals, [row.key]: value })}
+          className={field}
+        />
+      </View>
       {row.supportsCaps && row.cap ? (
         <Text>
           Hard cap week {row.cap.weeklyPercent === null ? "off" : `${row.cap.weeklyPercent}%`}
@@ -304,8 +345,10 @@ export function SettingsAllocationRouteScreen() {
     <SettingsScreen title="Provider allocation">
       <ScrollView contentContainerClassName="gap-4 p-4">
         <Text>
-          A worker goes to the account with the most room left. Hard caps and switched-off accounts
-          block.
+          A worker goes to the account with the most room for its job, accounts within their daily
+          goal first. A daily goal only changes which account is recommended: it never stops, queues
+          or changes a start, and a pinned account over its goal starts normally. Only hard caps,
+          real limits and switched-off accounts block.
         </Text>
         <Text>{target?.label ?? "Choose a connected environment in Settings."}</Text>
         <Text>
@@ -351,6 +394,40 @@ export function SettingsAllocationRouteScreen() {
                   />
                 </View>
               ))}
+            {policy && (
+              <View className="flex-row items-center justify-between">
+                <Text>Fable workers</Text>
+                <ThemedSwitch
+                  accessibilityLabel="Fable workers"
+                  value={policy.fableWorkers !== false}
+                  disabled={busy || !goalsEditable}
+                  onValueChange={(fableWorkers) => setDraft({ ...policy, fableWorkers })}
+                />
+              </View>
+            )}
+            <Text>
+              Off: no worker runs on Fable; a table cell or pin naming Fable starts from the nearest
+              rung without it.
+            </Text>
+            {snapshot.learned ? (
+              <View className="gap-1">
+                <Text className="font-semibold">Learned numbers</Text>
+                {snapshot.learned.costs.map((c) => (
+                  <Text key={`${c.driver}:${c.model}:${c.effort}:${c.kind}`}>
+                    {c.model} / {c.effort ?? "default"} {c.kind}: ${c.dollarsPerHour.toFixed(2)} an
+                    hour at {Math.round(c.contextTokens / 1000)}k context · {c.samples} turns ·{" "}
+                    {c.source}
+                  </Text>
+                ))}
+                {snapshot.learned.limits.map((l) => (
+                  <Text key={`${l.key}:${l.windowId}`}>
+                    {l.label} {l.windowLabel}: holds about {dollars(100 / l.percentPerDollar)} ·
+                    outside use {points(l.backgroundPercentPerHour)}% an hour · {l.samples} reading
+                    pairs · {l.source}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
             {dirty && (
               <View className="flex-row gap-4">
                 <Pressable disabled={busy} accessibilityRole="button" onPress={() => void save()}>
@@ -362,6 +439,7 @@ export function SettingsAllocationRouteScreen() {
                   onPress={() => {
                     setDraft(null);
                     setNumbers({});
+                    setGoals({});
                   }}
                 >
                   <Text className="text-primary">Discard changes</Text>

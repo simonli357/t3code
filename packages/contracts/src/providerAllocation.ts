@@ -160,6 +160,16 @@ export const AllocationPolicy = Schema.Struct({
   workerModels: Legacy,
 });
 export type AllocationPolicy = typeof AllocationPolicy.Type;
+/** The provider family's stored daily goal: what an account without its own goal uses. */
+export const allocationFamilyGoal = (policy: AllocationPolicy, driver: string) => {
+  const family =
+    driver === "claudeAgent" ? policy.claude : driver === "codex" ? policy.codex : policy.other;
+  const points =
+    typeof family === "object" && family !== null && "dailyPoints" in family
+      ? family.dailyPoints
+      : undefined;
+  return typeof points === "number" && points > 0 ? points : null;
+};
 export const defaultAllocationPolicy: AllocationPolicy = {
   version: 0,
   mode: "observation",

@@ -1,4 +1,5 @@
 import {
+  allocationFamilyGoal,
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
   legacyAllocationCandidateFields,
@@ -235,17 +236,6 @@ const preferenceIndex =
     return index < 0 ? Infinity : index;
   };
 
-/** The family's stored daily goal: what an account without its own goal uses. */
-const familyGoal = (policy: AllocationPolicy, driver: string) => {
-  const family =
-    driver === "claudeAgent" ? policy.claude : driver === "codex" ? policy.codex : policy.other;
-  const points =
-    typeof family === "object" && family !== null && "dailyPoints" in family
-      ? family.dailyPoints
-      : undefined;
-  return typeof points === "number" && points > 0 ? points : null;
-};
-
 /** Percent of the weekly window this account should use per day, and whose value it is. */
 export function accountGoal(
   policy: AllocationPolicy,
@@ -253,7 +243,7 @@ export function accountGoal(
 ): { percentPerDay: number; from: "account" | "family" } | null {
   const own = policy.accountGoals?.find((g) => g.key === allocationPreferenceKey(account));
   if (own) return { percentPerDay: own.percentPerDay, from: "account" };
-  const family = familyGoal(policy, account.driver);
+  const family = allocationFamilyGoal(policy, account.driver);
   return family === null ? null : { percentPerDay: family, from: "family" };
 }
 
