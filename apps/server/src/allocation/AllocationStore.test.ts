@@ -8,6 +8,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   defaultAllocationPolicy,
   allocationPreferenceKey,
+  legacyAllocationPolicyFields,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -18,6 +19,9 @@ import migration from "../persistence/Migrations/063_ProviderAllocation.ts";
 import * as Store from "./AllocationStore.ts";
 
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const parse = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 const at = "2026-10-23T12:00:00.000Z";
 const request: AllocationRequest = {
   assignmentId: "one",
@@ -77,7 +81,6 @@ const setup = Effect.gen(function* () {
       ...defaultAllocationPolicy,
       mode: "automatic",
       coordinatorEnvironmentId: "a",
-      codex: { ...defaultAllocationPolicy.codex, burstPoints: 80 },
     },
   });
   return store;
@@ -90,7 +93,7 @@ const run = <A, E>(effect: Effect.Effect<A, E, Store.AllocationStore | SqlClient
   effect.pipe(Effect.provide(layer));
 
 it.effect(
-  "applies saved account rules and forecast settings to the next recommendation without restart",
+  "applies a saved preference order, margin and hard cap to the next recommendation without restart",
   () =>
     run(
       Effect.gen(function* () {
@@ -106,25 +109,7 @@ it.effect(
           accountKey: "b",
           windows: a.windows.map((w) => ({ ...w, usedPoints: 59.5 })),
         };
-        let current = yield* store.savePolicy({
-          expectedVersion: 1,
-          policy: {
-            ...defaultAllocationPolicy,
-            uncertaintyMultiplier: 1,
-            coldLongPointsPerHour: 2,
-            codex: {
-              ...defaultAllocationPolicy.codex,
-              burstPoints: 80,
-              dailyPoints: 0,
-              reservePoints: 20,
-              borrowPoints: 0,
-            },
-            accountRules: [{ key: allocationPreferenceKey(b), kind: "priority", value: 1 }],
-          },
-        });
-        const hosts = [
-          { ...inventory("a"), accounts: [a, b], demand: [] as AllocationInventory["demand"] },
-        ];
+        const hosts = [{ ...inventory("a"), accounts: [a, b] }];
         const recommend = () =>
           store.allocate({
             at,
@@ -132,29 +117,40 @@ it.effect(
             inventories: hosts,
             authorityAvailable: true,
             reserve: false,
-            stableSelection: true,
           });
+        // a has half a point more room.
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
+        let current = yield* store.policy;
+        current = yield* store.savePolicy({
+          expectedVersion: current.version,
+          policy: { ...current, accountOrder: [allocationPreferenceKey(b)] },
+        });
         expect((yield* recommend()).decision.selectedInstanceId).toBe("b");
         current = yield* store.savePolicy({
           expectedVersion: current.version,
-          policy: { ...current, accountRules: [] },
+          policy: { ...current, closeMarginPoints: 0 },
         });
         expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
-        hosts[0]!.demand = Array.from({ length: 3 }, (_, n) => ({
-          environmentId: "a",
-          threadId: ThreadId.make(`active-${n}`),
-          instanceId: a.instanceId,
-          accountKey: a.accountKey,
-          model: request.model,
-          options: [],
-          state: "running",
-        }));
-        expect((yield* recommend()).decision.selectedInstanceId).toBe("b");
         yield* store.savePolicy({
           expectedVersion: current.version,
-          policy: { ...current, coldLongPointsPerHour: 0.1 },
+          policy: {
+            ...current,
+            accountCaps: [
+              {
+                key: allocationPreferenceKey(a),
+                weeklyPercent: 50,
+                fiveHourPercent: null,
+                stopWorkers: true,
+                stopMasters: false,
+              },
+            ],
+          },
         });
-        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
+        const capped = yield* recommend();
+        expect(capped.decision.selectedInstanceId).toBe("b");
+        expect(capped.decision.candidates.find((c) => c.instanceId === "a")?.drainedUntil).toBe(
+          "2026-10-29T12:00:00.000Z",
+        );
       }),
     ),
 );
@@ -264,7 +260,7 @@ it.effect(
         expect(yield* store.history).toHaveLength(1);
         yield* store.allocate({
           ...args,
-          previewPolicy: { ...policy, codex: { ...policy.codex, reservePoints: 99 } },
+          previewPolicy: { ...policy, closeMarginPoints: 0 },
         });
         expect(yield* store.history).toHaveLength(1);
         expect((yield* store.policy).mode).toBe("observation");
@@ -273,7 +269,7 @@ it.effect(
       }),
     ),
 );
-it.effect("rejects stale policy editors and expired overrides", () =>
+it.effect("rejects stale policy editors and an order that lists an account twice", () =>
   run(
     Effect.gen(function* () {
       const store = yield* setup;
@@ -305,18 +301,7 @@ it.effect("rejects stale policy editors and expired overrides", () =>
           yield* Effect.exit(
             store.savePolicy({
               expectedVersion: policy.version,
-              policy: {
-                ...policy,
-                overrides: [
-                  {
-                    accountKey: "a",
-                    windowId: "week",
-                    createdAt: at,
-                    expiresAt: "2026-10-22T12:00:00.000Z",
-                    baselineUsedPoints: 0,
-                  },
-                ],
-              },
+              policy: { ...policy, accountOrder: ["a", "b", "a"] },
             }),
           ),
         ),
@@ -400,48 +385,119 @@ it.effect("concurrent pre-start account choices cannot bind one account's intent
 );
 
 it.effect(
-  "persists numeric budgets and account rules, reloads old policies, and resets without admission enforcement",
+  "loads a policy saved before smart allocation, and saves every policy readable by older builds",
   () =>
     run(
       Effect.gen(function* () {
         yield* migration;
         const store = yield* Store.AllocationStore;
         const sql = yield* SqlClient.SqlClient;
-        const legacy = {
-          ...defaultAllocationPolicy,
-          version: 7,
-          claude: {
-            ...defaultAllocationPolicy.claude,
-            preset: "sustainable" as const,
-            dailyPoints: 100 / 7,
-          },
-          codex: { ...defaultAllocationPolicy.codex, dailyPoints: 23 },
-        };
-        // Weights saved before account rules are no longer a preference and are dropped on read.
-        yield* sql`INSERT INTO provider_allocation_policy (id, version, policy_json) VALUES (1, 7, ${json({ ...legacy, accountWeights: [{ key: "old", weight: 100 }] })})`;
-        expect(yield* store.policy).toEqual(legacy);
         const a = inventory("a").accounts[0]!;
         const b = { ...a, instanceId: ProviderInstanceId.make("b"), accountKey: "other-login" };
         const hosts = [{ ...inventory("a"), accounts: [a, b] }];
         const capKey = allocationPreferenceKey(a);
+        // Everything smart allocation removed, with values other than the ones it now writes.
+        const removed = {
+          claude: {
+            preset: "sustainable",
+            dailyPoints: 100 / 7,
+            burstPoints: 0,
+            burstHours: 0,
+            reservePoints: 10,
+            borrowPoints: 15,
+          },
+          codex: {
+            preset: "burst",
+            dailyPoints: 23,
+            burstPoints: 30,
+            burstHours: 0,
+            reservePoints: 5,
+            borrowPoints: 15,
+          },
+          minimumSamples: 9,
+          overrides: [
+            {
+              accountKey: "same-login",
+              windowId: "week",
+              createdAt: at,
+              expiresAt: "2026-10-30T12:00:00.000Z",
+              baselineUsedPoints: 10,
+            },
+          ],
+          accountRules: [
+            { key: capKey, kind: "exclude", note: "never" },
+            { key: allocationPreferenceKey(b), kind: "maxWorkers", value: 1 },
+          ],
+          workerModels: { claude: { model: "claude-fable-5", effort: "medium" } },
+        };
+        const {
+          accountCaps: _caps,
+          accountOrder: _order,
+          closeMarginPoints: _margin,
+          longWaitHours: _wait,
+          ...before
+        } = defaultAllocationPolicy;
+        const legacy = { ...before, version: 7, ...removed };
+        yield* sql`INSERT INTO provider_allocation_policy (id, version, policy_json) VALUES (1, 7, ${json({ ...legacy, accountWeights: [{ key: "old", weight: 100 }] })})`;
+        const loaded = yield* store.policy;
+        expect(loaded).toEqual(legacy);
+        // The removed rules no longer decide anything: the once excluded account has the most room.
+        const free = { ...a, windows: a.windows.map((w) => ({ ...w, usedPoints: 10 })) };
+        expect(
+          (yield* store.allocate({
+            at,
+            request,
+            inventories: [{ ...inventory("a"), accounts: [free, b] }],
+            authorityAvailable: true,
+            reserve: false,
+          })).decision.selectedInstanceId,
+        ).toBe("a");
+
+        const cap = {
+          key: capKey,
+          weeklyPercent: 80,
+          fiveHourPercent: null,
+          stopWorkers: true,
+          stopMasters: true,
+        };
         const saved = yield* store.savePolicy({
           expectedVersion: 7,
           policy: {
-            ...legacy,
-            claude: { ...legacy.claude, preset: "custom", dailyPoints: 40 },
-            accountRules: [{ key: allocationPreferenceKey(b), kind: "priority", value: 1 }],
-            accountCaps: [
-              {
-                key: capKey,
-                weeklyPercent: 80,
-                fiveHourPercent: null,
-                stopWorkers: true,
-                stopMasters: true,
-              },
-            ],
+            ...loaded,
+            accountOrder: [allocationPreferenceKey(b)],
+            closeMarginPoints: 4,
+            longWaitHours: 1,
+            accountCaps: [cap],
           },
         });
+        expect(saved).toEqual({
+          ...before,
+          ...legacyAllocationPolicyFields,
+          version: 8,
+          accountOrder: [allocationPreferenceKey(b)],
+          closeMarginPoints: 4,
+          longWaitHours: 1,
+          accountCaps: [cap],
+        });
+        expect(saved.accountRules).toBeUndefined();
+        expect(saved.workerModels).toBeUndefined();
         expect(yield* store.policy).toEqual(saved);
+        // What is on disk holds every field a build from before smart allocation requires.
+        const stored = sql<{
+          policy_json: string;
+        }>`SELECT policy_json FROM provider_allocation_policy WHERE id = 1`.pipe(
+          Effect.map((rows) => parse(rows[0]!.policy_json)),
+        );
+        expect(yield* stored).toMatchObject({
+          ...legacyAllocationPolicyFields,
+          mode: "observation",
+          maxReadingAgeMinutes: 10,
+          reservationMinutes: 5,
+        });
+        expect(Object.keys(yield* stored)).not.toContain("accountRules");
+        expect(Object.keys(yield* stored)).not.toContain("workerModels");
+
+        // A reached hard cap drains the account: the suggestion moves, and a pin is refused.
         const suggested = yield* store.allocate({
           at,
           request,
@@ -450,88 +506,54 @@ it.effect(
           reserve: false,
         });
         expect(suggested.decision.selectedInstanceId).toBe("b");
-        const chosen = yield* store.allocate({
+        const pinned = yield* store.allocate({
           at,
           request: { ...request, explicitInstanceId: a.instanceId },
           inventories: hosts,
           authorityAvailable: true,
           reserve: true,
         });
-        expect(chosen.decision.selectedInstanceId).toBe("a");
-        expect(chosen.reservation?.instanceId).toBe("a");
-        const stale = yield* Effect.exit(store.savePolicy({ expectedVersion: 7, policy: legacy }));
+        expect(pinned.decision).toMatchObject({
+          outcome: "wait",
+          selectedInstanceId: null,
+          waitUntil: "2026-10-29T12:00:00.000Z",
+        });
+        expect(pinned.reservation).toBeNull();
+
+        const stale = yield* Effect.exit(store.savePolicy({ expectedVersion: 7, policy: loaded }));
         expect(Exit.isFailure(stale)).toBe(true);
         expect(yield* store.policy).toEqual(saved);
-        const { accountRules: _rules, accountCaps: _caps, ...oldEditor } = saved;
+        // A build from before smart allocation saves without the new fields and with its own
+        // rules: what is stored stays, and the rules are not kept.
+        const {
+          accountCaps: _savedCaps,
+          accountOrder: _savedOrder,
+          closeMarginPoints: _savedMargin,
+          longWaitHours: _savedWait,
+          ...oldEditor
+        } = saved;
         const legacySaved = yield* store.savePolicy({
           expectedVersion: saved.version,
-          policy: oldEditor,
+          policy: { ...oldEditor, ...removed },
         });
-        expect(legacySaved.accountRules).toEqual(saved.accountRules);
-        for (const accountRules of [
-          [...saved.accountRules!, ...saved.accountRules!],
-          [{ key: capKey, kind: "maxWorkers" as const, value: 0 }],
-          [{ key: capKey, kind: "priority" as const }],
-          [{ key: capKey, kind: "exclude" as const, expiresAt: "tomorrow" }],
-        ])
+        expect(legacySaved).toEqual({ ...saved, version: 9 });
+        for (const accountCaps of [[cap, cap], [{ ...cap, weeklyPercent: null }]])
           expect(
             Exit.isFailure(
               yield* Effect.exit(
                 store.savePolicy({
                   expectedVersion: legacySaved.version,
-                  policy: { ...legacySaved, accountRules },
+                  policy: { ...legacySaved, accountCaps },
                 }),
               ),
             ),
           ).toBe(true);
-        expect(legacySaved.accountCaps).toEqual(saved.accountCaps);
-        const inactive = yield* store.savePolicy({
-          expectedVersion: legacySaved.version,
-          policy: {
-            ...legacySaved,
-            accountCaps: [
-              {
-                key: capKey,
-                weeklyPercent: 80,
-                fiveHourPercent: null,
-                stopWorkers: false,
-                stopMasters: false,
-              },
-            ],
-          },
-        });
-        expect(inactive.accountCaps?.[0]).toMatchObject({
-          stopWorkers: false,
-          stopMasters: false,
-        });
-        const emptyThreshold = yield* Effect.exit(
-          store.savePolicy({
-            expectedVersion: inactive.version,
-            policy: {
-              ...inactive,
-              accountCaps: [
-                {
-                  key: capKey,
-                  weeklyPercent: null,
-                  fiveHourPercent: null,
-                  stopWorkers: true,
-                  stopMasters: false,
-                },
-              ],
-            },
-          }),
-        );
-        expect(Exit.isFailure(emptyThreshold)).toBe(true);
-        expect(yield* store.policy).toEqual(inactive);
+        expect(yield* store.policy).toEqual(legacySaved);
         const reset = yield* store.savePolicy({
-          expectedVersion: inactive.version,
-          policy: { ...defaultAllocationPolicy, accountRules: [] },
+          expectedVersion: legacySaved.version,
+          policy: defaultAllocationPolicy,
         });
-        expect(reset.accountRules).toEqual([]);
-        expect(reset.claude.dailyPoints).toBe(17);
-        expect(reset.codex.burstPoints).toBe(30);
-        expect(reset.accountCaps).toEqual([]);
-        expect(yield* store.policy).toEqual(reset);
+        expect(reset).toEqual({ ...defaultAllocationPolicy, version: 10 });
         const explicitAfterReset = yield* store.allocate({
           at,
           request: {

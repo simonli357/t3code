@@ -1,5 +1,17 @@
-import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { MODEL_SCORES, type ModelRoutingPolicy, type RoutingCell } from "@t3tools/contracts";
+import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { ChevronDownIcon, ChevronUpIcon, XIcon } from "lucide-react";
+import {
+  defaultModelFallback,
+  MODEL_SCORES,
+  type ModelFallback,
+  type ModelRoutingPolicy,
+  type RoutingCell,
+  type RoutingProfile,
+} from "@t3tools/contracts";
+import type {
+  allocationModelChoices,
+  withModelLadderEdit,
+} from "@t3tools/client-runtime/state/provider-allocation";
 import {
   chooseModelForCell,
   effortDisplayName,
@@ -15,6 +27,8 @@ import {
 } from "@t3tools/client-runtime/state/model-routing";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 
 export interface ModelCellPosition {
   readonly difficulty: number;
@@ -191,6 +205,8 @@ export function ModelCellEditor(props: {
   cell: RoutingCell | null;
   saved: RoutingCell | null;
   catalog: ModelCatalog;
+  /** The table's model list: offered next to what connected accounts advertise. */
+  allowed: readonly string[];
   online: boolean;
   pendingModel: string | null;
   onPendingModel: (model: string | null) => void;
@@ -209,13 +225,17 @@ export function ModelCellEditor(props: {
       </p>
     );
   const model = pendingModel ?? cell.model;
-  const efforts = catalog.efforts(model);
+  const models = [...new Set([...catalog.models, ...props.allowed, cell.model])];
+  const offeredEfforts = catalog.efforts(model);
+  // A model no connected account advertises can take any reasoning level one of them offers.
+  const efforts = offeredEfforts.length
+    ? offeredEfforts
+    : [...new Set(catalog.models.flatMap((m) => catalog.efforts(m)))];
   const pairs = catalog.models.flatMap((m) =>
     catalog.efforts(m).map((effort) => ({ model: m, effort })),
   );
   const fallback = cell.alternatives?.[0];
   const edited = saved !== null && !sameModelCell(saved, cell);
-  const pairKey = (p: { model: string; effort: string }) => `${p.model}\n${p.effort}`;
   const offeredFallbacks = pairs.filter((p) => p.model !== cell.model || p.effort !== cell.effort);
   return (
     <div ref={root} className="grid min-w-0 gap-3 rounded-md border p-3 sm:grid-cols-3">
@@ -237,17 +257,16 @@ export function ModelCellEditor(props: {
           value={model}
           disabled={!catalog.known}
           onChange={(e) => {
-            const result = chooseModelForCell(cell, e.target.value, catalog);
+            const result = catalog.models.includes(e.target.value)
+              ? chooseModelForCell(cell, e.target.value, catalog)
+              : { cell: { ...cell, model: e.target.value } };
             if ("cell" in result) {
               onPendingModel(null);
               props.onChange(result.cell);
             } else onPendingModel(result.pendingModel);
           }}
         >
-          {(catalog.models.includes(cell.model)
-            ? catalog.models
-            : [cell.model, ...catalog.models]
-          ).map((m) => (
+          {models.map((m) => (
             <option key={m} value={m}>
               {modelDisplayName(m)} ({m}){catalog.models.includes(m) ? "" : " — not offered"}
             </option>
@@ -330,5 +349,260 @@ export function ModelCellEditor(props: {
         )
       )}
     </div>
+  );
+}
+
+const pairKey = (profile: RoutingProfile) => `${profile.model}\n${profile.effort}`;
+/** Rungs have no identity besides their place, and two may be equal. */
+const rungKeys = (ladder: readonly RoutingProfile[]) =>
+  ladder.map(
+    (item, index) =>
+      `${pairKey(item)}\n${ladder.slice(0, index).filter((other) => pairKey(other) === pairKey(item)).length}`,
+  );
+const captioned = "grid min-w-0 gap-1 text-sm";
+const warning = "text-warning-foreground";
+
+/** One table's model list. Any model ID can be added; one no account offers is only marked. */
+export function ModelListEditor(props: {
+  driver: ModelDriver;
+  models: readonly string[];
+  catalog: ModelCatalog;
+  onChange: (models: readonly string[]) => void;
+}) {
+  const { models, catalog } = props;
+  const [text, setText] = useState("");
+  const suggestions = useId();
+  const label = modelDriverLabel(props.driver);
+  const add = () => {
+    if (text.trim()) props.onChange([...models, text.trim()]);
+    setText("");
+  };
+  return (
+    <section aria-label={`${label} models`} className="grid min-w-0 gap-2 rounded-md border p-3">
+      <h2 className="text-sm font-medium">Models the {label} table may use</h2>
+      <ul className="flex min-w-0 flex-wrap gap-2 text-sm">
+        {models.map((model) => (
+          <li key={model} className="flex min-w-0 items-center gap-1 rounded border px-1.5 py-0.5">
+            {model}
+            {catalog.known && !catalog.models.includes(model) && (
+              <span className={warning}>· not offered by a connected account</span>
+            )}
+            <Button
+              size="icon-micro"
+              variant="ghost"
+              aria-label={`Remove ${model}`}
+              onClick={() => props.onChange(models.filter((m) => m !== model))}
+            >
+              <XIcon />
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <div className="flex min-w-0 items-end gap-2">
+        <label className={captioned}>
+          Add a model
+          <Input
+            size="compact"
+            list={suggestions}
+            placeholder="Any model ID"
+            value={text}
+            onChange={(e) => setText(e.currentTarget.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+          />
+        </label>
+        <datalist id={suggestions}>
+          {catalog.models
+            .filter((m) => !models.includes(m))
+            .map((m) => (
+              <option key={m} value={m} />
+            ))}
+        </datalist>
+        <Button size="xs" variant="outline" disabled={!text.trim()} onClick={add}>
+          Add model
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+type ModelChoices = ReturnType<typeof allocationModelChoices>;
+/** The Claude ladder, weakest first: where a worker goes when its model is drained everywhere. */
+export function ModelLadderEditor(props: {
+  ladder: readonly RoutingProfile[];
+  /** What connected Claude accounts offer; empty when none is known. */
+  choices: ModelChoices;
+  onEdit: (edit: Parameters<typeof withModelLadderEdit>[1]) => void;
+}) {
+  const { ladder, choices } = props;
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
+  const [models, efforts] = [useId(), useId()];
+  const rung = { model: model.trim(), effort: effort.trim() };
+  const keys = rungKeys(ladder);
+  return (
+    <section aria-label="Model ladder" className="grid min-w-0 gap-2 rounded-md border p-3">
+      <h2 className="text-sm font-medium">Claude ladder</h2>
+      <p className="text-sm text-muted-foreground">
+        Weakest first. When the table&apos;s model is drained on every account, the worker gets the
+        closest rung that has room.
+      </p>
+      <ol className="grid min-w-0 gap-1">
+        {ladder.map((item, index) => {
+          const name = modelProfileLabel(item);
+          return (
+            <li key={keys[index]} className="flex min-w-0 items-center gap-2 text-sm">
+              <Button
+                size="icon-xs"
+                variant="outline"
+                aria-label={`Move rung ${index + 1} up`}
+                disabled={index === 0}
+                onClick={() => props.onEdit({ type: "move", index, delta: -1 })}
+              >
+                <ChevronUpIcon />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="outline"
+                aria-label={`Move rung ${index + 1} down`}
+                disabled={index === ladder.length - 1}
+                onClick={() => props.onEdit({ type: "move", index, delta: 1 })}
+              >
+                <ChevronDownIcon />
+              </Button>
+              <span>
+                {index + 1}. {name}
+              </span>
+              {choices.length > 0 &&
+                !choices.some((c) => c.model === item.model && c.efforts.includes(item.effort)) && (
+                  <span className={warning}>not offered by a connected account</span>
+                )}
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={`Remove rung ${index + 1}`}
+                onClick={() => props.onEdit({ type: "remove", index })}
+              >
+                <XIcon />
+              </Button>
+            </li>
+          );
+        })}
+      </ol>
+      <div className="flex min-w-0 items-end gap-2">
+        <label className={captioned}>
+          Rung model
+          <Input
+            size="compact"
+            list={models}
+            value={model}
+            onChange={(e) => setModel(e.currentTarget.value)}
+          />
+        </label>
+        <label className={captioned}>
+          Rung effort
+          <Input
+            size="compact"
+            list={efforts}
+            value={effort}
+            onChange={(e) => setEffort(e.currentTarget.value)}
+          />
+        </label>
+        <datalist id={models}>
+          {choices.map((c) => (
+            <option key={c.model} value={c.model} />
+          ))}
+        </datalist>
+        <datalist id={efforts}>
+          {(choices.find((c) => c.model === rung.model)?.efforts ?? []).map((e) => (
+            <option key={e} value={e} />
+          ))}
+        </datalist>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!rung.model || !rung.effort}
+          onClick={() => {
+            props.onEdit({ type: "add", rung });
+            setModel("");
+            setEffort("");
+          }}
+        >
+          Add strongest rung
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+/** The one automatic change of provider family: on or off, its model, effort and threshold. */
+export function ModelFallbackEditor(props: {
+  fallback: ModelFallback | null;
+  ladder: readonly RoutingProfile[];
+  onChange: (fallback: ModelFallback | null) => void;
+}) {
+  const { fallback, ladder } = props;
+  const keys = rungKeys(ladder);
+  return (
+    <section aria-label="Fallback" className="grid min-w-0 gap-2 rounded-md border p-3">
+      <div className="flex items-center gap-2">
+        <Switch
+          size="sm"
+          aria-label="Fallback model"
+          checked={fallback !== null}
+          onCheckedChange={(on) => props.onChange(on ? defaultModelFallback : null)}
+        />
+        <h2 className="text-sm font-medium">Fallback model</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        When no ladder rung has room and the wanted rung is below the one chosen here, the worker
+        starts on the fallback model. From that rung up, the start is refused until a reset.
+      </p>
+      {fallback && (
+        <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-3">
+          <label className={captioned}>
+            Fallback model ID
+            <Input
+              size="compact"
+              value={fallback.model}
+              aria-invalid={!fallback.model || undefined}
+              onChange={(e) => props.onChange({ ...fallback, model: e.currentTarget.value.trim() })}
+            />
+          </label>
+          <label className={captioned}>
+            Fallback effort
+            <Input
+              size="compact"
+              value={fallback.effort}
+              aria-invalid={!fallback.effort || undefined}
+              onChange={(e) =>
+                props.onChange({ ...fallback, effort: e.currentTarget.value.trim() })
+              }
+            />
+          </label>
+          <label className={captioned}>
+            Used below rung
+            <select
+              className={field}
+              value={pairKey(fallback.below)}
+              onChange={(e) => {
+                const below = ladder.find((item) => pairKey(item) === e.target.value);
+                if (below) props.onChange({ ...fallback, below });
+              }}
+            >
+              {!ladder.some((item) => pairKey(item) === pairKey(fallback.below)) && (
+                <option value={pairKey(fallback.below)}>
+                  {modelProfileLabel(fallback.below)} — not on the ladder
+                </option>
+              )}
+              {ladder.map((item, index) => (
+                <option key={keys[index]} value={pairKey(item)}>
+                  {index + 1}. {modelProfileLabel(item)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+    </section>
   );
 }

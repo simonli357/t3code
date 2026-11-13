@@ -71,20 +71,12 @@ T3, and Computers only reads its records and starts its commands.
 
 ## Choosing a computer for agent work
 
-When you give an agent work and name no computer, it can compare every connected computer before
-starting a worker (`t3_recommend_computer`). It sees each computer's free memory, idle CPU, the
-disk that holds new agent work, running Workenv jobs and running agent sessions as measured then,
-and gets the computers best first with the reason for each place. The task's expected memory,
-CPU and disk, its project (the same repository on each computer, by Git remote or `projectKey`),
-a native operating system, and a provider account or model narrow the order.
+When you give an agent work and name no computer, it reads every connected computer's numbers
+before starting a worker (`t3_recommend_computer`): idle and total CPU threads, free and total
+memory, free space on the disk that holds new agent work, running agent sessions, and the
+project's ID on that computer (the same repository, by Git remote or `projectKey`). A computer
+that does not answer is listed as unreachable with empty numbers, never as idle.
 
-A computer that cannot be reached shows as offline (the advice waits about 15 seconds for one that
-does not answer), one whose server predates the reading as unknown, and a reading older than
-**Maximum measurement age** in **Settings > Provider allocation** as stale. None of them is treated
-as zero or idle.
-
-This is advice. It never blocks or delays starting a worker and it ignores quota. A computer,
-account or model you named is never replaced: if that computer is offline or not connected, the
-advice says so and names the best alternative, and the choice stays yours. It estimates from what
-is free now: reserves, exact runtimes and heavy jobs still need the workstation's own capacity
-check on the chosen computer.
+Nothing is ranked and no computer is recommended: the agent chooses from these numbers, what the
+task needs and where its data is. Heavy jobs still need the workstation's own capacity check on
+the chosen computer.

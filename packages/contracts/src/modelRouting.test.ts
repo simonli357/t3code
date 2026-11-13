@@ -1,8 +1,13 @@
 import { expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
+  AssignmentAssessment,
   ModelRoutingPolicy,
+  defaultModelFallback,
+  defaultModelLadder,
   defaultModelRoutingPolicy,
+  modelFallback,
+  modelLadder,
   ModelRoutingRequest,
 } from "./modelRouting.ts";
 import { AllocationOperation, AllocationResponse, AllocationStart } from "./providerAllocation.ts";
@@ -189,4 +194,77 @@ it("crosses the JSON codecs of the HTTP and RPC allocation endpoints in both tab
   });
   const answered = wire(Schema.encodeSync(reply)({ modelPolicy: defaultModelRoutingPolicy }));
   expect(Schema.decodeSync(reply)(answered)).toEqual({ modelPolicy: defaultModelRoutingPolicy });
+});
+
+it("scores an assignment with two whole numbers and needs no reasons", () => {
+  const decode = Schema.decodeUnknownSync(AssignmentAssessment);
+  expect(decode({ difficulty: 0, stakes: 10 })).toEqual({ difficulty: 0, stakes: 10 });
+  // Builds from before smart allocation send a reason beside each score.
+  const reasoned = { difficulty: 5, stakes: 4, difficultyReason: "Hard", stakesReason: "Risky" };
+  expect(decode(reasoned)).toEqual(reasoned);
+  for (const broken of [
+    { difficulty: 5 },
+    { difficulty: 5.5, stakes: 1 },
+    { difficulty: 5, stakes: 11 },
+  ])
+    expect(() => decode(broken)).toThrow();
+  expect(
+    decodeRequest({
+      selection: "automatic",
+      assignmentId: "one",
+      environmentId: "host",
+      threadId: "thread",
+      allowedDrivers: ["claudeAgent"],
+      assessment: { difficulty: 5, stakes: 4 },
+    }).assessment,
+  ).toEqual({ difficulty: 5, stakes: 4 });
+});
+
+it("defaults the ladder and the fallback for a policy saved before them", () => {
+  // Weakest first: haiku max, sonnet high, opus medium, sonnet xhigh, opus high, fable low,
+  // opus xhigh, fable medium, fable high.
+  expect(defaultModelLadder.map(({ model, effort }) => `${model.split("-")[1]} ${effort}`)).toEqual(
+    [
+      "haiku max",
+      "sonnet high",
+      "opus medium",
+      "sonnet xhigh",
+      "opus high",
+      "fable low",
+      "opus xhigh",
+      "fable medium",
+      "fable high",
+    ],
+  );
+  expect(defaultModelFallback).toEqual({
+    model: "deepseek-flash",
+    effort: "max",
+    below: defaultModelLadder[3],
+  });
+  expect(defaultModelRoutingPolicy.ladder).toBeUndefined();
+  expect(defaultModelRoutingPolicy.fallback).toBeUndefined();
+  expect(modelLadder(defaultModelRoutingPolicy)).toBe(defaultModelLadder);
+  expect(modelFallback(defaultModelRoutingPolicy)).toBe(defaultModelFallback);
+});
+
+it("stores any ladder and fallback, and null turns the fallback off", () => {
+  const ladder = [
+    { model: "a-model-no-code-lists", effort: "ultra" },
+    { model: "claude-opus-5-5", effort: "high" },
+  ];
+  const fallback = { model: "kimi", effort: "max", below: ladder[1]! };
+  const policy = decodePolicy(
+    JSON.parse(JSON.stringify(encodePolicy({ ...defaultModelRoutingPolicy, ladder, fallback }))),
+  );
+  expect(modelLadder(policy)).toEqual(ladder);
+  expect(modelFallback(policy)).toEqual(fallback);
+  const off = decodePolicy({ ...defaultModelRoutingPolicy, ladder: [], fallback: null });
+  expect(modelLadder(off)).toEqual([]);
+  expect(modelFallback(off)).toBeNull();
+  for (const broken of [
+    { ladder: [{ model: "", effort: "high" }] },
+    { ladder: Array.from({ length: 31 }, () => ladder[0]) },
+    { fallback: { model: "kimi", effort: "max" } },
+  ])
+    expect(() => decodePolicy({ ...defaultModelRoutingPolicy, ...broken })).toThrow();
 });

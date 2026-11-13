@@ -1,10 +1,11 @@
 import * as Schema from "effect/Schema";
 import {
   AssignmentAssessment,
-  AssignmentTier,
+  AssignmentScore,
   ModelRoutingPolicy,
   ModelRoutingRequest,
   RoutingProfile,
+  routingEffortOptionId,
 } from "./modelRouting.ts";
 import {
   IsoDateTime,
@@ -14,7 +15,6 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ComputerCapacity } from "./computers.ts";
-import { ExecutionEnvironmentPlatformOs } from "./environment.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderOptionSelection, ModelCapabilities } from "./model.ts";
 
@@ -34,36 +34,18 @@ export const AllocationRequest = Schema.Struct({
   driver: ProviderDriverKind,
   model: TrimmedNonEmptyString,
   options: Schema.Array(ProviderOptionSelection),
+  /** A pinned account is exact: a start is refused when the model is drained there. */
   explicitInstanceId: Schema.optional(ProviderInstanceId),
   allowedInstanceIds: Schema.optional(Schema.Array(ProviderInstanceId)),
+  // A native resume can only stay on its bound instance. Reselection is opt-in.
+  nativeInstanceId: Schema.optional(ProviderInstanceId),
+  /** Unused. Requests from builds before smart allocation may carry them. */
   expectedHours: Schema.optional(Hours),
   workClass: Schema.optional(Schema.Literals(["interactive", "batch", "long"])),
   contextTokens: Schema.optional(NonNegativeInt),
-  // A native resume can only stay on its bound instance. Reselection is opt-in.
-  nativeInstanceId: Schema.optional(ProviderInstanceId),
 });
 export type AllocationRequest = typeof AllocationRequest.Type;
 
-export const AllocationCurve = Schema.Struct({
-  preset: Schema.Literals(["sustainable", "aggressive17", "burst", "custom"]),
-  dailyPoints: Points,
-  burstPoints: Points,
-  burstHours: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 168 })),
-  reservePoints: Points,
-  borrowPoints: Points,
-});
-export type AllocationCurve = typeof AllocationCurve.Type;
-const Override = Schema.Struct({
-  accountKey: TrimmedNonEmptyString,
-  windowId: TrimmedNonEmptyString,
-  createdAt: IsoDateTime,
-  expiresAt: IsoDateTime,
-  curve: Schema.optional(AllocationCurve),
-  useBy: Schema.optional(IsoDateTime),
-  baselineUsedPoints: Points,
-  // Informational only: neither a plan nor a banked credit replenishes quota.
-  resetPlan: Schema.optional(Schema.Literals(["possible", "planned", "manual-confirmed"])),
-});
 const accountCapFields = {
   weeklyPercent: OptionalCapPercent,
   fiveHourPercent: OptionalCapPercent,
@@ -73,78 +55,23 @@ const accountCapFields = {
 /**
  * Optional hard usage thresholds for one account identity. Weekly applies to
  * an account-wide weekly window; Claude also reports a five-hour session.
- * Missing thresholds are disabled. These are independent of advisory budgets.
+ * Missing thresholds are disabled. A reached cap that stops workers counts as drained.
  */
 export const AllocationAccountCap = Schema.Struct({
   key: TrimmedNonEmptyString,
   ...accountCapFields,
 });
 export type AllocationAccountCap = typeof AllocationAccountCap.Type;
-const accountRuleFields = {
-  kind: Schema.Literals(["exclude", "maxWorkers", "priority"]),
-  /** `maxWorkers`: at least 1. `priority`: higher wins, unset accounts are 0. Absent for `exclude`. */
-  value: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: -100, maximum: 100 }))),
-  /** The rule stops applying by itself at this time. */
-  expiresAt: Schema.optional(IsoDateTime),
-  note: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(200))),
-};
+/** Two accounts whose room differs by at most this many points are close. */
+export const DEFAULT_CLOSE_MARGIN_POINTS = 10;
+/** A limited worker waits for a reset this near before it changes model. */
+export const DEFAULT_LONG_WAIT_HOURS = 3;
 /**
- * A standing instruction for one account identity, at most one per account and kind.
- * `exclude` and `maxWorkers` keep workers off the account, including a pinned start;
- * `priority` ranks the accounts that remain.
+ * Pacing, forecast and rule settings from before smart allocation. Nothing here reads them, but
+ * builds from before it require them, so every saved policy carries these values while the
+ * computers are released one at a time. Stored policies that hold other values still load.
  */
-export const AllocationAccountRule = Schema.Struct({
-  key: TrimmedNonEmptyString,
-  ...accountRuleFields,
-});
-export type AllocationAccountRule = typeof AllocationAccountRule.Type;
-const workerModelFields = {
-  ...RoutingProfile.fields,
-  /** The default stops applying by itself at this time. */
-  expiresAt: Schema.optional(IsoDateTime),
-  note: accountRuleFields.note,
-};
-/**
- * The model and effort of a worker start that pins no model, instead of the difficulty/stakes
- * table. A standing user instruction, so it is exact and not limited to the table's models.
- */
-export const AllocationWorkerModel = Schema.Struct(workerModelFields);
-export type AllocationWorkerModel = typeof AllocationWorkerModel.Type;
-export const AllocationPolicy = Schema.Struct({
-  version: NonNegativeInt,
-  /** Legacy mode retained for saved policy compatibility; explicit Start always submits work. */
-  mode: Schema.Literals(["observation", "automatic"]),
-  coordinatorEnvironmentId: Schema.NullOr(TrimmedNonEmptyString),
-  claude: AllocationCurve,
-  codex: AllocationCurve,
-  other: AllocationCurve,
-  maxReadingAgeMinutes: Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
-  coldShortPointsPerHour: Points,
-  coldLongPointsPerHour: Points,
-  uncertaintyMultiplier: Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 5 })),
-  defaultHours: Hours,
-  maxForecastHours: Hours,
-  minimumSamples: Schema.Int.check(Schema.isBetween({ minimum: 3, maximum: 100 })),
-  reservationMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 15 })),
-  hysteresisPoints: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 5 })),
-  /** Keyed by `allocationPreferenceKey`. */
-  accountRules: Schema.optional(Schema.Array(AllocationAccountRule).check(Schema.isMaxLength(300))),
-  /** Hard stops keyed by `allocationPreferenceKey`; absent or null caps are disabled. */
-  accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
-  /** Default worker model per provider family; a family without one uses the table. */
-  workerModels: Schema.optional(
-    Schema.Struct({
-      claude: Schema.optional(AllocationWorkerModel),
-      codex: Schema.optional(AllocationWorkerModel),
-    }),
-  ),
-  overrides: Schema.Array(Override).check(Schema.isMaxLength(100)),
-});
-export type AllocationPolicy = typeof AllocationPolicy.Type;
-export const defaultAllocationPolicy: AllocationPolicy = {
-  version: 0,
-  mode: "observation",
-  coordinatorEnvironmentId: null,
+export const legacyAllocationPolicyFields = {
   claude: {
     preset: "custom",
     dailyPoints: 17,
@@ -169,17 +96,64 @@ export const defaultAllocationPolicy: AllocationPolicy = {
     reservePoints: 10,
     borrowPoints: 15,
   },
-  maxReadingAgeMinutes: 10,
   coldShortPointsPerHour: 15,
   coldLongPointsPerHour: 5,
   uncertaintyMultiplier: 1.5,
   defaultHours: 1,
   maxForecastHours: 8,
   minimumSamples: 5,
-  reservationMinutes: 5,
   hysteresisPoints: 1,
-  accountCaps: [],
   overrides: [],
+} as const;
+const Legacy = Schema.optional(Schema.Unknown);
+export const AllocationPolicy = Schema.Struct({
+  version: NonNegativeInt,
+  /** Legacy mode retained for saved policy compatibility; explicit Start always submits work. */
+  mode: Schema.Literals(["observation", "automatic"]),
+  coordinatorEnvironmentId: Schema.NullOr(TrimmedNonEmptyString),
+  maxReadingAgeMinutes: Schema.Number.check(Schema.isBetween({ minimum: 1, maximum: 60 })),
+  reservationMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 15 })),
+  /** Hard stops keyed by `allocationPreferenceKey`; absent or null caps are disabled. */
+  accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
+  /**
+   * Accounts by `allocationPreferenceKey`, most preferred first. It decides only between
+   * accounts whose room is close; unlisted accounts come after listed ones.
+   */
+  accountOrder: Schema.optional(Names),
+  closeMarginPoints: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 50 })),
+  ),
+  /** A running worker that hits a limit waits for a reset within this time; else it changes model. */
+  longWaitHours: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 168 })),
+  ),
+  // See `legacyAllocationPolicyFields`. Rules, worker models and overrides are dropped on save.
+  claude: Legacy,
+  codex: Legacy,
+  other: Legacy,
+  coldShortPointsPerHour: Legacy,
+  coldLongPointsPerHour: Legacy,
+  uncertaintyMultiplier: Legacy,
+  defaultHours: Legacy,
+  maxForecastHours: Legacy,
+  minimumSamples: Legacy,
+  hysteresisPoints: Legacy,
+  overrides: Legacy,
+  accountRules: Legacy,
+  workerModels: Legacy,
+});
+export type AllocationPolicy = typeof AllocationPolicy.Type;
+export const defaultAllocationPolicy: AllocationPolicy = {
+  version: 0,
+  mode: "observation",
+  coordinatorEnvironmentId: null,
+  maxReadingAgeMinutes: 10,
+  reservationMinutes: 5,
+  accountCaps: [],
+  accountOrder: [],
+  closeMarginPoints: DEFAULT_CLOSE_MARGIN_POINTS,
+  longWaitHours: DEFAULT_LONG_WAIT_HOURS,
+  ...legacyAllocationPolicyFields,
 };
 
 /** Known login identity is shared; unknown aliases stay scoped to their environment. */
@@ -196,36 +170,6 @@ export function allocationPreferenceKey(account: {
       : ["account", account.accountKey],
   ]);
 }
-/** The account's rule of this kind, unless it has expired. */
-export function allocationAccountRule(
-  policy: AllocationPolicy,
-  key: string,
-  kind: AllocationAccountRule["kind"],
-  at: string,
-): AllocationAccountRule | undefined {
-  return policy.accountRules?.find(
-    (rule) =>
-      rule.key === key &&
-      rule.kind === kind &&
-      (rule.expiresAt === undefined || Date.parse(rule.expiresAt) > Date.parse(at)),
-  );
-}
-/** The provider family's default worker model, unless it has expired. */
-export function allocationWorkerModel(
-  policy: AllocationPolicy,
-  driver: string,
-  at: string,
-): AllocationWorkerModel | undefined {
-  const model =
-    driver === "codex"
-      ? policy.workerModels?.codex
-      : driver === "claudeAgent"
-        ? policy.workerModels?.claude
-        : undefined;
-  return model && (model.expiresAt === undefined || Date.parse(model.expiresAt) > Date.parse(at))
-    ? model
-    : undefined;
-}
 
 export const AllocationWindow = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -237,6 +181,7 @@ export const AllocationWindow = Schema.Struct({
   cycleStartedAt: Schema.NullOr(IsoDateTime),
   durationHours: Schema.NullOr(Schema.Number),
   models: Schema.optional(Names),
+  // Measured only for accounts opted into usage measurements, so decisions do not rank on them.
   ratePointsPerHour: Schema.NullOr(Schema.Number),
   predictionErrorPointsPerHour: Schema.optional(Schema.NullOr(Schema.Number)),
   samples: NonNegativeInt,
@@ -261,6 +206,13 @@ export const AllocationAccount = Schema.Struct({
     Schema.Literals(["unsupported", "unverified", "probeFailed"]),
   ),
   limitedUntil: Schema.NullOr(IsoDateTime),
+  /**
+   * Provider limit rejections still in force, by usage window; a null window is account-wide.
+   * Absent on older computers, which report only `limitedUntil`.
+   */
+  limits: Schema.optional(
+    Schema.Array(Schema.Struct({ windowId: Schema.NullOr(Schema.String), until: IsoDateTime })),
+  ),
   models: Schema.Array(
     Schema.Struct({ slug: Schema.String, capabilities: Schema.NullOr(ModelCapabilities) }),
   ),
@@ -301,7 +253,7 @@ export const AllocationDemand = Schema.Struct({
   model: Schema.String,
   options: Schema.Array(ProviderOptionSelection),
   state: Schema.Literals(["running", "pending", "uncertain"]),
-  /** A managed worker, counted by `maxWorkers` rules. Absent from older computers. */
+  /** A managed worker. Absent from older computers. */
   worker: Schema.optional(Schema.Boolean),
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
@@ -332,74 +284,36 @@ export const ComputerPlacementProbe = Schema.Struct({
   repositoryKey: Schema.optional(TrimmedNonEmptyString),
 });
 export type ComputerPlacementProbe = typeof ComputerPlacementProbe.Type;
-/** Extra peak load of the task, like a Workenv needs file. Omitted entries are not compared. */
-const ComputerPlacementNeeds = Schema.Struct({
-  memoryBytes: Schema.optional(NonNegativeInt),
-  cpuThreads: Schema.optional(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0))),
-  /** Space on the disk that holds new agent work. */
-  diskBytes: Schema.optional(NonNegativeInt),
-  /** The native operating system the task requires. */
-  os: Schema.optional(ExecutionEnvironmentPlatformOs),
-});
-/**
- * Everything is optional advice for choosing where a worker runs; no field blocks a start. The
- * computer, provider, model and account the user already chose stay exact.
- */
-export const ComputerPlacementRequest = Schema.Struct({
-  needs: Schema.optional(ComputerPlacementNeeds),
-  /** A project on the computer receiving the request; its repository finds the same checkout elsewhere. */
-  projectId: Schema.optional(ProjectId),
-  /** The repository key behind `projectId`; filled in by the receiving server. */
-  repositoryKey: Schema.optional(TrimmedNonEmptyString),
-  /** The provider runtime the worker needs. */
-  driver: Schema.optional(ProviderDriverKind),
-  model: Schema.optional(TrimmedNonEmptyString),
-  /** An account the user chose; the same login on another computer counts. */
-  instanceId: Schema.optional(ProviderInstanceId),
-  /** A computer the user already chose: kept, even when offline, and reported with its own warnings. */
-  environmentId: Schema.optional(TrimmedNonEmptyString),
-});
-export type ComputerPlacementRequest = typeof ComputerPlacementRequest.Type;
-export const ComputerPlacementHost = Schema.Struct({
+const GiB = Schema.NullOr(Schema.Number);
+/** One computer's load as numbers. A part that could not be measured is null, never zero. */
+export const ComputerNumbers = Schema.Struct({
   environmentId: Schema.String,
   label: Schema.String,
-  /** 1 is the best order for this request. Every connected computer is listed. */
-  rank: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  /**
-   * `fresh`: measured within the allocation policy's reading age; `stale`: older; `unknown`:
-   * reachable but not measured; `offline`: could not be reached for this read.
-   */
-  state: Schema.Literals(["fresh", "stale", "unknown", "offline"]),
-  ageSeconds: Schema.NullOr(NonNegativeInt),
-  /** The computer the request already chose. */
-  chosen: Schema.Boolean,
-  /** Running or starting agent sessions; null when unknown. */
+  /** False when the computer did not answer this read. */
+  reachable: Schema.Boolean,
+  cpuThreadsIdle: Schema.NullOr(Schema.Number),
+  cpuThreads: Schema.NullOr(Schema.Number),
+  memoryFreeGiB: GiB,
+  memoryTotalGiB: GiB,
+  /** Free space on the disk that holds new agent work. */
+  workDiskFreeGiB: GiB,
+  /** Running and starting agent sessions. */
   sessions: Schema.NullOr(NonNegativeInt),
-  /** Checkouts of the requested repository on this computer; absent when none was requested. */
-  projects: Schema.optional(
-    Schema.Array(Schema.Struct({ id: ProjectId, title: Schema.String })).check(
-      Schema.isMaxLength(20),
-    ),
-  ),
-  /** `none`: no needs were declared; `unknown`: they could not be compared. */
-  fit: Schema.Literals(["fits", "short", "unknown", "none"]),
-  computer: Schema.NullOr(ComputerCapacity),
-  reasons: Schema.Array(Schema.String),
-  warnings: Schema.Array(Schema.String),
+  /** The asked project's ID on this computer; null when it has no checkout or none was asked. */
+  projectId: Schema.NullOr(ProjectId),
 });
-export type ComputerPlacementHost = typeof ComputerPlacementHost.Type;
-export const ComputerPlacement = Schema.Struct({
+export type ComputerNumbers = typeof ComputerNumbers.Type;
+export const ComputersRequest = Schema.Struct({
+  /** A project on the computer receiving the request; its repository finds the same checkout elsewhere. */
+  projectId: Schema.optional(ProjectId),
+});
+export type ComputersRequest = typeof ComputersRequest.Type;
+export const ComputersReport = Schema.Struct({
   at: IsoDateTime,
-  request: ComputerPlacementRequest,
-  /**
-   * The computer the request named, whatever its state; null when it names none that is connected,
-   * never a substitute. Without a name, the best reachable computer, or null when none is.
-   */
-  recommendedEnvironmentId: Schema.NullOr(Schema.String),
-  hosts: Schema.Array(ComputerPlacementHost),
-  reasons: Schema.Array(Schema.String),
+  computers: Schema.Array(ComputerNumbers),
+  notes: Schema.Array(Schema.String),
 });
-export type ComputerPlacement = typeof ComputerPlacement.Type;
+export type ComputersReport = typeof ComputersReport.Type;
 const AllocationWindowDecision = Schema.Struct({
   id: Schema.String,
   actualPoints: Points,
@@ -418,18 +332,37 @@ const AllocationWindowDecision = Schema.Struct({
   resetsAt: Schema.NullOr(IsoDateTime),
   reasons: Schema.Array(Schema.String),
 });
+/** What builds before smart allocation require of every candidate; constant here. */
+export const legacyAllocationCandidateFields = {
+  behindPoints: 0,
+  confidence: "medium",
+  windows: [],
+} as const;
 export const AllocationCandidate = Schema.Struct({
-  /** Advisory estimates and observed health; never an admission veto. Optional for old history. */
-  warnings: Schema.optional(Schema.Array(Schema.String)),
   environmentId: Schema.String,
   instanceId: ProviderInstanceId,
   accountKey: Schema.NullOr(Schema.String),
+  label: Schema.optional(Schema.String),
+  /** Usable for this request and not drained. */
   eligible: Schema.Boolean,
   reasons: Schema.Array(Schema.String),
-  /** The account's priority rule as ranked: a preference counts only with quota headroom. */
+  /**
+   * Present when this model is drained here: an applicable usage window is used up, a provider
+   * limit rejection is still in force, or a hard cap is reached. Null when the reset is unknown.
+   */
+  drainedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Percentage points left on the tightest applicable window; null without a reading. */
+  roomPoints: Schema.optional(Schema.NullOr(Schema.Number)),
+  /** Hours until that window resets. */
+  resetInHours: Schema.NullOr(Schema.Number),
+  /** Active workers on this login, on every computer that was read. */
+  workers: Schema.optional(NonNegativeInt),
+  /** The numbers above as one line. */
+  line: Schema.optional(Schema.String),
+  // Only in decisions from before smart allocation, or required by those builds.
+  warnings: Schema.optional(Schema.Array(Schema.String)),
   priority: Schema.optional(Schema.Number),
   behindPoints: Schema.Number,
-  resetInHours: Schema.NullOr(Schema.Number),
   confidence: Schema.Literals(["low", "medium"]),
   windows: Schema.Array(AllocationWindowDecision),
 });
@@ -438,11 +371,15 @@ export const AllocationDecision = Schema.Struct({
   at: IsoDateTime,
   policyVersion: NonNegativeInt,
   request: AllocationRequest,
+  /** `wait`: the model is drained on every usable account until `waitUntil`. */
   outcome: Schema.Literals(["selected", "unavailable", "wait"]),
   selectedInstanceId: Schema.NullOr(ProviderInstanceId),
+  /** Accounts of the requested provider family on the requested computer. */
   candidates: Schema.Array(AllocationCandidate),
+  /** The first reason is the one-line explanation of the choice or refusal. */
   reasons: Schema.Array(Schema.String),
   confidence: Schema.Literals(["low", "medium"]),
+  /** The earliest reset of a drained account; null when none is known. */
   waitUntil: Schema.NullOr(IsoDateTime),
 });
 export type AllocationDecision = typeof AllocationDecision.Type;
@@ -483,6 +420,18 @@ export const ModelRoutingDecision = Schema.Struct({
   ).check(Schema.isMaxLength(2)),
   reasons: Schema.Array(Schema.String),
   allocation: Schema.NullOr(AllocationResult),
+  /** The table's or pinned profile, when a drained model moved the choice along the ladder. */
+  wanted: Schema.optional(
+    Schema.Struct({
+      driver: ProviderDriverKind,
+      model: Schema.String,
+      options: Schema.Array(ProviderOptionSelection),
+    }),
+  ),
+  /** Without a choice because everything is drained: the earliest reset, null when unknown. */
+  drainedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** One line per account of the wanted family on the computer. */
+  accounts: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ModelRoutingDecision = typeof ModelRoutingDecision.Type;
 export const ModelRoutingSnapshot = Schema.Struct({
@@ -494,9 +443,9 @@ export const ModelRoutingSnapshot = Schema.Struct({
 });
 export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AllocationSnapshot = Schema.Struct({
-  accountRulesSupported: Schema.optional(Schema.Boolean),
   accountCapsSupported: Schema.optional(Schema.Boolean),
-  workerModelsSupported: Schema.optional(Schema.Boolean),
+  /** The coordinator ranks by room and keeps `accountOrder`; absent on older coordinators. */
+  accountOrderSupported: Schema.optional(Schema.Boolean),
   policy: AllocationPolicy,
   inventories: Schema.Array(AllocationInventory),
   reservations: Schema.Array(AllocationReservation),
@@ -518,187 +467,216 @@ export const AllocationLifecycle = Schema.Struct({
   threadId: ThreadId,
   action: Schema.Literals(["start", "consume", "release"]),
 });
-const OverrideReason = TrimmedNonEmptyString.check(Schema.isMaxLength(500));
-/** Optional notes on why the master chose differently from a recommendation, per dimension. */
-export const RecommendationOverrides = Schema.Struct({
-  model: Schema.optional(OverrideReason),
-  account: Schema.optional(OverrideReason),
-  computer: Schema.optional(OverrideReason),
-});
-export type RecommendationOverrides = typeof RecommendationOverrides.Type;
 export const RecommendedChoice = Schema.Struct({
-  /** Null when no recommendation could be computed; `unavailable` says why. */
+  /** What the table and the ranking give without the user's pin; null when nothing had room. */
   recommended: Schema.NullOr(Schema.String),
   chosen: Schema.String,
-  overrideReason: Schema.optional(Schema.String),
-  unavailable: Schema.optional(Schema.String),
 });
 export type RecommendedChoice = typeof RecommendedChoice.Type;
-/** Recommended-vs-chosen record for one worker creation. Advice only; never an admission veto. */
+/** Stored with each worker start: the server's own choice next to the one that ran. */
 export const WorkerRecommendation = Schema.Struct({
   at: IsoDateTime,
   assessment: AssignmentAssessment,
-  /** `model / effort` from the default worker model, or else the difficulty/stakes table. */
+  /** `model / effort`. */
   model: RecommendedChoice,
-  /** Provider instance ID from allocation. */
+  /** Provider instance ID. */
   account: RecommendedChoice,
-  /** Environment ID from computer advice. */
-  computer: RecommendedChoice,
-  /** Advisory warnings for the chosen account and computer. */
-  warnings: Schema.Array(Schema.String),
 });
 export type WorkerRecommendation = typeof WorkerRecommendation.Type;
-/** One computer in stored advice. `unknown` is reachable but unmeasured; never zero load. */
-export const ComputerAdviceHost = Schema.Struct({
-  environmentId: Schema.String,
-  label: Schema.String,
-  rank: NonNegativeInt,
-  state: Schema.Literals(["fresh", "stale", "unknown", "offline"]),
-  sessions: Schema.NullOr(NonNegativeInt),
-  warnings: Schema.Array(Schema.String),
-});
-export type ComputerAdviceHost = typeof ComputerAdviceHost.Type;
 export const AllocationStart = Schema.Struct({
-  request: Schema.Union([
-    AllocationRequest,
-    Schema.Struct({
-      ...ModelRoutingRequest.fields,
-      assessment: Schema.optional(AssignmentAssessment),
-    }),
-  ]),
+  request: Schema.Union([AllocationRequest, ModelRoutingRequest]),
   kind: Schema.Literals(["session", "worker"]),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(100000)),
-  /** Shorthand for the assessment; `normal` when neither is given. */
-  tier: Schema.optional(AssignmentTier),
-  /** Exact scores instead of `tier`; automatic requests may carry them as `request.assessment`. */
-  assessment: Schema.optional(AssignmentAssessment),
-  overrides: Schema.optional(RecommendationOverrides),
 });
 export type AllocationStart = typeof AllocationStart.Type;
 export const AllocationStartResult = Schema.Struct({
   allocation: Schema.NullOr(AllocationResult),
   selection: Schema.optional(ModelRoutingDecision),
-  recommendation: Schema.optional(WorkerRecommendation),
   threadId: ThreadId,
   state: Schema.Literals(["observation", "unavailable", "submitted"]),
 });
 export type AllocationStartResult = typeof AllocationStartResult.Type;
-/** What a managed worker start returns to agents: the choice and its recommendation, no candidate lists. */
-export const AllocationWorkerStartResult = Schema.Struct({
+const workerChoiceFields = {
+  /** The computer the worker runs on. */
+  environmentId: TrimmedNonEmptyString,
+  difficulty: AssignmentScore,
+  stakes: AssignmentScore,
+  /** `codex` only when the start asks for Codex; Claude otherwise. */
+  driver: Schema.optional(ProviderDriverKind),
+  /** Pins, only for what the user named: an account's instance ID, a model ID, an effort. */
+  account: Schema.optional(ProviderInstanceId),
+  model: Schema.optional(TrimmedNonEmptyString),
+  effort: Schema.optional(TrimmedNonEmptyString),
+};
+/** What a master gives to preview a worker's account, model and effort. */
+export const WorkerChoiceInput = Schema.Struct(workerChoiceFields);
+export type WorkerChoiceInput = typeof WorkerChoiceInput.Type;
+/** What a master gives to start a worker. */
+export const WorkerStartInput = Schema.Struct({
+  assignmentId: TrimmedNonEmptyString,
   threadId: ThreadId,
-  state: AllocationStartResult.fields.state,
+  projectId: ProjectId,
+  title: AllocationStart.fields.title,
+  prompt: AllocationStart.fields.prompt,
+  ...workerChoiceFields,
+});
+export type WorkerStartInput = typeof WorkerStartInput.Type;
+/** The automatic request a worker choice stands for. */
+export function workerChoiceRequest(
+  input: WorkerChoiceInput & { assignmentId: string; threadId: ThreadId },
+): ModelRoutingRequest {
+  const driver = input.driver ?? ProviderDriverKind.make("claudeAgent");
+  return {
+    selection: "automatic",
+    assignmentId: input.assignmentId,
+    environmentId: input.environmentId,
+    threadId: input.threadId,
+    assessment: { difficulty: input.difficulty, stakes: input.stakes },
+    allowedDrivers: [driver],
+    ...(input.account ? { explicitInstanceId: input.account } : {}),
+    ...(input.model
+      ? {
+          override: {
+            driver,
+            model: input.model,
+            ...(input.effort
+              ? { options: [{ id: routingEffortOptionId(driver), value: input.effort }] }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+/** The result of a worker preview or start: one choice, its reason and a line per account. */
+export const WorkerChoice = Schema.Struct({
+  /** `drained`: nothing has room until `drainedUntil`. `unavailable`: no account can run it. */
+  state: Schema.Literals(["chosen", "drained", "unavailable"]),
   chosen: Schema.NullOr(
     Schema.Struct({
-      environmentId: Schema.String,
-      instanceId: Schema.NullOr(ProviderInstanceId),
+      instanceId: ProviderInstanceId,
       driver: ProviderDriverKind,
       model: Schema.String,
-      options: Schema.Array(ProviderOptionSelection),
+      effort: Schema.NullOr(Schema.String),
     }),
   ),
-  recommendation: Schema.optional(WorkerRecommendation),
-  reasons: Schema.Array(Schema.String),
+  /** The table's or pinned `model / effort`, only when the chosen one differs. */
+  wanted: Schema.optional(Schema.String),
+  reason: Schema.String,
+  /** The earliest reset when drained; null when unknown. */
+  drainedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
+  accounts: Schema.Array(Schema.String),
 });
-export type AllocationWorkerStartResult = typeof AllocationWorkerStartResult.Type;
-export function compactAllocationStart(result: AllocationStartResult): AllocationWorkerStartResult {
-  const decision = result.allocation?.decision ?? result.selection?.allocation?.decision;
-  return {
-    threadId: result.threadId,
-    state: result.state,
-    chosen: decision
+export type WorkerChoice = typeof WorkerChoice.Type;
+export const WorkerStartResult = Schema.Struct({
+  threadId: ThreadId,
+  started: Schema.Boolean,
+  ...WorkerChoice.fields,
+});
+export type WorkerStartResult = typeof WorkerStartResult.Type;
+const effortOf = (driver: string, options: ReadonlyArray<ProviderOptionSelection>) => {
+  const value = options.find((option) => option.id === routingEffortOptionId(driver))?.value;
+  return typeof value === "string" ? value : null;
+};
+/** `model / effort`, the way choices and records name a profile. */
+export const profileLabel = (
+  driver: string,
+  model: string,
+  options: ReadonlyArray<ProviderOptionSelection>,
+) => `${model} / ${effortOf(driver, options) ?? "default"}`;
+export function workerChoice(selection: ModelRoutingDecision): WorkerChoice {
+  const decision = selection.allocation?.decision;
+  const request = decision?.request;
+  const chosen =
+    request && decision.selectedInstanceId
       ? {
-          environmentId: decision.request.environmentId,
           instanceId: decision.selectedInstanceId,
-          driver: decision.request.driver,
-          model: decision.request.model,
-          options: decision.request.options,
+          driver: request.driver,
+          model: request.model,
+          effort: effortOf(request.driver, request.options),
         }
-      : null,
-    ...(result.recommendation ? { recommendation: result.recommendation } : {}),
-    reasons:
-      result.state === "submitted"
-        ? []
-        : [...(result.selection?.reasons ?? []), ...(decision?.reasons ?? [])].slice(0, 10),
+      : null;
+  const drained = !chosen && selection.drainedUntil !== undefined;
+  return {
+    state: chosen ? "chosen" : drained ? "drained" : "unavailable",
+    chosen,
+    ...(chosen && selection.wanted
+      ? {
+          wanted: profileLabel(
+            selection.wanted.driver,
+            selection.wanted.model,
+            selection.wanted.options,
+          ),
+        }
+      : {}),
+    reason: selection.reasons[0] ?? decision?.reasons[0] ?? "No reason was recorded.",
+    ...(drained ? { drainedUntil: selection.drainedUntil ?? null } : {}),
+    accounts:
+      selection.accounts ??
+      (decision?.candidates ?? []).map((candidate) => candidate.line ?? candidate.instanceId),
   };
 }
 /** An account by display label such as `ES`, or by instance ID; both name the shared login. */
 const AccountRef = TrimmedNonEmptyString;
-const overrideFields = {
-  windowId: TrimmedNonEmptyString,
-  expiresAt: IsoDateTime,
-  curve: Schema.optional(AllocationCurve),
-  useBy: Schema.optional(IsoDateTime),
-  resetPlan: Override.fields.resetPlan,
-};
-/** Changes to the allocation policy; with none, the policy is only read. */
+const TableName = Schema.Literals(["claudeAgent", "codex"]);
+/**
+ * Changes to the allocation and model policies; with none, they are only read. Every value is
+ * stored policy on the coordinator and applies to the next start on every computer.
+ */
 export const AllocationPolicyEdit = Schema.Struct({
-  /** Each entry replaces the account's rule of that kind. */
-  setRules: Schema.optional(
-    Schema.Array(Schema.Struct({ account: AccountRef, ...accountRuleFields })),
-  ),
-  /** Without `kind`, every rule of the account. */
-  clearRules: Schema.optional(
-    Schema.Array(
-      Schema.Struct({ account: AccountRef, kind: Schema.optional(accountRuleFields.kind) }),
-    ),
-  ),
-  /** Pacing curve per provider family; null restores the default. */
-  curves: Schema.optional(
-    Schema.Struct({
-      claude: Schema.optional(Schema.NullOr(AllocationCurve)),
-      codex: Schema.optional(Schema.NullOr(AllocationCurve)),
-      other: Schema.optional(Schema.NullOr(AllocationCurve)),
-    }),
-  ),
+  /** The whole preference order, most preferred first. It decides only between close accounts. */
+  accountOrder: Schema.optional(Schema.Array(AccountRef).check(Schema.isMaxLength(100))),
+  closeMarginPoints: AllocationPolicy.fields.closeMarginPoints,
+  longWaitHours: AllocationPolicy.fields.longWaitHours,
   setCaps: Schema.optional(
     Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
   ),
   clearCaps: Schema.optional(Schema.Array(AccountRef)),
-  /** A timed pacing override for one usage window, replacing the account's override of it. */
-  setOverrides: Schema.optional(
-    Schema.Array(Schema.Struct({ account: AccountRef, ...overrideFields })),
-  ),
-  /** Without `windowId`, every override of the account. */
-  clearOverrides: Schema.optional(
+  /** The whole Claude ladder, weakest first. */
+  ladder: ModelRoutingPolicy.fields.ladder,
+  /** Null turns the fallback off. */
+  fallback: ModelRoutingPolicy.fields.fallback,
+  /** Table entries for a range of scores; `to` values default to the single score. */
+  setCells: Schema.optional(
     Schema.Array(
-      Schema.Struct({ account: AccountRef, windowId: Schema.optional(TrimmedNonEmptyString) }),
-    ),
+      Schema.Struct({
+        table: Schema.optional(TableName),
+        difficulty: AssignmentScore,
+        difficultyTo: Schema.optional(AssignmentScore),
+        stakes: AssignmentScore,
+        stakesTo: Schema.optional(AssignmentScore),
+        ...RoutingProfile.fields,
+      }),
+    ).check(Schema.isMaxLength(121)),
   ),
-  /** Default worker model per provider family; null clears it, so the table applies again. */
-  workerModels: Schema.optional(
-    Schema.Struct({
-      claude: Schema.optional(Schema.NullOr(AllocationWorkerModel)),
-      codex: Schema.optional(Schema.NullOr(AllocationWorkerModel)),
-    }),
-  ),
+  /** Also return this table, one row per difficulty. */
+  showTable: Schema.optional(TableName),
 });
 export type AllocationPolicyEdit = typeof AllocationPolicyEdit.Type;
-/** The allocation policy as agents read it: accounts by label, expired entries left out. */
+/** The policies as agents read them: accounts by label. */
 export const AllocationPolicyView = Schema.Struct({
   version: NonNegativeInt,
-  curves: Schema.Struct({
-    claude: AllocationCurve,
-    codex: AllocationCurve,
-    other: AllocationCurve,
-  }),
-  rules: Schema.Array(Schema.Struct({ account: Schema.String, ...accountRuleFields })),
+  modelVersion: NonNegativeInt,
+  accountOrder: Schema.Array(Schema.String),
+  closeMarginPoints: Schema.Number,
+  longWaitHours: Schema.Number,
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
-  overrides: Schema.Array(Schema.Struct({ account: Schema.String, ...overrideFields })),
-  workerModels: Schema.Struct({
-    claude: Schema.optional(AllocationWorkerModel),
-    codex: Schema.optional(AllocationWorkerModel),
-  }),
-  /** Every account an edit can name, with the usage windows an override can target. */
+  /** `model / effort`, weakest first. */
+  ladder: Schema.Array(Schema.String),
+  fallback: Schema.NullOr(Schema.String),
+  /** `table[difficulty]` lists `model / effort` for stakes 0 to 10. */
+  table: Schema.optional(Schema.Array(Schema.Array(Schema.String))),
+  /** Every account an edit can name. */
   accounts: Schema.Array(
     Schema.Struct({
       label: Schema.String,
       driver: ProviderDriverKind,
       instanceIds: Schema.Array(ProviderInstanceId),
-      windowIds: Schema.Array(Schema.String),
     }),
   ),
+  /** What a save accepted but could not confirm, such as a model no connected account offers. */
+  warnings: Schema.Array(Schema.String),
 });
 export type AllocationPolicyView = typeof AllocationPolicyView.Type;
 export const AllocationOperation = Schema.TaggedUnion({
@@ -716,13 +694,14 @@ export const AllocationOperation = Schema.TaggedUnion({
   policy: { input: AllocationPolicyUpdate },
   lifecycle: { input: AllocationLifecycle },
   connect: { coordinatorEnvironmentId: TrimmedNonEmptyString },
-  /** Advice only: reads every connected computer and reserves nothing. */
-  placement: { request: ComputerPlacementRequest },
 });
 export type AllocationOperation = typeof AllocationOperation.Type;
 export const AllocationResponse = Schema.Struct({
   modelSnapshot: Schema.optional(ModelRoutingSnapshot),
+  /** Also in a `caps` answer, so a computer can follow the coordinator's ladder. */
   modelPolicy: Schema.optional(ModelRoutingPolicy),
+  /** What a model policy save accepted but could not confirm. */
+  warnings: Schema.optional(Schema.Array(Schema.String)),
   selection: Schema.optional(ModelRoutingDecision),
   connections: Schema.optional(
     Schema.Struct({
@@ -739,7 +718,6 @@ export const AllocationResponse = Schema.Struct({
   result: Schema.optional(AllocationResult),
   policy: Schema.optional(AllocationPolicy),
   reservation: Schema.optional(AllocationReservation),
-  placement: Schema.optional(ComputerPlacement),
 });
 export type AllocationResponse = typeof AllocationResponse.Type;
 export class AllocationError extends Schema.TaggedError<AllocationError>()("AllocationError", {

@@ -1,8 +1,9 @@
 import {
   MODEL_SCORES,
   accountSupportsRoutingProfile,
-  automaticModelAllowed,
   defaultModelRoutingPolicy,
+  modelFallback,
+  modelLadder,
   routingEffortOptionId,
   type ModelRoutingPolicy,
   type ModelRoutingRequest,
@@ -79,7 +80,7 @@ export const modelCellSummary = (cell: RoutingProfile) =>
 export interface ModelCatalog {
   /** At least one account of this provider is known (it may have been seen before a disconnect). */
   readonly known: boolean;
-  /** Models that automatic selection may use. */
+  /** Models the connected accounts advertise. */
   readonly models: readonly string[];
   readonly efforts: (model: string) => readonly string[];
   readonly supports: (profile: RoutingProfile) => boolean;
@@ -92,9 +93,7 @@ export function modelCatalog(
   const accounts = inventories
     .flatMap((i) => i.accounts)
     .filter((a) => a.environmentId === environmentId && a.driver === driver);
-  const models = [
-    ...new Set(accounts.flatMap((a) => a.models.map((m) => m.slug)).filter(automaticModelAllowed)),
-  ].sort();
+  const models = [...new Set(accounts.flatMap((a) => a.models.map((m) => m.slug)))].sort();
   return {
     known: accounts.length > 0,
     models,
@@ -155,6 +154,37 @@ export function setModelCell(
   };
 }
 
+/** Sets one table's model list. Any model ID is accepted; the save reports what no account offers. */
+export const setAllowedModels = (
+  policy: ModelRoutingPolicy,
+  driver: ModelDriver,
+  allowedModels: readonly string[],
+): ModelRoutingPolicy => ({
+  ...policy,
+  [driver]: { ...policy[driver], allowedModels: [...new Set(allowedModels)] },
+});
+
+/** Everything in a policy besides the table entries, for comparing and carrying over edits. */
+const modelSettings = (policy: ModelRoutingPolicy) => ({
+  maxReassessments: policy.maxReassessments,
+  ladder: modelLadder(policy),
+  fallback: modelFallback(policy),
+  codex: policy.codex.allowedModels,
+  claudeAgent: policy.claudeAgent.allowedModels,
+});
+const modelSettingKeys = [
+  "maxReassessments",
+  "ladder",
+  "fallback",
+  "codex",
+  "claudeAgent",
+] as const;
+/** The settings that differ, by name. */
+function modelSettingChanges(from: ModelRoutingPolicy, to: ModelRoutingPolicy) {
+  const [a, b] = [modelSettings(from), modelSettings(to)];
+  return modelSettingKeys.filter((key) => JSON.stringify(a[key]) !== JSON.stringify(b[key]));
+}
+
 /**
  * Choosing a model keeps the entry's reasoning when the new model offers it. Otherwise the
  * editor must ask for an explicit reasoning level; it never picks a different one silently.
@@ -211,7 +241,7 @@ export function modelDraftChanges(draft: ModelDraft) {
   if (!draft.baseline || !draft.policy) return { cells: [], settings: false };
   return {
     cells: modelCellChanges(draft.baseline, draft.policy),
-    settings: draft.baseline.maxReassessments !== draft.policy.maxReassessments,
+    settings: modelSettingChanges(draft.baseline, draft.policy).length > 0,
   };
 }
 export function modelDraftDirty(draft: ModelDraft) {
@@ -234,7 +264,7 @@ export function summarizeModelDraft(draft: ModelDraft) {
       saved !== null &&
       baseline !== null &&
       (saved.version !== baseline.version ||
-        saved.maxReassessments !== baseline.maxReassessments ||
+        modelSettingChanges(saved, baseline).length > 0 ||
         modelCellChanges(saved, baseline).length > 0),
     count: changes.cells.length + (changes.settings ? 1 : 0),
     editedCells: (driver: ModelDriver) => changes.cells.filter((c) => c.driver === driver).length,
@@ -272,8 +302,19 @@ export function rebaseModelDraft(draft: ModelDraft): ModelDraft {
       stakes,
       modelCell(policy, driver, difficulty, stakes),
     );
-  if (baseline.maxReassessments !== policy.maxReassessments)
-    merged = { ...merged, maxReassessments: policy.maxReassessments };
+  for (const key of modelSettingChanges(baseline, policy))
+    merged =
+      key === "codex" || key === "claudeAgent"
+        ? setAllowedModels(merged, key, [
+            ...policy[key].allowedModels,
+            // Models an edited entry approved on the newer table stay approved.
+            ...merged[key].allowedModels.filter((m) => !saved[key].allowedModels.includes(m)),
+          ])
+        : key === "ladder"
+          ? { ...merged, ladder: modelLadder(policy) }
+          : key === "fallback"
+            ? { ...merged, fallback: modelFallback(policy) }
+            : { ...merged, maxReassessments: policy.maxReassessments };
   return { saved, baseline: saved, policy: merged };
 }
 

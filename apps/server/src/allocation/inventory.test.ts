@@ -281,3 +281,42 @@ it("exports existing model token samples without inventing a quota rate or optin
       .accounts[0]!.usageProfiles,
   ).toEqual([]);
 });
+
+it("reports each limit rejection still in force with the usage window it names", () => {
+  const rejected = (windowId: string, resetsAt?: string) => ({
+    instanceId: "alias",
+    windowId,
+    status: "rejected" as const,
+    at: "2026-10-23T12:00:00.000Z",
+    ...(resetsAt ? { resetsAt } : {}),
+  });
+  const account = allocationInventory({
+    environmentId: "host",
+    at,
+    providers: [provider("a@example.test")],
+    threads: [],
+    measurements,
+    quotaEvidence: [
+      // The model's own bucket, a bucket no usage window reports, and one without a reset time.
+      rejected("spark", "2026-10-25T00:00:00.000Z"),
+      rejected("mystery", "2026-10-24T00:00:00.000Z"),
+      rejected("short"),
+    ],
+  }).accounts[0]!;
+  expect(account.limits).toEqual([
+    { windowId: "spark", until: "2026-10-25T00:00:00.000Z" },
+    { windowId: null, until: "2026-10-24T00:00:00.000Z" },
+  ]);
+  expect(account.limitedUntil).toBe("2026-10-25T00:00:00.000Z");
+  // A rejection whose reset has passed is no longer in force.
+  expect(
+    allocationInventory({
+      environmentId: "host",
+      at,
+      providers: [provider("a@example.test")],
+      threads: [],
+      measurements,
+      quotaEvidence: [rejected("mystery", "2026-10-23T17:00:00.000Z")],
+    }).accounts[0]!.limits,
+  ).toEqual([]);
+});

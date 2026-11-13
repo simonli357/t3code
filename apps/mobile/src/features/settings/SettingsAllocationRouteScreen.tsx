@@ -3,25 +3,24 @@ import { useEffect, useState } from "react";
 import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 
 import {
+  DEFAULT_CLOSE_MARGIN_POINTS,
+  DEFAULT_LONG_WAIT_HOURS,
   EnvironmentId,
-  allocationWorkerModel,
-  defaultAllocationPolicy,
   ProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
   ThreadId,
+  type AllocationPolicy,
   type AllocationSnapshot,
   type AllocationDecision,
 } from "@t3tools/contracts";
 
 import {
   createAllocationCommands,
+  allocationAccountOrder,
   allocationAccountRows,
-  allocationCurveFields,
-  allocationCurveValue,
-  allocationFamilies,
-  allocationReadingAge,
   allocationSummary,
   allocationAccountLabel,
+  withAllocationAccountMoved,
   type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
 
@@ -39,10 +38,7 @@ import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const points = (value: number) => Number(value.toFixed(2)).toString();
-const until = (expiresAt: string | undefined) =>
-  expiresAt ? ` until ${new Date(expiresAt).toLocaleString()}` : "";
-const rule = (entry: { expiresAt?: string | undefined; note?: string | undefined }) =>
-  `${until(entry.expiresAt)}${entry.note ? ` (${entry.note})` : ""}`;
+const field = "rounded border border-border p-2 text-foreground";
 
 export function SettingsAllocationRouteScreen() {
   const { selectedTargets } = useSettingsEnvironmentFilter();
@@ -57,6 +53,12 @@ export function SettingsAllocationRouteScreen() {
   const [now, setNow] = useState(0);
 
   const [decision, setDecision] = useState<AllocationDecision | null>(null);
+
+  // Unsaved edits: the preference order, and the two numbers as typed.
+  const [draft, setDraft] = useState<AllocationPolicy | null>(null);
+  const [numbers, setNumbers] = useState<{ closeMarginPoints?: string; longWaitHours?: string }>(
+    {},
+  );
 
   const [model, setModel] = useState("");
 
@@ -116,61 +118,152 @@ export function SettingsAllocationRouteScreen() {
     };
   }, [target, execute]);
 
-  const at = new Date(now).toISOString();
-  const rows = snapshot ? allocationAccountRows(snapshot, snapshot.policy, now) : [];
+  const policy = draft ?? snapshot?.policy;
+  const rows = snapshot && policy ? allocationAccountRows(snapshot, policy, now) : [];
+  const ordered = policy
+    ? allocationAccountOrder(
+        rows.filter((row) => !row.other),
+        policy,
+      )
+    : [];
   const others = rows.filter((row) => row.other);
-  const accountRow = (row: AllocationAccountRow) => {
-    const reading = row.usage.weekly ?? row.usage.short;
-    const family = snapshot!.policy[row.family];
-    const curve = row.target?.curve ?? family;
-    const { exclude, maxWorkers, priority } = row.rules;
-    return (
-      <View key={row.key} className="gap-1 rounded border border-border p-3">
-        <Text className="font-semibold">
-          {row.label} · {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
-        </Text>
-        <Text>
-          {reading
-            ? `${[
-                row.usage.weekly ? `Week ${points(row.usage.weekly.usedPoints)}%` : "",
-                row.usage.short
-                  ? `${row.usage.short.durationHours ? `${points(row.usage.short.durationHours)}h` : row.usage.short.label} ${points(row.usage.short.usedPoints)}%`
-                  : "",
-              ]
-                .filter(Boolean)
-                .join(" · ")} · ${allocationReadingAge(reading.checkedAt, now)} ago`
-            : row.capSource === "unsupported"
-              ? "No subscription quota"
-              : row.capSource === "probeFailed"
-                ? "Quota read failed"
-                : "No verified quota reading"}
-        </Text>
-        <Text>
-          Workers {exclude ? `off${rule(exclude)}` : "on"}
-          {row.workersOffOn.length ? ` (off on ${row.workersOffOn.join(", ")})` : ""}
-          {maxWorkers ? ` · max ${maxWorkers.value}${rule(maxWorkers)}` : ""}
-          {priority ? ` · priority ${priority.value}${rule(priority)}` : ""}
-        </Text>
-        <Text>
-          Budget {allocationCurveValue(curve, "burstPoints") ?? "derived"} initial ·{" "}
-          {allocationCurveValue(curve, "dailyPoints") ?? "derived"} daily ·{" "}
-          {row.target ? `temporary${until(row.target.expiresAt)}` : "family default"}
-        </Text>
-        {row.supportsCaps && row.cap ? (
-          <Text>
-            Hard cap week {row.cap.weeklyPercent === null ? "off" : `${row.cap.weeklyPercent}%`}
-            {row.driver === "claudeAgent"
-              ? ` · 5h ${row.cap.fiveHourPercent === null ? "off" : `${row.cap.fiveHourPercent}%`}`
-              : ""}{" "}
-            · stops{" "}
-            {[row.cap.stopWorkers ? "workers" : "", row.cap.stopMasters ? "masters" : ""]
-              .filter(Boolean)
-              .join(" and ") || "nothing"}
-          </Text>
-        ) : null}
-      </View>
-    );
+  const editable = snapshot?.accountOrderSupported === true && snapshot.authorityAvailable;
+  const dirty = draft !== null || Object.keys(numbers).length > 0;
+  const numberFields = [
+    {
+      key: "closeMarginPoints",
+      label: "Closeness margin (points)",
+      help: "Accounts whose room differs by at most this much count as close; among those the preference order decides.",
+      fallback: DEFAULT_CLOSE_MARGIN_POINTS,
+    },
+    {
+      key: "longWaitHours",
+      label: "Long wait (hours)",
+      help: "A worker that hits a limit waits for a reset within this time; a longer wait changes its model.",
+      fallback: DEFAULT_LONG_WAIT_HOURS,
+    },
+  ] as const;
+
+  const save = async () => {
+    if (!target || !policy) return;
+    const values = numberFields.map((f) => Number(numbers[f.key] ?? policy[f.key] ?? f.fallback));
+    if (
+      numbers.closeMarginPoints === "" ||
+      numbers.longWaitHours === "" ||
+      values.some(Number.isNaN)
+    ) {
+      setMessage("Enter a number for the margin and the long wait.");
+      return;
+    }
+    setBusy(true);
+    const result = await execute({
+      environmentId: target.environmentId,
+      input: {
+        _tag: "policy",
+        input: {
+          expectedVersion: policy.version,
+          policy: { ...policy, closeMarginPoints: values[0]!, longWaitHours: values[1]! },
+        },
+      },
+    });
+    if (result._tag === "Success" && result.value.policy) {
+      setDraft(null);
+      setNumbers({});
+      await refresh();
+    } else {
+      setMessage("Could not save. Check the numbers, refresh and retry.");
+      setBusy(false);
+    }
   };
+
+  const accountRow = (row: AllocationAccountRow, position?: number) => (
+    <View key={row.key} className="gap-1 rounded border border-border p-3">
+      <Text className="font-semibold">
+        {position === undefined ? "" : `${position + 1}. `}
+        {row.label} · {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+      </Text>
+      {position !== undefined && editable && (
+        <View className="flex-row gap-4">
+          {([-1, 1] as const).map((delta) => (
+            <Pressable
+              key={delta}
+              accessibilityRole="button"
+              accessibilityLabel={`Move ${row.label} ${delta < 0 ? "up" : "down"}`}
+              disabled={busy || position + delta < 0 || position + delta >= ordered.length}
+              onPress={() => setDraft(withAllocationAccountMoved(policy!, ordered, row.key, delta))}
+            >
+              <Text className="text-primary">{delta < 0 ? "Move up" : "Move down"}</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      {row.windows.length ? (
+        row.windows.map((w) => (
+          <Text key={w.id}>
+            {w.label}: {points(w.usedPercent)}% used · resets{" "}
+            {w.resetsAt ? new Date(w.resetsAt).toLocaleString() : "unknown"} · read {w.age} ago
+          </Text>
+        ))
+      ) : (
+        <Text>
+          {row.capSource === "unsupported"
+            ? "No subscription quota"
+            : row.capSource === "probeFailed"
+              ? "Quota read failed"
+              : "No verified quota reading"}
+        </Text>
+      )}
+      <Text>Workers now: {row.workers}</Text>
+      {row.supportsCaps && row.cap ? (
+        <Text>
+          Hard cap week {row.cap.weeklyPercent === null ? "off" : `${row.cap.weeklyPercent}%`}
+          {row.driver === "claudeAgent"
+            ? ` · 5h ${row.cap.fiveHourPercent === null ? "off" : `${row.cap.fiveHourPercent}%`}`
+            : ""}{" "}
+          · stops{" "}
+          {[row.cap.stopWorkers ? "workers" : "", row.cap.stopMasters ? "masters" : ""]
+            .filter(Boolean)
+            .join(" and ") || "nothing"}
+        </Text>
+      ) : null}
+      {row.instances.map((instance) => (
+        <View key={instance.environmentId} className="flex-row items-center justify-between">
+          <Text>Available for workers on {instance.computer}</Text>
+          <ThemedSwitch
+            accessibilityLabel={`Available for workers: ${row.label} on ${instance.computer}`}
+            value={instance.workersEnabled}
+            disabled={busy}
+            onValueChange={async (checked) => {
+              setBusy(true);
+              const result = await updateSettings({
+                environmentId: EnvironmentId.make(instance.environmentId),
+                input: {
+                  patch: {
+                    workerDisabledInstanceIds: (
+                      snapshot?.inventories.find(
+                        (host) => host.environmentId === instance.environmentId,
+                      )?.accounts ?? []
+                    )
+                      .filter((account) =>
+                        account.instanceId === instance.instanceId
+                          ? !checked
+                          : account.availableForWorkers === false,
+                      )
+                      .map((account) => account.instanceId),
+                  },
+                },
+              });
+              if (result._tag === "Success") await refresh();
+              else {
+                setMessage("Could not save worker availability. Reconnect and retry.");
+                setBusy(false);
+              }
+            }}
+          />
+        </View>
+      ))}
+    </View>
+  );
 
   const preview = async () => {
     if (!target) return;
@@ -210,11 +303,14 @@ export function SettingsAllocationRouteScreen() {
   return (
     <SettingsScreen title="Provider allocation">
       <ScrollView contentContainerClassName="gap-4 p-4">
-        <Text>Budgets and priorities advise; account rules and hard caps block.</Text>
+        <Text>
+          A worker goes to the account with the most room left. Hard caps and switched-off accounts
+          block.
+        </Text>
         <Text>{target?.label ?? "Choose a connected environment in Settings."}</Text>
         <Text>
           {snapshot
-            ? `Advisory · policy ${snapshot.policy.version} · ${snapshot.authorityAvailable ? "coordinator ready" : "coordinator unavailable"}`
+            ? `Policy ${snapshot.policy.version} · ${snapshot.authorityAvailable ? "coordinator ready" : "coordinator unavailable"}`
             : "No snapshot"}
         </Text>
         <Pressable disabled={busy} accessibilityRole="button" onPress={() => void refresh()}>
@@ -223,9 +319,13 @@ export function SettingsAllocationRouteScreen() {
         {message ? <Text accessibilityRole="alert">{message}</Text> : null}
         {snapshot && (
           <View className="gap-4">
-            <Text className="font-semibold">Accounts</Text>
-            <Text>Read-only on native mobile. Edit in the web settings page.</Text>
-            {rows.filter((row) => !row.other).map(accountRow)}
+            <Text className="font-semibold">Accounts, most preferred first</Text>
+            <Text>
+              {editable
+                ? "The order decides only between accounts whose room is close. Hard caps are edited in the web settings page."
+                : "This coordinator cannot save the order, margin or long wait yet."}
+            </Text>
+            {ordered.map(accountRow)}
             {others.length > 0 && (
               <Pressable
                 accessibilityRole="button"
@@ -235,33 +335,39 @@ export function SettingsAllocationRouteScreen() {
                 <Text className="text-primary">Other accounts ({others.length})</Text>
               </Pressable>
             )}
-            {showOthers && others.map(accountRow)}
-            <Text className="font-semibold">Family defaults</Text>
-            {allocationFamilies.map(({ family, driver, label }) => {
-              const worker = allocationWorkerModel(snapshot.policy, driver, at);
-              return (
-                <View key={family} className="gap-1 rounded border border-border p-3">
-                  <Text className="font-semibold">{label}</Text>
-                  <Text>
-                    {allocationCurveFields
-                      .filter((field) => field.key !== "burstHours")
-                      .map(
-                        (field) =>
-                          `${field.label} ${
-                            allocationCurveValue(snapshot.policy[family], field.key) ?? "derived"
-                          } (default ${points(defaultAllocationPolicy[family][field.key])})`,
-                      )
-                      .join(" · ")}
-                  </Text>
-                  <Text>
-                    Worker model:{" "}
-                    {worker
-                      ? `${worker.model} / ${worker.effort}${until(worker.expiresAt)}${worker.note ? ` (${worker.note})` : ""}`
-                      : "difficulty table"}
-                  </Text>
+            {showOthers && others.map((row) => accountRow(row))}
+            {policy &&
+              numberFields.map((f) => (
+                <View key={f.key} className="gap-1">
+                  <Text className="font-semibold">{f.label}</Text>
+                  <Text>{f.help}</Text>
+                  <TextInput
+                    accessibilityLabel={f.label}
+                    keyboardType="decimal-pad"
+                    editable={editable}
+                    value={numbers[f.key] ?? String(policy[f.key] ?? f.fallback)}
+                    onChangeText={(value) => setNumbers({ ...numbers, [f.key]: value })}
+                    className={field}
+                  />
                 </View>
-              );
-            })}
+              ))}
+            {dirty && (
+              <View className="flex-row gap-4">
+                <Pressable disabled={busy} accessibilityRole="button" onPress={() => void save()}>
+                  <Text className="text-primary">Save</Text>
+                </Pressable>
+                <Pressable
+                  disabled={busy}
+                  accessibilityRole="button"
+                  onPress={() => {
+                    setDraft(null);
+                    setNumbers({});
+                  }}
+                >
+                  <Text className="text-primary">Discard changes</Text>
+                </Pressable>
+              </View>
+            )}
           </View>
         )}
         <Pressable
@@ -316,7 +422,7 @@ export function SettingsAllocationRouteScreen() {
 
               onChangeText={setModel}
 
-              className="rounded border border-border p-2 text-foreground"
+              className={field}
             />
             <TextInput
               accessibilityLabel="Reasoning effort"
@@ -327,7 +433,7 @@ export function SettingsAllocationRouteScreen() {
 
               onChangeText={setEffort}
 
-              className="rounded border border-border p-2 text-foreground"
+              className={field}
             />
             <Pressable
               disabled={busy || !model || !target}
@@ -347,110 +453,22 @@ export function SettingsAllocationRouteScreen() {
                         decision.request.environmentId,
                         decision.selectedInstanceId,
                       )
-                    : allocationSummary(decision).choice}{" "}
-                  · {decision.confidence} confidence
+                    : allocationSummary(decision).choice}
                 </Text>
-                <Text>{decision.reasons.join(" ")}</Text>
+                <Text>{decision.reasons[0]}</Text>
                 {decision.candidates.map((c) => (
                   <Text key={`${c.environmentId}:${c.instanceId}`}>
-                    {allocationAccountLabel(snapshot, c.environmentId, c.instanceId)}:{" "}
-                    {c.eligible ? "Compatible" : c.reasons.join(" ")}
-                    {c.warnings?.length ? ` - Warnings: ${c.warnings.join(" ")}` : ""}
-                    {c.windows.map((w) =>
-                      w.budgetHeadroomPoints === undefined ? null : (
-                        <Text key={w.id}>
-                          {"\n"}
-                          {w.id}: observed {w.actualPoints.toFixed(1)} + running{" "}
-                          {w.runningForecastPoints?.toFixed(1)} + queued/reserved{" "}
-                          {w.queuedForecastPoints?.toFixed(1)} + incoming{" "}
-                          {w.incomingForecastPoints?.toFixed(1)} + aggregate/reading-age allowance{" "}
-                          {w.unobservedForecastPoints?.toFixed(1)}; budget{" "}
-                          {w.budgetPoints?.toFixed(1)}, projected budget headroom{" "}
-                          {w.budgetHeadroomPoints.toFixed(1)}
-                          {w.budgetHeadroomPoints ===
-                          Math.min(
-                            ...c.windows.map((v) => v.budgetHeadroomPoints ?? v.headroomPoints),
-                          )
-                            ? " (limiting)"
-                            : ""}
-                          .
-                        </Text>
-                      ),
-                    )}
+                    {c.line ??
+                      `${allocationAccountLabel(snapshot, c.environmentId, c.instanceId)}: ${
+                        c.eligible ? "Compatible" : c.reasons.join(" ")
+                      }`}
                   </Text>
                 ))}
               </View>
             ) : null}
           </View>
         )}
-        {snapshot?.inventories.map((host) => (
-          <View key={host.environmentId} className="gap-2">
-            <Text className="font-semibold">
-              {host.environmentLabel ??
-                (host.environmentId === target?.environmentId
-                  ? target.label
-                  : "Linked environment")}{" "}
-              · {host.complete ? `${host.demand.length} ongoing` : "load unknown"}
-            </Text>
-            {host.accounts.map((a) => (
-              <View key={a.instanceId} className="gap-1 rounded border border-border p-3">
-                <Text>
-                  {a.label} · {a.shortWindow}
-                </Text>
-                <View className="flex-row items-center justify-between">
-                  <Text>Available for workers</Text>
-                  <ThemedSwitch
-                    accessibilityLabel={`Available for workers: ${a.label}`}
-                    value={a.availableForWorkers !== false}
-                    disabled={busy}
-                    onValueChange={async (checked) => {
-                      setBusy(true);
-                      try {
-                        const result = await updateSettings({
-                          environmentId: EnvironmentId.make(host.environmentId),
-                          input: {
-                            patch: {
-                              workerDisabledInstanceIds: host.accounts
-                                .filter((account) =>
-                                  account.instanceId === a.instanceId
-                                    ? !checked
-                                    : account.availableForWorkers === false,
-                                )
-                                .map((account) => account.instanceId),
-                            },
-                          },
-                        });
-                        if (result._tag === "Success") await refresh();
-                        else setMessage("Could not save worker availability. Reconnect and retry.");
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  />
-                </View>
-                {a.windows.map((w) => (
-                  <Text key={w.id}>
-                    {w.label}: {w.usedPoints.toFixed(1)}% used · {w.samples} samples · reset{" "}
-                    {w.resetsAt ?? "unknown"} · burn{" "}
-                    {w.ratePointsPerHour === null
-                      ? "Not enough data"
-                      : `${w.ratePointsPerHour.toFixed(2)} allowance points/hour`}{" "}
-                    ·{" "}
-                    {w.rateAgeMinutes === null
-                      ? "age unknown"
-                      : `${w.rateAgeMinutes.toFixed(1)} minutes old at last refresh`}
-                  </Text>
-                ))}
-                <Text>
-                  {a.unavailableReason
-                    ? `Observed warning: ${a.unavailableReason}`
-                    : "No observed warning"}
-                </Text>
-              </View>
-            ))}
-          </View>
-        ))}
-        <Text>Open the web page to edit settings and inspect model samples.</Text>
+        <Text>Open the web page to edit hard caps.</Text>
         {target?.displayUrl ? (
           <Pressable
             accessibilityRole="link"

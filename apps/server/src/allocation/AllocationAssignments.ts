@@ -3,18 +3,10 @@ import { stableStringify } from "@t3tools/shared/relaySigning";
 import {
   WORKER_ACCOUNT_DISABLED_REASON,
   AllocationError,
-  AssignmentAssessment,
-  AssignmentTier,
-  tierAssessment,
-  RecommendationOverrides,
   WorkerRecommendation,
-  ComputerAdviceHost,
   ProviderDriverKind,
   ProviderOptionSelection,
-  ProviderInstanceId,
-  type ProjectId,
-  type ComputerPlacementRequest,
-  type AllocationInventory,
+  profileLabel,
   type AllocationStart,
   type AllocationStartResult,
   type AllocationRequest,
@@ -30,7 +22,6 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Allocation from "./ProviderAllocation.ts";
@@ -38,30 +29,11 @@ import * as Workers from "../orchestration/WorkerControls.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PeerLinks } from "../orchestration/PeerLinks.ts";
-import { ACCOUNT_RULE_REASON, accountDemand, accountRuleRefusal } from "./decision.ts";
-import {
-  computerAdvice,
-  compareRecommendation,
-  profileLabel,
-  type Dimension,
-} from "./recommendation.ts";
 
-/** `t3_worker_spawn` input: the worker plus an optional tier or assessment and override notes. */
-export const ManagedSpawnInput = Schema.Struct({
-  ...Workers.RemoteSpawnInput.fields,
-  tier: Schema.optional(AssignmentTier),
-  assessment: Schema.optional(AssignmentAssessment),
-  overrides: Schema.optional(RecommendationOverrides),
-});
-export const ManagedSpawnResult = Schema.Struct({
-  ...Workers.WorkerResult.fields,
-  recommendation: Schema.optional(WorkerRecommendation),
-});
-/** Stored with each worker creation; the start/spawn response carries only `recommendation`. */
+/** Stored with each worker start. Records from before smart allocation hold more; it is ignored. */
 const StoredRecommendation = Schema.Struct({
   recommendation: WorkerRecommendation,
-  computers: Schema.Array(ComputerAdviceHost),
-  /** The exact request a start resolved, so a retry repeats it. */
+  /** The exact request a start resolved. */
   request: Schema.optional(
     Schema.Struct({
       driver: ProviderDriverKind,
@@ -71,12 +43,9 @@ const StoredRecommendation = Schema.Struct({
   ),
 });
 type StoredRecommendation = typeof StoredRecommendation.Type;
-const decodeStored = Schema.decodeUnknownSync(Schema.fromJsonString(StoredRecommendation));
 const encodeStored = Schema.encodeSync(Schema.fromJsonString(StoredRecommendation));
 const intentOf = (value: unknown) =>
   NodeCrypto.createHash("sha256").update(stableStringify(value)).digest("hex");
-const ADVICE_DEADLINE = "20 seconds";
-const FORK_CONTINUITY = "Fork keeps the source session's account and model for native continuity.";
 
 export class AllocationAssignments extends Context.Service<
   AllocationAssignments,
@@ -85,11 +54,6 @@ export class AllocationAssignments extends Context.Service<
       input: AllocationStart,
       owner?: ThreadId,
     ) => Effect.Effect<AllocationStartResult, AllocationError>;
-    /** Creates a fork or legacy fresh worker after recording its recommendation. */
-    readonly spawn: (
-      owner: ThreadId,
-      input: typeof ManagedSpawnInput.Type,
-    ) => Effect.Effect<typeof ManagedSpawnResult.Type, Workers.WorkerError>;
   }
 >()("t3/allocation/AllocationAssignments") {}
 
@@ -102,26 +66,12 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const local = yield* peers.localEnvironment;
   const starts = yield* Semaphore.make(1);
-  const now = Clock.currentTimeMillis.pipe(
-    Effect.map((n) => DateTime.formatIso(DateTime.makeUnsafe(n))),
-  );
-  const persistence = () =>
-    new AllocationError({
-      code: "persistence",
-      detail: "Could not access the worker recommendation.",
-    });
-  const readStored = (threadId: string) =>
-    sql<{
-      intent: string;
-      record_json: string;
-    }>`SELECT intent, record_json FROM worker_recommendations WHERE thread_id = ${threadId}`.pipe(
-      Effect.map((rows) => rows[0]),
-      Effect.mapError(persistence),
-    );
   /** Keeps the first record once a worker exists; the worker itself rejects changed input. */
   const saveStored = (threadId: string, intent: string, stored: StoredRecommendation) =>
     Effect.gen(function* () {
-      const prior = yield* readStored(threadId);
+      const prior = (yield* sql<{
+        intent: string;
+      }>`SELECT intent FROM worker_recommendations WHERE thread_id = ${threadId}`)[0];
       if (prior?.intent === intent) return;
       if (prior && (yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = ${threadId}`).length)
         return;
@@ -129,181 +79,30 @@ const make = Effect.gen(function* () {
         VALUES (${threadId}, ${intent}, ${encodeStored(stored)}, ${stored.recommendation.at})
         ON CONFLICT(thread_id) DO UPDATE SET intent = excluded.intent,
           record_json = excluded.record_json, created_at = excluded.created_at`;
-    }).pipe(Effect.mapError(persistence));
-  /** Placement matches checkouts by the project when it can; an unknown project only loses that. */
-  const placeAdvice = (request: ComputerPlacementRequest, projectId?: ProjectId) =>
-    projectId
-      ? allocation
-          .place({ ...request, projectId })
-          .pipe(Effect.catch(() => allocation.place(request)))
-      : allocation.place(request);
-  /**
-   * Runs all three recommendations: the table's model/effort and allocation's account for
-   * that profile (one model preview), and computer placement read on this server from every
-   * linked computer.
-   * Advice failures degrade to recorded reasons; disabled worker accounts are rejected.
-   */
-  const advise = Effect.fn("AllocationAssignments.advise")(function* (input: {
-    readonly environment: string;
-    readonly threadId: ThreadId;
-    readonly assignmentId: string;
-    readonly assessment: AssignmentAssessment;
-    readonly drivers?: readonly ProviderDriverKind[] | undefined;
-    readonly instanceId?: string | undefined;
-    readonly model?: string | undefined;
-    /** A project on this computer, so placement can find the same checkout elsewhere. */
-    readonly projectId?: ProjectId | undefined;
-  }) {
-    const preview = (environmentId: string, drivers: readonly ProviderDriverKind[]) =>
-      allocation
-        .execute({
-          _tag: "modelPreview",
-          request: {
-            selection: "automatic",
-            assignmentId: `${input.assignmentId}:recommendation`,
-            environmentId,
-            threadId: input.threadId,
-            assessment: input.assessment,
-            allowedDrivers: drivers,
-          },
-        })
-        .pipe(
-          Effect.flatMap((response) =>
-            response.selection
-              ? Effect.succeed(response.selection)
-              : Effect.fail(new AllocationError({ code: "invalid", detail: "No decision." })),
-          ),
-          Effect.result,
-        );
-    const [read, early] = yield* Effect.all(
-      [
-        placeAdvice(
-          {
-            ...(input.drivers?.length === 1 ? { driver: input.drivers[0] } : {}),
-            ...(input.model ? { model: input.model } : {}),
-            ...(input.instanceId ? { instanceId: ProviderInstanceId.make(input.instanceId) } : {}),
-          },
-          input.projectId,
-        ).pipe(
-          // Placement gives each computer one peer deadline; never hold a start much longer.
-          Effect.timeoutOrElse({
-            duration: ADVICE_DEADLINE,
-            orElse: () =>
-              Effect.fail(
-                new AllocationError({ code: "unavailable", detail: "no answer within 20 s." }),
-              ),
+    }).pipe(
+      Effect.mapError(
+        () =>
+          new AllocationError({
+            code: "persistence",
+            detail: "Could not access the worker recommendation.",
           }),
-          Effect.result,
-        ),
-        input.drivers ? preview(input.environment, input.drivers) : Effect.succeed(undefined),
-      ],
-      { concurrency: "unbounded" },
+      ),
     );
-    const inventories: readonly AllocationInventory[] = Result.isSuccess(read)
-      ? read.success.inventories
-      : [];
-    const environment = input.environment.toLowerCase();
-    const environmentId =
-      inventories.find(
-        (i) =>
-          i.environmentId === input.environment ||
-          (i.environmentLabel ?? i.environmentId).toLowerCase() === environment,
-      )?.environmentId ?? input.environment;
-    if (
-      inventories.some((i) =>
-        i.accounts.some(
-          (a) =>
-            a.environmentId === environmentId &&
-            a.instanceId === input.instanceId &&
-            a.availableForWorkers === false,
-        ),
-      )
-    )
-      return yield* new AllocationError({
-        code: "invalid",
-        detail: WORKER_ACCOUNT_DISABLED_REASON,
-      });
-    const driver =
-      input.drivers?.length === 1
-        ? input.drivers[0]
-        : inventories
-            .flatMap((i) => i.accounts)
-            .find((a) => a.environmentId === environmentId && a.instanceId === input.instanceId)
-            ?.driver;
-    const selected = early ?? (driver ? yield* preview(environmentId, [driver]) : undefined);
-    const selection = selected && Result.isSuccess(selected) ? selected.success : undefined;
-    const profile =
-      selection?.allocation?.decision.request ?? selection?.profiles.find((p) => p.eligible);
-    const reasons = (list: readonly string[] | undefined) => list?.join(" ") || undefined;
-    const unavailable = !selected
-      ? `The provider of account ${input.instanceId ?? "(none)"} could not be found on ${environmentId}.`
-      : Result.isFailure(selected)
-        ? `Recommendation unavailable: ${selected.failure.message}`
-        : undefined;
-    return {
-      environmentId,
-      driver,
-      inventories,
-      selection,
-      model: profile
-        ? { ...profile, label: profileLabel(profile.driver, profile.model, profile.options) }
-        : undefined,
-      modelUnavailable: unavailable ?? reasons(selection?.reasons) ?? "No table profile applies.",
-      account: selection?.allocation?.decision.selectedInstanceId ?? undefined,
-      accountUnavailable:
-        unavailable ??
-        reasons(selection?.allocation?.decision.reasons) ??
-        reasons(selection?.reasons) ??
-        "No account is available for the recommended profile.",
-      computers: Result.isSuccess(read) ? computerAdvice(read.success.placement) : undefined,
-      computersUnavailable: Result.isFailure(read)
-        ? `Advice unavailable: ${read.failure.message}`
-        : undefined,
-    };
-  });
-  type Advice = Effect.Success<ReturnType<typeof advise>>;
-  const compare = (
-    advice: Advice,
-    chosen: Record<
-      "model" | "account" | "computer",
-      Omit<Dimension, "recommended" | "unavailable">
-    >,
-    context: {
-      readonly at: string;
-      readonly assessment: AssignmentAssessment;
-      readonly overrides?: RecommendationOverrides | undefined;
-      readonly automatic?: RecommendationOverrides | undefined;
-      readonly warnings?: readonly string[];
-    },
-  ) =>
-    compareRecommendation({
-      ...context,
-      model: {
-        ...chosen.model,
-        recommended: advice.model?.label ?? null,
-        unavailable: advice.modelUnavailable,
-      },
-      account: {
-        ...chosen.account,
-        recommended: advice.account ?? null,
-        unavailable: advice.accountUnavailable,
-      },
-      computer: {
-        ...chosen.computer,
-        recommended: advice.computers?.recommendedEnvironmentId ?? null,
-        unavailable:
-          advice.computersUnavailable ?? "Advice unavailable: no connected computer is reachable.",
-      },
-      warnings: [
-        ...(context.warnings ??
-          advice.selection?.allocation?.decision.candidates.find(
-            (c) => c.instanceId === chosen.account.chosen,
-          )?.warnings ??
-          []),
-        ...(advice.computers?.hosts.find((h) => h.environmentId === chosen.computer.chosen)
-          ?.warnings ?? []),
-      ],
-    });
+  /** What the table and the ranking give for these scores when nothing is pinned. */
+  const unpinned = (selection: ModelRoutingDecision) => {
+    const { explicitInstanceId: _account, override: _model, ...request } = selection.request;
+    return allocation
+      .execute({
+        _tag: "modelPreview",
+        request: { ...request, assignmentId: `${request.assignmentId}:recommendation` },
+      })
+      .pipe(
+        Effect.map((response) => response.selection),
+        Effect.catch(() => Effect.succeed(undefined)),
+      );
+  };
+  const label = (request: Pick<AllocationRequest, "driver" | "model" | "options">) =>
+    profileLabel(request.driver, request.model, request.options);
   return AllocationAssignments.of({
     start: Effect.fn("AllocationAssignments.start")(function* (raw, owner) {
       const invalid = (detail: string) => new AllocationError({ code: "invalid", detail });
@@ -316,74 +115,12 @@ const make = Effect.gen(function* () {
           "Fresh automatic startup cannot replace a bound native session. Use the explicit resume path.",
         );
       const managed = raw.kind === "worker";
-      const automatic = raw.request.selection === "automatic" ? raw.request : undefined;
-      const assessment = automatic?.assessment ?? raw.assessment ?? tierAssessment(raw.tier);
-      if (
-        automatic?.assessment &&
-        raw.assessment &&
-        stableStringify(raw.assessment) !== stableStringify(automatic.assessment)
-      )
-        return yield* invalid(
-          "assessment and request.assessment differ. Give the assessment once, in request.assessment.",
-        );
       // Hash the complete start intent, including the authenticated owner. Prompt
       // bodies never enter allocation logs or replay snapshots.
       const startIntent = intentOf({ input: raw, owner: owner ?? null });
-      const prior = managed ? yield* readStored(raw.request.threadId) : undefined;
-      const reused = prior?.intent === startIntent ? decodeStored(prior.record_json) : undefined;
-      const advice =
-        managed && !reused
-          ? yield* advise({
-              environment: raw.request.environmentId,
-              ...(raw.request.environmentId === local.environmentId
-                ? { projectId: raw.projectId }
-                : {}),
-              threadId: raw.request.threadId,
-              assignmentId: raw.request.assignmentId,
-              assessment,
-              drivers:
-                raw.request.selection === "automatic"
-                  ? raw.request.allowedDrivers
-                  : [raw.request.driver],
-              instanceId: raw.request.explicitInstanceId,
-              model:
-                raw.request.selection === "automatic"
-                  ? raw.request.override?.model
-                  : raw.request.model,
-            })
-          : undefined;
-      let routed =
-        raw.request.selection === "automatic" ? { ...raw.request, assessment } : { ...raw.request };
+      let routed = { ...raw.request };
       if (managed) delete routed.kind;
       else routed = { ...routed, kind: "session" };
-      // A model-only pin takes the table's effort, resolved here so older coordinators
-      // still receive the exact override they understand.
-      if (automatic?.override && !automatic.override.options) {
-        const override = automatic.override;
-        const options =
-          reused?.request?.options ??
-          advice?.selection?.profiles.find((p) => p.driver === override.driver)?.options;
-        if (options && routed.selection === "automatic")
-          routed = { ...routed, override: { ...override, options } };
-      }
-      const pinnedModel =
-        routed.selection === "automatic"
-          ? routed.override &&
-            profileLabel(
-              routed.override.driver,
-              routed.override.model,
-              routed.override.options ?? [],
-            )
-          : profileLabel(routed.driver, routed.model, routed.options);
-      const pins = (model: string, account: string) => ({
-        model: { chosen: pinnedModel ?? model, pinned: pinnedModel !== undefined },
-        account: {
-          chosen: raw.request.explicitInstanceId ?? account,
-          pinned: raw.request.explicitInstanceId !== undefined,
-        },
-        computer: { chosen: raw.request.environmentId, pinned: true },
-      });
-      const context = { at: yield* now, assessment, overrides: raw.overrides };
       let selectionDecision: ModelRoutingDecision | undefined;
       let request: AllocationRequest;
       if (routed.selection === "automatic") {
@@ -394,9 +131,6 @@ const make = Effect.gen(function* () {
           return {
             allocation: selectionDecision.allocation,
             selection: selectionDecision,
-            ...(advice
-              ? { recommendation: compare(advice, pins("(none)", "(none)"), context) }
-              : {}),
             threadId: raw.request.threadId,
             state: "unavailable" as const,
           };
@@ -421,39 +155,43 @@ const make = Effect.gen(function* () {
       const response = yield* allocation.execute({ _tag: "allocate", request: input.request });
       const result = response.result;
       if (!result) return yield* invalid("Allocation returned no decision.");
-      const chosenModel = profileLabel(request.driver, request.model, request.options);
-      const refusal = result.decision.reasons.find(
-        (reason) =>
-          reason === WORKER_ACCOUNT_DISABLED_REASON || reason.startsWith(ACCOUNT_RULE_REASON),
-      );
-      if (managed && request.explicitInstanceId && !result.decision.selectedInstanceId && refusal)
-        return yield* invalid(refusal);
+      if (
+        managed &&
+        request.explicitInstanceId &&
+        !result.decision.selectedInstanceId &&
+        result.decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
+      )
+        return yield* invalid(WORKER_ACCOUNT_DISABLED_REASON);
       if (!result.reservation || !result.decision.selectedInstanceId)
         return {
           allocation: result,
           ...(selectionDecision ? { selection: selectionDecision } : {}),
-          ...(advice
-            ? { recommendation: compare(advice, pins(chosenModel, "(none)"), context) }
-            : {}),
           threadId: input.request.threadId,
           state: "unavailable" as const,
         };
       const reservation = result.reservation;
-      const stored =
-        reused ??
-        (advice
-          ? {
-              recommendation: compare(advice, pins(chosenModel, reservation.instanceId), {
-                ...context,
-                warnings:
-                  result.decision.candidates.find((c) => c.instanceId === reservation.instanceId)
-                    ?.warnings ?? [],
-              }),
-              computers: advice.computers?.hosts ?? [],
-              request: { driver: request.driver, model: request.model, options: request.options },
-            }
-          : undefined);
-      if (stored) yield* saveStored(input.request.threadId, startIntent, stored);
+      if (managed && selectionDecision) {
+        const pinned =
+          selectionDecision.request.explicitInstanceId !== undefined ||
+          selectionDecision.request.override !== undefined;
+        const own = pinned ? yield* unpinned(selectionDecision) : selectionDecision;
+        const recommended = own?.allocation?.decision;
+        yield* saveStored(input.request.threadId, startIntent, {
+          recommendation: {
+            at: selectionDecision.at,
+            assessment: selectionDecision.request.assessment,
+            model: {
+              recommended: recommended ? label(own.wanted ?? recommended.request) : null,
+              chosen: label(request),
+            },
+            account: {
+              recommended: recommended?.selectedInstanceId ?? null,
+              chosen: reservation.instanceId,
+            },
+          },
+          request: { driver: request.driver, model: request.model, options: request.options },
+        });
+      }
       yield* allocation.execute({
         _tag: "lifecycle",
         input: {
@@ -559,95 +297,10 @@ const make = Effect.gen(function* () {
       return {
         allocation: result,
         ...(selectionDecision ? { selection: selectionDecision } : {}),
-        ...(stored ? { recommendation: stored.recommendation } : {}),
         threadId: input.request.threadId,
         state: "submitted" as const,
       };
     }, starts.withPermit),
-    spawn: Effect.fn("AllocationAssignments.spawn")(
-      function* (owner, input) {
-        const { tier, assessment = tierAssessment(tier), overrides, ...spawnInput } = input;
-        const intent = intentOf({ spawn: input, owner });
-        const prior = yield* readStored(input.threadId);
-        let stored = prior?.intent === intent ? decodeStored(prior.record_json) : undefined;
-        if (!stored) {
-          const advice = yield* advise({
-            environment: input.environment ?? local.environmentId,
-            ...(input.environment === undefined && input.projectId
-              ? { projectId: input.projectId }
-              : {}),
-            threadId: input.threadId,
-            assignmentId: `spawn:${input.threadId}`,
-            assessment,
-            instanceId: input.modelSelection.instanceId,
-            model: input.modelSelection.model,
-          });
-          // Spawns reserve nothing, so the coordinator's rules are checked against this read.
-          const account = advice.inventories
-            .flatMap((i) => i.accounts)
-            .find(
-              (a) =>
-                a.environmentId === advice.environmentId &&
-                a.instanceId === input.modelSelection.instanceId,
-            );
-          const policy = account
-            ? Option.getOrUndefined(yield* allocation.execute({ _tag: "caps" }).pipe(Effect.option))
-                ?.policy
-            : undefined;
-          const refusal =
-            account && policy
-              ? accountRuleRefusal(
-                  policy,
-                  account,
-                  accountDemand(
-                    account,
-                    advice.inventories.flatMap((i) => i.demand),
-                    { environmentId: advice.environmentId, threadId: input.threadId },
-                  ),
-                  yield* now,
-                )
-              : undefined;
-          if (refusal) return yield* new Workers.WorkerError({ message: refusal });
-          const fork = input.sourceThreadId !== undefined;
-          const recommendation = compare(
-            advice,
-            {
-              model: {
-                chosen: profileLabel(
-                  advice.driver ?? "",
-                  input.modelSelection.model,
-                  input.modelSelection.options ?? [],
-                ),
-                pinned: true,
-              },
-              account: { chosen: input.modelSelection.instanceId, pinned: true },
-              computer: { chosen: advice.environmentId, pinned: true },
-            },
-            {
-              at: yield* now,
-              assessment,
-              overrides,
-              ...(fork
-                ? {
-                    automatic: {
-                      model: FORK_CONTINUITY,
-                      account: FORK_CONTINUITY,
-                      computer: "Fork runs on the source session's computer.",
-                    },
-                  }
-                : {}),
-            },
-          );
-          stored = { recommendation, computers: advice.computers?.hosts ?? [] };
-          yield* saveStored(input.threadId, intent, stored);
-        }
-        const worker = yield* workers.spawn(owner, spawnInput);
-        return { ...worker, recommendation: stored.recommendation };
-      },
-      Effect.catchTag("AllocationError", (error) =>
-        Effect.fail(new Workers.WorkerError({ message: error.detail })),
-      ),
-    ),
   });
 });
 export const layer = Layer.effect(AllocationAssignments, make);

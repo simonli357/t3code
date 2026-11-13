@@ -4,6 +4,7 @@ import {
   AllocationReservation,
   AllocationDecision,
   defaultAllocationPolicy,
+  legacyAllocationPolicyFields,
   ModelRoutingPolicy,
   ModelRoutingDecision,
   defaultModelRoutingPolicy,
@@ -19,9 +20,9 @@ import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { allocationScore, decideAllocation } from "./decision.ts";
+import { decideAllocation } from "./decision.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
-import { modelCandidates, modelPolicyIssues } from "./modelDecision.ts";
+import { chooseProfile, modelPolicyWarnings } from "./modelDecision.ts";
 
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const policyJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationPolicy));
@@ -53,7 +54,10 @@ export class AllocationStore extends Context.Service<
       policy?: ModelRoutingPolicy;
       revertVersion?: number;
       inventories: readonly AllocationInventory[];
-    }) => Effect.Effect<ModelRoutingPolicy, AllocationError>;
+    }) => Effect.Effect<
+      { readonly policy: ModelRoutingPolicy; readonly warnings: readonly string[] },
+      AllocationError
+    >;
     readonly selectModel: (input: {
       at: string;
       request: ModelRoutingRequest;
@@ -64,6 +68,8 @@ export class AllocationStore extends Context.Service<
       expectedModelVersion: number;
       previewPolicy?: ModelRoutingPolicy;
       coordinatorPolicy?: AllocationPolicy | null;
+      /** The coordinator's model policy as last read, when this computer decides in its place. */
+      coordinatorModelPolicy?: ModelRoutingPolicy;
     }) => Effect.Effect<ModelRoutingDecision, AllocationError>;
     readonly policy: Effect.Effect<AllocationPolicy, AllocationError>;
     readonly reservations: Effect.Effect<readonly AllocationReservation[], AllocationError>;
@@ -85,7 +91,6 @@ export class AllocationStore extends Context.Service<
        * known policy, or null when none was read, which the decision then records.
        */
       coordinatorPolicy?: AllocationPolicy | null;
-      stableSelection?: boolean;
     }) => Effect.Effect<
       {
         decision: AllocationDecision;
@@ -205,24 +210,7 @@ const make = Effect.gen(function* () {
               detail: "This thread already has an active allocation.",
             });
           }
-          const last = input.stableSelection
-            ? undefined
-            : (yield* history).find(
-                (d) =>
-                  d.request.driver === input.request.driver &&
-                  d.request.environmentId === input.request.environmentId &&
-                  d.selectedInstanceId,
-              );
-          const previousAccountKey = last?.candidates.find(
-            (c) => c.instanceId === last.selectedInstanceId && c.eligible,
-          )?.accountKey;
-          const replay = {
-            ...input,
-            policy: effective,
-            reservations: stored,
-            ...(input.coordinatorPolicy === null ? { rulesUnchecked: true } : {}),
-            ...(previousAccountKey ? { previousAccountKey } : {}),
-          };
+          const replay = { ...input, policy: effective, reservations: stored };
           const decision = decideAllocation(replay);
           const retained = new Set(
             input.inventories.flatMap((i) =>
@@ -231,22 +219,12 @@ const make = Effect.gen(function* () {
                 .map((a) => `${a.environmentId}:${a.instanceId}`),
             ),
           );
-          const retainedDecision = {
-            ...decision,
-            candidates: decision.candidates.map((c) =>
-              retained.has(`${c.environmentId}:${c.instanceId}`)
-                ? c
-                : { ...c, windows: [], behindPoints: 0, resetInHours: null },
-            ),
-          };
           const retainedReplay = {
             at: replay.at,
             request: replay.request,
             policy: replay.policy,
             authorityAvailable: replay.authorityAvailable,
             reservations: replay.reservations,
-            ...(replay.rulesUnchecked ? { rulesUnchecked: true } : {}),
-            ...(previousAccountKey ? { previousAccountKey } : {}),
             inventories: replay.inventories.map((i) => ({
               ...i,
               accounts: i.accounts.map((a) =>
@@ -257,6 +235,7 @@ const make = Effect.gen(function* () {
                       windows: [],
                       resetCredits: null,
                       limitedUntil: null,
+                      limits: [],
                       profileSamples: 0,
                       profileUncertainty: 1,
                     },
@@ -264,6 +243,15 @@ const make = Effect.gen(function* () {
             })),
             retentionNotice:
               "Quota replay is retained only for accounts opted into UsageMeasurements.",
+          };
+          // Readings of accounts outside usage measurements are not kept in history.
+          const retainedDecision = {
+            ...decision,
+            candidates: decision.candidates.map((c) =>
+              retained.has(`${c.environmentId}:${c.instanceId}`)
+                ? c
+                : { ...c, roomPoints: null, resetInHours: null, line: c.label ?? c.instanceId },
+            ),
           };
           if (!input.previewPolicy) {
             yield* sql`INSERT INTO provider_allocation_decisions (created_at, decision_json, replay_json) VALUES (${input.at}, ${json(retainedDecision)}, ${json(retainedReplay)})`;
@@ -362,16 +350,15 @@ const make = Effect.gen(function* () {
               (reverted &&
                 ("policy_json" in reverted ? decodeModelPolicy(reverted.policy_json) : reverted));
             if (!proposed) return yield* invalid("The requested previous policy is unavailable.");
-            const next = { ...proposed, version: current.version + 1 };
-            // Reverts restore a known policy, including readable but now-unavailable catalog values.
-            const issues = modelPolicyIssues(
-              next,
-              input.revertVersion === undefined ? current : next,
-              input.inventories,
-            );
-            if (issues.length) return yield* invalid(issues.join(" "));
+            // A build from before the ladder saves a policy without it; keep what is stored.
+            const next = {
+              ...(current.ladder !== undefined ? { ladder: current.ladder } : {}),
+              ...(current.fallback !== undefined ? { fallback: current.fallback } : {}),
+              ...proposed,
+              version: current.version + 1,
+            };
             yield* sql`INSERT INTO model_selection_policies (version, policy_json) VALUES (${next.version}, ${json(next)})`;
-            return next;
+            return { policy: next, warnings: modelPolicyWarnings(next, input.inventories) };
           }),
         )
         .pipe(Effect.catchTag("SqlError", failure)),
@@ -417,7 +404,7 @@ const make = Effect.gen(function* () {
               input.coordinatorPolicy === undefined
                 ? {}
                 : { coordinatorPolicy: input.coordinatorPolicy };
-            const effective = input.previewPolicy ?? current;
+            const effective = input.previewPolicy ?? input.coordinatorModelPolicy ?? current;
             const retained =
               prior &&
               !input.previewPolicy &&
@@ -480,137 +467,82 @@ const make = Effect.gen(function* () {
                 );
               anchor = predecessor;
             }
-            const resolved = modelCandidates(
-              effective,
-              input.request,
-              input.inventories,
-              retained,
-              {
-                policy: allocationPolicy,
-                at: input.at,
-              },
-            );
-            const proposals = [];
-            for (const candidate of resolved.candidates) {
-              if (
-                anchor?.allocation &&
-                anchor.allocation.decision.request.driver !== candidate.request.driver &&
-                !input.request.reassessment?.allowFreshProviderSession
-              ) {
-                resolved.reasons.push(
-                  "Changing provider family requires explicit consent to a fresh provider session; native identity cannot be mutated.",
-                );
-                continue;
-              }
-              const result = yield* allocate({
-                at: input.at,
-                inventories: input.inventories,
-                authorityAvailable: input.authorityAvailable,
-                expectedPolicyVersion: input.expectedPolicyVersion,
-                request: candidate.request,
-                reserve: false,
-                ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
-                ...fallback,
-                stableSelection: true,
-              });
-              proposals.push({ ...candidate, result });
-            }
-            const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-            const ranked = proposals
-              .flatMap((p) => {
-                const c = p.result.decision.candidates.find(
-                  (v) => v.eligible && v.instanceId === p.result.decision.selectedInstanceId,
-                );
-                return c ? [{ p, c }] : [];
-              })
-              .sort(
-                (a, b) =>
-                  (b.c.priority ?? 0) - (a.c.priority ?? 0) ||
-                  (a.c.warnings?.length ?? 0) - (b.c.warnings?.length ?? 0) ||
-                  allocationScore(b.c, allocationPolicy) - allocationScore(a.c, allocationPolicy) ||
-                  (a.c.resetInHours ?? Infinity) - (b.c.resetInHours ?? Infinity) ||
-                  compare(a.c.accountKey ?? "", b.c.accountKey ?? "") ||
-                  compare(a.c.instanceId, b.c.instanceId) ||
-                  compare(a.p.request.driver, b.p.request.driver),
-              );
-            const chosen = ranked[0]?.p;
-            // All families were evaluated against the same inventory/reservations under
-            // this SQL transaction. Only its selected exact profile enters admission.
-            const allocation = chosen
-              ? yield* allocate({
-                  at: input.at,
-                  inventories: input.inventories,
-                  authorityAvailable: input.authorityAvailable,
-                  reserve: input.reserve,
-                  expectedPolicyVersion: input.expectedPolicyVersion,
-                  request: chosen.request,
-                  stableSelection: true,
-                  ...(input.previewPolicy ? { previewPolicy: allocationPolicy } : {}),
-                  ...fallback,
-                })
-              : null;
+            const choice = chooseProfile({
+              at: input.at,
+              policy: allocationPolicy,
+              modelPolicy: effective,
+              request: input.request,
+              inventories: input.inventories,
+              reservations: yield* reservations,
+              authorityAvailable: input.authorityAvailable,
+            });
+            const chosen = choice.decision?.request;
+            // A reassessment may not move to another provider family without consent.
+            const familyChange =
+              chosen !== undefined &&
+              anchor?.allocation &&
+              anchor.allocation.decision.request.driver !== chosen.driver &&
+              !input.request.reassessment?.allowFreshProviderSession;
+            // The choice and its admission share this transaction, inventory and reservations.
+            const allocation =
+              chosen && !familyChange
+                ? yield* allocate({
+                    at: input.at,
+                    inventories: input.inventories,
+                    authorityAvailable: input.authorityAvailable,
+                    reserve: input.reserve,
+                    expectedPolicyVersion: input.expectedPolicyVersion,
+                    request: chosen,
+                    ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
+                    ...fallback,
+                  })
+                : null;
+            const first = choice.tried[0];
+            const last = choice.tried.at(-1);
             const decision: ModelRoutingDecision = {
               at: input.at,
-              policyVersion: retained?.policyVersion ?? effective.version,
+              policyVersion: effective.version,
               request: input.request,
               revision,
-              selectedProfile: chosen?.profile ?? null,
-              rule: resolved.rule,
-              profiles: proposals.map((p) => ({
+              selectedProfile: null,
+              rule: choice.rule,
+              profiles: (first && last && first !== last
+                ? [first, last]
+                : first
+                  ? [first]
+                  : []
+              ).map((p) => ({
                 driver: p.request.driver,
-                profile: p.profile,
+                profile: null,
                 model: p.request.model,
                 options: p.request.options,
                 reason: p.reason,
-                eligible: p.result.decision.selectedInstanceId !== null,
+                eligible: p.chosen && !familyChange,
               })),
               reasons: [
-                ...new Set([
-                  ...resolved.reasons,
-                  ...(chosen
-                    ? [chosen.reason, ...chosen.result.decision.reasons]
-                    : [
-                        "No approved profile/account matches the capability and continuity constraints.",
-                      ]),
-                  ...proposals.flatMap((p) =>
-                    p.result.decision.selectedInstanceId
-                      ? []
-                      : [
-                          p.reason,
-                          ...p.result.decision.reasons,
-                          ...p.result.decision.candidates.flatMap((c) => c.reasons),
-                        ],
-                  ),
-                ]),
-              ].slice(0, 24),
+                familyChange
+                  ? "Changing provider family requires explicit consent to a fresh provider session; native identity cannot be mutated."
+                  : choice.reason,
+              ],
               allocation,
-            };
-            if (input.reserve) {
-              // Diagnostic history contains assessments and choices, never private prompts.
-              const retained = allocation
+              ...(choice.wanted && allocation
                 ? {
-                    ...decision,
-                    allocation: {
-                      ...allocation,
-                      decision: allocation.reservation?.decision ?? {
-                        ...allocation.decision,
-                        candidates: allocation.decision.candidates.map((c) => ({
-                          ...c,
-                          windows: [],
-                          behindPoints: 0,
-                          resetInHours: null,
-                        })),
-                      },
+                    wanted: {
+                      driver: choice.wanted.driver,
+                      model: choice.wanted.model,
+                      options: choice.wanted.options,
                     },
                   }
-                : decision;
-              // Keep the original resolved intent until admission commits. Failed
-              // attempts are audited in the allocator's bounded decision history.
-              if (!prior || allocation?.reservation)
-                yield* sql`INSERT INTO model_selection_decisions (assignment_id, created_at, decision_json) VALUES (${input.request.assignmentId}, ${input.at}, ${json(retained)})
-                  ON CONFLICT(assignment_id) DO UPDATE SET decision_json = excluded.decision_json`;
-              return retained;
-            }
+                : {}),
+              ...(choice.drainedUntil !== undefined ? { drainedUntil: choice.drainedUntil } : {}),
+              accounts: choice.accounts,
+            };
+            // Diagnostic history contains assessments and choices, never private prompts. Keep
+            // the original resolved intent until admission commits; failed attempts are audited
+            // in the allocator's bounded decision history.
+            if (input.reserve && (!prior || allocation?.reservation))
+              yield* sql`INSERT INTO model_selection_decisions (assignment_id, created_at, decision_json) VALUES (${input.request.assignmentId}, ${input.at}, ${json(decision)})
+                ON CONFLICT(assignment_id) DO UPDATE SET decision_json = excluded.decision_json`;
             return decision;
           }),
         )
@@ -638,34 +570,29 @@ const make = Effect.gen(function* () {
                 code: "conflict",
                 detail: "Policy changed. Reload saved settings before saving.",
               });
-            const next = {
-              ...input.policy,
-              ...(input.policy.accountRules === undefined && current.accountRules !== undefined
-                ? { accountRules: current.accountRules }
-                : {}),
-              ...(input.policy.accountCaps === undefined && current.accountCaps !== undefined
-                ? { accountCaps: current.accountCaps }
-                : {}),
-              ...(input.policy.workerModels === undefined && current.workerModels !== undefined
-                ? { workerModels: current.workerModels }
-                : {}),
+            // Rules, worker models and overrides are gone. The legacy values keep the policy
+            // readable by builds from before smart allocation, which also save without the
+            // new fields: those keep what is stored.
+            const { accountRules: _rules, workerModels: _workerModels, ...kept } = input.policy;
+            const carried = (
+              name: "accountCaps" | "accountOrder" | "closeMarginPoints" | "longWaitHours",
+            ) =>
+              kept[name] === undefined && current[name] !== undefined
+                ? { [name]: current[name] }
+                : {};
+            const next: AllocationPolicy = {
+              ...kept,
+              ...carried("accountCaps"),
+              ...carried("accountOrder"),
+              ...carried("closeMarginPoints"),
+              ...carried("longWaitHours"),
+              ...legacyAllocationPolicyFields,
               version: current.version + 1,
             };
-            const rules = next.accountRules ?? [];
-            if (
-              new Set(rules.map((rule) => `${rule.kind}:${rule.key}`)).size !== rules.length ||
-              rules.some(
-                (rule) =>
-                  (rule.kind === "exclude"
-                    ? rule.value !== undefined
-                    : rule.value === undefined || (rule.kind === "maxWorkers" && rule.value < 1)) ||
-                  (rule.expiresAt !== undefined && !Number.isFinite(Date.parse(rule.expiresAt))),
-              )
-            )
+            if (new Set(next.accountOrder).size !== (next.accountOrder ?? []).length)
               return yield* new AllocationError({
                 code: "invalid",
-                detail:
-                  "Account rules need one rule per account and kind, a maxWorkers value of at least 1, a priority value from -100 to 100, no value for exclude, and a valid expiry time.",
+                detail: "The preference order lists an account twice.",
               });
             const caps = next.accountCaps ?? [];
             if (
@@ -688,18 +615,6 @@ const make = Effect.gen(function* () {
                 detail:
                   "Account caps need unique identities, at least one threshold, and percentages from 0 to 100.",
               });
-            if (next.defaultHours > next.maxForecastHours)
-              return yield* new AllocationError({
-                code: "invalid",
-                detail: "Default duration must fit within the forecast horizon.",
-              });
-            for (const o of next.overrides) {
-              if (o.expiresAt <= o.createdAt || (o.useBy && o.useBy <= o.createdAt))
-                return yield* new AllocationError({
-                  code: "invalid",
-                  detail: "Override expiry and use-by target must follow its creation.",
-                });
-            }
             yield* sql`INSERT INTO provider_allocation_policy (id, version, policy_json) VALUES (1, ${next.version}, ${json(next)}) ON CONFLICT(id) DO UPDATE SET version = excluded.version, policy_json = excluded.policy_json`;
             return next;
           }),

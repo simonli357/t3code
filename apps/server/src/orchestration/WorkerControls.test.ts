@@ -285,13 +285,6 @@ for (const automatic of [false, true])
           projectId: ProjectId.make("allocated-fresh"),
           title: "allocated_astra",
           prompt: "perform allocated work",
-          assessment: {
-            difficulty: 8,
-            stakes: 8,
-            difficultyReason: "Interacting state machines",
-            stakesReason: "Consequential startup",
-          },
-          overrides: { model: "test pins the profile" },
           request: {
             assignmentId: "integrated-start",
             explicitInstanceId: ProviderInstanceId.make("codex_antoine"),
@@ -327,11 +320,11 @@ for (const automatic of [false, true])
               _tag: "modelPreview",
               request: request.request,
             })).selection?.allocation?.decision.reasons.join(" "),
-          ).toContain("bounded borrowing");
+          ).toContain("pinned account.");
         }
         const started = yield* assignments.start(request, owner);
         expect(started.state).toBe("submitted");
-        expect(started.allocation?.decision.reasons.join(" ")).toContain("bounded borrowing");
+        expect(started.allocation?.decision.reasons.join(" ")).toContain("pinned account.");
         const workers = yield* Workers.WorkerControls;
         yield* workers.drain();
         const shell = Option.getOrThrow(
@@ -3697,43 +3690,35 @@ it.effect(
           }),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      const request = {
-        selection: "automatic",
-        assignmentId: "mcp-selected",
-        threadId: worker,
-        environmentId: "env-local",
-        allowedDrivers: ["codex"],
-        assessment: {
-          difficulty: 8,
-          stakes: 8,
-          difficultyReason: "Interacting behavior",
-          stakesReason: "Hard-to-detect failures",
-        },
+      // Difficulty 8, stakes 8 is gpt-6-astra / high in the default Codex table.
+      const scores = { environmentId: "env-local", difficulty: 8, stakes: 8, driver: "codex" };
+      const chosen = {
+        instanceId: "codex_antoine",
+        driver: "codex",
+        model: selections[1]!.model,
+        effort: "high",
       };
-      const preview = yield* call("t3_allocate_account", { request, preview: true });
+      const preview = yield* call("t3_allocate_account", scores);
       expect(preview.isError).not.toBe(true);
-      expect(encodeMcpResult(preview)).toContain("bounded borrowing");
-      expect(yield* store.reservations).toHaveLength(0);
-      // Without scores, a preview uses the same tier default as a start.
-      const { assessment: _scores, ...unscored } = request;
-      const tiered = yield* call("t3_allocate_account", { request: unscored, preview: true });
-      expect(tiered.isError).not.toBe(true);
-      expect(encodeMcpResult(tiered)).toContain("Tier normal");
-      expect(
-        encodeMcpResult(
-          yield* call("t3_allocate_account", { request: unscored, tier: "hard", preview: true }),
-        ),
-      ).toContain("Tier hard");
+      expect(preview.structuredContent).toMatchObject({ state: "chosen", chosen });
       expect(yield* store.reservations).toHaveLength(0);
       const input = {
-        request,
-        kind: "worker",
+        ...scores,
+        assignmentId: "mcp-selected",
+        threadId: worker,
         projectId: "model-mcp",
         title: "Selected worker",
         prompt: "Perform the scoped assignment",
         ownerThreadId: "forged-owner",
       };
-      expect((yield* call("t3_start_allocated_assignment", input)).isError).not.toBe(true);
+      const started = yield* call("t3_start_allocated_assignment", input);
+      expect(started.isError).not.toBe(true);
+      expect(started.structuredContent).toMatchObject({
+        threadId: worker,
+        started: true,
+        state: "chosen",
+        chosen,
+      });
       const workers = yield* Workers.WorkerControls;
       yield* workers.drain();
       expect((yield* workers.list(owner)).map((w) => w.threadId)).toEqual([worker]);
@@ -3790,26 +3775,14 @@ it.layer(mcpLayer)("worker MCP", (it) => {
                 Effect.provideService(Invocation.McpInvocationContext, scope),
                 Effect.provideService(McpSchema.McpServerClient, client),
               );
-          const assessment = {
-            difficulty: 3,
-            difficultyReason: "Routine follow-up",
-            stakes: 3,
-            stakesReason: "Reversible",
-          };
           const spawnInput = fresh
             ? {
                 threadId: worker,
                 title: input.title,
                 modelSelection: input.modelSelection,
                 prompt: input.prompt,
-                assessment,
-                overrides: {
-                  model: "test pins the model",
-                  account: "test pins the account",
-                  computer: "test pins the computer",
-                },
               }
-            : { ...input, assessment };
+            : input;
           const spawned = yield* call("t3_worker_spawn", {
             ...spawnInput,
             ownerThreadId: "forged",
@@ -3942,7 +3915,7 @@ it.layer(mcpLayer)("worker MCP", (it) => {
 });
 
 it.effect(
-  "the agent tool recommends a computer from fresh telemetry and reserves or gates nothing",
+  "the agent tool reports each computer's numbers and ranks, reserves or gates nothing",
   () =>
     Effect.gen(function* () {
       const { owner } = yield* seed("placement-mcp", 1);
@@ -3972,22 +3945,14 @@ it.effect(
           }),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      // More memory than the stubbed computer has: advice says so but nothing is refused.
-      const advice = yield* call("t3_recommend_computer", {
-        needs: { memoryBytes: 64 * 2 ** 30 },
-        environmentId: "env-local",
+      const numbers = yield* call("t3_recommend_computer", {});
+      expect(numbers.isError).not.toBe(true);
+      expect(numbers.structuredContent).toMatchObject({
+        computers: [{ environmentId: "env-local", reachable: true, memoryFreeGiB: 8 }],
+        notes: [],
       });
-      expect(advice.isError).not.toBe(true);
-      const text = encodeMcpResult(advice);
-      expect(text).toContain("recommendedEnvironmentId");
-      expect(text).toContain("env-local");
-      expect(text).toContain("Needs 64.0 GiB memory but only 8.0 GiB is available.");
-      expect(text).toContain("Advice only: it never blocks a start");
+      expect(encodeMcpResult(numbers)).not.toContain("recommendedEnvironmentId");
       expect(yield* store.reservations).toHaveLength(0);
-      // Input that is not a valid need is rejected, not silently defaulted.
-      expect(
-        yield* call("t3_recommend_computer", { needs: { memoryBytes: -1 } }).pipe(Effect.flip),
-      ).toMatchObject({ _tag: "InvalidParams" });
     }).pipe(
       Effect.provide(
         McpServer.toolkit(AllocationTools.AllocationToolkit).pipe(
@@ -5504,17 +5469,6 @@ for (const automatic of [false, true])
           projectId: ProjectId.make("missing-project"),
           title: "allocated remote",
           prompt: "task",
-          assessment: {
-            difficulty: 8,
-            stakes: 8,
-            difficultyReason: "Interacting state machines",
-            stakesReason: "Consequential startup",
-          },
-          overrides: {
-            model: "test pins the profile",
-            account: "test pins the account",
-            computer: "test pins the computer",
-          },
           request: {
             assignmentId: "remote-refused",
             environmentId: "env-beta",
@@ -5618,7 +5572,9 @@ for (const automatic of [false, true])
         ).toEqual(selections[1]);
         const retried = yield* assignments.start(accepted, owner);
         expect(retried.state).toBe("submitted");
-        expect(retried.allocation?.decision.reasons.join(" ")).toContain("bounded borrowing");
+        expect(retried.allocation?.decision.reasons.join(" ")).toContain(
+          "the only account that is not drained.",
+        );
         yield* betaWorkers.drain();
         yield* assignments.start(accepted, owner);
         yield* betaWorkers.drain();
@@ -6140,16 +6096,16 @@ const usageRecoveryLayer = Workers.layer.pipe(
       reroute: (threadId, _current, options) =>
         Effect.sync(() => {
           usage.calls.push({ threadId, ...options });
-          const crossFamily = threadId.includes("cross-family");
+          const modelChanged = threadId.includes("model-change");
           return (
             usage.route ?? {
               _tag: "switch",
-              selection: selections[crossFamily ? 2 : 1]!,
-              crossFamily,
+              selection: selections[modelChanged ? 2 : 1]!,
+              modelChanged,
             }
           );
         }),
-      limited: (instanceId) => Effect.sync(() => usage.limited.includes(instanceId)),
+      limited: (selection) => Effect.sync(() => usage.limited.includes(selection.instanceId)),
     }),
   ),
   Layer.provideMerge(infrastructure),
@@ -6187,15 +6143,15 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
     const start = DateTime.toEpochMillis(yield* DateTime.now);
     return (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(start + minutes * 60_000));
   });
-  for (const family of ["same-family", "cross-family"] as const)
+  for (const family of ["account-only", "model-change"] as const)
     it.effect(
-      `retries a usage-limited assignment on another ${family} account and tells the master only across families`,
+      `retries a usage-limited assignment after an ${family} switch and tells the master only when the model changed`,
       () =>
         Effect.gen(function* () {
           yield* reset;
           const service = yield* Workers.WorkerControls;
           const snapshots = yield* ProjectionSnapshotQuery;
-          const replacement = selections[family === "cross-family" ? 2 : 1]!;
+          const replacement = selections[family === "model-change" ? 2 : 1]!;
           const { owner, worker, input } = yield* seed(`usage-recovery-${family}`);
           yield* service.spawn(owner, input);
           yield* session(worker, "running", "usage-first");
@@ -6211,11 +6167,11 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
           ]);
           const notices = yield* usageNotices(worker);
           expect(notices.map((notice) => notice.id)).toEqual(
-            family === "cross-family" ? [`notice:usage-retry:spawn:${worker}:usage-switch`] : [],
+            family === "model-change" ? [`notice:usage-retry:spawn:${worker}:usage-switch`] : [],
           );
-          if (family === "cross-family")
+          if (family === "model-change")
             expect(notices[0]!.prompt).toContain(
-              `from codex to ${replacement.instanceId} after a usage limit`,
+              `from codex ${input.modelSelection.model} to ${replacement.instanceId} ${replacement.model} after a usage limit`,
             );
           // A restart reads the same durable rows and repeats nothing.
           const restarted = yield* Workers.WorkerControls.pipe(Effect.provide(Workers.layer));
@@ -6235,7 +6191,7 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
         yield* session(worker, "running", "wait-first");
         // A fresh reading shows the exhausted window and when it resets.
         usage.limited = [input.modelSelection.instanceId];
-        usage.route = { _tag: "wait", until: after(120), observed: true };
+        usage.route = { _tag: "wait", until: after(120), observed: true, long: false };
         yield* session(worker, "error", "wait-failed", undefined, "Claude usage limit reached.");
         yield* service.drain();
         const retry = `usage-retry:spawn:${worker}`;
@@ -6273,7 +6229,7 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
         // Limited again at the reset: the retry waits again, now long enough to tell the master once.
         yield* session(worker, "running", "wait-second");
         usage.limited = [input.modelSelection.instanceId];
-        usage.route = { _tag: "wait", until: after(480), observed: true };
+        usage.route = { _tag: "wait", until: after(480), observed: true, long: true };
         yield* session(
           worker,
           "error",
@@ -6391,7 +6347,7 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
         const snapshots = yield* ProjectionSnapshotQuery;
         const held = yield* seed("usage-before-dispatch-hold");
         usage.limited = [selections[0]!.instanceId];
-        usage.route = { _tag: "wait", until: after(60), observed: true };
+        usage.route = { _tag: "wait", until: after(60), observed: true, long: false };
         yield* service.spawn(held.owner, held.input);
         yield* service.drain();
         // Nothing was sent into the certain failure, and a short wait is not reported.
@@ -6459,7 +6415,7 @@ it.layer(usageRecoveryLayer)("worker usage-limit recovery", (it) => {
         if (scenario === "master") {
           const child = ThreadId.make(`${worker}-child`);
           yield* service.spawn(worker, { ...input, threadId: child });
-          usage.route = { _tag: "wait", until: after(60), observed: false };
+          usage.route = { _tag: "wait", until: after(60), observed: false, long: false };
         }
         yield* session(worker, "running", `${scenario}-running`);
         yield* session(

@@ -1,23 +1,22 @@
 import {
   AllocationError,
-  allocationPreferenceKey,
-  AssignmentAssessment,
   AllocationInventory,
   AllocationOperation,
   AllocationResponse,
   AllocationRequest,
   ComputerPlacementProbe,
+  DEFAULT_LONG_WAIT_HOURS,
   ModelSelection,
-  ProviderDriverKind,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
-  type AllocationAccount,
   type AllocationSnapshot,
   type AllocationPolicy,
   type AllocationPolicyEdit,
   type AllocationPolicyView,
-  type ComputerPlacement,
-  type ComputerPlacementRequest,
+  type ComputersReport,
+  type ComputersRequest,
+  type ModelRoutingPolicy,
+  type ModelRoutingRequest,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
@@ -37,10 +36,10 @@ import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.ts";
 import { allocationInventory } from "./inventory.ts";
-import { ACCOUNT_RULE_REASON, decideAllocation } from "./decision.ts";
-import { allocationPolicyView, editAllocationPolicy } from "./policyEdit.ts";
-import { modelCandidates } from "./modelDecision.ts";
-import { recommendPlacement } from "./placement.ts";
+import { accountCap, accountRoom, decideAllocation } from "./decision.ts";
+import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
+import { chooseProfile } from "./modelDecision.ts";
+import { computerNumbers } from "./placement.ts";
 
 const PeerInput = Schema.TaggedUnion({
   allocation: { operation: AllocationOperation },
@@ -73,8 +72,6 @@ const UNREADABLE_PEER_REQUEST = "Invalid allocation peer request";
 const READING_REFRESH_BUDGET = "3 seconds";
 /** Decisions probe one slow or failing account at most this often. */
 const READING_REFRESH_RETRY_MS = 60_000;
-/** A longer wait for a reset is worth changing provider family, and worth telling the master. */
-export const LONG_USAGE_WAIT_MS = 3 * 3_600_000;
 /** After the coordinator fails to answer, the rest of that start decides locally without waiting again. */
 const COORDINATOR_RETRY_MS = 60_000;
 /** Without a provider reset time, a limited account is tried again after this long. */
@@ -82,12 +79,19 @@ const UNKNOWN_RESET_WAIT_MS = 30 * 60_000;
 /** Where a worker's next turn runs when its account is limited, capped or was just rejected. */
 export type UsageRoute =
   | { readonly _tag: "proceed" }
-  | { readonly _tag: "switch"; readonly selection: ModelSelection; readonly crossFamily: boolean }
+  | {
+      readonly _tag: "switch";
+      readonly selection: ModelSelection;
+      /** The worker continues on another model, so its master is told. */
+      readonly modelChanged: boolean;
+    }
   | {
       readonly _tag: "wait";
       readonly until: string;
       /** A reading or cap shows the exhaustion, so the wait may end as soon as that clears. */
       readonly observed: boolean;
+      /** The wait is longer than the policy's threshold, so the master is told. */
+      readonly long: boolean;
     };
 const decodeResponse = Schema.decodeUnknownEffect(AllocationResponse);
 const decodePeerInput = Schema.decodeUnknownEffect(PeerInput);
@@ -95,7 +99,7 @@ const decodeSelection = Schema.decodeUnknownEffect(Schema.fromJsonString(ModelSe
 const now = Clock.currentTimeMillis.pipe(
   Effect.map((n) => DateTime.formatIso(DateTime.makeUnsafe(n))),
 );
-/** A computer that could not be read for a placement: listed offline with its error, never left out or zero. */
+/** A computer that could not be read: listed unreachable with its error, never left out or zero. */
 const unreadInventory = (
   peer: { environmentId: string; label: string },
   observedAt: string,
@@ -110,6 +114,21 @@ const unreadInventory = (
   complete: false,
   notices: [`${peer.label}: load unavailable for this decision${cause ? `: ${cause}` : "."}`],
 });
+/**
+ * Builds from before smart allocation require a reason beside each score and pin. They are
+ * filled in on the way to a coordinator that may still run one.
+ */
+const withLegacyReasons = (request: ModelRoutingRequest): ModelRoutingRequest => ({
+  ...request,
+  assessment: {
+    ...request.assessment,
+    difficultyReason: request.assessment.difficultyReason ?? "Scored by the master",
+    stakesReason: request.assessment.stakesReason ?? "Scored by the master",
+  },
+  ...(request.override
+    ? { override: { ...request.override, reason: request.override.reason ?? "Pinned" } }
+    : {}),
+});
 
 export class ProviderAllocation extends Context.Service<
   ProviderAllocation,
@@ -118,38 +137,31 @@ export class ProviderAllocation extends Context.Service<
       operation: AllocationOperation,
     ) => Effect.Effect<AllocationResponse, AllocationError>;
     /**
-     * Routes a worker whose account is limited, capped or (`rejected`) just refused a turn:
-     * another account of the same family with observed headroom, else wait for the provider
-     * reset. The other family is tried only when that wait is long. `switchAccount: false`
-     * only waits. `proceed` means nothing is known against the current account.
+     * Routes a worker whose model is drained on its account or (`rejected`) was just refused a
+     * turn: the same model on another account with room; else wait for a reset that is near;
+     * else the closest model that has room; else wait. `switchAccount: false` only waits.
+     * `proceed` means nothing is known against the current account.
      */
     readonly reroute: (
       threadId: ThreadId,
       current: ModelSelection,
       options?: { readonly rejected?: boolean; readonly switchAccount?: boolean },
     ) => Effect.Effect<UsageRoute, AllocationError>;
-    /** True when retained readings or a cap latch already show the account as exhausted. No probing. */
-    readonly limited: (instanceId: string) => Effect.Effect<boolean, AllocationError>;
-    /** Reads the coordinator's policy, after applying `edit` when it changes anything. */
+    /** True when retained readings or a hard cap already show the model drained there. No probing. */
+    readonly limited: (
+      selection: Pick<ModelSelection, "instanceId" | "model">,
+    ) => Effect.Effect<boolean, AllocationError>;
+    /** Reads the coordinator's policies, after applying `edit` when it changes anything. */
     readonly editPolicy: (
       edit: AllocationPolicyEdit,
     ) => Effect.Effect<AllocationPolicyView, AllocationError>;
     readonly receive: (from: string, request: unknown) => Effect.Effect<unknown, AllocationError>;
-    /**
-     * Computer advice plus the inventories it ranked, read on this computer. Placement needs no
-     * allocation authority, so it never goes through the coordinator.
-     */
-    readonly place: (request: ComputerPlacementRequest) => Effect.Effect<
-      {
-        readonly placement: ComputerPlacement;
-        readonly inventories: readonly AllocationInventory[];
-      },
-      AllocationError
-    >;
+    /** Load numbers of this computer and every linked one. Nothing is ranked or reserved. */
+    readonly computers: (
+      request: ComputersRequest,
+    ) => Effect.Effect<ComputersReport, AllocationError>;
   }
 >()("t3/allocation/ProviderAllocation") {}
-
-const decodeAssessment = Schema.decodeUnknownEffect(Schema.fromJsonString(AssignmentAssessment));
 
 const make = Effect.gen(function* () {
   const store = yield* Store.AllocationStore;
@@ -164,8 +176,9 @@ const make = Effect.gen(function* () {
   const scope = yield* Effect.scope;
   const refreshAttempts = new Map<string, number>();
   let coordinatorUnreachableAt = -Infinity;
-  /** The coordinator's policy as last read, so its account rules outlive a lost connection. */
+  /** The coordinator's policies as last read, so a lost connection decides by them. */
   let coordinatorPolicy: AllocationPolicy | undefined;
+  let coordinatorModelPolicy: ModelRoutingPolicy | undefined;
 
   /**
    * Readings are only probed while a client watches provider status, so they can be days old
@@ -329,46 +342,24 @@ const make = Effect.gen(function* () {
         : {}),
     };
   }, Effect.mapError(unavailable));
-  /** Accounts a reached cap closes to workers, with the provider reset when it is known. */
-  const workerCaps = Effect.fn("ProviderAllocation.workerCaps")(function* (at: string) {
-    const rows = yield* sql<{
-      account_key: string;
-      resets_at: string | null;
-    }>`SELECT account_key, resets_at FROM provider_usage_cap_latches WHERE stop_workers = 1`;
-    return new Map(
-      rows
-        .filter((row) => row.resets_at === null || row.resets_at > at)
-        .map((row) => [row.account_key, row.resets_at]),
+  /** The coordinator's policies: asked now, else as last read, else this computer's own copy. */
+  const policies = Effect.gen(function* () {
+    yield* execute({ _tag: "caps" }).pipe(
+      Effect.timeoutOption(READING_REFRESH_BUDGET),
+      Effect.catch(() => Effect.succeedNone),
     );
+    return {
+      policy: coordinatorPolicy ?? (yield* store.policy),
+      modelPolicy: coordinatorModelPolicy ?? (yield* store.modelPolicy),
+    };
   });
-  /** Undefined when nothing shows the account exhausted; null when it is, with no known reset. */
-  const exhaustedUntil = (
-    account: Pick<
-      AllocationAccount,
-      "driver" | "accountKey" | "environmentId" | "instanceId" | "windows" | "limitedUntil"
-    >,
-    at: string,
-    caps: ReadonlyMap<string, string | null>,
-  ) => {
-    const key = allocationPreferenceKey(account);
-    const resets = [
-      ...(caps.has(key) ? [caps.get(key) ?? null] : []),
-      ...account.windows
-        .filter((w) => w.usedPoints >= 100 && (w.resetsAt === null || w.resetsAt > at))
-        .map((w) => w.resetsAt),
-      ...(account.limitedUntil && account.limitedUntil > at ? [account.limitedUntil] : []),
-    ];
-    if (!resets.length) return undefined;
-    return (
-      resets
-        .filter((reset): reset is string => reset !== null)
-        .sort()
-        .at(-1) ?? null
-    );
-  };
-  const limited = Effect.fn("ProviderAllocation.limited")(function* (instanceId: string) {
+  const limited = Effect.fn("ProviderAllocation.limited")(function* (
+    selection: Pick<ModelSelection, "instanceId" | "model">,
+  ) {
     const at = yield* now;
-    const provider = (yield* providers.getProviders).find((p) => p.instanceId === instanceId);
+    const provider = (yield* providers.getProviders).find(
+      (p) => p.instanceId === selection.instanceId,
+    );
     if (!provider) return false;
     const [account] = allocationInventory({
       environmentId: local.environmentId,
@@ -387,8 +378,15 @@ const make = Effect.gen(function* () {
         limitations: [],
       },
     }).accounts;
+    if (!account) return false;
+    const policy = coordinatorPolicy ?? (yield* store.policy);
     return (
-      account !== undefined && exhaustedUntil(account, at, yield* workerCaps(at)) !== undefined
+      accountRoom({
+        account,
+        model: selection.model,
+        cap: accountCap(policy, account, "worker"),
+        at,
+      }).drainedUntil !== undefined
     );
   }, Effect.mapError(unavailable));
   const reroute = Effect.fn("ProviderAllocation.reroute")(function* (
@@ -396,116 +394,87 @@ const make = Effect.gen(function* () {
     current: ModelSelection,
     options?: { readonly rejected?: boolean; readonly switchAccount?: boolean },
   ) {
-    // Account rules live in the coordinator's policy; `execute` answers from its last known copy.
-    const policy =
-      Option.getOrUndefined(
-        yield* execute({ _tag: "caps" }).pipe(
-          Effect.map((response) => response.policy),
-          Effect.timeoutOption(READING_REFRESH_BUDGET),
-          Effect.catch(() => Effect.succeedNone),
-        ),
-      ) ??
-      coordinatorPolicy ??
-      (yield* Effect.logWarning("Usage recovery could not check account rules").pipe(
-        Effect.andThen(store.policy),
-      ));
+    const { policy, modelPolicy } = yield* policies;
     const localInventory = yield* inventory(undefined, undefined, policy.maxReadingAgeMinutes);
     const at = yield* now;
-    const caps = yield* workerCaps(at);
-    const currentAccount = localInventory.accounts.find((a) => a.instanceId === current.instanceId);
-    const reset = currentAccount ? exhaustedUntil(currentAccount, at, caps) : undefined;
+    const account = localInventory.accounts.find((a) => a.instanceId === current.instanceId);
+    const reset = account
+      ? accountRoom({
+          account,
+          model: current.model,
+          cap: accountCap(policy, account, "worker"),
+          at,
+        }).drainedUntil
+      : undefined;
     if (!options?.rejected && reset === undefined) return { _tag: "proceed" } as const;
     const until =
       reset ?? DateTime.formatIso(DateTime.makeUnsafe(Date.parse(at) + UNKNOWN_RESET_WAIT_MS));
-    const wait = { _tag: "wait", until, observed: reset !== undefined } as const;
-    const driver = currentAccount?.driver;
-    if (options?.switchAccount === false || (driver !== "codex" && driver !== "claudeAgent"))
-      return wait;
-    // Unknown or expired readings cannot establish headroom for an automatic retry.
-    const accounts = localInventory.accounts.filter(
-      (a) =>
-        a.available &&
-        a.instanceId !== current.instanceId &&
-        (!currentAccount?.accountKey || a.accountKey !== currentAccount.accountKey) &&
-        !caps.has(allocationPreferenceKey(a)) &&
-        a.windows.length > 0 &&
-        a.windows.every(
-          (w) =>
-            w.usedPoints < 100 &&
-            Date.parse(at) - Date.parse(w.checkedAt) <= policy.maxReadingAgeMinutes * 60_000 &&
-            (w.resetsAt === null || w.resetsAt > at),
+    const long =
+      Date.parse(until) - Date.parse(at) >
+      (policy.longWaitHours ?? DEFAULT_LONG_WAIT_HOURS) * 3_600_000;
+    const wait = { _tag: "wait", until, observed: reset !== undefined, long } as const;
+    if (options?.switchAccount === false || !account) return wait;
+    // The account that is drained or just refused the turn is out, whatever its readings say.
+    const inventories = [
+      {
+        ...localInventory,
+        accounts: localInventory.accounts.filter(
+          (a) =>
+            a.instanceId !== current.instanceId &&
+            (!account.accountKey || a.accountKey !== account.accountKey),
         ),
-    );
-    const inventories = [{ ...localInventory, accounts }];
+      },
+    ];
     const reservations = yield* store.reservations;
     const base = {
       assignmentId: `usage-switch:${threadId}`,
       environmentId: local.environmentId,
       threadId,
     };
-    const decide = (request: AllocationRequest) =>
-      decideAllocation({
-        at,
-        policy,
-        request,
-        inventories,
-        reservations,
-        authorityAvailable: true,
-      }).selectedInstanceId;
-    const sameInstance = decide({
-      ...base,
-      driver,
-      model: current.model,
-      options: current.options ?? [],
-    });
-    if (sameInstance)
+    const context = { at, policy, inventories, reservations, authorityAvailable: true };
+    const sameModel = decideAllocation({
+      ...context,
+      request: {
+        ...base,
+        driver: account.driver,
+        model: current.model,
+        options: current.options ?? [],
+      },
+    }).selectedInstanceId;
+    if (sameModel)
       return {
         _tag: "switch",
-        selection: { ...current, instanceId: sameInstance },
-        crossFamily: false,
+        selection: { ...current, instanceId: sameModel },
+        modelChanged: false,
       } as const;
-    const rows = yield* sql<{
-      assessment: string | null;
-    }>`SELECT json_extract(record_json, '$.recommendation.assessment') AS assessment FROM worker_recommendations WHERE thread_id = ${threadId}`;
-    // Legacy workers lack a task assessment. Use the middle routing-table cell.
-    const assessment = rows[0]?.assessment
-      ? yield* decodeAssessment(rows[0].assessment).pipe(Effect.mapError(unavailable))
-      : {
-          difficulty: 5,
-          stakes: 5,
-          difficultyReason: "Legacy worker usage recovery",
-          stakesReason: "Legacy worker usage recovery",
-        };
-    const modelPolicy = yield* store.modelPolicy;
-    for (const family of [
-      driver,
-      ProviderDriverKind.make(driver === "codex" ? "claudeAgent" : "codex"),
-    ]) {
-      // Another family restarts from a summary of the conversation, so a short wait is better.
-      if (family !== driver && Date.parse(until) - Date.parse(at) <= LONG_USAGE_WAIT_MS) break;
-      const candidates = modelCandidates(
-        modelPolicy,
-        {
-          ...base,
-          selection: "automatic",
-          assessment,
-          allowedDrivers: [family],
-        },
-        inventories,
-        undefined,
-        { policy, at },
-      ).candidates;
-      for (const { request } of candidates) {
-        const instanceId = decide(request);
-        if (instanceId)
-          return {
-            _tag: "switch",
-            selection: { instanceId, model: request.model, options: request.options },
-            crossFamily: family !== driver,
-          } as const;
-      }
-    }
-    return wait;
+    // Another model continues from the same conversation with other abilities: only when the
+    // reset is far, and then the master is told.
+    if (!long) return wait;
+    // A reading that shows the drain is scoped to the model, so this account may offer another.
+    const decision = chooseProfile({
+      ...context,
+      ...(reset !== undefined ? { inventories: [localInventory] } : {}),
+      modelPolicy,
+      request: {
+        ...base,
+        selection: "automatic",
+        // Unused: the worker's own model is the starting rung.
+        assessment: { difficulty: 0, stakes: 0 },
+        allowedDrivers: [account.driver],
+        override: { driver: account.driver, model: current.model, options: current.options ?? [] },
+      },
+    }).decision;
+    return decision?.selectedInstanceId
+      ? ({
+          _tag: "switch",
+          selection: {
+            instanceId: decision.selectedInstanceId,
+            model: decision.request.model,
+            options: decision.request.options,
+          },
+          modelChanged: true,
+        } as const)
+      : wait;
   }, Effect.mapError(unavailable));
   const probe = Effect.fn("ProviderAllocation.probe")(function* (
     threadId: ThreadId,
@@ -673,21 +642,6 @@ const make = Effect.gen(function* () {
       }
     }
   });
-  /** Advice only: it reads every linked computer, reserves nothing and gates nothing. */
-  const placeLocal = Effect.fn("ProviderAllocation.placeLocal")(function* (
-    request: ComputerPlacementRequest,
-    policy: AllocationPolicy,
-  ) {
-    const inventories = yield* collect(
-      undefined,
-      undefined,
-      request.repositoryKey === undefined ? {} : { repositoryKey: request.repositoryKey },
-    );
-    return {
-      placement: recommendPlacement({ at: yield* now, policy, request, inventories }),
-      inventories,
-    };
-  });
   const executeLocal = Effect.fn("ProviderAllocation.executeLocal")(function* (
     operation: AllocationOperation,
     /** The coordinator cannot be used: decide here, and let the decision record that. */
@@ -696,9 +650,17 @@ const make = Effect.gen(function* () {
     const policy = yield* store.policy;
     const authorityAvailable = policy.coordinatorEnvironmentId === local.environmentId;
     const decides = authorityAvailable || fallback;
-    // A fallback applies the coordinator's last known policy, or records that it has none.
-    const standIn = fallback ? { coordinatorPolicy: coordinatorPolicy ?? null } : {};
-    if (operation._tag === "caps") return { policy };
+    // A fallback applies the coordinator's last known policies.
+    const standIn: {
+      coordinatorPolicy?: AllocationPolicy | null;
+      coordinatorModelPolicy?: ModelRoutingPolicy;
+    } = fallback
+      ? {
+          coordinatorPolicy: coordinatorPolicy ?? null,
+          ...(coordinatorModelPolicy ? { coordinatorModelPolicy } : {}),
+        }
+      : {};
+    if (operation._tag === "caps") return { policy, modelPolicy: yield* store.modelPolicy };
     if (
       operation._tag === "modelSnapshot" ||
       operation._tag === "modelPolicy" ||
@@ -709,15 +671,12 @@ const make = Effect.gen(function* () {
       const modelPolicy = yield* store.modelPolicy;
       const selecting = operation._tag === "modelPreview" || operation._tag === "modelAllocate";
       yield* reconcile(selecting ? operation.request.assignmentId : undefined);
-      let inventories = yield* collect(
+      const inventories = yield* collect(
         undefined,
         selecting ? operation.request.environmentId : undefined,
         undefined,
         selecting ? policy.maxReadingAgeMinutes : undefined,
       );
-      const coordinated =
-        authorityAvailable &&
-        inventories.every((i) => i.complete && i.coordinatorEnvironmentId === local.environmentId);
       if (operation._tag === "modelSnapshot")
         return {
           modelSnapshot: {
@@ -729,58 +688,19 @@ const make = Effect.gen(function* () {
           },
         };
       if (operation._tag === "modelPolicy" || operation._tag === "modelRevert") {
-        if (!coordinated) return yield* unavailable();
-        return {
-          modelPolicy: yield* store.saveModelPolicy({
-            expectedVersion: operation.expectedVersion,
-            inventories,
-            ...(operation._tag === "modelPolicy"
-              ? { policy: operation.policy }
-              : { revertVersion: operation.version }),
-          }),
-        };
+        // Models are only warned about, so a computer that is off never blocks an edit.
+        if (!authorityAvailable) return yield* unavailable();
+        const saved = yield* store.saveModelPolicy({
+          expectedVersion: operation.expectedVersion,
+          inventories,
+          ...(operation._tag === "modelPolicy"
+            ? { policy: operation.policy }
+            : { revertVersion: operation.version }),
+        });
+        return { modelPolicy: saved.policy, warnings: [...saved.warnings] };
       }
       if (operation._tag === "modelAllocate" && !decides) return yield* unavailable();
-      // Preserve the allocator's measured profile uncertainty for each eligible
-      // family. Catalog/quota selection below still uses one shared snapshot.
-      const effectiveModelPolicy =
-        operation._tag === "modelPreview" ? (operation.policy ?? modelPolicy) : modelPolicy;
-      const prior =
-        operation._tag === "modelAllocate" || !operation.policy
-          ? yield* store.modelDecisionById(operation.request.assignmentId)
-          : undefined;
-      const retained =
-        prior &&
-        Store.withoutAccountChoice(prior.request) === Store.withoutAccountChoice(operation.request)
-          ? prior
-          : undefined;
-      for (const candidate of modelCandidates(
-        effectiveModelPolicy,
-        operation.request,
-        inventories,
-        retained,
-        { policy: standIn.coordinatorPolicy ?? policy, at: yield* now },
-      ).candidates) {
-        const measured = yield* collect(candidate.request);
-        inventories = inventories.map((host) => ({
-          ...host,
-          complete:
-            host.complete &&
-            measured.some((i) => i.environmentId === host.environmentId && i.complete),
-          accounts: host.accounts.map((account) => {
-            const profile = measured
-              .find((i) => i.environmentId === host.environmentId)
-              ?.accounts.find((a) => a.instanceId === account.instanceId);
-            return profile && account.driver === candidate.request.driver
-              ? {
-                  ...account,
-                  profileSamples: profile.profileSamples,
-                  profileUncertainty: profile.profileUncertainty,
-                }
-              : account;
-          }),
-        }));
-      }
+      const effectiveModelPolicy = operation._tag === "modelPreview" ? operation.policy : undefined;
       return {
         selection: yield* store.selectModel({
           at: yield* now,
@@ -791,14 +711,10 @@ const make = Effect.gen(function* () {
           expectedPolicyVersion: policy.version,
           expectedModelVersion: modelPolicy.version,
           ...standIn,
-          ...(operation._tag === "modelPreview" && operation.policy
-            ? { previewPolicy: operation.policy }
-            : {}),
+          ...(effectiveModelPolicy ? { previewPolicy: effectiveModelPolicy } : {}),
         }),
       };
     }
-    if (operation._tag === "placement")
-      return { placement: (yield* placeLocal(operation.request, policy)).placement };
     if (operation._tag === "policy") {
       if (operation.input.policy.coordinatorEnvironmentId !== local.environmentId)
         return yield* new AllocationError({
@@ -830,8 +746,9 @@ const make = Effect.gen(function* () {
               code: "unavailable",
               detail: decision.reasons.includes(WORKER_ACCOUNT_DISABLED_REASON)
                 ? WORKER_ACCOUNT_DISABLED_REASON
-                : (decision.reasons.find((reason) => reason.startsWith(ACCOUNT_RULE_REASON)) ??
-                  "Reserved account no longer supports the exact requested profile or identity constraints."),
+                : decision.outcome === "wait"
+                  ? decision.reasons[0]!
+                  : "Reserved account no longer supports the exact requested profile or identity constraints.",
             });
         }
       }
@@ -872,9 +789,8 @@ const make = Effect.gen(function* () {
     if (operation._tag === "snapshot")
       return {
         snapshot: {
-          accountRulesSupported: true,
           accountCapsSupported: true,
-          workerModelsSupported: true,
+          accountOrderSupported: true,
           policy,
           inventories,
           reservations: yield* store.reservations,
@@ -884,7 +800,7 @@ const make = Effect.gen(function* () {
             ...inventories.flatMap((i) => i.notices),
             ...(!coordinated
               ? [
-                  "Some linked environment observations or coordinator settings differ. Forecasts may be incomplete; managed starts retain their exact destination.",
+                  "Some linked computers could not be read or name another coordinator, so their accounts and workers may be missing here.",
                 ]
               : []),
           ],
@@ -906,38 +822,38 @@ const make = Effect.gen(function* () {
       }),
     };
   });
-  const withRepositoryKey = Effect.fn("ProviderAllocation.repositoryKey")(function* (
-    request: ComputerPlacementRequest,
-  ) {
-    if (request.projectId === undefined || request.repositoryKey !== undefined) return { request };
-    const { projectId, ...unmatched } = request;
-    const project = (yield* projection
-      .getShellSnapshot()
-      .pipe(Effect.mapError(unavailable))).projects.find(({ id }) => id === projectId);
-    // Another computer's project ID is a common input; the advice is still worth having.
-    if (!project)
-      return {
-        request: unmatched,
-        warning: `Project ${projectId} was not found on this computer, so checkouts were not matched. Use a project ID of the computer you are asking.`,
-      };
-    const repositoryKey = project.repositoryIdentity?.canonicalKey;
-    return { request: repositoryKey === undefined ? request : { ...request, repositoryKey } };
-  });
   // Only this computer knows its project IDs; checkouts elsewhere match by repository.
-  const place = Effect.fn("ProviderAllocation.place")(function* (
-    request: ComputerPlacementRequest,
+  const computersReport = Effect.fn("ProviderAllocation.computers")(function* (
+    request: ComputersRequest,
   ) {
-    const resolved = yield* withRepositoryKey(request);
-    const advice = yield* placeLocal(resolved.request, yield* store.policy);
-    return resolved.warning === undefined
-      ? advice
-      : {
-          ...advice,
-          placement: {
-            ...advice.placement,
-            reasons: [...advice.placement.reasons, resolved.warning],
-          },
-        };
+    const project =
+      request.projectId === undefined
+        ? undefined
+        : (yield* projection.getShellSnapshot().pipe(Effect.mapError(unavailable))).projects.find(
+            ({ id }) => id === request.projectId,
+          );
+    const repositoryKey = project?.repositoryIdentity?.canonicalKey;
+    const inventories = yield* collect(
+      undefined,
+      undefined,
+      repositoryKey === undefined ? {} : { repositoryKey },
+    );
+    return {
+      at: yield* now,
+      computers: inventories.map(computerNumbers),
+      notes: [
+        ...(request.projectId !== undefined && !project
+          ? [
+              `Project ${request.projectId} was not found on this computer, so no checkout was matched.`,
+            ]
+          : project && repositoryKey === undefined
+            ? [
+                "The project has no repository identity (a Git remote or a projectKey in t3.json), so no checkout was matched.",
+              ]
+            : []),
+        ...inventories.flatMap((i) => (i.complete ? [] : i.notices)),
+      ],
+    };
   });
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
     operation: AllocationOperation,
@@ -1006,10 +922,6 @@ const make = Effect.gen(function* () {
       }
       return {};
     }
-    // Placement reads every linked computer itself and needs no authority, so it stays here:
-    // an older coordinator that does not know the operation cannot fail the whole advice.
-    if (operation._tag === "placement")
-      return { placement: (yield* place(operation.request)).placement };
     const id = (yield* settings.getSettings.pipe(Effect.mapError(unavailable)))
       .allocationCoordinatorEnvironmentId;
     if (id && id !== local.environmentId) {
@@ -1048,11 +960,17 @@ const make = Effect.gen(function* () {
         (yield* Clock.currentTimeMillis) - coordinatorUnreachableAt < COORDINATOR_RETRY_MS
       )
         return yield* executeLocal(here, true);
-      return yield* peers.call(id, { _tag: "allocation", operation }).pipe(
+      const sent =
+        operation._tag === "modelPreview" || operation._tag === "modelAllocate"
+          ? { ...operation, request: withLegacyReasons(operation.request) }
+          : operation;
+      return yield* peers.call(id, { _tag: "allocation", operation: sent }).pipe(
         Effect.flatMap(decodeResponse),
         Effect.tap((response) =>
           Effect.sync(() => {
             coordinatorPolicy = response.policy ?? response.snapshot?.policy ?? coordinatorPolicy;
+            coordinatorModelPolicy =
+              response.modelPolicy ?? response.modelSnapshot?.policy ?? coordinatorModelPolicy;
           }),
         ),
         Effect.catch((cause) => {
@@ -1060,19 +978,22 @@ const make = Effect.gen(function* () {
             return Effect.fail(
               new AllocationError({ code: "invalid", detail: WORKER_ACCOUNT_DISABLED_REASON }),
             );
-          // The coordinator's own answer to a policy save or a rule refusal is the message.
+          // The coordinator's own answer to a policy save is the message.
           if (
             cause._tag === "PeerRejected" &&
-            (operation._tag === "policy" || cause.message.includes(ACCOUNT_RULE_REASON))
+            (operation._tag === "policy" || operation._tag === "modelPolicy")
           )
             return Effect.fail(new AllocationError({ code: "invalid", detail: cause.message }));
           // An unreachable coordinator, or one on a version that cannot read the request, must
           // not fail a start. A deliberate refusal still does.
           const refused =
             cause._tag === "PeerRejected" && !cause.message.includes(UNREADABLE_PEER_REQUEST);
-          // Rule checks outside a start read the policy; an unreachable coordinator's last copy answers.
+          // Checks outside a start read the policy; an unreachable coordinator's last copy answers.
           if (operation._tag === "caps" && !refused && coordinatorPolicy)
-            return Effect.succeed({ policy: coordinatorPolicy });
+            return Effect.succeed({
+              policy: coordinatorPolicy,
+              ...(coordinatorModelPolicy ? { modelPolicy: coordinatorModelPolicy } : {}),
+            });
           if (refused || !decidesHere) return Effect.fail(unavailable());
           return Effect.logWarning("Allocation coordinator unavailable; deciding locally", {
             operation: operation._tag,
@@ -1096,35 +1017,49 @@ const make = Effect.gen(function* () {
   ) {
     const snapshot = (yield* execute({ _tag: "snapshot" })).snapshot;
     if (!snapshot) return yield* unavailable();
-    const at = yield* now;
-    if (Object.values(edit).every((change) => change === undefined))
-      return allocationPolicyView(snapshot, at);
-    if (snapshot.accountRulesSupported !== true)
+    // A coordinator from before smart allocation answers `caps` without the model policy.
+    const model =
+      (yield* execute({ _tag: "caps" })).modelPolicy ??
+      (yield* execute({ _tag: "modelSnapshot" })).modelSnapshot?.policy;
+    if (!model) return yield* unavailable();
+    const { showTable, ...changes } = edit;
+    const { accountOrder, closeMarginPoints, longWaitHours, setCaps, clearCaps } = changes;
+    const allocationEdit = [accountOrder, closeMarginPoints, longWaitHours, setCaps, clearCaps];
+    const modelEdit = [changes.ladder, changes.fallback, changes.setCells];
+    const edits = (values: readonly unknown[]) => values.some((value) => value !== undefined);
+    if ((edits(allocationEdit) || edits(modelEdit)) && snapshot.accountOrderSupported !== true)
       return yield* new AllocationError({
         code: "invalid",
         detail: "Update the allocation coordinator before changing its policy from here.",
       });
-    if (edit.workerModels && snapshot.workerModelsSupported !== true)
-      return yield* new AllocationError({
-        code: "invalid",
-        detail: "Update the allocation coordinator before setting a default worker model.",
-      });
-    const { policy } = yield* execute({
-      _tag: "policy",
-      input: {
-        expectedVersion: snapshot.policy.version,
-        policy: yield* editAllocationPolicy(snapshot, edit, at),
-      },
+    const policy = edits(allocationEdit)
+      ? (yield* execute({
+          _tag: "policy",
+          input: {
+            expectedVersion: snapshot.policy.version,
+            policy: yield* editAllocationPolicy(snapshot, edit),
+          },
+        })).policy
+      : snapshot.policy;
+    const saved = edits(modelEdit)
+      ? yield* execute({
+          _tag: "modelPolicy",
+          expectedVersion: model.version,
+          policy: editModelPolicy(model, edit),
+        })
+      : { modelPolicy: model };
+    if (!policy || !saved.modelPolicy) return yield* unavailable();
+    return allocationPolicyView({ ...snapshot, policy }, saved.modelPolicy, {
+      ...(showTable ? { showTable } : {}),
+      ...(saved.warnings ? { warnings: saved.warnings } : {}),
     });
-    if (!policy) return yield* unavailable();
-    return allocationPolicyView({ ...snapshot, policy }, at);
   });
   return ProviderAllocation.of({
     reroute,
     limited,
     execute,
     editPolicy,
-    place,
+    computers: computersReport,
     receive: Effect.fn("ProviderAllocation.receive")(function* (from, raw) {
       if (Option.isNone(yield* peers.resolve(from)))
         return yield* new AllocationError({

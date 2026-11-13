@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  workerChoice,
   type AllocationInventory,
   type ModelRoutingRequest,
 } from "@t3tools/contracts";
@@ -101,11 +102,13 @@ const setup = Effect.gen(function* () {
       ...defaultAllocationPolicy,
       mode: "automatic",
       coordinatorEnvironmentId: "host",
-      claude: defaultAllocationPolicy.codex,
     },
   });
   return store;
 });
+const claudeAgent = ProviderDriverKind.make("claudeAgent");
+const claude = inventory.accounts.find((a) => a.driver === "claudeAgent")!;
+const claudeOnly = { ...request, allowedDrivers: [claudeAgent] };
 const args = {
   at,
   request,
@@ -116,45 +119,109 @@ const args = {
   expectedModelVersion: 0,
 };
 it.effect(
-  "compares projected headroom across approved provider profiles as concurrent work changes",
+  "records the wanted profile when a drained model moved the choice, and the reset when refused",
   () =>
     run(
       Effect.gen(function* () {
         const store = yield* setup;
-        const current = {
-          ...inventory,
-          accounts: inventory.accounts.map((a) => ({
-            ...a,
-            windows: a.windows.map((w) => ({ ...w, usedPoints: a.driver === "codex" ? 9 : 10 })),
-          })),
-        };
-        const idle = yield* store.selectModel({ ...args, reserve: false, inventories: [current] });
-        expect(idle.allocation?.decision.request.driver).toBe("codex");
-        const profile = idle.allocation!.decision.request;
-        const busy = yield* store.selectModel({
+        const week = claude.windows[0]!;
+        const withWindows = (windows: AllocationInventory["accounts"][number]["windows"]) => [
+          { ...inventory, accounts: [{ ...claude, windows }] },
+        ];
+        // Difficulty 7, stakes 7 is Opus medium, and Opus has its own used-up window.
+        const moved = yield* store.selectModel({
           ...args,
-          reserve: false,
-          inventories: [
+          request: claudeOnly,
+          inventories: withWindows([
+            week,
             {
-              ...current,
-              demand: [
-                {
-                  environmentId: "host",
-                  threadId: ThreadId.make("ongoing"),
-                  instanceId: ProviderInstanceId.make("codex"),
-                  accountKey: "codex",
-                  model: profile.model,
-                  options: profile.options,
-                  state: "running",
-                },
-              ],
+              ...week,
+              id: "week_opus",
+              label: "Week · Opus",
+              models: ["claude-opus-5-5"],
+              usedPoints: 100,
+              resetsAt: "2026-10-25T12:00:00.000Z",
             },
-          ],
+          ]),
         });
-        expect(busy.allocation?.decision.request.driver).toBe("claudeAgent");
-        expect(busy.profiles.every((p) => p.eligible)).toBe(true);
+        expect(moved.allocation?.decision.request).toMatchObject({
+          model: "claude-sonnet-5-5",
+          options: [{ id: "effort", value: "high" }],
+        });
+        expect(moved.wanted).toEqual({
+          driver: "claudeAgent",
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "medium" }],
+        });
+        expect(moved.profiles.map((p) => [p.model, p.eligible])).toEqual([
+          ["claude-opus-5-5", false],
+          ["claude-sonnet-5-5", true],
+        ]);
+        expect(moved.reasons[0]).toContain(
+          "claude-opus-5-5 / medium is drained on every account (earliest reset 2026-10-25T12:00:00.000Z)",
+        );
+        expect(moved.accounts).toHaveLength(1);
+        expect(moved.drainedUntil).toBeUndefined();
+        expect(moved.allocation?.reservation?.instanceId).toBe("claudeAgent");
+        expect(workerChoice(moved)).toMatchObject({
+          state: "chosen",
+          chosen: { instanceId: "claudeAgent", model: "claude-sonnet-5-5", effort: "high" },
+          wanted: "claude-opus-5-5 / medium",
+        });
+        expect(yield* store.modelDecisionById("one")).toEqual(moved);
+
+        // Difficulty 7, stakes 8 is Opus high, above the fallback threshold: with the whole
+        // account used up the start is refused until the reset.
+        const high = {
+          ...claudeOnly,
+          assignmentId: "refused",
+          threadId: ThreadId.make("refused"),
+          assessment: { difficulty: 7, stakes: 8 },
+        };
+        const refused = yield* store.selectModel({
+          ...args,
+          request: high,
+          inventories: withWindows([{ ...week, usedPoints: 100 }]),
+        });
+        expect(refused.allocation).toBeNull();
+        expect(refused.wanted).toBeUndefined();
+        expect(refused.drainedUntil).toBe("2026-10-29T12:00:00.000Z");
+        expect(refused.reasons[0]).toContain("Drained: claude-opus-5-5 / high");
+        expect(workerChoice(refused)).toMatchObject({
+          state: "drained",
+          chosen: null,
+          drainedUntil: "2026-10-29T12:00:00.000Z",
+        });
+        expect(yield* store.reservations).toHaveLength(1);
+        // The same start, retried once there is room, is admitted.
+        const started = yield* store.selectModel({ ...args, request: high });
+        expect(started.allocation?.reservation).not.toBeNull();
+        expect(started.allocation?.decision.request).toMatchObject({
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "high" }],
+        });
+        expect(started.drainedUntil).toBeUndefined();
+        expect(yield* store.reservations).toHaveLength(2);
       }),
     ),
+);
+it.effect("asks Claude first when both families are allowed, whatever room Codex has", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      const current = {
+        ...inventory,
+        accounts: inventory.accounts.map((a) => ({
+          ...a,
+          windows: a.windows.map((w) => ({ ...w, usedPoints: a.driver === "codex" ? 0 : 90 })),
+        })),
+      };
+      const chosen = yield* store.selectModel({ ...args, reserve: false, inventories: [current] });
+      expect(chosen.allocation?.decision.request.driver).toBe("claudeAgent");
+      expect(chosen.profiles.map((p) => [p.driver, p.eligible])).toEqual([["claudeAgent", true]]);
+      expect(yield* store.reservations).toHaveLength(0);
+    }),
+  ),
 );
 it.effect("retains family consent through denied lineage after store reconstruction", () =>
   run(
@@ -202,128 +269,110 @@ it.effect("retains family consent through denied lineage after store reconstruct
     }),
   ),
 );
-it.effect(
-  "retries never-reserved quota denial with frozen profiles and version after reconstruction",
-  () =>
-    run(
-      Effect.gen(function* () {
-        const store = yield* setup;
-        const pinned = {
-          ...request,
-          policyVersion: 0,
-          explicitInstanceId: ProviderInstanceId.make("codex"),
-        };
-        const blocked = {
-          ...inventory,
-          accounts: inventory.accounts.map((a) => ({
-            ...a,
-            windows: a.windows.map((w) => ({ ...w, usedPoints: 100 })),
+it.effect("retries a refused start once there is room, then replays its reservation exactly", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      const pinned = {
+        ...request,
+        policyVersion: 0,
+        explicitInstanceId: ProviderInstanceId.make("codex"),
+      };
+      const blocked = {
+        ...inventory,
+        accounts: inventory.accounts.map((a) => ({
+          ...a,
+          windows: a.windows.map((w) => ({ ...w, usedPoints: 100 })),
+        })),
+      };
+      const refused = yield* store.selectModel({
+        ...args,
+        request: pinned,
+        inventories: [blocked],
+      });
+      expect(refused.allocation).toBeNull();
+      expect(refused.drainedUntil).toBe("2026-10-29T12:00:00.000Z");
+      expect(refused.reasons[0]).toContain("a pinned account is exact.");
+      expect(refused.profiles.map((p) => [p.model, p.eligible])).toEqual([["gpt-6-astra", false]]);
+      expect(yield* store.reservations).toHaveLength(0);
+      const recoveredAt = "2026-10-29T18:00:00.000Z";
+      const recovered = {
+        ...inventory,
+        observedAt: recoveredAt,
+        accounts: inventory.accounts.map((a) => ({
+          ...a,
+          shortWindowAbsentCheckedAt: recoveredAt,
+          windows: a.windows.map((w) => ({
+            ...w,
+            checkedAt: recoveredAt,
+            cycleStartedAt: "2026-10-29T12:00:00.000Z",
+            resetsAt: "2026-11-05T12:00:00.000Z",
           })),
-        };
-        const proposal = yield* store.selectModel({
-          ...args,
-          reserve: false,
-          request: pinned,
-          inventories: [blocked],
-        });
-        const first = {
-          ...proposal,
-          allocation: null,
-          profiles: proposal.profiles.map((p) => ({ ...p, eligible: false })),
-        };
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO model_selection_decisions (assignment_id,created_at,decision_json) VALUES (${pinned.assignmentId},${at},${encode(first)})`;
-        expect(first.allocation).toBeNull();
-        expect(yield* store.reservations).toHaveLength(0);
-        yield* store.saveModelPolicy({
-          expectedVersion: 0,
-          inventories: [inventory],
-          policy: {
-            ...defaultModelRoutingPolicy,
-            codex: {
-              ...defaultModelRoutingPolicy.codex,
-              cells: defaultModelRoutingPolicy.codex.cells.map((row) =>
-                row.map(() => ({ model: "gpt-6.1-sol", effort: "medium" })),
-              ),
-            },
-          },
-        });
-        const recoveredAt = "2026-10-29T18:00:00.000Z";
-        const recovered = {
-          ...inventory,
-          observedAt: recoveredAt,
-          accounts: inventory.accounts.map((a) => ({
-            ...a,
-            shortWindowAbsentCheckedAt: recoveredAt,
-            windows: a.windows.map((w) => ({
-              ...w,
-              checkedAt: recoveredAt,
-              cycleStartedAt: "2026-10-29T12:00:00.000Z",
-              resetsAt: "2026-11-05T12:00:00.000Z",
+        })),
+      };
+      const retryArgs = {
+        ...args,
+        request: pinned,
+        at: recoveredAt,
+        inventories: [recovered],
+      };
+      const missingExact = yield* store.selectModel({
+        ...retryArgs,
+        inventories: [
+          {
+            ...recovered,
+            accounts: recovered.accounts.map((a) => ({
+              ...a,
+              models: a.models.filter((m) => m.slug !== "gpt-6-astra"),
             })),
-          })),
-        };
-        const retryArgs = {
-          ...args,
-          request: pinned,
-          at: recoveredAt,
-          inventories: [recovered],
-          expectedModelVersion: 1,
-        };
-        const missingExact = yield* store.selectModel({
-          ...retryArgs,
-          inventories: [
-            {
-              ...recovered,
-              accounts: recovered.accounts.map((a) => ({
-                ...a,
-                models: a.models.filter((m) => m.slug !== "gpt-6-astra"),
-              })),
-            },
-          ],
-        });
-        expect(missingExact.allocation).toBeNull();
-        expect(missingExact.profiles.map((p) => p.model)).toEqual(["gpt-6-astra"]);
-        expect(yield* store.reservations).toHaveLength(0);
-        const [retry, concurrent] = yield* Effect.all(
-          [store.selectModel(retryArgs), store.selectModel(retryArgs)],
-          { concurrency: "unbounded" },
-        ).pipe(Effect.provide(Store.layer));
-        expect(concurrent).toEqual(retry);
-        expect(retry.allocation?.reservation).not.toBeNull();
-        expect(retry.allocation?.decision.request).toMatchObject({
-          assignmentId: "one",
-          threadId: "one",
-          explicitInstanceId: "codex",
-          model: "gpt-6-astra",
-          options: [{ id: "reasoningEffort", value: "medium" }],
-        });
-        expect(retry.policyVersion).toBe(0);
-        expect(retry.request).toEqual(pinned);
+          },
+        ],
+      });
+      expect(missingExact.allocation).toBeNull();
+      expect(missingExact.drainedUntil).toBeUndefined();
+      expect(missingExact.reasons.join(" ")).toContain(
+        "no account on this computer offers gpt-6-astra / medium",
+      );
+      expect(yield* store.reservations).toHaveLength(0);
+      const [retry, concurrent] = yield* Effect.all(
+        [store.selectModel(retryArgs), store.selectModel(retryArgs)],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.provide(Store.layer));
+      expect(concurrent).toEqual(retry);
+      expect(retry.allocation?.reservation).not.toBeNull();
+      expect(retry.allocation?.decision.request).toMatchObject({
+        assignmentId: "one",
+        threadId: "one",
+        explicitInstanceId: "codex",
+        model: "gpt-6-astra",
+        options: [{ id: "reasoningEffort", value: "medium" }],
+      });
+      expect(retry.policyVersion).toBe(0);
+      expect(retry.request).toEqual(pinned);
+      expect(yield* store.reservations).toHaveLength(1);
+      expect(yield* store.selectModel({ ...retryArgs, inventories: [blocked] })).toEqual(retry);
+      for (const action of ["start", "consume", "release"] as const) {
+        yield* store.lifecycle(
+          {
+            assignmentId: "one",
+            environmentId: "host",
+            threadId: pinned.threadId,
+            action,
+            ...(action === "start" ? { startIntent: "original-start-intent" } : {}),
+          },
+          recoveredAt,
+        );
+        expect(yield* store.selectModel(retryArgs).pipe(Effect.provide(Store.layer))).toEqual(
+          retry,
+        );
         expect(yield* store.reservations).toHaveLength(1);
-        expect(yield* store.selectModel({ ...retryArgs, inventories: [blocked] })).toEqual(retry);
-        for (const action of ["start", "consume", "release"] as const) {
-          yield* store.lifecycle(
-            {
-              assignmentId: "one",
-              environmentId: "host",
-              threadId: pinned.threadId,
-              action,
-              ...(action === "start" ? { startIntent: "original-start-intent" } : {}),
-            },
-            recoveredAt,
-          );
-          expect(yield* store.selectModel(retryArgs).pipe(Effect.provide(Store.layer))).toEqual(
-            retry,
-          );
-          expect(yield* store.reservations).toHaveLength(1);
-        }
-        const finished = yield* store
-          .allocate({ ...retryArgs, request: retry.allocation!.decision.request })
-          .pipe(Effect.flip);
-        expect(finished.message).toContain("finished or was cancelled");
-      }),
-    ),
+      }
+      const finished = yield* store
+        .allocate({ ...retryArgs, request: retry.allocation!.decision.request })
+        .pipe(Effect.flip);
+      expect(finished.message).toContain("finished or was cancelled");
+    }),
+  ),
 );
 it.effect("admits an observed exact profile after mode recovery without changing identity", () =>
   run(
@@ -341,23 +390,9 @@ it.effect("admits an observed exact profile after mode recovery without changing
       expect(observed.allocation?.mode).toBe("observation");
       expect(yield* store.reservations).toHaveLength(0);
       yield* store.savePolicy({ expectedVersion: 2, policy: { ...policy, mode: "automatic" } });
-      const denied = yield* store.selectModel({
-        ...args,
-        expectedPolicyVersion: 3,
-        inventories: [
-          {
-            ...inventory,
-            accounts: inventory.accounts.map((a) =>
-              a.driver === "claudeAgent"
-                ? { ...a, available: false, unavailableReason: "Provider rejected" }
-                : a,
-            ),
-          },
-        ],
-      });
-      expect(denied.allocation).not.toBeNull();
-      expect(denied.allocation?.decision.reasons.join(" ")).toContain("Provider rejected");
-      expect(denied.profiles.map((p) => p.driver)).toEqual(["claudeAgent"]);
+      const admitted = yield* store.selectModel({ ...args, expectedPolicyVersion: 3 });
+      expect(admitted.allocation?.reservation).not.toBeNull();
+      expect(admitted.profiles.map((p) => p.driver)).toEqual(["claudeAgent"]);
       expect(yield* store.reservations).toHaveLength(1);
       const changed = yield* store
         .selectModel({
@@ -376,9 +411,6 @@ it.effect("admits an observed exact profile after mode recovery without changing
       );
       expect(retried.policyVersion).toBe(observed.policyVersion);
       expect(yield* store.reservations).toHaveLength(1);
-      expect(
-        (yield* store.history).some((d) => d.reasons.some((r) => r.includes("Provider rejected"))),
-      ).toBe(true);
     }),
   ),
 );
@@ -412,54 +444,37 @@ it.effect(
       }),
     ),
 );
-it.effect(
-  "serializes different automatic assignments across both provider families without double admission",
-  () =>
-    run(
-      Effect.gen(function* () {
-        const store = yield* setup;
-        yield* store.savePolicy({
-          expectedVersion: 1,
-          policy: {
-            ...defaultAllocationPolicy,
-            mode: "automatic",
-            coordinatorEnvironmentId: "host",
-            codex: { ...defaultAllocationPolicy.codex, burstPoints: 80 },
-            claude: { ...defaultAllocationPolicy.codex, burstPoints: 80 },
-          },
-        });
-        const scarce = {
+it.effect("sends the next start to a close account with fewer workers", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      const pair = [
+        {
           ...inventory,
-          accounts: inventory.accounts.map((a) => ({
-            ...a,
-            windows: a.windows.map((w) => ({ ...w, usedPoints: 80 })),
+          accounts: ["a", "b"].map((id, n) => ({
+            ...claude,
+            instanceId: ProviderInstanceId.make(id),
+            accountKey: id,
+            label: id,
+            windows: claude.windows.map((w) => ({ ...w, usedPoints: 10 + n })),
           })),
-        };
-        const allocate = (id: string) =>
-          store.selectModel({
-            ...args,
-            expectedPolicyVersion: 2,
-            inventories: [scarce],
-            request: { ...request, assignmentId: id, threadId: ThreadId.make(id) },
-          });
-        const [one, two] = yield* Effect.all([allocate("race-one"), allocate("race-two")], {
-          concurrency: "unbounded",
+        },
+      ];
+      const start = (id: string) =>
+        store.selectModel({
+          ...args,
+          inventories: pair,
+          request: { ...claudeOnly, assignmentId: id, threadId: ThreadId.make(id) },
         });
-        expect(
-          new Set([
-            one.allocation?.decision.selectedInstanceId,
-            two.allocation?.decision.selectedInstanceId,
-          ]),
-        ).toEqual(new Set(["codex", "claudeAgent"]));
-        expect(yield* store.reservations).toHaveLength(2);
-        const blocked = yield* allocate("race-three");
-        expect(blocked.allocation?.decision.reasons.join(" ")).toContain("headroom");
-        expect(blocked.profiles.map((p) => [p.driver, p.model, p.options[0]?.value])).toEqual([
-          ["claudeAgent", "claude-opus-5-5", "medium"],
-          ["codex", "gpt-6-astra", "medium"],
-        ]);
-      }),
-    ),
+      expect((yield* start("first")).allocation?.decision.selectedInstanceId).toBe("a");
+      // The reservation just made counts as a worker on a.
+      const second = yield* start("second");
+      expect(second.allocation?.decision.selectedInstanceId).toBe("b");
+      expect(second.reasons[0]).toContain("close to a (90% left) and has fewer workers.");
+      expect((yield* start("third")).allocation?.decision.selectedInstanceId).toBe("a");
+      expect(yield* store.reservations).toHaveLength(3);
+    }),
+  ),
 );
 it.effect(
   "keeps deterministic ties independent of inventory order, and preserves explicit account and host pins",
@@ -566,56 +581,142 @@ it.effect("saves optimistically and reverts as a new immutable policy version", 
         revertVersion: 0,
         inventories: [inventory],
       });
-      expect(restored).toEqual({ ...defaultModelRoutingPolicy, version: 2 });
+      expect(restored.policy).toEqual({ ...defaultModelRoutingPolicy, version: 2 });
       expect((yield* store.modelPolicies).map((p) => p.version)).toEqual([2, 1]);
     }),
   ),
 );
 it.effect(
-  "recommends unchanged profiles with offline/stale, rejection and measured-burn warnings",
+  "accepts a model no account offers with a warning, and keeps the ladder for older editors",
   () =>
     run(
       Effect.gen(function* () {
         const store = yield* setup;
-        for (const inventories of [
-          [{ ...inventory, complete: false }],
-          [{ ...inventory, observedAt: "2026-10-22T12:00:00.000Z" }],
-          [
+        const table = defaultModelRoutingPolicy.claudeAgent;
+        const ladder = [
+          { model: "claude-sonnet-5-5", effort: "high" },
+          { model: "claude-opus-5-5", effort: "xhigh" },
+          { model: "claude-next-9", effort: "high" },
+        ];
+        const saved = yield* store.saveModelPolicy({
+          expectedVersion: 0,
+          inventories: [inventory],
+          policy: {
+            ...defaultModelRoutingPolicy,
+            claudeAgent: {
+              ...table,
+              cells: table.cells.map((row, d) =>
+                row.map((cell, s) =>
+                  d === 0 && s === 0 ? { model: "claude-next-9", effort: "high" } : cell,
+                ),
+              ),
+            },
+            ladder,
+            fallback: null,
+          },
+        });
+        expect(saved.policy.version).toBe(1);
+        expect(saved.policy.claudeAgent.cells[0]![0]).toEqual({
+          model: "claude-next-9",
+          effort: "high",
+        });
+        expect(saved.warnings).toEqual([
+          "claudeAgent table: no connected account offers claude-next-9.",
+          "claudeAgent table: claude-next-9 is not in the table's model list.",
+          "Ladder: no connected account offers claude-next-9.",
+        ]);
+        expect(yield* store.modelPolicy).toEqual(saved.policy);
+        // No computer could be read: the save still goes through.
+        const unread = yield* store.saveModelPolicy({
+          expectedVersion: 1,
+          inventories: [],
+          policy: saved.policy,
+        });
+        expect(unread.policy.version).toBe(2);
+        expect(unread.warnings.length).toBeGreaterThan(0);
+        // A build from before the ladder saves the table without it: what is stored stays.
+        const older = yield* store.saveModelPolicy({
+          expectedVersion: 2,
+          inventories: [inventory],
+          policy: { ...defaultModelRoutingPolicy, maxReassessments: 1 },
+        });
+        expect(older.policy).toEqual({
+          ...defaultModelRoutingPolicy,
+          maxReassessments: 1,
+          version: 3,
+          ladder,
+          fallback: null,
+        });
+        expect(yield* store.modelPolicy).toEqual(older.policy);
+        // The stored ladder decides the next start: Opus is drained, no account offers the rung
+        // above it, so the rung below it is taken.
+        const week = claude.windows[0]!;
+        const drained = {
+          ...inventory,
+          accounts: [
             {
-              ...inventory,
-              accounts: inventory.accounts.map((a) => ({
-                ...a,
-                available: false,
-                unavailableReason: "Provider rejected",
-              })),
+              ...claude,
+              windows: [
+                week,
+                { ...week, id: "week_opus", models: ["claude-opus-5-5"], usedPoints: 100 },
+              ],
             },
           ],
-          [
-            {
-              ...inventory,
-              accounts: inventory.accounts.map((a) => ({
-                ...a,
-                windows: a.windows.map((w) => ({
-                  ...w,
-                  ratePointsPerHour: 20,
-                  rateAgeMinutes: 0,
-                  samples: 10,
-                })),
-              })),
-            },
-          ],
-        ]) {
-          const result = yield* store.selectModel({ ...args, reserve: false, inventories });
-          expect(result.allocation?.decision.selectedInstanceId).not.toBeNull();
-          expect(result.allocation?.decision.reasons.length).toBeGreaterThan(1);
-        }
-        expect(
-          (yield* store.selectModel({ ...args, reserve: false, authorityAvailable: false }))
-            .allocation,
-        ).not.toBeNull();
-        expect(yield* store.reservations).toHaveLength(0);
+        };
+        const chosen = yield* store.selectModel({
+          ...args,
+          reserve: false,
+          expectedModelVersion: 3,
+          // Difficulty 10, stakes 10 is Opus xhigh.
+          request: { ...claudeOnly, assessment: { difficulty: 10, stakes: 10 } },
+          inventories: [drained],
+        });
+        expect(chosen.allocation?.decision.request).toMatchObject({
+          model: "claude-sonnet-5-5",
+          options: [{ id: "effort", value: "high" }],
+        });
       }),
     ),
+);
+it.effect("chooses the same profile whatever is unread, stale, unavailable or burning fast", () =>
+  run(
+    Effect.gen(function* () {
+      const store = yield* setup;
+      for (const inventories of [
+        [{ ...inventory, complete: false }],
+        [{ ...inventory, observedAt: "2026-10-22T12:00:00.000Z" }],
+        [
+          {
+            ...inventory,
+            accounts: inventory.accounts.map((a) => ({
+              ...a,
+              windows: a.windows.map((w) => ({
+                ...w,
+                usedPoints: 99,
+                checkedAt: "2026-10-20T12:00:00.000Z",
+                ratePointsPerHour: 20,
+                rateAgeMinutes: 0,
+                samples: 10,
+              })),
+            })),
+          },
+        ],
+      ]) {
+        const result = yield* store.selectModel({ ...args, reserve: false, inventories });
+        expect(result.allocation?.decision.request).toMatchObject({
+          driver: "claudeAgent",
+          model: "claude-opus-5-5",
+          options: [{ id: "effort", value: "medium" }],
+        });
+        expect(result.wanted).toBeUndefined();
+      }
+      expect(
+        (yield* store.selectModel({ ...args, reserve: false, authorityAvailable: false }))
+          .allocation,
+      ).not.toBeNull();
+      expect(yield* store.reservations).toHaveLength(0);
+    }),
+  ),
 );
 it.effect("bounds explicit reassessment, keeps pins and requires fresh-provider consent", () =>
   run(
@@ -735,7 +836,7 @@ for (const oldOutcome of ["denied", "observation"] as const)
             model: "gpt-6-astra",
             options: pinned.override.options,
           });
-          expect(result.allocation?.decision.reasons.join(" ")).toContain("bounded borrowing");
+          expect(result.allocation?.decision.reasons[0]).toContain("pinned account.");
           yield* store.lifecycle(
             {
               assignmentId: "one",
@@ -846,7 +947,7 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
         policy: edit,
         inventories: [inventory],
       });
-      expect(next.version).toBe(2);
+      expect(next.policy.version).toBe(2);
       expect(yield* resolved(2, 7, 8)).toBe("gpt-6-astra/xhigh");
       expect(yield* resolved(2, 7, 7)).toBe("gpt-6.1-sol/max");
       for (const [d, s] of [
@@ -855,7 +956,7 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
         [8, 8],
         [6, 8],
       ] as const)
-        expect(next.codex.cells[d]![s]).toEqual(saved.codex.cells[d]![s]);
+        expect(next.policy.codex.cells[d]![s]).toEqual(saved.codex.cells[d]![s]);
       expect((yield* stored()).codex.grid).toBeDefined();
       const latest = yield* sql<{
         policy_json: string;
@@ -867,7 +968,7 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
         revertVersion: 1,
         inventories: [inventory],
       });
-      expect(reverted).toEqual({ ...saved, version: 3 });
+      expect(reverted.policy).toEqual({ ...saved, version: 3 });
     }),
   ),
 );

@@ -1189,7 +1189,7 @@ const make = Effect.gen(function* () {
                 cause,
               }).pipe(
                 Effect.andThen(later(USAGE_RETRY_MS)),
-                Effect.map((until) => ({ _tag: "wait", until, observed: false })),
+                Effect.map((until) => ({ _tag: "wait", until, observed: false, long: false })),
               )
             : Effect.succeed(proceed),
         ),
@@ -1221,11 +1221,10 @@ const make = Effect.gen(function* () {
           resumeAt: null,
           whenClear: false,
           waiting: null,
-          // Another family continues from a summary with another model, so the master is told.
-          notice: route.crossFamily
+          notice: route.modelChanged
             ? ([
                 "usage-switch",
-                `switched ${target.title} from ${from} to ${label(route.selection.instanceId)} after a usage limit`,
+                `switched ${target.title} from ${from} ${target.modelSelection.model} to ${label(route.selection.instanceId)} ${route.selection.model} after a usage limit`,
               ] as const)
             : null,
         };
@@ -1237,19 +1236,17 @@ const make = Effect.gen(function* () {
           ? yield* later(USAGE_RETRY_MS)
           : null;
     if (resumeAt === null) return { resumeAt, whenClear: false, waiting: null, notice: null };
-    const long =
-      Date.parse(resumeAt) - DateTime.toEpochMillis(yield* DateTime.now) >
-      ProviderAllocation.LONG_USAGE_WAIT_MS;
     return {
       resumeAt,
       whenClear: route._tag === "wait" && route.observed,
       waiting: `Waiting for ${from} until ${resumeAt}; resumes by itself.`,
-      notice: long
-        ? ([
-            "usage-wait",
-            `${target.title} is waiting for ${from} until ${resumeAt} (usage limit or cap) and resumes by itself. Switch its account to resume sooner.`,
-          ] as const)
-        : null,
+      notice:
+        route._tag === "wait" && route.long
+          ? ([
+              "usage-wait",
+              `${target.title} is waiting for ${from} until ${resumeAt} (usage limit or cap) and resumes by itself. Switch its account to resume sooner.`,
+            ] as const)
+          : null,
     };
   });
   /** One wait notice per assignment, however many times its retries have to wait again. */
@@ -1289,7 +1286,7 @@ const make = Effect.gen(function* () {
     const shell = yield* snapshots.getThreadShellById(ThreadId.make(job.target_id));
     if (Option.isNone(shell)) return false;
     const target = shell.value;
-    if (!(yield* allocation.value.limited(target.modelSelection.instanceId))) return false;
+    if (!(yield* allocation.value.limited(target.modelSelection))) return false;
     // A running turn finishes where it is; a new assignment is not steered into it.
     if (yield* busy(target)) return true;
     const route = yield* usageRoute(worker, target, false);
@@ -1460,6 +1457,7 @@ const make = Effect.gen(function* () {
                     _tag: "wait" as const,
                     until: yield* later(Math.min(360, (routed ? 30 : 5) * 2 ** repeats) * 60_000),
                     observed: false,
+                    long: false,
                   };
             const outcome = yield* settleUsageRoute(worker, target, route);
             yield* sql.withTransaction(
@@ -1811,7 +1809,7 @@ const make = Effect.gen(function* () {
           worker &&
           Option.isSome(allocation) &&
           !(yield* allocation.value
-            .limited(decodePlan(worker.plan_json).modelSelection.instanceId)
+            .limited(decodePlan(worker.plan_json).modelSelection)
             .pipe(Effect.orElseSucceed(() => true)))
         )
       ) {
