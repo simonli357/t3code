@@ -6986,6 +6986,43 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect.each([
+    { case: "a fresh session", resume: false, configured: undefined, expected: undefined },
+    { case: "a resumed session", resume: true, configured: undefined, expected: "0" },
+    {
+      case: "a resumed session with an instance value",
+      resume: true,
+      configured: "1",
+      expected: "1",
+    },
+  ])("connects MCP servers before the first request only for $case", (row) => {
+    const { MCP_CONNECTION_NONBLOCKING: _hostValue, ...hostEnvironment } = process.env;
+    const harness = makeHarness({
+      environment: {
+        ...hostEnvironment,
+        ...(row.configured ? { MCP_CONNECTION_NONBLOCKING: row.configured } : {}),
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        ...(row.resume
+          ? { resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000", turnCount: 1 } }
+          : {}),
+        runtimeMode: "full-access",
+      });
+      assert.equal(
+        harness.getLastCreateQueryInput()?.options.env?.MCP_CONNECTION_NONBLOCKING,
+        row.expected,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect(
     "emits early turn.started before rejecting an unsupported image, without SDK delivery",
     () => {

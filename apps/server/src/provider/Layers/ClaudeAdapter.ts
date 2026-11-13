@@ -5037,6 +5037,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? [input.cwd] : []),
         serverConfig.attachmentsDir,
       ];
+      const launchEnvironment = input.workspaceEnvironment
+        ? { ...claudeEnvironment, ...input.workspaceEnvironment }
+        : claudeEnvironment;
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -5078,9 +5081,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
         env: McpProviderSession.withAgentDeviceEnvironment(
-          input.workspaceEnvironment
-            ? { ...claudeEnvironment, ...input.workspaceEnvironment }
-            : claudeEnvironment,
+          // A resumed session's first request otherwise goes out before its
+          // claude.ai connectors connect: Claude Code tells the agent their
+          // tools were removed, then re-adds them. Explicit values still win.
+          existingResumeSessionId !== undefined &&
+            launchEnvironment.MCP_CONNECTION_NONBLOCKING === undefined
+            ? { ...launchEnvironment, MCP_CONNECTION_NONBLOCKING: "0" }
+            : launchEnvironment,
           mcpSession,
         ),
         additionalDirectories,
