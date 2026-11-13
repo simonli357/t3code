@@ -2277,6 +2277,32 @@ it.layer(
     ),
   );
 
+  it.effect("leaves the Claude entrypoint of an in-app terminal to the user", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const resolve = (env: Record<string, string> | undefined) =>
+        TerminalManager.resolveProviderInstanceTerminalEnvironment({
+          serverSettings,
+          path,
+          rawProviderInstanceId: "claudeAgent",
+          env,
+        });
+
+      expect((yield* resolve(undefined)).CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+      expect((yield* resolve({ CLAUDE_CODE_ENTRYPOINT: "cli" })).CLAUDE_CODE_ENTRYPOINT).toBe(
+        "cli",
+      );
+    }).pipe(
+      Effect.provide(
+        ServerSettings.ServerSettingsService.layerTest({
+          providerInstances: {},
+          providers: { claudeAgent: { homePath: "~/.claude-legacy" } },
+        }),
+      ),
+    ),
+  );
+
   it.effect("prefers an explicit default instance over legacy provider settings", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

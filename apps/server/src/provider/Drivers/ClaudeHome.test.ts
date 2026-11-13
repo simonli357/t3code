@@ -10,6 +10,7 @@ import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
+  mergeClaudeProcessEnvironment,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
@@ -64,6 +65,25 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         );
       }),
     );
+
+    it("labels Claude processes t3-code over an inherited entrypoint and keeps the host environment", () => {
+      const host = { CLAUDE_CODE_ENTRYPOINT: "claude-desktop", KEEP: "1" };
+
+      expect(mergeClaudeProcessEnvironment(undefined, host)).toEqual({
+        CLAUDE_CODE_ENTRYPOINT: "t3-code",
+        KEEP: "1",
+      });
+      expect(host.CLAUDE_CODE_ENTRYPOINT).toBe("claude-desktop");
+    });
+
+    it("lets the provider instance environment set the entrypoint", () => {
+      const instance = [{ name: "CLAUDE_CODE_ENTRYPOINT", value: "instance", sensitive: false }];
+
+      expect(
+        mergeClaudeProcessEnvironment(instance, { CLAUDE_CODE_ENTRYPOINT: "cli" })
+          .CLAUDE_CODE_ENTRYPOINT,
+      ).toBe("instance");
+    });
 
     it("points the signed-out hint at the configured Claude home", () => {
       expect(claudeSignedOutMessage({ configDir: undefined, cwd: "/synthetic" })).toContain(

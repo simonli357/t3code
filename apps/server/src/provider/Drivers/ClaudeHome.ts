@@ -1,11 +1,12 @@
 import * as NodeOS from "node:os";
 
-import type { ClaudeSettings } from "@t3tools/contracts";
+import type { ClaudeSettings, ProviderInstanceEnvironment } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 
 const quotePath = Schema.encodeSync(Schema.fromJsonString(Schema.String));
 
@@ -52,6 +53,23 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     CLAUDE_CONFIG_DIR: resolvedHomePath,
   };
 });
+
+/**
+ * Base env for the Claude processes T3 Code runs, before `makeClaudeEnvironment`.
+ * Claude Code reports its entrypoint to Anthropic, which meters the Agent SDK
+ * default (`sdk-ts`) faster against the 5-hour limit than an interactive
+ * session. The instance's own environment wins. In-app terminals do not use
+ * this, so an interactive `claude` there keeps its own entrypoint.
+ */
+export function mergeClaudeProcessEnvironment(
+  environment: ProviderInstanceEnvironment | undefined,
+  hostEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return mergeProviderInstanceEnvironment(environment, {
+    ...hostEnvironment,
+    CLAUDE_CODE_ENTRYPOINT: "t3-code",
+  });
+}
 
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(
   function* (
