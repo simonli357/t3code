@@ -14,6 +14,7 @@ import {
   ThreadId,
   type AllocationAccount,
   type AllocationInventory,
+  type AllocationLearned,
   type AllocationPolicy,
   type AllocationWindow,
   type ModelRoutingRequest,
@@ -130,6 +131,47 @@ const wanting = (profile: RoutingProfile, patch: Partial<ModelRoutingPolicy> = {
   },
   ...patch,
 });
+/**
+ * Every model costs a worker $10 an hour (a master $4); every weekly window, account-wide or a
+ * model's own, holds $10,000 of use. Ranking then follows the percentages, as on equal plans.
+ */
+const learned = (accounts: readonly AllocationAccount[]): AllocationLearned => ({
+  learnedAt: at,
+  workerHours: 2,
+  notes: [],
+  costs: accounts.flatMap((a) =>
+    a.models.flatMap((m) =>
+      (["worker", "master"] as const).map((kind) => ({
+        driver: a.driver,
+        model: m.slug,
+        effort: "high",
+        kind,
+        dollarsPerHour: kind === "worker" ? 10 : 4,
+        perHundredK: 0,
+        contextTokens: 100_000,
+        samples: 50,
+        hours: 20,
+        source: "measured" as const,
+      })),
+    ),
+  ),
+  limits: accounts.flatMap((a) =>
+    a.windows.map((w) => ({
+      key: allocationPreferenceKey(a),
+      label: a.label,
+      driver: a.driver,
+      windowId: w.id,
+      windowLabel: w.label,
+      plan: null,
+      percentPerDollar: 0.01,
+      backgroundPercentPerHour: 0,
+      samples: 40,
+      hours: 100,
+      source: "measured" as const,
+    })),
+  ),
+});
+const noGoals = { claude: undefined, codex: undefined, other: undefined };
 const choose = (
   accounts: AllocationAccount[],
   wanted: RoutingProfile,
@@ -137,16 +179,18 @@ const choose = (
     request?: Partial<ModelRoutingRequest>;
     modelPolicy?: Partial<ModelRoutingPolicy>;
     policy?: Partial<AllocationPolicy>;
+    learned?: AllocationLearned;
   } = {},
 ) =>
   chooseProfile({
     at,
-    policy: { ...defaultAllocationPolicy, ...patch.policy },
+    policy: { ...defaultAllocationPolicy, ...noGoals, ...patch.policy },
     modelPolicy: wanting(wanted, patch.modelPolicy),
     request: { ...request, ...patch.request },
     inventories: [host(accounts)],
     reservations: [],
     authorityAvailable: true,
+    learned: patch.learned ?? learned(accounts),
   });
 /** `account model / effort`, or null when the start is refused. */
 const picked = (choice: ProfileChoice) => {
@@ -174,7 +218,7 @@ describe("account, model and effort together", () => {
     expect(choice.tried).toHaveLength(1);
     expect(choice.accounts).toEqual([
       `A: drained until ${inHours(100)} (Weekly · ${FABLE} 100% used), 0 workers`,
-      "B: Weekly 40% left, resets in 4d, 0 workers",
+      `B: room for about 4 more ${FABLE} / medium workers until the Weekly reset in 4d; tightest limit Weekly, 0 workers`,
     ]);
   });
 
@@ -184,7 +228,7 @@ describe("account, model and effort together", () => {
     expect(picked(opus)).toBe(`A ${SONNET} / xhigh`);
     expect(wantedLabel(opus)).toBe(`${OPUS} / high`);
     expect(opus.reason).toContain(
-      `${OPUS} / high is drained on every account (earliest reset ${inHours(7)}); the nearest ladder rung with room is ${SONNET} / xhigh.`,
+      `${OPUS} / high fits on no account for this job; the nearest ladder rung that fits is ${SONNET} / xhigh.`,
     );
     expect(opus.tried.map((t) => [t.request.model, t.chosen])).toEqual([
       [OPUS, false],
@@ -269,7 +313,7 @@ describe("account, model and effort together", () => {
       });
       expect(wantedLabel(choice)).toBe(`${below.model} / ${below.effort}`);
       expect(choice.reason).toContain(
-        `no Claude rung has room, and below ${SONNET} / xhigh the fallback deepseek-flash / max applies.`,
+        `no Claude rung within 2 fits, and below ${SONNET} / xhigh the fallback deepseek-flash / max applies.`,
       );
     }
     for (const atOrAbove of [
@@ -282,7 +326,7 @@ describe("account, model and effort together", () => {
       expect(choice.drainedUntil).toBe(inHours(7));
       expect(choice.wanted).toBeUndefined();
       expect(choice.reason).toBe(
-        `Drained: ${atOrAbove.model} / ${atOrAbove.effort} and every model that may stand in for it have no room; earliest reset ${inHours(7)}.`,
+        `Drained: ${atOrAbove.model} / ${atOrAbove.effort} and every model that may stand in for it are out; earliest reset ${inHours(7)}.`,
       );
       expect(choice.accounts).toHaveLength(2);
     }
@@ -420,7 +464,7 @@ describe("account, model and effort together", () => {
       wanted,
     );
     expect(picked(rejected)).toBe(`A ${OPUS} / xhigh`);
-    expect(rejected.reason).toContain(`earliest reset ${inHours(5)}`);
+    expect(rejected.reason).toContain(`the nearest ladder rung that fits is ${OPUS} / xhigh`);
 
     // A rejection that names no window closes the whole account.
     for (const patch of [
@@ -817,5 +861,96 @@ describe("model policy warnings", () => {
     const warnings = modelPolicyWarnings(defaultModelRoutingPolicy, []);
     expect(warnings).toContain(`Ladder: no connected account offers ${FABLE}.`);
     expect(warnings).toContain("Fallback: no connected account offers deepseek-flash.");
+  });
+});
+
+describe("when the wanted model fits nowhere", () => {
+  const opusHigh = { model: OPUS, effort: "high" };
+
+  it("waits for a limit that resets within 30 minutes, 45 at high stakes", () => {
+    const soon = (hours: number) => [
+      claude("A", [weekly(20), only(OPUS, 100, { resetsAt: inHours(hours) })]),
+    ];
+    const waits = choose(soon(0.4), opusHigh);
+    expect(picked(waits)).toBe(`A ${OPUS} / high`);
+    expect(waits.startAt).toBe(inHours(0.4));
+    expect(waits.reason).toContain("resets in 24m, so the start waits for it.");
+    // 36 minutes is too long at ordinary stakes: the nearest rung that fits instead.
+    const moves = choose(soon(0.6), opusHigh);
+    expect(moves.startAt).toBeUndefined();
+    expect(picked(moves)).toBe(`A ${SONNET} / xhigh`);
+    // At stakes 8 the start waits up to 45 minutes.
+    const high = choose(soon(0.6), opusHigh, {
+      request: { assessment: { difficulty: 5, stakes: 8 } },
+    });
+    expect(high.startAt).toBe(inHours(0.6));
+    expect(picked(high)).toBe(`A ${OPUS} / high`);
+  });
+
+  it("moves at most two rungs", () => {
+    // Fable high's two nearest rungs are Fable medium and Opus xhigh; both are out.
+    const out = [claude("A", [weekly(20), only(OPUS, 100), only(FABLE, 100)])];
+    const choice = choose(out, { model: FABLE, effort: "high" });
+    expect(picked(choice)).toBeNull();
+    expect(choice.drainedUntil).toBe(inHours(100));
+    expect(choice.tried.map((t) => t.request.model)).not.toContain(SONNET);
+  });
+
+  it("starts the wanted model on the account that lasts longest when nothing fits the job", () => {
+    const tight = [claude("A", [weekly(99.5)]), claude("B", [weekly(99.7)])];
+    const choice = choose(tight, opusHigh, { request: { expectedHours: 8 } });
+    expect(picked(choice)).toBe(`A ${OPUS} / high`);
+    expect(choice.reason).toContain("no account lasts the whole job, this one lasts longest.");
+    // Refused as drained only when every account is really out.
+    const out = choose([claude("A", [weekly(100)]), claude("B", [weekly(100)])], opusHigh);
+    expect(picked(out)).toBeNull();
+    expect(out.drainedUntil).toBe(inHours(100));
+  });
+});
+
+describe("Fable switch", () => {
+  const off = { policy: { fableWorkers: false } };
+
+  it("starts a table or pinned Fable choice from the nearest rung without Fable, and says so", () => {
+    const table = choose([claude("A")], { model: FABLE, effort: "medium" }, off);
+    expect(picked(table)).toBe(`A ${OPUS} / xhigh`);
+    expect(wantedLabel(table)).toBe(`${FABLE} / medium`);
+    expect(table.notes[0]).toBe(
+      `Fable workers are off: ${FABLE} / medium starts from ${OPUS} / xhigh, the nearest rung without Fable.`,
+    );
+    const pinned = choose(
+      [claude("A")],
+      { model: SONNET, effort: "high" },
+      {
+        ...off,
+        request: {
+          override: {
+            driver: claudeAgent,
+            model: FABLE,
+            options: [{ id: "effort", value: "high" }],
+          },
+        },
+      },
+    );
+    expect(picked(pinned)).toBe(`A ${OPUS} / xhigh`);
+    // Masters are not workers: the switch leaves them alone.
+    expect(
+      picked(
+        choose(
+          [claude("A")],
+          { model: FABLE, effort: "medium" },
+          { ...off, request: { kind: "session" } },
+        ),
+      ),
+    ).toBe(`A ${FABLE} / medium`);
+  });
+
+  it("never substitutes a Fable rung", () => {
+    const opusOut = [claude("A", [weekly(20), only(OPUS, 100)])];
+    const on = choose(opusOut, { model: OPUS, effort: "xhigh" });
+    expect(picked(on)).toBe(`A ${FABLE} / low`);
+    const offChoice = choose(opusOut, { model: OPUS, effort: "xhigh" }, off);
+    expect(picked(offChoice)).toBeNull();
+    expect(offChoice.tried.map((t) => t.request.model)).not.toContain(FABLE);
   });
 });

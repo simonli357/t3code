@@ -143,8 +143,8 @@ export const AllocationPolicy = Schema.Struct({
       Schema.isMaxLength(100),
     ),
   ),
-  // See `legacyAllocationPolicyFields`. Rules, worker models and overrides are dropped on save.
-  // `dailyPoints` of `claude`, `codex` and `other` are the family daily goals and are kept.
+  // See `legacyAllocationPolicyFields`. Rules and worker models are dropped on save; the rest
+  // is kept. `dailyPoints` of `claude`, `codex` and `other` are the family daily goals.
   claude: Legacy,
   codex: Legacy,
   other: Legacy,

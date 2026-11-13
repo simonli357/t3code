@@ -101,9 +101,9 @@ it("carries unavailable and unverified subscription-quota provenance into alloca
   ).toMatchObject({ usageLimitsUnavailableReason: "unverified" });
 });
 
-it("counts running, starting and working background sessions, excluding completed, idle and monitoring sessions", () => {
+it("counts running, starting and working background sessions and those that finished a turn within 15 minutes, excluding idle and monitoring sessions", () => {
   const decode = Schema.decodeUnknownSync(OrchestrationThreadShell);
-  const thread = (id: string, status: string, backgroundLiveness?: string) =>
+  const thread = (id: string, status: string, backgroundLiveness?: string, completedAt?: string) =>
     decode({
       id,
       projectId: "project",
@@ -117,7 +117,16 @@ it("counts running, starting and working background sessions, excluding complete
       interactionMode: "default",
       branch: null,
       worktreePath: null,
-      latestTurn: null,
+      latestTurn: completedAt
+        ? {
+            turnId: id,
+            state: "completed",
+            requestedAt: completedAt,
+            startedAt: completedAt,
+            completedAt,
+            assistantMessageId: null,
+          }
+        : null,
       createdAt: at,
       updatedAt: at,
       latestUserMessageAt: at,
@@ -148,12 +157,15 @@ it("counts running, starting and working background sessions, excluding complete
       thread("completed", "ready"),
       thread("monitoring", "ready", "monitoring"),
       thread("stopped", "stopped"),
+      thread("between turns", "ready", undefined, "2026-10-23T17:50:00.000Z"),
+      thread("idle since", "ready", undefined, "2026-10-23T17:40:00.000Z"),
     ],
   });
-  expect(result.demand.map((d) => [d.threadId, d.state])).toEqual([
-    ["running", "running"],
-    ["starting", "pending"],
-    ["background", "running"],
+  expect(result.demand.map((d) => [d.threadId, d.state, d.recent ?? false])).toEqual([
+    ["running", "running", false],
+    ["starting", "pending", false],
+    ["background", "running", false],
+    ["between turns", "running", true],
   ]);
   expect(
     result.demand.every(

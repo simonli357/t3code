@@ -641,7 +641,7 @@ const make = Effect.gen(function* () {
                 code: "conflict",
                 detail: "Policy changed. Reload saved settings before saving.",
               });
-            // Rules, worker models and overrides are gone. The legacy values keep the policy
+            // Rules and worker models are gone. The legacy values keep the policy
             // readable by builds from before smart allocation, which also save without the
             // new fields: those keep what is stored.
             const { accountRules: _rules, workerModels: _workerModels, ...kept } = input.policy;
