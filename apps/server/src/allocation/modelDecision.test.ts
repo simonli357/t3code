@@ -228,7 +228,7 @@ describe("account, model and effort together", () => {
     expect(picked(opus)).toBe(`A ${SONNET} / xhigh`);
     expect(wantedLabel(opus)).toBe(`${OPUS} / high`);
     expect(opus.reason).toContain(
-      `${OPUS} / high fits on no account for this job; the nearest ladder rung that fits is ${SONNET} / xhigh.`,
+      `${OPUS} / high is drained on every account (earliest reset ${inHours(7)}); the nearest ladder rung that fits is ${SONNET} / xhigh.`,
     );
     expect(opus.tried.map((t) => [t.request.model, t.chosen])).toEqual([
       [OPUS, false],

@@ -1,13 +1,12 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import { ServerProvider } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
-import * as Settings from "../serverSettings.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -15,7 +14,7 @@ import * as Measurements from "./UsageMeasurements.ts";
 
 const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
 
-it.effect("persists only opted-in accounts and purges them when disabled", () =>
+it.effect("records every account without opt-in and never stores its email", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -45,12 +44,6 @@ it.effect("persists only opted-in accounts and purges them when disabled", () =>
         }),
         Layer.mock(ProviderService)({ streamEvents: Stream.empty }),
         Layer.mock(ProjectionSnapshotQuery)({}),
-        Settings.layerTest({
-          usageMeasurementInstanceIds: [
-            ProviderInstanceId.make("codex"),
-            ProviderInstanceId.make("claudeAgent"),
-          ],
-        }),
       );
       const layer = Measurements.layer.pipe(Layer.provideMerge(dependencies));
       yield* Effect.scoped(
@@ -60,23 +53,13 @@ it.effect("persists only opted-in accounts and purges them when disabled", () =>
           expect(report.accounts.flatMap((a) => a.instanceIds).sort()).toEqual([
             "claudeAgent",
             "codex",
+            "codex_antoine",
           ]);
         }).pipe(Effect.provide(layer)),
       );
       const stored = yield* fs.readFileString(`${dir}/userdata/usage-measurements.json`);
-      expect(stored).toContain('"codex"');
-      expect(stored).not.toContain("codex_antoine");
+      expect(stored).toContain("codex_antoine");
       expect(stored).not.toContain("@example.test");
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          const settings = yield* Settings.ServerSettingsService;
-          const service = yield* Measurements.UsageMeasurements;
-          yield* settings.updateSettings({ usageMeasurementInstanceIds: [] });
-          expect((yield* service.read({})).accounts).toEqual([]);
-        }).pipe(Effect.provide(layer)),
-      );
-      const cleared = yield* fs.readFileString(`${dir}/userdata/usage-measurements.json`);
-      expect(cleared).not.toContain('"codex"');
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );

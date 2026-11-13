@@ -444,7 +444,7 @@ it.effect(
       }),
     ),
 );
-it.effect("sends the next start to a close account with fewer workers", () =>
+it.effect("counts a reserved start as load, so the next start goes to the other account", () =>
   run(
     Effect.gen(function* () {
       const store = yield* setup;
@@ -460,17 +460,39 @@ it.effect("sends the next start to a close account with fewer workers", () =>
           })),
         },
       ];
+      // A worker costs a dollar an hour, so both accounts keep within their daily goals.
+      const learned = {
+        learnedAt: at,
+        costs: [
+          {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            model: "claude-opus-5-5",
+            effort: "medium",
+            kind: "worker" as const,
+            dollarsPerHour: 1,
+            perHundredK: 0,
+            contextTokens: 0,
+            samples: 1,
+            hours: 1,
+            source: "measured" as const,
+          },
+        ],
+        limits: [],
+        workerHours: null,
+        notes: [],
+      };
       const start = (id: string) =>
         store.selectModel({
           ...args,
           inventories: pair,
+          learned,
           request: { ...claudeOnly, assignmentId: id, threadId: ThreadId.make(id) },
         });
       expect((yield* start("first")).allocation?.decision.selectedInstanceId).toBe("a");
       // The reservation just made counts as a worker on a.
       const second = yield* start("second");
       expect(second.allocation?.decision.selectedInstanceId).toBe("b");
-      expect(second.reasons[0]).toContain("close to a (90% left) and has fewer workers.");
+      expect(second.reasons[0]).toContain("most room of 2 accounts.");
       expect((yield* start("third")).allocation?.decision.selectedInstanceId).toBe("a");
       expect(yield* store.reservations).toHaveLength(3);
     }),

@@ -190,7 +190,7 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
   return {
     ...policy,
     accountCaps: caps,
-    accountGoals: goals,
+    ...(policy.accountGoals || edit.setGoals || edit.clearGoals ? { accountGoals: goals } : {}),
     ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),

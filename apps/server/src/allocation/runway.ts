@@ -299,7 +299,8 @@ export function runwayText(
 ): string {
   const tightest = p.tightest;
   if (!tightest) return "no usage reading";
-  const sessions = kind === "worker" ? "workers" : "sessions";
+  const room = p.roomWorkers ?? 0;
+  const sessions = `${kind === "worker" ? "worker" : "session"}${room < 2 ? "" : "s"}`;
   const resetIn = (w: WindowProjection) =>
     w.resetsAt === null ? "" : ` in ${span((w.resetsAt - at) / HOUR)}`;
   const goal = p.windows.find((w) => w.goal !== null);
@@ -316,7 +317,6 @@ export function runwayText(
       out.limit < 100 ? `, hard cap ${out.limit}%` : ""
     }, resets${resetIn(out) || " at an unknown time"})${goalText}`;
   }
-  const room = p.roomWorkers ?? 0;
   return `room for ${room < 1 ? "less than one more" : `about ${Math.floor(room)} more`} ${profile} ${sessions} until the ${tightest.window.label} reset${resetIn(tightest)}; tightest limit ${tightest.window.label}${
     tightest.limit < 100 ? ` (hard cap ${tightest.limit}%)` : ""
   }${goalText}`;

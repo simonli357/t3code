@@ -187,7 +187,7 @@ describe("room", () => {
     expect(candidate(decision, "a")).toMatchObject({ eligible: true, roomPoints: 20, workers: 0 });
     // $10 an hour for 2 hours on a 5-hour window that holds $100 is 20 points: exactly full.
     expect(candidate(decision, "a").line).toBe(
-      "a: room for less than one more astra / high workers until the 5-hour reset in 2h 0m; tightest limit 5-hour, 0 workers",
+      "a: room for less than one more astra / high worker until the 5-hour reset in 2h 0m; tightest limit 5-hour, 0 workers",
     );
   });
 

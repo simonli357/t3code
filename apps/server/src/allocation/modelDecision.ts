@@ -340,7 +340,9 @@ export function chooseProfile(input: {
               options: [{ id: routingEffortOptionId(driver), value: fallback.effort }],
             }))
         : [];
-    const why = `${label(wanted.request)} fits on no account for this job;`;
+    const why = first.selectedInstanceId
+      ? `${label(wanted.request)} fits on no account for this job;`
+      : `${label(wanted.request)} is drained on every account (earliest reset ${first.waitUntil ?? "unknown"});`;
     for (const rung of rungs) {
       const candidate = onRung(wanted.request, rung);
       const decision = decide(candidate);
