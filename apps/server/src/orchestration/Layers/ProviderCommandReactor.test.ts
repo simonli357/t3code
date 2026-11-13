@@ -1275,6 +1275,64 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  effectIt.effect("gives Claude the prompt seed or thread title so it skips its own naming", () =>
+    Effect.gen(function* () {
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-sonnet-4-6",
+      };
+      const harness = yield* Effect.promise(() =>
+        createHarness({ initialTitle: "New thread", threadModelSelection: modelSelection }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      const startTurn = (threadId: string, text: string) =>
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-claude-title-${threadId}`),
+          threadId: ThreadId.make(threadId),
+          message: {
+            messageId: asMessageId(`message-claude-title-${threadId}`),
+            role: "user",
+            text,
+            attachments: [],
+          },
+          titleSeed: text,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+
+      yield* startTurn("thread-1", "Add a progressive blur as you scroll");
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 1));
+      expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+        title: "Add a progressive blur as you scroll",
+      });
+
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-thread-create-claude-seeded"),
+        threadId: ThreadId.make("thread-claude-seeded"),
+        projectId: asProjectId("project-1"),
+        title: "New thread",
+        modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-claude-autotitle"),
+        threadId: ThreadId.make("thread-claude-seeded"),
+        title: "hello there",
+      });
+      yield* startTurn("thread-claude-seeded", "hello there");
+      yield* Effect.promise(() => waitFor(() => harness.startSession.mock.calls.length === 2));
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ title: "hello there" });
+    }),
+  );
+
   effectIt.effect("projects inline context before sending the provider turn", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() => createHarness());

@@ -811,10 +811,19 @@ const make = Effect.gen(function* () {
     // and let the provider generate one. A real rename is source "manual" and
     // differs from the first-turn prompt seed (the web client writes that seed
     // through thread.meta.update, which also marks the title manual).
+    // Claude Code instead spends a model request naming every untitled new
+    // session, which T3 already does, so Claude gets any title, seed first.
     const manualTitle = thread.titleState?.source === "manual" ? thread.title.trim() : "";
     const promptSeed = options?.titleSeed?.trim();
+    const threadTitle = thread.title.trim();
     const sessionTitle =
-      manualTitle.length > 0 && manualTitle !== promptSeed ? thread.title : undefined;
+      preferredProvider === "claudeAgent"
+        ? threadTitle === DEFAULT_THREAD_TITLE && promptSeed
+          ? promptSeed
+          : threadTitle
+        : manualTitle.length > 0 && manualTitle !== promptSeed
+          ? thread.title
+          : undefined;
 
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;

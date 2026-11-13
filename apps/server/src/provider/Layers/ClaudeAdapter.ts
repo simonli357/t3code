@@ -5070,6 +5070,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
         ...(newSessionId ? { sessionId: newSessionId } : {}),
+        // A title skips Claude Code's naming request for a new session; a
+        // resumed session keeps the title it already has.
+        ...(input.title ? { title: input.title } : {}),
         includePartialMessages: true,
         canUseTool,
         onUserDialog,
