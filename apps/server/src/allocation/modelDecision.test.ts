@@ -250,6 +250,42 @@ describe("deterministic model policy", () => {
       choice(withCell(changed, 0, 0, { model: "missing", effort: "medium" }), 0, 0),
     ).toBeNull();
   });
+  it("lets Haiku and Fable be approved and chosen from the Claude table", () => {
+    const models = ["claude-haiku-5-5", "claude-fable-5-2"];
+    const claudeInventory = {
+      ...inventory,
+      accounts: inventory.accounts.map((a) =>
+        a.driver === "claudeAgent"
+          ? { ...a, models: [...a.models, ...models.map((slug) => ({ ...a.models[0]!, slug }))] }
+          : a,
+      ),
+    };
+    const table = defaultModelRoutingPolicy.claudeAgent;
+    const policy = {
+      ...defaultModelRoutingPolicy,
+      claudeAgent: {
+        allowedModels: [...table.allowedModels, ...models],
+        cells: table.cells.map((row, d) =>
+          row.map((cell, s) =>
+            d === 0 && s === 0
+              ? { model: "claude-haiku-5-5", effort: "max" }
+              : d === 10 && s === 10
+                ? { model: "claude-fable-5-2", effort: "high" }
+                : cell,
+          ),
+        ),
+      },
+    };
+    expect(modelPolicyIssues(policy, defaultModelRoutingPolicy, [claudeInventory])).toEqual([]);
+    const claude = (difficulty: number, stakes: number) =>
+      modelCandidates(
+        policy,
+        { ...assess(difficulty, stakes), allowedDrivers: [ProviderDriverKind.make("claudeAgent")] },
+        [claudeInventory],
+      ).candidates[0]?.request.model;
+    expect(claude(0, 0)).toBe("claude-haiku-5-5");
+    expect(claude(10, 10)).toBe("claude-fable-5-2");
+  });
   it("retains exact overrides and native/account pins, with honest conflict and unsupported paths", () => {
     const override = {
       driver: ProviderDriverKind.make("codex"),

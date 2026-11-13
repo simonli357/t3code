@@ -126,8 +126,8 @@ export const defaultModelRoutingPolicy: ModelRoutingPolicy = {
   claudeAgent: defaultTable(["claude-sonnet-5-5", "claude-opus-5-5"]),
   maxReassessments: 2,
 };
-/** Luna, Haiku and Fable are never chosen automatically; exact user instructions still can. */
-export const automaticModelAllowed = (model: string) => !/luna|haiku|fable/i.test(model);
+/** Luna is never chosen automatically; exact user instructions still can. */
+export const automaticModelAllowed = (model: string) => !/luna/i.test(model);
 /** The provider option that carries a profile's effort. */
 export const routingEffortOptionId = (driver: string) =>
   driver === "codex" ? "reasoningEffort" : "effort";

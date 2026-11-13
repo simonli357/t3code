@@ -232,7 +232,7 @@ then change its model or reasoning, or set an alternative that is used only when
 is unavailable. Only that cell changes. Choices come from what your connected accounts
 advertise, and a cell they cannot currently offer is flagged and keeps its saved value.
 Changing a model keeps the cell's reasoning when the new model offers it; otherwise you
-choose the reasoning yourself. Automatic selection never uses Luna, Haiku or Fable.
+choose the reasoning yourself. Automatic selection never uses Luna.
 
 Edited cells are marked until you press **Save table**, which creates a new policy version.
 **Discard changes** returns to the saved table, and **Reset to defaults** restores the built-in

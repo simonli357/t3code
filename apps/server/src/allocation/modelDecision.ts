@@ -205,7 +205,7 @@ export function modelPolicyIssues(
     const prior = previous[driver];
     const ofDriver = accounts.filter((a) => a.driver === driver);
     if (table.allowedModels.some((m) => !automaticModelAllowed(m)))
-      issues.add(`${driver}: Luna, Haiku and Fable are excluded from automatic selection.`);
+      issues.add(`${driver}: Luna is excluded from automatic selection.`);
     if (new Set(table.allowedModels).size !== table.allowedModels.length)
       issues.add(`${driver}: approved models must be unique.`);
     for (const model of table.allowedModels)
