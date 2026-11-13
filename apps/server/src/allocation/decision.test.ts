@@ -15,7 +15,7 @@ import {
   type AllocationReservation,
   type AllocationWindow,
 } from "@t3tools/contracts";
-import { accountRoom, decideAllocation } from "./decision.ts";
+import { accountRoom, accountRunways, decideAllocation } from "./decision.ts";
 import { costPerHour } from "./runway.ts";
 
 const at = "2026-10-23T12:00:00.000Z";
@@ -379,6 +379,24 @@ describe("runway", () => {
     const idle = account("a", 10, { windows: [weekly(10), fiveHour(0, { resetsAt: null })] });
     const decision = decide([idle], { request: { expectedHours: 12 } });
     expect(candidate(decision, "a")).toMatchObject({ fits: true });
+  });
+
+  it("tells each account's runway: a used-up limit and its reset, or the limit that runs out first", () => {
+    const runways = (accounts: AllocationAccount[], demand: AllocationDemand[] = []) =>
+      accountRunways({
+        at,
+        policy: { ...defaultAllocationPolicy, ...noGoals },
+        inventories: [inventory(accounts, { demand })],
+        learned: learned(),
+      }).map((r) => r.line);
+    expect(runways([account("a", 10, { windows: [weekly(10), fiveHour(100)] })])).toEqual([
+      "5-hour is used up; it resets in about 2h 0m.",
+    ]);
+    // A worker at $10 an hour uses 0.1% of the week an hour, so the 1% left lasts 10 hours; the
+    // 5-hour window it uses 10% of an hour resets in 2, before its 60% runs out.
+    expect(
+      runways([account("a", 10, { windows: [weekly(99), fiveHour(40)] })], [worker("a", "one")]),
+    ).toEqual(["Weekly runs out in about 10h 0m at the current load (1 working session)."]);
   });
 
   it("does not fit when a limit runs out before the job ends, and says when it would", () => {

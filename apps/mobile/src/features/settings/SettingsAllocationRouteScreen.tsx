@@ -225,7 +225,9 @@ export function SettingsAllocationRouteScreen() {
               {runway?.sizeDollars != null
                 ? ` · holds about ${dollars(runway.sizeDollars)}${runway.source === "estimated" ? " (estimated)" : ""}`
                 : ""}
-              {runway?.goalPercent != null ? ` · goal ${points(runway.goalPercent)}% by now` : ""}
+              {runway?.goalPercent != null
+                ? ` · goal ${Math.round(runway.goalPercent)}% by now`
+                : ""}
             </Text>
           );
         })

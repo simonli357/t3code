@@ -510,16 +510,26 @@ export function accountRunways(input: {
     });
     const sessions = load.length;
     const first = projection.windows.find((w) => w.lastsHours === projection.lastsHours);
+    // An account-wide limit first: a model's own limit leaves the other models usable.
+    const usedUp = projection.windows
+      .filter((w) => w.used >= w.limit)
+      .toSorted((a, b) => Number(!!a.window.models?.length) - Number(!!b.window.models?.length))[0];
     return {
       key,
       label: account.label,
       line: !account.windows.length
         ? "No usage reading."
-        : `${
-            projection.lastsHours === null || !first
-              ? "No limit runs out before its reset"
-              : `${first.window.label} runs out in about ${span(projection.lastsHours)}`
-          } at the current load (${sessions} working session${sessions === 1 ? "" : "s"}).`,
+        : usedUp
+          ? `${usedUp.window.label} is used up${
+              usedUp.resetsAt === null
+                ? ""
+                : `; it resets in about ${span((usedUp.resetsAt - now) / 3_600_000)}`
+            }.`
+          : `${
+              projection.lastsHours === null || !first
+                ? "No limit runs out before its reset"
+                : `${first.window.label} runs out in about ${span(projection.lastsHours)}`
+            } at the current load (${sessions} working session${sessions === 1 ? "" : "s"}).`,
       windows,
     };
   });

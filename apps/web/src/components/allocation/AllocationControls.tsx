@@ -195,7 +195,7 @@ function AccountsTable({
                             runway.source === "estimated" ? " (estimated)" : ""
                           }`}
                         {runway?.goalPercent != null &&
-                          ` · goal ${number(runway.goalPercent)}% by now`}
+                          ` · goal ${Math.round(runway.goalPercent)}% by now`}
                       </span>
                     </div>
                   );
