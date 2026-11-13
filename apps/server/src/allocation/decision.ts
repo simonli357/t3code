@@ -509,15 +509,16 @@ export function accountRunways(input: {
       };
     });
     const sessions = load.length;
+    const first = projection.windows.find((w) => w.lastsHours === projection.lastsHours);
     return {
       key,
       label: account.label,
       line: !account.windows.length
         ? "No usage reading."
         : `${
-            projection.lastsHours === null
+            projection.lastsHours === null || !first
               ? "No limit runs out before its reset"
-              : `Lasts about ${span(projection.lastsHours)}`
+              : `${first.window.label} runs out in about ${span(projection.lastsHours)}`
           } at the current load (${sessions} working session${sessions === 1 ? "" : "s"}).`,
       windows,
     };
