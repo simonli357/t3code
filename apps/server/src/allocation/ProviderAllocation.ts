@@ -1323,7 +1323,16 @@ const make = Effect.gen(function* () {
     if (!model) return yield* unavailable();
     const { showTable, ...changes } = edit;
     const { accountOrder, closeMarginPoints, longWaitHours, setCaps, clearCaps } = changes;
-    const allocationEdit = [accountOrder, closeMarginPoints, longWaitHours, setCaps, clearCaps];
+    const allocationEdit = [
+      accountOrder,
+      closeMarginPoints,
+      longWaitHours,
+      setCaps,
+      clearCaps,
+      changes.setGoals,
+      changes.clearGoals,
+      changes.fableWorkers,
+    ];
     const modelEdit = [changes.ladder, changes.fallback, changes.setCells];
     const edits = (values: readonly unknown[]) => values.some((value) => value !== undefined);
     if ((edits(allocationEdit) || edits(modelEdit)) && snapshot.accountOrderSupported !== true)
@@ -1351,6 +1360,7 @@ const make = Effect.gen(function* () {
     return allocationPolicyView({ ...snapshot, policy }, saved.modelPolicy, {
       ...(showTable ? { showTable } : {}),
       ...(saved.warnings ? { warnings: saved.warnings } : {}),
+      learned: snapshot.learned ?? coordinatorLearned,
     });
   });
   // Only the coordinator learns; every other computer receives its numbers with the policies.

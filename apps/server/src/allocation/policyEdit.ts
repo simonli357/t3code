@@ -5,6 +5,7 @@ import {
   DEFAULT_LONG_WAIT_HOURS,
   modelFallback,
   modelLadder,
+  type AllocationLearned,
   type AllocationPolicy,
   type AllocationPolicyEdit,
   type AllocationPolicyView,
@@ -12,6 +13,8 @@ import {
   type ModelRoutingPolicy,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import { accountGoal } from "./decision.ts";
+import { span } from "./runway.ts";
 
 const invalid = (detail: string) => new AllocationError({ code: "invalid", detail });
 
@@ -64,6 +67,7 @@ export function allocationPolicyView(
   options?: {
     readonly showTable?: AllocationPolicyEdit["showTable"];
     readonly warnings?: readonly string[];
+    readonly learned?: AllocationLearned | undefined;
   },
 ): AllocationPolicyView {
   const { policy } = snapshot;
@@ -79,6 +83,24 @@ export function allocationPolicyView(
     caps: once(
       (policy.accountCaps ?? []).map(({ key, ...cap }) => ({ account: label(key), ...cap })),
     ),
+    goals: once(
+      snapshot.inventories
+        .flatMap((i) => i.accounts)
+        .flatMap((account) => {
+          const goal = accountGoal(policy, account);
+          return goal
+            ? [
+                {
+                  account: label(allocationPreferenceKey(account)),
+                  percentPerDay: goal.percentPerDay,
+                  from: goal.from,
+                },
+              ]
+            : [];
+        }),
+    ),
+    fableWorkers: policy.fableWorkers !== false,
+    ...(options?.learned ? { learned: learnedLines(options.learned) } : {}),
     ladder: modelLadder(model).map(profile),
     fallback: fallback
       ? `${profile(fallback)} when the wanted rung is below ${profile(fallback.below)}`
@@ -92,6 +114,27 @@ export function allocationPolicyView(
       instanceIds: [...instanceIds],
     })),
     warnings: [...(options?.warnings ?? [])],
+  };
+}
+
+const money = (dollars: number) =>
+  dollars >= 100 ? `$${Math.round(dollars).toLocaleString("en-US")}` : `$${dollars.toFixed(2)}`;
+/** The learned numbers, one line each, as agents and the settings page read them. */
+export function learnedLines(learned: AllocationLearned) {
+  const source = (entry: { source: string; basis?: string | undefined }) =>
+    entry.source === "measured" ? "measured" : `estimated from ${entry.basis ?? "plan size"}`;
+  return {
+    at: learned.learnedAt,
+    costs: learned.costs.map(
+      (c) =>
+        `${c.model} / ${c.effort ?? "default"} ${c.kind}: ${money(c.dollarsPerHour)} an hour at ${Math.round(c.contextTokens / 1000)}k context${
+          c.perHundredK > 0 ? `, ${money(c.perHundredK)} more per 100k` : ""
+        }; ${c.samples} turns over ${span(c.hours)}, ${source(c)}`,
+    ),
+    limits: learned.limits.map(
+      (l) =>
+        `${l.label} ${l.windowLabel}: holds about ${money(100 / l.percentPerDollar)} of use; outside use ${l.backgroundPercentPerHour.toFixed(2)}% an hour; ${l.samples} reading pairs, ${source(l)}`,
+    ),
   };
 }
 
@@ -126,6 +169,18 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     const keys = yield* resolve(account);
     caps = [...caps.filter((c) => !keys.includes(c.key)), ...keys.map((key) => ({ key, ...cap }))];
   }
+  let goals = policy.accountGoals ?? [];
+  for (const account of edit.clearGoals ?? []) {
+    const keys = new Set(yield* resolve(account));
+    goals = goals.filter((goal) => !keys.has(goal.key));
+  }
+  for (const { account, percentPerDay } of edit.setGoals ?? []) {
+    const keys = yield* resolve(account);
+    goals = [
+      ...goals.filter((g) => !keys.includes(g.key)),
+      ...keys.map((key) => ({ key, percentPerDay })),
+    ];
+  }
   let accountOrder = policy.accountOrder;
   if (edit.accountOrder) {
     const keys: string[] = [];
@@ -135,6 +190,8 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
   return {
     ...policy,
     accountCaps: caps,
+    accountGoals: goals,
+    ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),
     ...(edit.longWaitHours === undefined ? {} : { longWaitHours: edit.longWaitHours }),
