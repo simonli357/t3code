@@ -168,7 +168,8 @@ export function projectAccount(input: {
   /** When the session would start. */
   readonly at: number;
   readonly hours: number;
-  readonly session: SessionLoad;
+  /** The session being placed; absent to project only the load already there. */
+  readonly session?: SessionLoad | undefined;
   readonly load: readonly SessionLoad[];
   readonly learned: AllocationLearned | undefined;
   readonly cap?: AllocationAccountCap | undefined;
@@ -179,7 +180,7 @@ export function projectAccount(input: {
   const slug = (model: string) => findCatalogModel(account.models, model)?.slug ?? model;
   const applies = (w: AllocationWindow, model: string) =>
     !w.models || w.models.includes(slug(model));
-  const rate = costPerHour(learned, input.session).dollarsPerHour;
+  const rate = input.session ? costPerHour(learned, input.session).dollarsPerHour : 0;
   const identity = {
     key: input.key,
     label: account.label,
@@ -187,7 +188,7 @@ export function projectAccount(input: {
     plan: account.plan ?? null,
   };
   const windows = account.windows
-    .filter((w) => applies(w, input.session.model))
+    .filter((w) => !input.session || applies(w, input.session.model))
     .map((w): WindowProjection => {
       const duration = w.durationHours ?? null;
       let resetsAt = w.resetsAt ? Date.parse(w.resetsAt) : null;
@@ -267,7 +268,7 @@ export function projectAccount(input: {
     fits: failing.length === 0,
     ...(goals.length ? { withinGoal: goals.every((w) => w.withinGoal) } : {}),
     overGoal: Math.max(0, ...windows.map((w) => w.overGoal)),
-    roomWorkers: tightest ? tightest.spareDollarsPerHour / rate : null,
+    roomWorkers: tightest && rate > 0 ? tightest.spareDollarsPerHour / rate : null,
     ...(tightest ? { tightest } : {}),
     lastsHours: lasts.length ? Math.min(...lasts) : null,
     ...(failing.length

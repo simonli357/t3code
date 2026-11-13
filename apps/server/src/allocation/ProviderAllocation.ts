@@ -1,5 +1,6 @@
 import {
   AllocationError,
+  AllocationEvidence,
   AllocationInventory,
   AllocationOperation,
   AllocationResponse,
@@ -9,6 +10,10 @@ import {
   ModelSelection,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
+  allocationPreferenceKey,
+  modelFallback,
+  modelLadder,
+  type AllocationLearned,
   type AllocationSnapshot,
   type AllocationPolicy,
   type AllocationPolicyEdit,
@@ -26,6 +31,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Store from "./AllocationStore.ts";
 import * as Computers from "../computers/Computers.ts";
@@ -35,8 +41,10 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import { UsageMeasurements } from "../usage/UsageMeasurements.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.ts";
-import { allocationInventory } from "./inventory.ts";
-import { accountCap, accountRoom, decideAllocation } from "./decision.ts";
+import { allocationIdentity, allocationInventory, windowModels } from "./inventory.ts";
+import { accountCap, accountRoom, accountRunways, decideAllocation } from "./decision.ts";
+import { learnAllocation } from "./learning.ts";
+import { span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
 import { chooseProfile } from "./modelDecision.ts";
 import { computerNumbers } from "./placement.ts";
@@ -56,6 +64,8 @@ const PeerInput = Schema.TaggedUnion({
     since: Schema.String,
     startIntent: Schema.optional(Schema.String),
   },
+  /** This computer's turns and limit readings, for the coordinator's learning. */
+  allocationEvidence: {},
 });
 const Probe = Schema.Struct({
   state: Schema.Literals(["pending", "running", "terminal", "unknown"]),
@@ -76,6 +86,11 @@ const READING_REFRESH_RETRY_MS = 60_000;
 const COORDINATOR_RETRY_MS = 60_000;
 /** Without a provider reset time, a limited account is tried again after this long. */
 const UNKNOWN_RESET_WAIT_MS = 30 * 60_000;
+/** The coordinator relearns costs and limit sizes this often, from every computer's history. */
+const LEARN_INTERVAL = "30 minutes";
+const FIRST_LEARN_DELAY = "2 minutes";
+/** An unchanged settings copy is rewritten at most this often, to keep its age current. */
+const COPY_WRITE_INTERVAL_MS = 10 * 60_000;
 /** Where a worker's next turn runs when its account is limited, capped or was just rejected. */
 export type UsageRoute =
   | { readonly _tag: "proceed" }
@@ -179,6 +194,58 @@ const make = Effect.gen(function* () {
   /** The coordinator's policies as last read, so a lost connection decides by them. */
   let coordinatorPolicy: AllocationPolicy | undefined;
   let coordinatorModelPolicy: ModelRoutingPolicy | undefined;
+  let coordinatorLearned: AllocationLearned | undefined;
+  /** When the coordinator last sent its policies, and when this computer last stored them. */
+  let copySyncedAt: number | undefined;
+  let copyWrittenAt = -Infinity;
+  // The stored copy stands in from startup, so a lost coordinator never means built-in defaults.
+  const savedCopy = yield* store.copy.pipe(Effect.catch(() => Effect.succeed(undefined)));
+  if (
+    savedCopy &&
+    savedCopy.coordinatorEnvironmentId ===
+      (yield* settings.getSettings).allocationCoordinatorEnvironmentId
+  ) {
+    coordinatorPolicy = savedCopy.policy;
+    coordinatorModelPolicy = savedCopy.modelPolicy;
+    coordinatorLearned = savedCopy.learned;
+    copySyncedAt = Date.parse(savedCopy.syncedAt);
+  }
+  const keepCopy = Effect.fn("ProviderAllocation.keepCopy")(function* (
+    coordinatorId: string,
+    response: AllocationResponse,
+  ) {
+    const policy = response.policy ?? response.snapshot?.policy;
+    const modelPolicy = response.modelPolicy ?? response.modelSnapshot?.policy;
+    if (!policy && !modelPolicy && !response.learned) return;
+    const changed =
+      (policy !== undefined && policy.version !== coordinatorPolicy?.version) ||
+      (modelPolicy !== undefined && modelPolicy.version !== coordinatorModelPolicy?.version) ||
+      (response.learned !== undefined &&
+        response.learned.learnedAt !== coordinatorLearned?.learnedAt);
+    coordinatorPolicy = policy ?? coordinatorPolicy;
+    coordinatorModelPolicy = modelPolicy ?? coordinatorModelPolicy;
+    coordinatorLearned = response.learned ?? coordinatorLearned;
+    const at = yield* Clock.currentTimeMillis;
+    copySyncedAt = at;
+    if (!coordinatorPolicy || (!changed && at - copyWrittenAt < COPY_WRITE_INTERVAL_MS)) return;
+    copyWrittenAt = at;
+    yield* store
+      .saveCopy({
+        coordinatorEnvironmentId: coordinatorId,
+        syncedAt: DateTime.formatIso(DateTime.makeUnsafe(at)),
+        policy: coordinatorPolicy,
+        ...(coordinatorModelPolicy ? { modelPolicy: coordinatorModelPolicy } : {}),
+        ...(coordinatorLearned ? { learned: coordinatorLearned } : {}),
+      })
+      .pipe(Effect.ignore);
+  });
+  /** Said with a choice made here because the coordinator could not be reached. */
+  const copyNote = Effect.gen(function* () {
+    if (copySyncedAt === undefined || !coordinatorPolicy)
+      return "The coordinator could not be reached and never sent its settings here: decided with built-in defaults.";
+    const age = ((yield* Clock.currentTimeMillis) - copySyncedAt) / 3_600_000;
+    return `The coordinator could not be reached: decided here with the settings and learned numbers it last sent, ${span(Math.max(0, age))} ago.`;
+  });
 
   /**
    * Readings are only probed while a client watches provider status, so they can be days old
@@ -330,11 +397,30 @@ const make = Effect.gen(function* () {
           )}`).map((row) => row.thread_id)
         : [],
     );
+    // Each working session's context, which sets what its next hour costs.
+    const contexts = new Map<string, number>();
+    yield* Effect.forEach(demand, (d) =>
+      sql<{
+        used: number | null;
+      }>`SELECT json_extract(payload_json, '$.usedTokens') AS used FROM projection_thread_activities
+        WHERE kind = 'context-window.updated' AND thread_id = ${d.threadId} ORDER BY created_at DESC LIMIT 1`.pipe(
+        Effect.tap((rows) =>
+          Effect.sync(() => {
+            const used = rows[0]?.used;
+            if (typeof used === "number" && used >= 0) contexts.set(d.threadId, Math.round(used));
+          }),
+        ),
+      ),
+    );
     return {
       ...current,
       maxActiveAgentSessions: (yield* settings.getSettings).maxActiveAgentSessions,
       environmentLabel: local.label,
-      demand: demand.map((d) => (workers.has(d.threadId) ? { ...d, worker: true } : d)),
+      demand: demand.map((d) => ({
+        ...d,
+        ...(workers.has(d.threadId) ? { worker: true } : {}),
+        ...(contexts.has(d.threadId) ? { contextTokens: contexts.get(d.threadId)! } : {}),
+      })),
       coordinatorEnvironmentId: (yield* settings.getSettings).allocationCoordinatorEnvironmentId,
       ...(computer ? { computer } : {}),
       ...(checkouts
@@ -351,6 +437,7 @@ const make = Effect.gen(function* () {
     return {
       policy: coordinatorPolicy ?? (yield* store.policy),
       modelPolicy: coordinatorModelPolicy ?? (yield* store.modelPolicy),
+      learned: coordinatorLearned ?? (yield* store.learned),
     };
   });
   const limited = Effect.fn("ProviderAllocation.limited")(function* (
@@ -389,12 +476,186 @@ const make = Effect.gen(function* () {
       }).drainedUntil !== undefined
     );
   }, Effect.mapError(unavailable));
+  /** This computer's finished turns and limit readings, for learning, on every account. */
+  const evidence = Effect.gen(function* () {
+    const raw = yield* measurements.evidence;
+    const current = yield* providers.getProviders;
+    const byInstance = new Map(current.map((p) => [p.instanceId as string, p]));
+    const keyOf = (instanceId: string) => {
+      const p = byInstance.get(instanceId);
+      return p
+        ? allocationPreferenceKey({
+            driver: p.driver,
+            accountKey: allocationIdentity(p),
+            environmentId: local.environmentId,
+            instanceId: p.instanceId,
+          })
+        : undefined;
+    };
+    const rows = yield* sql<{
+      thread_id: string;
+      owner_id: string | null;
+    }>`SELECT thread_id, owner_id FROM custom_workers`;
+    const workers = new Set(rows.map((r) => r.thread_id));
+    // A thread that owns workers is a master, even when another master started it.
+    const owners = new Set(
+      rows.flatMap((r) => (r.owner_id ? [r.owner_id.split(":").at(-1)!] : [])),
+    );
+    return {
+      environmentId: local.environmentId,
+      observedAt: yield* now,
+      turns: raw.turns.flatMap((t) => {
+        const key = keyOf(t.instanceId);
+        const provider = byInstance.get(t.instanceId);
+        if (!key || !provider || !t.model || t.priced === null || !t.startedAt || !t.endedAt)
+          return [];
+        const tokens = t.tokens;
+        const context =
+          t.peakContextTokens === null
+            ? null
+            : Math.round(
+                ((t.initialContextTokens ?? t.peakContextTokens) + t.peakContextTokens) / 2,
+              );
+        return [
+          {
+            key,
+            driver: provider.driver,
+            model: t.model,
+            effort: t.effort,
+            kind: workers.has(t.threadId) && !owners.has(t.threadId) ? "worker" : "master",
+            threadId: t.threadId,
+            startedAt: t.startedAt,
+            endedAt: t.endedAt,
+            contextTokens: context,
+            costUsd: t.priced,
+            ...(tokens?.inputTokens !== undefined && tokens.outputTokens !== undefined
+              ? {
+                  tokens: {
+                    input: Math.max(
+                      0,
+                      tokens.inputTokens -
+                        (tokens.cachedInputTokens ?? 0) -
+                        (tokens.cacheCreationTokens ?? 0),
+                    ),
+                    cacheRead: tokens.cachedInputTokens ?? 0,
+                    cacheWrite: tokens.cacheCreationTokens ?? 0,
+                    output: tokens.outputTokens,
+                  },
+                }
+              : {}),
+          } as const,
+        ];
+      }),
+      readings: raw.quotas.flatMap((q) => {
+        const key = keyOf(q.instanceId);
+        const provider = byInstance.get(q.instanceId);
+        if (!key || !provider) return [];
+        const models = windowModels(q.window.modelScope, provider.models);
+        return [
+          {
+            key,
+            label: provider.displayName ?? provider.instanceId,
+            driver: provider.driver,
+            windowId: q.window.id,
+            windowLabel: q.window.label,
+            kind: q.window.kind,
+            ...(models.length ? { models } : {}),
+            usedPercent: q.window.usedPercent,
+            checkedAt: q.checkedAt,
+            resetsAt: q.window.resetsAt ?? null,
+            durationHours: q.window.windowDurationMins ? q.window.windowDurationMins / 60 : null,
+            plan: q.plan ?? null,
+          },
+        ];
+      }),
+    } satisfies AllocationEvidence;
+  }).pipe(Effect.mapError(unavailable));
+  /**
+   * Learns cost per working hour and each limit's share per dollar from every computer's
+   * history, and stores the result for every decision and every computer's copy.
+   */
+  const learn = Effect.gen(function* () {
+    const at = yield* now;
+    const linked = yield* peers.list;
+    const remote = yield* Effect.forEach(
+      linked,
+      (peer) =>
+        peers
+          .call(peer.environmentId, { _tag: "allocationEvidence" })
+          .pipe(Effect.flatMap(Schema.decodeUnknownEffect(AllocationEvidence)), Effect.result),
+      { concurrency: "unbounded" },
+    );
+    const inventories = yield* collect();
+    const accounts = [
+      ...new Map(
+        inventories
+          .flatMap((i) => i.accounts)
+          .map((a) => [
+            allocationPreferenceKey(a),
+            {
+              key: allocationPreferenceKey(a),
+              label: a.label,
+              driver: a.driver,
+              plan: a.plan ?? null,
+              windows: a.windows.map((w) => ({
+                id: w.id,
+                label: w.label,
+                kind: w.kind,
+                ...(w.models ? { models: w.models } : {}),
+              })),
+            },
+          ]),
+      ).values(),
+    ];
+    const modelPolicy = yield* store.modelPolicy;
+    const fallback = modelFallback(modelPolicy);
+    const offered = (model: string) => [
+      ...new Set(
+        inventories
+          .flatMap((i) => i.accounts)
+          .filter((a) => a.models.some((m) => m.slug === model))
+          .map((a) => a.driver),
+      ),
+    ];
+    const profiles = [
+      ...modelLadder(modelPolicy).map((r) => ({ driver: "claudeAgent", ...r })),
+      ...(["claudeAgent", "codex"] as const).flatMap((driver) =>
+        modelPolicy[driver].cells.flat().map((c) => ({ driver, model: c.model, effort: c.effort })),
+      ),
+      ...(fallback
+        ? offered(fallback.model).map((driver) => ({
+            driver,
+            model: fallback.model,
+            effort: fallback.effort,
+          }))
+        : []),
+    ];
+    const learned = learnAllocation({
+      at,
+      evidence: [
+        yield* evidence,
+        ...remote.flatMap((r) => (r._tag === "Success" ? [r.success] : [])),
+      ],
+      accounts,
+      profiles: [...new Map(profiles.map((p) => [JSON.stringify(p), p])).values()],
+      price: yield* measurements.prices,
+      notes: remote.flatMap((r, i) =>
+        r._tag === "Success"
+          ? []
+          : [
+              `${linked[i]!.label}: history not read (${r.failure.message}); its use counts as background.`,
+            ],
+      ),
+    });
+    yield* store.saveLearned(learned);
+    return learned;
+  });
   const reroute = Effect.fn("ProviderAllocation.reroute")(function* (
     threadId: ThreadId,
     current: ModelSelection,
     options?: { readonly rejected?: boolean; readonly switchAccount?: boolean },
   ) {
-    const { policy, modelPolicy } = yield* policies;
+    const { policy, modelPolicy, learned } = yield* policies;
     const localInventory = yield* inventory(undefined, undefined, policy.maxReadingAgeMinutes);
     const at = yield* now;
     const account = localInventory.accounts.find((a) => a.instanceId === current.instanceId);
@@ -426,13 +687,25 @@ const make = Effect.gen(function* () {
       },
     ];
     const reservations = yield* store.reservations;
+    // What is left of the job the worker was started for, as the projection's horizon.
+    const started = reservations.findLast((r) => r.request.threadId === threadId);
+    const remaining = started?.request.expectedHours
+      ? Math.max(
+          0.5,
+          started.request.expectedHours -
+            (Date.parse(at) - Date.parse(started.createdAt)) / 3_600_000,
+        )
+      : undefined;
     const base = {
+      kind: "worker" as const,
       assignmentId: `usage-switch:${threadId}`,
       environmentId: local.environmentId,
       threadId,
+      ...(remaining === undefined ? {} : { expectedHours: Math.min(168, remaining) }),
     };
-    const context = { at, policy, inventories, reservations, authorityAvailable: true };
-    const sameModel = decideAllocation({
+    const context = { at, policy, inventories, reservations, authorityAvailable: true, learned };
+    // The same model on another account that lasts the rest of the job, ranked like a start.
+    const same = decideAllocation({
       ...context,
       request: {
         ...base,
@@ -440,7 +713,10 @@ const make = Effect.gen(function* () {
         model: current.model,
         options: current.options ?? [],
       },
-    }).selectedInstanceId;
+    });
+    const sameModel = same.candidates.find(
+      (c) => c.instanceId === same.selectedInstanceId && c.fits !== false,
+    )?.instanceId;
     if (sameModel)
       return {
         _tag: "switch",
@@ -448,10 +724,11 @@ const make = Effect.gen(function* () {
         modelChanged: false,
       } as const;
     // Another model continues from the same conversation with other abilities: only when the
-    // reset is far, and then the master is told.
+    // reset is far, and then the master is told. It moves at most two rungs and never onto Fable
+    // when Fable workers are off.
     if (!long) return wait;
     // A reading that shows the drain is scoped to the model, so this account may offer another.
-    const decision = chooseProfile({
+    const choice = chooseProfile({
       ...context,
       ...(reset !== undefined ? { inventories: [localInventory] } : {}),
       modelPolicy,
@@ -463,7 +740,10 @@ const make = Effect.gen(function* () {
         allowedDrivers: [account.driver],
         override: { driver: account.driver, model: current.model, options: current.options ?? [] },
       },
-    }).decision;
+    });
+    const decision = choice.decision;
+    // Another account's limit resets soon: wait for it, then decide again.
+    if (choice.startAt) return { ...wait, until: choice.startAt, observed: false };
     return decision?.selectedInstanceId
       ? ({
           _tag: "switch",
@@ -472,7 +752,7 @@ const make = Effect.gen(function* () {
             model: decision.request.model,
             options: decision.request.options,
           },
-          modelChanged: true,
+          modelChanged: decision.request.model !== current.model,
         } as const)
       : wait;
   }, Effect.mapError(unavailable));
@@ -660,7 +940,18 @@ const make = Effect.gen(function* () {
           ...(coordinatorModelPolicy ? { coordinatorModelPolicy } : {}),
         }
       : {};
-    if (operation._tag === "caps") return { policy, modelPolicy: yield* store.modelPolicy };
+    if (operation._tag === "caps") {
+      // Only a newer build asks with `learnedAt`, and only a newer table is sent back.
+      const learned = operation.learnedAt === undefined ? undefined : yield* store.learned;
+      return {
+        policy,
+        modelPolicy: yield* store.modelPolicy,
+        ...(learned && learned.learnedAt !== operation.learnedAt ? { learned } : {}),
+      };
+    }
+    // The coordinator decides with what it learned; a stand-in with the copy it last received.
+    const learned = fallback ? coordinatorLearned : yield* store.learned;
+    const notes = fallback ? [yield* copyNote] : [];
     if (
       operation._tag === "modelSnapshot" ||
       operation._tag === "modelPolicy" ||
@@ -710,6 +1001,8 @@ const make = Effect.gen(function* () {
           reserve: operation._tag === "modelAllocate",
           expectedPolicyVersion: policy.version,
           expectedModelVersion: modelPolicy.version,
+          learned,
+          notes,
           ...standIn,
           ...(effectiveModelPolicy ? { previewPolicy: effectiveModelPolicy } : {}),
         }),
@@ -740,6 +1033,7 @@ const make = Effect.gen(function* () {
             inventories,
             reservations: yield* store.reservations,
             authorityAvailable,
+            learned,
           });
           if (!decision.selectedInstanceId)
             return yield* new AllocationError({
@@ -796,6 +1090,13 @@ const make = Effect.gen(function* () {
           reservations: yield* store.reservations,
           history: yield* store.history,
           authorityAvailable,
+          ...(learned ? { learned } : {}),
+          runways: accountRunways({
+            at: yield* now,
+            policy,
+            inventories,
+            learned,
+          }),
           notices: [
             ...inventories.flatMap((i) => i.notices),
             ...(!coordinated
@@ -815,6 +1116,7 @@ const make = Effect.gen(function* () {
         authorityAvailable,
         reserve: operation._tag === "allocate",
         expectedPolicyVersion: policy.version,
+        learned,
         ...standIn,
         ...(operation._tag === "preview" && operation.policy
           ? { previewPolicy: operation.policy }
@@ -963,16 +1265,12 @@ const make = Effect.gen(function* () {
       const sent =
         operation._tag === "modelPreview" || operation._tag === "modelAllocate"
           ? { ...operation, request: withLegacyReasons(operation.request) }
-          : operation;
+          : operation._tag === "caps"
+            ? { ...operation, learnedAt: coordinatorLearned?.learnedAt ?? "" }
+            : operation;
       return yield* peers.call(id, { _tag: "allocation", operation: sent }).pipe(
         Effect.flatMap(decodeResponse),
-        Effect.tap((response) =>
-          Effect.sync(() => {
-            coordinatorPolicy = response.policy ?? response.snapshot?.policy ?? coordinatorPolicy;
-            coordinatorModelPolicy =
-              response.modelPolicy ?? response.modelSnapshot?.policy ?? coordinatorModelPolicy;
-          }),
-        ),
+        Effect.tap((response) => keepCopy(id, response)),
         Effect.catch((cause) => {
           if (cause.message.includes(WORKER_ACCOUNT_DISABLED_REASON))
             return Effect.fail(
@@ -993,6 +1291,7 @@ const make = Effect.gen(function* () {
             return Effect.succeed({
               policy: coordinatorPolicy,
               ...(coordinatorModelPolicy ? { modelPolicy: coordinatorModelPolicy } : {}),
+              ...(coordinatorLearned ? { learned: coordinatorLearned } : {}),
             });
           if (refused || !decidesHere) return Effect.fail(unavailable());
           return Effect.logWarning("Allocation coordinator unavailable; deciding locally", {
@@ -1054,6 +1353,17 @@ const make = Effect.gen(function* () {
       ...(saved.warnings ? { warnings: saved.warnings } : {}),
     });
   });
+  // Only the coordinator learns; every other computer receives its numbers with the policies.
+  yield* Effect.gen(function* () {
+    const id = (yield* settings.getSettings).allocationCoordinatorEnvironmentId;
+    if (id && id !== local.environmentId) return;
+    yield* learn;
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("Allocation learning failed", cause)),
+    Effect.delay(FIRST_LEARN_DELAY),
+    Effect.repeat(Schedule.spaced(LEARN_INTERVAL)),
+    Effect.forkIn(scope),
+  );
   return ProviderAllocation.of({
     reroute,
     limited,
@@ -1091,6 +1401,8 @@ const make = Effect.gen(function* () {
           );
         case "allocation":
           return yield* executeLocal(request.operation);
+        case "allocationEvidence":
+          return yield* evidence;
       }
     }),
   });

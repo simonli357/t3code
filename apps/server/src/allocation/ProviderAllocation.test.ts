@@ -377,6 +377,7 @@ function fixture(
     }),
     Layer.succeed(UsageMeasurements, {
       evidence: Effect.succeed({ turns: [], quotas: [] }),
+      prices: Effect.succeed(() => null),
       read: () => Effect.succeed(report),
     }),
     Layer.mock(Computers.Computers)({

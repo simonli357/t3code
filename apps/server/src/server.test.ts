@@ -1096,6 +1096,7 @@ const buildAppUnderTest = (options?: {
           UsageService.layerTest,
           Layer.succeed(UsageMeasurements.UsageMeasurements, {
             evidence: Effect.succeed({ turns: [], quotas: [] }),
+            prices: Effect.succeed(() => null),
             read: (input) => Effect.sync(() => new MeasurementHistory().report(input, 0)),
           }),
           Layer.mock(SettledThreadPurge.SettledThreadPurge)({}),

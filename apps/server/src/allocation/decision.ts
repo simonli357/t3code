@@ -5,6 +5,7 @@ import {
   WORKER_ACCOUNT_DISABLED_REASON,
 } from "@t3tools/contracts";
 import type {
+  AccountRunway,
   AllocationAccount,
   AllocationAccountCap,
   AllocationCandidate,
@@ -21,6 +22,8 @@ import { profileLabel } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
 import {
   demandLoad,
+  limitShare,
+  paced,
   projectAccount,
   runwayText,
   SEED_JOB_HOURS,
@@ -454,4 +457,79 @@ export function decideAllocation(input: {
         ],
     waitUntil: selected || !reason ? null : (resets[0] ?? null),
   };
+}
+
+/**
+ * Each login once, for the accounts table: what its meters say, its daily goal's budget now,
+ * how many dollars each window holds, and how long it lasts at the current load.
+ */
+export function accountRunways(input: {
+  at: string;
+  policy: AllocationPolicy;
+  inventories: readonly AllocationInventory[];
+  learned: AllocationLearned | undefined;
+}): AccountRunway[] {
+  const everyAccount = input.inventories.flatMap((i) => i.accounts);
+  const demand = input.inventories.flatMap((i) => i.demand);
+  const now = Date.parse(input.at);
+  const logins = new Map<string, AllocationAccount>();
+  for (const account of everyAccount)
+    if (!logins.has(allocationPreferenceKey(account)))
+      logins.set(allocationPreferenceKey(account), account);
+  return [...logins].map(([key, local]) => {
+    const account = { ...local, ...sharedReadings(local, everyAccount) };
+    const load = demand
+      .filter((d) =>
+        account.accountKey !== null
+          ? d.accountKey === account.accountKey
+          : d.environmentId === account.environmentId && d.instanceId === account.instanceId,
+      )
+      .map((d) => demandLoad(account.driver, d));
+    const goal = accountGoal(input.policy, account);
+    const projection = projectAccount({
+      account,
+      key,
+      at: now,
+      hours: 0,
+      load,
+      learned: input.learned,
+      cap: accountCap(input.policy, account, "worker"),
+      goal: goal?.percentPerDay ?? null,
+    });
+    const identity = {
+      key,
+      label: account.label,
+      driver: account.driver,
+      plan: account.plan ?? null,
+    };
+    const windows = account.windows.map((w) => {
+      const share = projection.windows.find((p) => p.window.id === w.id);
+      const learnedShare = limitShare(input.learned, identity, w);
+      const cycleStart = w.cycleStartedAt ? Date.parse(w.cycleStartedAt) : null;
+      return {
+        id: w.id,
+        label: w.label,
+        meterPercent: w.usedPoints,
+        goalPercent:
+          goal && paced(w) && cycleStart !== null
+            ? Math.min(share?.limit ?? 100, (goal.percentPerDay * (now - cycleStart)) / 86_400_000)
+            : null,
+        sizeDollars: 100 / learnedShare.percentPerDollar,
+        source: learnedShare.source,
+      };
+    });
+    const sessions = load.length;
+    return {
+      key,
+      label: account.label,
+      line: !account.windows.length
+        ? "No usage reading."
+        : `${
+            projection.lastsHours === null
+              ? "No limit runs out before its reset"
+              : `Lasts about ${span(projection.lastsHours)}`
+          } at the current load (${sessions} working session${sessions === 1 ? "" : "s"}).`,
+      windows,
+    };
+  });
 }

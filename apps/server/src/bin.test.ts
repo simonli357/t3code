@@ -384,6 +384,7 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
           Layer.provide(
             Layer.succeed(UsageMeasurements.UsageMeasurements, {
               evidence: Effect.succeed({ turns: [], quotas: [] }),
+              prices: Effect.succeed(() => null),
               read: (input) => Effect.sync(() => new MeasurementHistory().report(input, 0)),
             }),
           ),

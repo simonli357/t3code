@@ -1,6 +1,7 @@
 import { unresolvedQuotaRejections, type QuotaEvidence } from "./quotaEvidence.ts";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
+import { IDLE_AFTER_MINUTES } from "@t3tools/contracts";
 import type {
   AllocationAccount,
   AllocationInventory,
@@ -36,6 +37,18 @@ const profileUncertainty = (profile: UsageMeasurementsReport["profiles"][number]
         Math.min(2, profile.p90OutputTokensPerTurnHour / profile.medianOutputTokensPerTurnHour),
       )
     : 1;
+
+/** The models a model-scoped window (such as `Fable`) applies to; empty when it is account-wide. */
+export function windowModels(
+  modelScope: string | undefined,
+  models: readonly { readonly slug: string }[],
+) {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const scope = modelScope ? normalize(modelScope) : null;
+  return scope
+    ? models.filter((m) => `-${normalize(m.slug)}-`.includes(`-${scope}-`)).map((m) => m.slug)
+    : [];
+}
 
 export function allocationInventory(input: {
   environmentId: string;
@@ -112,6 +125,7 @@ export function allocationInventory(input: {
       availableForWorkers: !input.workerDisabledInstanceIds?.includes(p.instanceId),
       retainHistory: measurements.monitoredInstanceIds.includes(p.instanceId),
       enabled: p.enabled,
+      ...(p.auth.label ? { plan: p.auth.label } : {}),
       environmentId,
       instanceId: p.instanceId,
       driver: p.driver,
@@ -159,13 +173,7 @@ export function allocationInventory(input: {
         ? { shortWindowAbsentCheckedAt: limits.shortWindowAbsentCheckedAt }
         : {}),
       windows: (limits?.windows ?? []).map((w) => {
-        const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-        const scope = w.modelScope ? normalize(w.modelScope) : null;
-        const scopedModels = scope
-          ? p.models
-              .filter((m) => `-${normalize(m.slug)}-`.includes(`-${scope}-`))
-              .map((m) => m.slug)
-          : [];
+        const scopedModels = windowModels(w.modelScope, p.models);
         const rate = measured?.windows.find(
           (v) =>
             v.window.id === w.id &&
@@ -250,7 +258,12 @@ export function allocationInventory(input: {
           t.session?.status === "running" ||
           t.session?.status === "starting" ||
           t.backgroundLiveness === "working" ||
-          t.latestTurn?.state === "running",
+          t.latestTurn?.state === "running" ||
+          // A session still counts as working this long after its last turn: a master between
+          // its workers' reports, a worker between a master's messages.
+          (t.latestTurn?.completedAt !== undefined &&
+            t.latestTurn.completedAt !== null &&
+            Date.parse(at) - Date.parse(t.latestTurn.completedAt) <= IDLE_AFTER_MINUTES * 60_000),
       )
       .map((t) => {
         const instanceId = t.session?.providerInstanceId ?? t.modelSelection.instanceId;
@@ -262,6 +275,12 @@ export function allocationInventory(input: {
           model: t.modelSelection.model,
           options: t.modelSelection.options ?? [],
           state: t.session?.status === "starting" ? "pending" : "running",
+          ...(t.session?.status === "running" ||
+          t.session?.status === "starting" ||
+          t.backgroundLiveness === "working" ||
+          t.latestTurn?.state === "running"
+            ? {}
+            : { recent: true }),
         };
       }),
     notices: [

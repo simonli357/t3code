@@ -219,6 +219,7 @@ const make = Effect.gen(function* () {
                 title: input.title,
                 prompt: input.prompt,
                 modelSelection: selection,
+                ...(selectionDecision?.startAt ? { startAt: selectionDecision.startAt } : {}),
                 ...(input.request.environmentId !== local.environmentId
                   ? { environment: input.request.environmentId }
                   : {}),

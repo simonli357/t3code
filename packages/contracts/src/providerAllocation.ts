@@ -276,6 +276,8 @@ export const AllocationDemand = Schema.Struct({
   worker: Schema.optional(Schema.Boolean),
   /** The session's current context. Absent when unknown or from older computers. */
   contextTokens: Schema.optional(NonNegativeInt),
+  /** Between turns, still counted as working; not a running session. */
+  recent: Schema.optional(Schema.Boolean),
 });
 export type AllocationDemand = typeof AllocationDemand.Type;
 export const AllocationInventory = Schema.Struct({

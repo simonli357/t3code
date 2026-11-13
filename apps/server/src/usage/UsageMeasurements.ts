@@ -16,16 +16,38 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { MeasurementHistory } from "./measurementHistory.ts";
+import { lookupRate, parseRateTable, type RateTable } from "./usagePricing.ts";
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeRates = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ fetchedAtMs: Schema.Number, document: Schema.Unknown })),
+);
+/** Dollars per token by price class, as allocation learning prices turns. */
+export interface TokenPrice {
+  readonly input: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+  readonly output: number;
+}
+const RATES_RELOAD_MS = 60 * 60_000;
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 export class UsageMeasurements extends Context.Service<
   UsageMeasurements,
   {
     readonly read: (input: UsageMeasurementsInput) => Effect.Effect<UsageMeasurementsReport>;
-    /** Every retained finished turn and limit reading, for allocation learning. */
-    readonly evidence: Effect.Effect<ReturnType<MeasurementHistory["evidence"]>>;
+    /**
+     * Every retained finished turn, with its cost (the provider's own figure, else its tokens
+     * at API prices; null when neither is known), and every limit reading.
+     */
+    readonly evidence: Effect.Effect<{
+      readonly turns: readonly (ReturnType<MeasurementHistory["evidence"]>["turns"][number] & {
+        readonly priced: number | null;
+      })[];
+      readonly quotas: ReturnType<MeasurementHistory["evidence"]>["quotas"];
+    }>;
+    /** API prices from the usage page's cached rate table. */
+    readonly prices: Effect.Effect<(model: string) => TokenPrice | null>;
   }
 >()("t3/usage/UsageMeasurements") {}
 
@@ -127,10 +149,60 @@ const make = Effect.gen(function* () {
     ),
     Effect.forkScoped,
   );
+  // The usage page fetches and caches the rate table; learning only reads that copy.
+  let rates: { table: RateTable; loadedAt: number } | undefined;
+  const rateTable = Effect.gen(function* () {
+    const at = yield* Clock.currentTimeMillis;
+    if (rates && at - rates.loadedAt < RATES_RELOAD_MS) return rates.table;
+    const table = yield* fs
+      .readFileString(path.join(config.stateDir, "usage-model-rates.json"))
+      .pipe(
+        Effect.flatMap(decodeRates),
+        Effect.map((cached) => parseRateTable(cached.document)),
+        Effect.catchCause(() => Effect.succeed(rates?.table ?? new Map())),
+      );
+    rates = { table, loadedAt: at };
+    return table;
+  });
+  const prices = Effect.map(rateTable, (table) => (model: string) => {
+    const rate = lookupRate(table, model);
+    return rate
+      ? {
+          input: rate.inputCostPerToken,
+          cacheRead: rate.cacheReadCostPerToken,
+          cacheWrite: rate.cacheCreationCostPerToken,
+          output: rate.outputCostPerToken,
+        }
+      : null;
+  });
   return UsageMeasurements.of({
+    prices,
     evidence: Effect.gen(function* () {
       history.recordProviders(yield* providers.getProviders);
-      return history.evidence(yield* Clock.currentTimeMillis);
+      const price = yield* prices;
+      const { turns, quotas } = history.evidence(yield* Clock.currentTimeMillis);
+      return {
+        quotas,
+        turns: turns.map((turn) => {
+          const tokens = turn.tokens;
+          const rate = turn.model ? price(turn.model) : null;
+          const priced =
+            turn.costUsd ??
+            (rate && tokens?.inputTokens !== undefined && tokens.outputTokens !== undefined
+              ? Math.max(
+                  0,
+                  tokens.inputTokens -
+                    (tokens.cachedInputTokens ?? 0) -
+                    (tokens.cacheCreationTokens ?? 0),
+                ) *
+                  rate.input +
+                (tokens.cachedInputTokens ?? 0) * rate.cacheRead +
+                (tokens.cacheCreationTokens ?? 0) * rate.cacheWrite +
+                tokens.outputTokens * rate.output
+              : null);
+          return { ...turn, priced };
+        }),
+      };
     }),
     read: (input) =>
       Effect.gen(function* () {
