@@ -6693,6 +6693,55 @@ it.effect("concurrent recovery requests serialize at execution and reject the st
   }).pipe(Effect.scoped),
 );
 
+it.effect(
+  "linked servers draining at once synchronize ownership through each other",
+  () =>
+    Effect.gen(function* () {
+      const { alpha, beta, alphaWorkers: aw, betaWorkers: bw } = yield* linkedPair;
+      // One worker runs on each computer for a master on the other, so each
+      // master's computer announces an ownership change to the other.
+      const a = yield* seed("cross-drain-a").pipe(Effect.provide(alpha));
+      const b = yield* seed("cross-drain-b").pipe(Effect.provide(beta));
+      yield* aw.spawn(a.owner, { ...b.input, environment: "beta" });
+      yield* bw.spawn(b.owner, { ...a.input, environment: "alpha" });
+      yield* aw.drain();
+      yield* bw.drain();
+      const alphaSql = yield* SqlClient.SqlClient.pipe(Effect.provide(alpha));
+      const betaSql = yield* SqlClient.SqlClient.pipe(Effect.provide(beta));
+      const pending = (sql: typeof alphaSql) =>
+        sql<{
+          id: string;
+        }>`SELECT id FROM custom_session_ownership_changes WHERE announced = 0 AND id LIKE 'sync:%:cross'`;
+      for (const [sql, worker] of [
+        [alphaSql, b.worker],
+        [betaSql, a.worker],
+      ] as const)
+        yield* sql`INSERT INTO custom_session_ownership_changes (id, request_json, result_json)
+          VALUES (${`sync:${worker}:cross`}, '{}', json_object('threadId', ${worker}, 'ownerThreadId', NULL, 'previousOwnerThreadId', NULL, 'revision', 0))`;
+      // Both passes reach their peer call before either peer handles one.
+      const bothCalling = yield* Deferred.make<void>();
+      let calling = 0;
+      for (const id of ["env-alpha", "env-beta"]) {
+        const handle = peerHandlers.get(id)!;
+        peerHandlers.set(id, (from, request) =>
+          (request as { _tag?: string })._tag === "synchronizeOwnership"
+            ? Effect.suspend(() =>
+                ++calling === 2 ? Deferred.succeed(bothCalling, undefined) : Effect.void,
+              ).pipe(
+                Effect.andThen(Deferred.await(bothCalling)),
+                Effect.andThen(handle(from, request)),
+              )
+            : handle(from, request),
+        );
+      }
+      yield* Effect.all([aw.drain(), bw.drain()], { concurrency: "unbounded" });
+      expect(calling).toBe(2);
+      expect(yield* pending(alphaSql)).toEqual([]);
+      expect(yield* pending(betaSql)).toEqual([]);
+    }).pipe(Effect.scoped),
+  20_000,
+);
+
 // These envelopes and durable rows replay the protocol in c6fbc3c635
 // (organizationReserve/Decision/Finish, synchronizeOwnership and worker).
 // The former coordinator is deliberately a legacy protocol responder, not aw.

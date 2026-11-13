@@ -570,6 +570,12 @@ export class WorkerControls extends Context.Service<
   }
 >()("t3/orchestration/WorkerControls") {}
 
+/** True inside a drain pass, which gives up its queue lock while it waits on a linked server. */
+const LendsLockToPeers = Context.Reference<boolean>(
+  "t3/orchestration/WorkerControls/LendsLockToPeers",
+  { defaultValue: () => false },
+);
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const querySessionOrganization = yield* makeSessionOrganizationQuery;
@@ -582,12 +588,37 @@ const make = Effect.gen(function* () {
   const directory = yield* ProviderSessionDirectory;
   const catalog = yield* ProviderRegistry;
   const allocation = yield* Effect.serviceOption(ProviderAllocation.ProviderAllocation);
-  const peers = yield* PeerLinks;
+  const links = yield* PeerLinks;
   const settings = yield* ServerSettingsService;
   const workspaces = yield* Effect.serviceOption(SessionWorkspaces.SessionWorkspaces);
   const scope = yield* Effect.scope;
   let communicationTimer: Fiber.Fiber<void> | undefined;
   const lock = yield* Semaphore.make(1);
+  // One drain pass at a time, including while the pass has lent `lock` out.
+  const passLock = yield* Semaphore.make(1);
+  // A linked server's handler may need its own lock while its drain waits on
+  // ours, so a pass never holds `lock` across a peer call: both servers waited
+  // until the peer timeout and retried into the same wait. A transaction keeps
+  // it, because a lock holder would then queue on this connection.
+  const peers = PeerLinks.of({
+    ...links,
+    call: (environmentId, request, timeoutMs) =>
+      Effect.gen(function* () {
+        const call = links
+          .call(environmentId, request, timeoutMs)
+          .pipe(Effect.provideService(LendsLockToPeers, false));
+        if (
+          !(yield* LendsLockToPeers) ||
+          Option.isSome(yield* Effect.serviceOption(sql.transactionService))
+        )
+          return yield* call;
+        return yield* Effect.acquireUseRelease(
+          lock.release(1),
+          () => call,
+          () => lock.take(1),
+        );
+      }),
+  });
   const messageLock = yield* Semaphore.make(1);
   // Holds at most one pending pass, so a burst of events or requests costs one drain.
   const drainRequests = yield* Queue.dropping<void>(1);
@@ -1737,24 +1768,35 @@ const make = Effect.gen(function* () {
     const blocked = new Set<string>();
     const unreachable = new Set<string>();
     const passAt = DateTime.toEpochMillis(yield* DateTime.now);
-    for (const job of jobs) {
-      if (blocked.has(job.target_id) || held.has(job.id)) continue;
-
-      if (staleReports.has(job.worker_id) && ["done", "blocked", "notice"].includes(job.kind))
-        continue;
+    const parked = Effect.fn(function* (job: Job) {
       if (
         ["done", "blocked", "notice"].includes(job.kind) &&
         (yield* sql`SELECT 1 FROM custom_ownership_reservation`).length
       )
-        continue;
+        return true;
       // Transfers park pending assignments/reports instead of turning a move
       // into a failed assignment. The move owns routing until commit/cancel.
-      if (
+      return (
         (yield* sql`SELECT 1 FROM custom_session_moves WHERE locked = 1 AND
         (thread_id = ${job.target_id} OR thread_id = ${job.worker_id}) AND (state != 'complete' OR ${job.kind} = 'work') LIMIT 1`)
-          .length
-      )
+          .length > 0
+      );
+    });
+    const sameRouting = (a: Worker | undefined, b: Worker | undefined) =>
+      a?.state === b?.state &&
+      a?.owner_id === b?.owner_id &&
+      a?.notify === b?.notify &&
+      a?.plan_json === b?.plan_json;
+    // Peer calls lend `lock` out, so a job may change while this pass handles it.
+    let changed = false;
+    for (const listed of jobs) {
+      const job =
+        (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${listed.id} AND state = 'queued'`)[0];
+      if (!job || blocked.has(job.target_id) || held.has(job.id)) continue;
+
+      if (staleReports.has(job.worker_id) && ["done", "blocked", "notice"].includes(job.kind))
         continue;
+      if (yield* parked(job)) continue;
       const workers =
         yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`;
       const worker = workers[0];
@@ -1835,6 +1877,22 @@ const make = Effect.gen(function* () {
           ),
         );
         if (!policy) continue;
+      }
+      // A linked server may have retargeted, reserved or parked this job, or
+      // moved its worker, during the checks above. The next pass starts over.
+      const latest = (yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${job.id}`)[0];
+      if (
+        latest?.state !== "queued" ||
+        latest.target_id !== job.target_id ||
+        latest.attempt !== job.attempt ||
+        !sameRouting(
+          (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${job.worker_id}`)[0],
+          worker,
+        ) ||
+        (yield* parked(job))
+      ) {
+        changed = true;
+        continue;
       }
       const remote = parsePeerRef(job.target_id);
       if (
@@ -2047,6 +2105,7 @@ const make = Effect.gen(function* () {
         ),
       );
     }
+    if (changed) yield* Queue.offer(drainRequests, undefined);
     if (communicationTimer) yield* Fiber.interrupt(communicationTimer);
     communicationTimer = undefined;
     if (communicationDeadline !== undefined) {
@@ -2142,20 +2201,26 @@ const make = Effect.gen(function* () {
     }
   });
   const drainAndPublish = () =>
-    drainJobs().pipe(Effect.andThen(publishOrganizations()), Effect.mapError(failure));
+    drainJobs().pipe(
+      Effect.andThen(publishOrganizations()),
+      Effect.provideService(LendsLockToPeers, true),
+      Effect.mapError(failure),
+    );
   const drain = () =>
     recoverOrganizations().pipe(
-      Effect.andThen(lock.withPermit(drainAndPublish())),
+      Effect.andThen(passLock.withPermit(lock.withPermit(drainAndPublish()))),
       Effect.mapError(failure),
     );
   // Tool calls never wait behind a running pass: they deliver now when the queue
   // is free and otherwise leave their already persisted work to the next pass.
   const kick = () =>
-    lock
-      .withPermitsIfAvailable(1)(drainAndPublish())
+    passLock
+      .withPermitsIfAvailable(1)(lock.withPermitsIfAvailable(1)(drainAndPublish()))
       .pipe(
         Effect.flatMap((ran) =>
-          Option.isSome(ran) ? Effect.void : Queue.offer(drainRequests, undefined),
+          Option.isSome(ran) && Option.isSome(ran.value)
+            ? Effect.void
+            : Queue.offer(drainRequests, undefined),
         ),
       );
 
@@ -3710,7 +3775,7 @@ const make = Effect.gen(function* () {
       );
     }
   });
-  // Called under the queue lock. Preparation uses normal fork/create commands;
+  // Called by a drain pass. Preparation uses normal fork/create commands;
   // ownership and undelivered report routing change in one SQL transaction.
   const processHandoffs = Effect.fn(function* () {
     const rows =
@@ -3851,9 +3916,26 @@ const make = Effect.gen(function* () {
             }).pipe(sql.withTransaction);
           }
         }
+        // Refreshes the communication clock this successor inherits. A remote check
+        // is a peer call, which must not wait inside the transaction.
+        if (parentRecord?.owner_id) yield* communicationStatus(parentRecord.thread_id);
         const prompt = `[T3 orchestrator handoff]\nPrevious orchestrator: ${row.owner_id}\nYou are the successor orchestrator. Existing worker ownership has transferred to this session. Use t3_worker_list/read to review current assignments and evidence before giving concrete follow-ups. Queued/running work continues; do not duplicate it. The previous conversation remains available.\n\n${input.prompt}`;
         yield* sql.withTransaction(
           Effect.gen(function* () {
+            // The renewal calls above lent the queue lock out. Retry from fresh rows
+            // if the old master gained a worker or its own record changed meanwhile.
+            const parentNow =
+              (yield* sql<Worker>`SELECT * FROM custom_workers WHERE thread_id = ${row.owner_id}`)[0];
+            const children =
+              yield* sql<Worker>`SELECT * FROM custom_workers WHERE owner_id = ${row.owner_id} AND thread_id != ${row.thread_id}`;
+            if (
+              children.some((child) => !transferred.includes(child.thread_id)) ||
+              parentNow?.owner_id !== parentRecord?.owner_id ||
+              parentNow?.plan_json !== parentRecord?.plan_json
+            ) {
+              yield* Queue.offer(drainRequests, undefined);
+              return;
+            }
             // A receipt may have committed just before a restart, before queue state did.
             yield* sql`UPDATE custom_worker_jobs SET state = 'completed' WHERE kind IN ('notice', 'done', 'blocked') AND state = 'queued'
             AND EXISTS (SELECT 1 FROM orchestration_command_receipts r WHERE r.command_id = 'worker-job:' || custom_worker_jobs.id || ':' || custom_worker_jobs.attempt AND r.status = 'accepted')`;
@@ -3875,7 +3957,6 @@ const make = Effect.gen(function* () {
             // conversation remains accessible under that parent with its history.
             yield* sql`DELETE FROM custom_worker_jobs WHERE id = ${`spawn:${row.thread_id}`} AND state = 'queued'`;
             if (parentRecord?.owner_id) {
-              yield* communicationStatus(parentRecord.thread_id);
               yield* sql`UPDATE custom_workers SET communication_anchor_at = (SELECT communication_anchor_at FROM custom_workers WHERE thread_id = ${parentRecord.thread_id}) WHERE thread_id = ${row.thread_id}`;
               yield* sql`UPDATE custom_workers SET owner_id = ${parentRecord.owner_id} WHERE thread_id = ${row.thread_id}`;
               if (renewedParent) {
@@ -4202,8 +4283,8 @@ const make = Effect.gen(function* () {
             ON CONFLICT(thread_id) DO UPDATE SET revision = revision + 1`;
         }).pipe(sql.withTransaction, lock.withPermit);
         watched.add(record.thread_id);
-        // Do not drain here: the caller holds its coordination lock. An immediate
-        // peer report/control could otherwise recurse into that same lock.
+        // Do not drain here: the caller's pass waits for this answer, and a pass
+        // here would first make its own peer calls, possibly back to the caller.
         yield* Queue.offer(drainRequests, undefined);
         return { synchronized: true };
       }
