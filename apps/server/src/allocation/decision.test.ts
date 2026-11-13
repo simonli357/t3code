@@ -374,6 +374,13 @@ describe("runway", () => {
     expect(candidate(busy, "a").roomWorkers!).toBeLessThan(candidate(quiet, "a").roomWorkers!);
   });
 
+  it("starts a 5-hour window that has not begun with the job, so it resets during a long one", () => {
+    // $10 an hour is 10% of the 5-hour window an hour: 12 hours in one window would not fit.
+    const idle = account("a", 10, { windows: [weekly(10), fiveHour(0, { resetsAt: null })] });
+    const decision = decide([idle], { request: { expectedHours: 12 } });
+    expect(candidate(decision, "a")).toMatchObject({ fits: true });
+  });
+
   it("does not fit when a limit runs out before the job ends, and says when it would", () => {
     // $10 an hour is 0.1 points an hour: 99.5% used runs out in 5 hours, before an 8-hour job ends.
     const decision = decide([account("a", 99.5)], { request: { expectedHours: 8 } });

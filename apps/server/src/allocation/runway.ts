@@ -194,6 +194,11 @@ export function projectAccount(input: {
       let resetsAt = w.resetsAt ? Date.parse(w.resetsAt) : null;
       let used = w.usedPoints;
       let cycleStart = resetsAt !== null && duration !== null ? resetsAt - duration * HOUR : null;
+      // A window that has not started (nothing used, no reset) starts with the next use.
+      if (resetsAt === null && duration !== null && used === 0) {
+        resetsAt = at + duration * HOUR;
+        cycleStart = at;
+      }
       // A window that resets before the start begins fresh.
       if (resetsAt !== null && resetsAt <= at) {
         used = 0;
