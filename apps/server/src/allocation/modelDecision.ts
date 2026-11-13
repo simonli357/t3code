@@ -204,8 +204,9 @@ const fits = (decision: AllocationDecision) =>
  * spare capacity, when it fits the job somewhere. Otherwise: wait for a limit that resets
  * within 30 minutes (45 at high stakes); else the nearest ladder rung that fits, at most two
  * away; else the fallback model below its threshold; else the wanted model on the account
- * that lasts longest; refused only when every candidate is out. With Fable workers off, no
- * worker gets a Fable model. Codex and a pinned account never change model.
+ * that lasts longest. When every candidate is out, the same choice as of a reset within the
+ * wait, queued for it; refused only when nothing comes back within the wait. With Fable
+ * workers off, no worker gets a Fable model. Codex and a pinned account never change model.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -340,47 +341,67 @@ export function chooseProfile(input: {
               options: [{ id: routingEffortOptionId(driver), value: fallback.effort }],
             }))
         : [];
-    const why = first.selectedInstanceId
-      ? `${label(wanted.request)} fits on no account for this job;`
-      : `${label(wanted.request)} is drained on every account (earliest reset ${first.waitUntil ?? "unknown"});`;
-    for (const rung of rungs) {
-      const candidate = onRung(wanted.request, rung);
-      const decision = decide(candidate);
-      if (fits(decision))
+    /** The nearest rung, the fallback, then the account that lasts longest, as of `startAt`. */
+    const standIn = (base: AllocationDecision, startAt?: string) => {
+      const why = base.selectedInstanceId
+        ? `${label(wanted.request)} fits on no account for this job;`
+        : `${label(wanted.request)} is drained on every account (earliest reset ${base.waitUntil ?? "unknown"});`;
+      for (const rung of rungs) {
+        const candidate = onRung(wanted.request, rung);
+        const decision = decide(candidate, startAt);
+        if (fits(decision))
+          return {
+            decision,
+            candidate,
+            why: `${why} the nearest ladder rung that fits is ${rung.model} / ${rung.effort}.`,
+          };
+      }
+      for (const candidate of fallbacks) {
+        const decision = decide(candidate, startAt);
+        if (fits(decision))
+          return {
+            decision,
+            candidate,
+            why: `${why} no Claude rung within ${MAX_RUNG_DISTANCE} fits, and below ${fallback!.below.model} / ${fallback!.below.effort} the fallback ${fallback!.model} / ${fallback!.effort} applies.`,
+          };
+      }
+      // Nothing fits the whole job: the account that lasts longest, as long as one is not out.
+      if (base.selectedInstanceId)
+        return { decision: base, candidate: wanted.request, why: undefined };
+      for (const rung of rungs) {
+        const candidate = onRung(wanted.request, rung);
+        const decision = decide(candidate, startAt);
+        if (decision.selectedInstanceId)
+          return {
+            decision,
+            candidate,
+            why: `${label(wanted.request)} is out on every account; ${rung.model} / ${rung.effort} is the nearest rung that is not.`,
+          };
+      }
+      for (const candidate of fallbacks) {
+        const decision = decide(candidate, startAt);
+        if (decision.selectedInstanceId)
+          return {
+            decision,
+            candidate,
+            why: `${label(wanted.request)} and its nearest rungs are out on every account; the fallback ${candidate.model} is not.`,
+          };
+      }
+      return undefined;
+    };
+    const now = standIn(first);
+    if (now) return chosen(now.decision, now.candidate, now.why);
+    // Everything is out now: decide as of a reset within the wait by the same rules, and queue.
+    for (const reset of resets) {
+      const then = standIn(decide(wanted.request, reset), reset);
+      if (then)
         return chosen(
-          decision,
-          candidate,
-          `${why} the nearest ladder rung that fits is ${rung.model} / ${rung.effort}.`,
-        );
-    }
-    for (const candidate of fallbacks) {
-      const decision = decide(candidate);
-      if (fits(decision))
-        return chosen(
-          decision,
-          candidate,
-          `${why} no Claude rung within ${MAX_RUNG_DISTANCE} fits, and below ${fallback!.below.model} / ${fallback!.below.effort} the fallback ${fallback!.model} / ${fallback!.effort} applies.`,
-        );
-    }
-    // Nothing fits the whole job: the account that lasts longest, as long as one is not out.
-    if (first.selectedInstanceId) return chosen(first, wanted.request, undefined);
-    for (const rung of rungs) {
-      const candidate = onRung(wanted.request, rung);
-      const decision = decide(candidate);
-      if (decision.selectedInstanceId)
-        return chosen(
-          decision,
-          candidate,
-          `${label(wanted.request)} is out on every account; ${rung.model} / ${rung.effort} is the nearest rung that is not.`,
-        );
-    }
-    for (const candidate of fallbacks) {
-      const decision = decide(candidate);
-      if (decision.selectedInstanceId)
-        return chosen(
-          decision,
-          candidate,
-          `${label(wanted.request)} and its nearest rungs are out on every account; the fallback ${candidate.model} is not.`,
+          then.decision,
+          { ...then.candidate, startAt: reset },
+          `Every account is out now and a limit resets in ${span(
+            (Date.parse(reset) - Date.parse(input.at)) / 3_600_000,
+          )}, so the start waits for it. ${then.why ?? `Then ${label(wanted.request)} runs on the account that lasts longest.`}`,
+          { startAt: reset },
         );
     }
     tried.push({ ...wanted, chosen: false });

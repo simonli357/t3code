@@ -887,6 +887,35 @@ describe("when the wanted model fits nowhere", () => {
     expect(picked(high)).toBe(`A ${OPUS} / high`);
   });
 
+  it("queues the choice for a reset within the wait when everything is out now", () => {
+    // The 5-hour limit is used up until the reset; after it, Fable's own limit still cannot
+    // hold the job, so the nearest rung waits for the reset instead of a refusal.
+    const out = (hours: number) => [
+      claude("A", [
+        weekly(100, {
+          id: "five_hour",
+          label: "Session",
+          kind: "session",
+          resetsAt: inHours(hours),
+          durationHours: 5,
+        }),
+        weekly(69),
+        only(FABLE, 99.9),
+      ]),
+    ];
+    const fable = { model: FABLE, effort: "medium" };
+    const queued = choose(out(0.4), fable);
+    expect(picked(queued)).toBe(`A ${OPUS} / xhigh`);
+    expect(queued.startAt).toBe(inHours(0.4));
+    expect(queued.reason).toContain(
+      "Every account is out now and a limit resets in 24m, so the start waits for it.",
+    );
+    // Nothing comes back within the wait: refused.
+    const refused = choose(out(0.6), fable);
+    expect(picked(refused)).toBeNull();
+    expect(refused.drainedUntil).toBe(inHours(0.6));
+  });
+
   it("moves at most two rungs", () => {
     // Fable high's two nearest rungs are Fable medium and Opus xhigh; both are out.
     const out = [claude("A", [weekly(20), only(OPUS, 100), only(FABLE, 100)])];
