@@ -1,5 +1,7 @@
 import { expect, it } from "vite-plus/test";
 import {
+  defaultModelFallback,
+  defaultModelLadder,
   defaultModelRoutingPolicy,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -25,6 +27,7 @@ import {
   rebaseModelDraft,
   receiveSavedModelPolicy,
   resetModelTable,
+  setAllowedModels,
   setModelCell,
   summarizeModelDraft,
 } from "./modelRouting.ts";
@@ -128,10 +131,10 @@ const inventories = [
   },
 ];
 
-it("lists only what this environment's accounts advertise for automatic selection", () => {
+it("lists every model this environment's accounts advertise", () => {
   const catalog = modelCatalog(inventories, "host", "codex");
   expect(catalog.known).toBe(true);
-  expect(catalog.models).toEqual(["gpt-6-astra", "gpt-6.1-sol"]);
+  expect(catalog.models).toEqual(["gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol"]);
   expect(catalog.efforts("gpt-6-astra")).toEqual(["medium", "high", "xhigh"]);
   expect(catalog.efforts("gpt-6.1-sol")).toEqual(["medium", "high", "max"]);
   expect(catalog.supports({ model: "gpt-6.1-sol", effort: "ultra" })).toBe(false);
@@ -252,4 +255,33 @@ it("resets one provider table to the defaults as a draft edit only", () => {
   const draft = editModelDraft(adoptModelPolicy(codexEdited), (p) => resetModelTable(p, "codex"));
   expect(modelDraftDirty(draft)).toBe(true);
   expect(modelDraftChanges(draft).cells.every((c) => c.driver === "codex")).toBe(true);
+});
+
+it("counts ladder, fallback and model list edits as unsaved work and carries them onto a newer table", () => {
+  const saved = { ...defaultModelRoutingPolicy, version: 3 };
+  let draft = adoptModelPolicy(saved);
+  expect(modelDraftDirty(draft)).toBe(false);
+  draft = editModelDraft(draft, (policy) => ({ ...policy, fallback: null }));
+  draft = editModelDraft(draft, (policy) => ({ ...policy, ladder: defaultModelLadder.slice(1) }));
+  draft = editModelDraft(draft, (policy) =>
+    setAllowedModels(policy, "claudeAgent", [...policy.claudeAgent.allowedModels, "typed-model"]),
+  );
+  expect(summarizeModelDraft(draft).count).toBe(1);
+  expect(modelDraftDirty(draft)).toBe(true);
+  // An explicit default is the same as an absent one.
+  expect(
+    modelDraftDirty(
+      editModelDraft(adoptModelPolicy(saved), (policy) => ({
+        ...policy,
+        ladder: defaultModelLadder,
+        fallback: defaultModelFallback,
+      })),
+    ),
+  ).toBe(false);
+  const newer = { ...saved, version: 4, maxReassessments: 1 };
+  const rebased = rebaseModelDraft(receiveSavedModelPolicy(draft, newer)).policy!;
+  expect(rebased).toMatchObject({ version: 4, maxReassessments: 1, fallback: null });
+  expect(rebased.ladder).toEqual(defaultModelLadder.slice(1));
+  expect(rebased.claudeAgent.allowedModels).toContain("typed-model");
+  expect(rebased.codex).toEqual(saved.codex);
 });

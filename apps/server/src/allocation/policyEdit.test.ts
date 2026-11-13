@@ -2,16 +2,19 @@ import { expect, it } from "@effect/vitest";
 import {
   allocationPreferenceKey,
   defaultAllocationPolicy,
+  defaultModelLadder,
+  defaultModelRoutingPolicy,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type AllocationAccount,
   type AllocationPolicy,
   type AllocationPolicyEdit,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { accountRuleRefusal } from "./decision.ts";
-import { allocationPolicyView, editAllocationPolicy } from "./policyEdit.ts";
+import { decideAllocation } from "./decision.ts";
+import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
 
 const at = "2026-11-09T12:00:00.000Z";
 const account = (
@@ -19,6 +22,7 @@ const account = (
   instanceId: string,
   label: string,
   accountKey: string | null,
+  usedPoints = 30,
 ): AllocationAccount => ({
   environmentId,
   instanceId: ProviderInstanceId.make(instanceId),
@@ -28,15 +32,15 @@ const account = (
   available: true,
   unavailableReason: null,
   limitedUntil: null,
-  models: [],
+  models: [{ slug: "claude-sonnet-5-5", capabilities: null }],
   shortWindow: "unknown",
   windows: [
     {
       id: "weekly",
       label: "Weekly",
       kind: "weekly",
-      usedPoints: environmentId === "laptop" ? 40 : 30,
-      checkedAt: environmentId === "laptop" ? at : "2026-11-09T11:00:00.000Z",
+      usedPoints,
+      checkedAt: at,
       resetsAt: null,
       cycleStartedAt: null,
       durationHours: 168,
@@ -51,31 +55,24 @@ const account = (
 });
 const es = account("desk", "claude_eol", "ES", "es-login");
 const xl = account("desk", "claude_xinya", "XL", "xl-login");
+const unknownEs = account("laptop", "local", "ES", null);
 const key = allocationPreferenceKey;
+const host = (environmentId: string, accounts: AllocationAccount[]) => ({
+  environmentId,
+  observedAt: at,
+  complete: true,
+  demand: [],
+  notices: [],
+  accounts,
+});
 const snapshot = (policy: Partial<AllocationPolicy> = {}): AllocationSnapshot => ({
-  accountRulesSupported: true,
+  accountCapsSupported: true,
+  accountOrderSupported: true,
   policy: { ...defaultAllocationPolicy, version: 3, ...policy },
   inventories: [
-    {
-      environmentId: "desk",
-      observedAt: at,
-      complete: true,
-      demand: [],
-      notices: [],
-      accounts: [es, xl],
-    },
-    {
-      environmentId: "laptop",
-      observedAt: at,
-      complete: true,
-      demand: [],
-      notices: [],
-      // The same ES login under another alias, and an account whose login is unknown.
-      accounts: [
-        account("laptop", "claude_es_laptop", "ES", "es-login"),
-        account("laptop", "local", "ES", null),
-      ],
-    },
+    host("desk", [es, xl]),
+    // The same ES login under another alias, and an account whose login is unknown.
+    host("laptop", [account("laptop", "claude_es_laptop", "ES", "es-login"), unknownEs]),
   ],
   reservations: [],
   history: [],
@@ -83,292 +80,258 @@ const snapshot = (policy: Partial<AllocationPolicy> = {}): AllocationSnapshot =>
   notices: [],
 });
 const edit = (change: AllocationPolicyEdit, policy?: Partial<AllocationPolicy>) =>
-  editAllocationPolicy(snapshot(policy), change, at);
+  editAllocationPolicy(snapshot(policy), change);
+const cap = { weeklyPercent: 80, fiveHourPercent: null, stopWorkers: true, stopMasters: false };
 
 it.effect("resolves labels and instance IDs to the shared account identity", () =>
   Effect.gen(function* () {
-    const next = yield* edit({
-      setRules: [
-        { account: "xl", kind: "exclude" },
-        { account: "claude_es_laptop", kind: "maxWorkers", value: 1, note: "one at a time" },
-      ],
-    });
-    expect(next.accountRules).toEqual([
-      { key: key(xl), kind: "exclude" },
-      { key: key(es), kind: "maxWorkers", value: 1, note: "one at a time" },
+    // Any case, and any of the login's instance IDs on any computer.
+    expect((yield* edit({ accountOrder: ["xl", "claude_es_laptop"] })).accountOrder).toEqual([
+      key(xl),
+      key(es),
     ]);
     // A label covers the shared login and any account whose login is unknown.
+    expect((yield* edit({ accountOrder: ["ES"] })).accountOrder).toEqual([key(es), key(unknownEs)]);
+    // Naming one account twice lists it once.
     expect(
-      (yield* edit({ setRules: [{ account: "ES", kind: "exclude" }] })).accountRules?.map(
-        (rule) => rule.key,
-      ),
-    ).toEqual([key(es), key(account("laptop", "local", "ES", null))]);
-    const unknown = yield* Effect.flip(edit({ clearRules: [{ account: "AD" }] }));
+      (yield* edit({ accountOrder: ["claude_eol", "XL", "claude_es_laptop"] })).accountOrder,
+    ).toEqual([key(es), key(xl)]);
+    const unknown = yield* Effect.flip(edit({ accountOrder: ["AD"] }));
+    expect(unknown).toMatchObject({ code: "invalid" });
     expect(unknown.detail).toContain('No account matches "AD"');
     expect(unknown.detail).toContain("XL (claude_xinya)");
   }),
 );
 
-it.effect("sets one rule per account and kind, clears by kind, and drops expired rules", () =>
+it.effect("replaces the whole order and changes only what the edit names", () =>
   Effect.gen(function* () {
     const saved = {
-      accountRules: [
-        { key: key(xl), kind: "exclude" as const },
-        { key: key(xl), kind: "priority" as const, value: -5 },
-        {
-          key: key(es),
-          kind: "priority" as const,
-          value: 10,
-          expiresAt: "2026-11-09T11:00:00.000Z",
-        },
-      ],
+      accountOrder: [key(xl), key(es)],
+      closeMarginPoints: 5,
+      longWaitHours: 2,
+      accountCaps: [{ key: key(xl), ...cap }],
     };
-    const next = yield* edit(
-      {
-        clearRules: [{ account: "XL", kind: "exclude" }],
-        setRules: [
-          { account: "XL", kind: "priority", value: 20, expiresAt: "2026-11-10T00:00:00+01:00" },
-        ],
-      },
-      saved,
-    );
-    expect(next.accountRules).toEqual([
-      { key: key(xl), kind: "priority", value: 20, expiresAt: "2026-11-09T23:00:00.000Z" },
+    expect((yield* edit({ accountOrder: ["ES"] }, saved)).accountOrder).toEqual([
+      key(es),
+      key(unknownEs),
     ]);
-    expect(
-      (yield* edit({ clearRules: [{ account: "claude_xinya" }] }, saved)).accountRules,
-    ).toEqual([]);
-    const past = yield* Effect.flip(
-      edit({ setRules: [{ account: "XL", kind: "exclude", expiresAt: "2026-11-09T11:59:00Z" }] }),
-    );
-    expect(past.detail).toContain("must be a time after now");
+    expect((yield* edit({ accountOrder: [] }, saved)).accountOrder).toEqual([]);
+    const next = yield* edit({ closeMarginPoints: 20, longWaitHours: 0.5 }, saved);
+    expect(next).toEqual({
+      ...snapshot(saved).policy,
+      closeMarginPoints: 20,
+      longWaitHours: 0.5,
+    });
+    // Nothing named: the stored policy, with the fields older builds require.
+    expect(yield* edit({}, saved)).toEqual(snapshot(saved).policy);
+    expect(yield* edit({ ladder: [], showTable: "codex" }, saved)).toEqual(snapshot(saved).policy);
   }),
 );
 
-it.effect("sets and clears curves, caps and timed overrides", () =>
+it.effect("sets and clears hard caps", () =>
   Effect.gen(function* () {
-    const cap = { weeklyPercent: 80, fiveHourPercent: null, stopWorkers: true, stopMasters: false };
-    const curve = { ...defaultAllocationPolicy.claude, dailyPoints: 25 };
-    const next = yield* edit({
-      curves: { claude: curve },
-      setCaps: [{ account: "XL", ...cap }],
-      setOverrides: [
-        { account: "claude_eol", windowId: "weekly", expiresAt: "2026-11-12T00:00:00Z" },
-      ],
-    });
-    expect(next.claude).toEqual(curve);
-    expect(next.codex).toEqual(defaultAllocationPolicy.codex);
+    const next = yield* edit({ setCaps: [{ account: "XL", ...cap }] });
     expect(next.accountCaps).toEqual([{ key: key(xl), ...cap }]);
-    // The override starts from the newest reading of the shared login's window.
-    expect(next.overrides).toEqual([
+    // Setting again replaces; a clear and a set in one edit both apply.
+    const changed = yield* edit(
       {
-        accountKey: "es-login",
-        windowId: "weekly",
-        createdAt: at,
-        baselineUsedPoints: 40,
-        expiresAt: "2026-11-12T00:00:00.000Z",
+        clearCaps: ["claude_xinya"],
+        setCaps: [{ account: "claude_eol", ...cap, weeklyPercent: 50, stopMasters: true }],
       },
-    ]);
-    const cleared = yield* edit(
-      { curves: { claude: null }, clearCaps: ["XL"], clearOverrides: [{ account: "claude_eol" }] },
       next,
     );
-    expect(cleared.claude).toEqual(defaultAllocationPolicy.claude);
-    expect(cleared.accountCaps).toEqual([]);
-    expect(cleared.overrides).toEqual([]);
-    const missing = yield* Effect.flip(
-      edit({
-        setOverrides: [{ account: "XL", windowId: "five_hour", expiresAt: "2026-11-12T00:00:00Z" }],
-      }),
-    );
-    expect(missing.detail).toContain(
-      'XL reports no usage window "five_hour". Its windows: weekly.',
-    );
+    expect(changed.accountCaps).toEqual([
+      { key: key(es), ...cap, weeklyPercent: 50, stopMasters: true },
+    ]);
+    expect(
+      (yield* edit({ setCaps: [{ account: "ES", ...cap, weeklyPercent: 60 }] }, changed))
+        .accountCaps,
+    ).toEqual([
+      { key: key(es), ...cap, weeklyPercent: 60 },
+      { key: key(unknownEs), ...cap, weeklyPercent: 60 },
+    ]);
+    expect((yield* edit({ clearCaps: ["ES"] }, changed)).accountCaps).toEqual([]);
+    expect((yield* Effect.flip(edit({ clearCaps: ["nobody"] }))).detail).toContain("No account");
   }),
 );
 
-it("reads the policy with accounts by label and without expired entries", () => {
-  const view = allocationPolicyView(
-    snapshot({
-      accountRules: [
-        { key: key(xl), kind: "exclude", note: "never XL" },
-        { key: key(es), kind: "priority", value: 10, expiresAt: "2026-11-09T11:00:00.000Z" },
-        { key: "gone", kind: "maxWorkers", value: 1 },
-      ],
-      accountCaps: [
-        {
-          key: key(es),
-          weeklyPercent: 90,
-          fiveHourPercent: null,
-          stopWorkers: true,
-          stopMasters: false,
-        },
-      ],
-    }),
-    at,
-  );
-  expect(view.version).toBe(3);
-  expect(view.rules).toEqual([
-    { account: "XL", kind: "exclude", note: "never XL" },
-    { account: "gone", kind: "maxWorkers", value: 1 },
-  ]);
-  expect(view.caps[0]?.account).toBe("ES");
-  expect(view.accounts).toEqual([
+it("reads both policies with accounts by label", () => {
+  const stored = snapshot({
+    accountOrder: [key(xl), key(es), "gone"],
+    closeMarginPoints: 7,
+    longWaitHours: 1.5,
+    accountCaps: [{ key: key(es), ...cap }],
+  });
+  const view = allocationPolicyView(stored, { ...defaultModelRoutingPolicy, version: 9 });
+  expect(view).toEqual({
+    version: 3,
+    modelVersion: 9,
+    // An account that is no longer connected reads back as its stored key.
+    accountOrder: ["XL", "ES", "gone"],
+    closeMarginPoints: 7,
+    longWaitHours: 1.5,
+    caps: [{ account: "ES", ...cap }],
+    ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
+    fallback: "deepseek-flash / max when the wanted rung is below claude-sonnet-5-5 / xhigh",
+    accounts: [
+      { label: "ES", driver: "claudeAgent", instanceIds: ["claude_eol", "claude_es_laptop"] },
+      { label: "XL", driver: "claudeAgent", instanceIds: ["claude_xinya"] },
+      { label: "ES", driver: "claudeAgent", instanceIds: ["local"] },
+    ],
+    warnings: [],
+  });
+  // A policy saved before these fields reads with the defaults.
+  const {
+    accountOrder: _order,
+    closeMarginPoints: _margin,
+    longWaitHours: _wait,
+    accountCaps: _caps,
+    ...old
+  } = stored.policy;
+  expect(allocationPolicyView({ ...stored, policy: old }, defaultModelRoutingPolicy)).toMatchObject(
     {
-      label: "ES",
-      driver: "claudeAgent",
-      instanceIds: ["claude_eol", "claude_es_laptop"],
-      windowIds: ["weekly"],
+      accountOrder: [],
+      closeMarginPoints: 10,
+      longWaitHours: 3,
+      caps: [],
     },
-    { label: "XL", driver: "claudeAgent", instanceIds: ["claude_xinya"], windowIds: ["weekly"] },
-    { label: "ES", driver: "claudeAgent", instanceIds: ["local"], windowIds: ["weekly"] },
-  ]);
+  );
+
+  const custom = allocationPolicyView(
+    stored,
+    {
+      ...defaultModelRoutingPolicy,
+      ladder: [{ model: "claude-next-9", effort: "high" }],
+      fallback: null,
+    },
+    { showTable: "codex", warnings: ["Ladder: no connected account offers claude-next-9."] },
+  );
+  expect(custom.ladder).toEqual(["claude-next-9 / high"]);
+  expect(custom.fallback).toBeNull();
+  expect(custom.warnings).toEqual(["Ladder: no connected account offers claude-next-9."]);
+  expect(custom.table).toHaveLength(11);
+  expect(custom.table![0]).toHaveLength(11);
+  expect(custom.table![0]![0]).toBe("gpt-6.1-sol / medium");
+  expect(custom.table![10]![10]).toBe("gpt-6-astra / xhigh");
 });
 
-// DS has no known login on any of three computers, so each computer keys it separately.
-const threeComputers = ["desk", "laptop", "server"].map((environmentId) => ({
-  environmentId,
-  observedAt: at,
-  complete: true,
-  demand: [],
-  notices: [],
-  accounts: [account(environmentId, "ds", "DS", null)],
-}));
-const everywhere = { ...snapshot(), inventories: threeComputers };
-const blocked = (policy: AllocationPolicy) =>
-  threeComputers.map(({ accounts: [ds] }) => accountRuleRefusal(policy, ds!, [], at) !== undefined);
-
-it.effect("lists an account with no known login once and applies its rules on every computer", () =>
+it.effect("lists an account with no known login once and prefers it on every computer", () =>
   Effect.gen(function* () {
-    expect(allocationPolicyView(everywhere, at).accounts).toEqual([
-      { label: "DS", driver: "claudeAgent", instanceIds: ["ds"], windowIds: ["weekly"] },
-    ]);
-    const cap = { weeklyPercent: 80, fiveHourPercent: null, stopWorkers: true, stopMasters: false };
-    const set = yield* editAllocationPolicy(
-      everywhere,
-      { setRules: [{ account: "DS", kind: "exclude" }], setCaps: [{ account: "ds", ...cap }] },
-      at,
+    // DS has no known login on any of three computers, so each computer keys it separately.
+    const computers = ["desk", "laptop", "server"].map((environmentId) =>
+      host(environmentId, [
+        account(environmentId, "ds", "DS", null, 35),
+        account(environmentId, "other", "Other", `other-${environmentId}`, 30),
+      ]),
     );
-    expect(set.accountRules).toHaveLength(3);
-    expect(blocked(set)).toEqual([true, true, true]);
-    // Three stored rules read back as one.
-    const view = allocationPolicyView({ ...everywhere, policy: set }, at);
-    expect(view.rules).toEqual([{ account: "DS", kind: "exclude" }]);
-    expect(view.caps).toEqual([{ account: "DS", ...cap }]);
-    const cleared = yield* editAllocationPolicy(
-      { ...everywhere, policy: set },
-      { clearRules: [{ account: "DS" }], clearCaps: ["DS"] },
-      at,
-    );
-    expect(cleared.accountRules).toEqual([]);
-    expect(cleared.accountCaps).toEqual([]);
-    expect(blocked(cleared)).toEqual([false, false, false]);
-    const override = yield* Effect.flip(
-      editAllocationPolicy(
-        everywhere,
-        {
-          setOverrides: [{ account: "DS", windowId: "weekly", expiresAt: "2026-11-12T00:00:00Z" }],
-        },
-        at,
-      ),
-    );
-    expect(override.detail).toContain("has no known login");
-  }),
-);
-
-it.effect("sets and clears a family's default worker model, checked against the catalog", () =>
-  Effect.gen(function* () {
-    const offered = snapshot();
-    const models = [
-      {
-        slug: "claude-fable-5",
-        capabilities: {
-          optionDescriptors: [
-            {
-              id: "effort",
-              label: "Effort",
-              type: "select" as const,
-              options: [
-                { id: "medium", label: "Medium" },
-                { id: "high", label: "High" },
-              ],
-            },
-          ],
-        },
-      },
-    ];
-    const catalog = {
-      ...offered,
-      inventories: offered.inventories.map((host) => ({
-        ...host,
-        accounts: host.accounts.map((a) => ({ ...a, models })),
-      })),
-    };
-    const set = yield* editAllocationPolicy(
-      catalog,
-      {
-        workerModels: {
-          claude: {
-            model: "claude-fable-5",
-            effort: "medium",
-            expiresAt: "2026-11-10T05:00:00Z",
-            note: "workers on Fable medium today",
-          },
-        },
-      },
-      at,
-    );
-    const standing = {
-      model: "claude-fable-5",
-      effort: "medium",
-      expiresAt: "2026-11-10T05:00:00.000Z",
-      note: "workers on Fable medium today",
-    };
-    expect(set.workerModels).toEqual({ claude: standing });
-    expect(allocationPolicyView({ ...catalog, policy: set }, at).workerModels).toEqual({
-      claude: standing,
+    const everywhere = { ...snapshot(), inventories: computers };
+    expect(allocationPolicyView(everywhere, defaultModelRoutingPolicy).accounts[0]).toEqual({
+      label: "DS",
+      driver: "claudeAgent",
+      instanceIds: ["ds"],
     });
-    // Past its end time it is no longer read back, and another edit leaves it alone.
-    expect(
-      allocationPolicyView({ ...catalog, policy: set }, "2026-11-10T05:00:00.000Z").workerModels,
-    ).toEqual({});
-    const kept = yield* editAllocationPolicy(
-      { ...catalog, policy: set },
-      { setRules: [{ account: "XL", kind: "exclude" }] },
-      at,
-    );
-    expect(kept.workerModels).toEqual({ claude: standing });
+    const policy = yield* editAllocationPolicy(everywhere, {
+      accountOrder: ["DS"],
+      setCaps: [{ account: "ds", ...cap }],
+    });
+    expect(policy.accountOrder).toHaveLength(3);
+    expect(policy.accountCaps).toHaveLength(3);
+    // Three stored entries read back as one.
+    const view = allocationPolicyView({ ...everywhere, policy }, defaultModelRoutingPolicy);
+    expect(view.accountOrder).toEqual(["DS"]);
+    expect(view.caps).toEqual([{ account: "DS", ...cap }]);
+    // DS has a little less room than the other account on each computer: the order decides.
+    const chosen = (decided: AllocationPolicy) =>
+      computers.map(
+        ({ environmentId }) =>
+          decideAllocation({
+            at,
+            policy: decided,
+            request: {
+              assignmentId: "job",
+              environmentId,
+              threadId: ThreadId.make("thread"),
+              driver: ProviderDriverKind.make("claudeAgent"),
+              model: "claude-sonnet-5-5",
+              options: [],
+            },
+            inventories: computers,
+            reservations: [],
+            authorityAvailable: true,
+          }).selectedInstanceId,
+      );
+    expect(chosen(everywhere.policy)).toEqual(["other", "other", "other"]);
+    expect(chosen({ ...policy, accountCaps: [] })).toEqual(["ds", "ds", "ds"]);
     const cleared = yield* editAllocationPolicy(
-      { ...catalog, policy: set },
-      { workerModels: { claude: null } },
-      at,
+      { ...everywhere, policy },
+      { accountOrder: [], clearCaps: ["DS"] },
     );
-    expect(cleared.workerModels).toEqual({});
-    for (const claude of [
-      { model: "fable", effort: "medium" },
-      { model: "claude-fable-5", effort: "xhigh" },
-    ])
-      expect(
-        (yield* Effect.flip(editAllocationPolicy(catalog, { workerModels: { claude } }, at)))
-          .detail,
-      ).toContain("claude-fable-5 (medium, high)");
-    // Codex has no account here, so nothing can be its default.
-    expect(
-      (yield* Effect.flip(
-        editAllocationPolicy(
-          catalog,
-          { workerModels: { codex: { model: "gpt-6-astra", effort: "high" } } },
-          at,
-        ),
-      )).detail,
-    ).toContain("none reported");
-    const past = yield* Effect.flip(
-      editAllocationPolicy(
-        catalog,
-        { workerModels: { claude: { ...standing, expiresAt: "2026-11-09T11:00:00Z" } } },
-        at,
-      ),
-    );
-    expect(past.detail).toContain("must be a time after now");
+    expect(cleared.accountOrder).toEqual([]);
+    expect(cleared.accountCaps).toEqual([]);
   }),
 );
+
+it("writes table entries for a range of scores and accepts any model ID", () => {
+  const policy = defaultModelRoutingPolicy;
+  const next = editModelPolicy(policy, {
+    setCells: [
+      {
+        difficulty: 2,
+        difficultyTo: 3,
+        stakes: 5,
+        stakesTo: 4,
+        model: "claude-next-9",
+        effort: "high",
+      },
+      { table: "codex", difficulty: 10, stakes: 0, model: "gpt-6-astra", effort: "low" },
+    ],
+  });
+  for (const [d, row] of next.claudeAgent.cells.entries())
+    for (const [s, cell] of row.entries())
+      expect(cell).toEqual(
+        (d === 2 || d === 3) && (s === 4 || s === 5)
+          ? { model: "claude-next-9", effort: "high" }
+          : policy.claudeAgent.cells[d]![s],
+      );
+  // A model the code has never heard of joins the table's model list; a listed one is not repeated.
+  expect(next.claudeAgent.allowedModels).toEqual([
+    ...policy.claudeAgent.allowedModels,
+    "claude-next-9",
+  ]);
+  expect(next.codex.cells[10]![0]).toEqual({ model: "gpt-6-astra", effort: "low" });
+  expect(next.codex.cells[10]![1]).toEqual(policy.codex.cells[10]![1]);
+  expect(next.codex.allowedModels).toEqual(policy.codex.allowedModels);
+  // A later entry for the same pair wins.
+  const twice = editModelPolicy(policy, {
+    setCells: [
+      { difficulty: 0, difficultyTo: 10, stakes: 0, stakesTo: 10, model: "a", effort: "low" },
+      { difficulty: 4, stakes: 4, model: "b", effort: "max" },
+    ],
+  });
+  expect(twice.claudeAgent.cells[4]![4]).toEqual({ model: "b", effort: "max" });
+  expect(twice.claudeAgent.cells[4]![5]).toEqual({ model: "a", effort: "low" });
+});
+
+it("replaces the ladder and the fallback only when the edit names them", () => {
+  const stored = {
+    ...defaultModelRoutingPolicy,
+    ladder: [{ model: "claude-sonnet-5-5", effort: "high" }],
+    fallback: {
+      model: "kimi",
+      effort: "max",
+      below: { model: "claude-sonnet-5-5", effort: "high" },
+    },
+  };
+  expect(editModelPolicy(stored, { accountOrder: ["ES"], closeMarginPoints: 3 })).toEqual(stored);
+  const ladder = [
+    { model: "claude-haiku-5-5", effort: "max" },
+    { model: "claude-next-9", effort: "high" },
+  ];
+  expect(editModelPolicy(stored, { ladder })).toEqual({ ...stored, ladder });
+  // Null turns the fallback off; leaving it out keeps it.
+  expect(editModelPolicy(stored, { fallback: null })).toEqual({ ...stored, fallback: null });
+  expect(editModelPolicy(defaultModelRoutingPolicy, { ladder })).toEqual({
+    ...defaultModelRoutingPolicy,
+    ladder,
+  });
+});

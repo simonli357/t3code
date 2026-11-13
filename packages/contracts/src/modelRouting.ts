@@ -5,26 +5,17 @@ import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ProviderOptionSelection, type ModelCapabilities } from "./model.ts";
 
 const Reason = TrimmedNonEmptyString.check(Schema.isMaxLength(500));
-const Score = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10 }));
+export const AssignmentScore = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10 }));
 export const AssignmentAssessment = Schema.Struct({
-  difficulty: Score,
-  difficultyReason: Reason,
-  stakes: Score,
-  stakesReason: Reason,
+  difficulty: AssignmentScore,
+  stakes: AssignmentScore,
+  /** Unused. Still accepted and sent, because builds before smart allocation require both. */
+  difficultyReason: Schema.optional(Reason),
+  stakesReason: Schema.optional(Reason),
 });
 export type AssignmentAssessment = typeof AssignmentAssessment.Type;
-export const AssignmentTier = Schema.Literals(["routine", "normal", "hard"]);
-export type AssignmentTier = typeof AssignmentTier.Type;
-const TIER_SCORE = { routine: 2, normal: 5, hard: 8 } as const;
-/** A tier is one score for both axes of the difficulty/stakes table. */
-export const tierAssessment = (tier: AssignmentTier = "normal"): AssignmentAssessment => ({
-  difficulty: TIER_SCORE[tier],
-  difficultyReason: `Tier ${tier}`,
-  stakes: TIER_SCORE[tier],
-  stakesReason: `Tier ${tier}`,
-});
 export const MODEL_SCORING_RUBRIC =
-  "Score the scoped assignment, not its project. Difficulty: reasoning, uncertainty and interactions. Stakes: failure impact, reversibility and detectability. Each axis is an integer 0–10 with a concise reason: 0–3 routine/low; 4–6 moderate; 7 demanding/high; 8 very demanding/very high; 9 extreme; 10 exceptional. Supply both assessments; the service never invents them.";
+  "Score the scoped assignment, not its project. Difficulty: reasoning, uncertainty and interactions. Stakes: failure impact, reversibility and detectability. Each axis is an integer 0–10: 0–3 routine/low; 4–6 moderate; 7 demanding/high; 8 very demanding/very high; 9 extreme; 10 exceptional.";
 /** The table has one entry for every (difficulty, stakes) score pair. */
 export const MODEL_SCORES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 export const RoutingProfile = Schema.Struct({
@@ -34,8 +25,8 @@ export const RoutingProfile = Schema.Struct({
 export type RoutingProfile = typeof RoutingProfile.Type;
 /**
  * One table entry. `alternatives` are ordered, explicit capability alternatives used only
- * when the primary choice is unavailable in the target catalogs; quota pressure never
- * activates them.
+ * when the primary choice is missing from the target catalogs. A drained model moves along
+ * the ladder instead.
  */
 export const RoutingCell = Schema.Struct({
   ...RoutingProfile.fields,
@@ -95,13 +86,45 @@ export const RoutingTable = Schema.Union([
   ),
 ]);
 export type RoutingTable = typeof RoutingTable.Type;
+/**
+ * When no Claude rung has room and the wanted rung is below `below`, a worker starts on
+ * `model` at `effort` on any account that offers it. The only automatic change of family.
+ */
+export const ModelFallback = Schema.Struct({
+  ...RoutingProfile.fields,
+  below: RoutingProfile,
+});
+export type ModelFallback = typeof ModelFallback.Type;
 export const ModelRoutingPolicy = Schema.Struct({
   version: NonNegativeInt,
   codex: RoutingTable,
   claudeAgent: RoutingTable,
   maxReassessments: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3 })),
+  /** Claude profiles, weakest first. Absent in policies saved before it: the default ladder. */
+  ladder: Schema.optional(Schema.Array(RoutingProfile).check(Schema.isMaxLength(30))),
+  /** Null turns the fallback off. Absent in policies saved before it: the default fallback. */
+  fallback: Schema.optional(Schema.NullOr(ModelFallback)),
 });
 export type ModelRoutingPolicy = typeof ModelRoutingPolicy.Type;
+export const defaultModelLadder: readonly RoutingProfile[] = [
+  { model: "claude-haiku-5-5", effort: "max" },
+  { model: "claude-sonnet-5-5", effort: "high" },
+  { model: "claude-opus-5-5", effort: "medium" },
+  { model: "claude-sonnet-5-5", effort: "xhigh" },
+  { model: "claude-opus-5-5", effort: "high" },
+  { model: "claude-fable-5-2", effort: "low" },
+  { model: "claude-opus-5-5", effort: "xhigh" },
+  { model: "claude-fable-5-2", effort: "medium" },
+  { model: "claude-fable-5-2", effort: "high" },
+];
+export const defaultModelFallback: ModelFallback = {
+  model: "deepseek-flash",
+  effort: "max",
+  below: { model: "claude-sonnet-5-5", effort: "xhigh" },
+};
+export const modelLadder = (policy: ModelRoutingPolicy) => policy.ladder ?? defaultModelLadder;
+export const modelFallback = (policy: ModelRoutingPolicy) =>
+  policy.fallback === undefined ? defaultModelFallback : policy.fallback;
 const defaultBands = [
   [1, 2, 2, 4, 5, 5],
   [2, 2, 3, 4, 5, 5],
@@ -126,8 +149,6 @@ export const defaultModelRoutingPolicy: ModelRoutingPolicy = {
   claudeAgent: defaultTable(["claude-sonnet-5-5", "claude-opus-5-5"]),
   maxReassessments: 2,
 };
-/** Luna is never chosen automatically; exact user instructions still can. */
-export const automaticModelAllowed = (model: string) => !/luna/i.test(model);
 /** The provider option that carries a profile's effort. */
 export const routingEffortOptionId = (driver: string) =>
   driver === "codex" ? "reasoningEffort" : "effort";
@@ -163,14 +184,15 @@ export const ModelRoutingRequest = Schema.Struct({
     Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 168 })),
   ),
   contextTokens: Schema.optional(NonNegativeInt),
-  // Exact user instructions remain exact, even outside the automatic allowlist. Omit
-  // options to pin only the model and take the effort from the table.
+  // A model the user named, even outside the automatic allowlist: the starting rung. Omit
+  // options to take the effort from the table.
   override: Schema.optional(
     Schema.Struct({
       driver: ProviderDriverKind,
       model: TrimmedNonEmptyString,
       options: Schema.optional(Schema.Array(ProviderOptionSelection)),
-      reason: Reason,
+      /** Unused. Still sent, because builds before smart allocation require it. */
+      reason: Schema.optional(Reason),
     }),
   ),
   reassessment: Schema.optional(

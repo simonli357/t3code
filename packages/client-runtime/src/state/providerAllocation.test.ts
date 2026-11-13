@@ -1,6 +1,9 @@
 import { expect, it } from "vite-plus/test";
 import {
   defaultAllocationPolicy,
+  defaultModelLadder,
+  defaultModelRoutingPolicy,
+  ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
   allocationPreferenceKey,
@@ -9,10 +12,12 @@ import {
 } from "@t3tools/contracts";
 import {
   allocationAccountGroups,
+  allocationAccountOrder,
   allocationAccountRows,
-  allocationModelRows,
-  allocationRateEvidence,
-  withAllocationTarget,
+  allocationModelChoices,
+  allocationMoved,
+  withAllocationAccountMoved,
+  withModelLadderEdit,
 } from "./providerAllocation.ts";
 const account = (
   environmentId: string,
@@ -68,7 +73,7 @@ it("counts known aliases once across three hosts in a stable order", () => {
   expect(groups.find((a) => a.label === "SL")?.key).toBe(allocationPreferenceKey(accounts[0]!));
   expect(allocationAccountGroups(snapshot(accounts.toReversed()))).toEqual(groups);
 });
-it("lists an account with no known login once, holding each computer's rule key", () => {
+it("lists an account with no known login once, holding each computer's key", () => {
   const unknown = [
     account("alien", "codex", "SL", null),
     account("acer", "codex", "SL", null),
@@ -83,97 +88,82 @@ it("lists an account with no known login once, holding each computer's rule key"
   expect(codex.key).toBe(codex.keys[0]);
   expect(allocationAccountGroups(snapshot(unknown.toReversed()))).toEqual(groups);
 });
-it("does not turn account rates or model token throughput into model quota percentages", () => {
-  const a = accounts[0]!;
-  expect(allocationModelRows(a)).toMatchObject([
-    { model: "astra", quotaRate: null, samples: 0, outputTokensPerHour: null },
-  ]);
-  expect(
-    allocationModelRows({
-      ...a,
-      usageProfiles: [
-        {
-          model: "astra",
-          effort: null,
-          contextBand: "under32k",
-          samples: 8,
-          observedAt: null,
-          outputTokensPerHour: 1200,
-        },
-      ],
-    }),
-  ).toEqual([
-    {
-      model: "astra",
-      effort: null,
-      contextBand: "under32k",
-      samples: 8,
-      observedAt: null,
-      outputTokensPerHour: 1200,
-      quotaRate: null,
-    },
-  ]);
+const now = Date.parse("2026-10-24T12:00:00.000Z");
+const window = (
+  usedPoints: number,
+  checkedAt: string,
+  id = "seven_day",
+  kind: "weekly" | "session" = "weekly",
+) => ({
+  id,
+  label: kind === "weekly" ? "Weekly" : "5 hours",
+  kind,
+  usedPoints,
+  checkedAt,
+  resetsAt: "2026-10-28T12:00:00.000Z",
+  cycleStartedAt: null,
+  durationHours: kind === "weekly" ? 168 : 5,
+  ratePointsPerHour: null,
+  samples: 0,
+  rateAgeMinutes: null,
+});
+const demand = (
+  environmentId: string,
+  instanceId: string,
+  accountKey: string,
+  worker?: boolean,
+) => ({
+  environmentId,
+  threadId: ThreadId.make(`${environmentId}-${instanceId}-${String(worker)}`),
+  instanceId: ProviderInstanceId.make(instanceId),
+  accountKey,
+  model: "astra",
+  options: [],
+  state: "running" as const,
+  ...(worker === undefined ? {} : { worker }),
 });
 
-it("does not present stale or future-dated account rates as current confidence", () => {
-  const observedAt = "2026-10-24T12:00:00.000Z";
-  const window = {
-    id: "week",
-    label: "Weekly",
-    kind: "weekly" as const,
-    usedPoints: 30,
-    checkedAt: observedAt,
-    resetsAt: null,
-    cycleStartedAt: null,
-    durationHours: 168,
-    ratePointsPerHour: 2,
-    samples: 8,
-    rateAgeMinutes: 2,
-  };
-  expect(
-    allocationRateEvidence(window, observedAt, defaultAllocationPolicy, Date.parse(observedAt)),
-  ).toEqual({ ageMinutes: 2, confidence: "medium" });
-  expect(
-    allocationRateEvidence(
-      window,
-      observedAt,
-      defaultAllocationPolicy,
-      Date.parse(observedAt) + 11 * 60_000,
-    ),
-  ).toEqual({ ageMinutes: 13, confidence: "low" });
-  expect(
-    allocationRateEvidence(window, observedAt, defaultAllocationPolicy, Date.parse(observedAt) - 1),
-  ).toEqual({ ageMinutes: null, confidence: "low" });
-});
-
-it("collapses accounts that cannot take a setting and reads usage from the newest computer", () => {
-  const now = Date.parse("2026-10-24T12:00:00.000Z");
-  const weekly = (usedPoints: number, checkedAt: string, id = "seven_day") => ({
-    id,
-    label: "Weekly",
-    kind: "weekly" as const,
-    usedPoints,
-    checkedAt,
-    resetsAt: "2026-10-28T12:00:00.000Z",
-    cycleStartedAt: "2026-10-21T12:00:00.000Z",
-    durationHours: 168,
-    ratePointsPerHour: null,
-    samples: 0,
-    rateAgeMinutes: null,
-  });
+it("gives each login its live numbers: windows from the newest reading, workers and caps", () => {
   const unsupported = { usageLimitsUnavailableReason: "unsupported" as const };
-  const state = snapshot([
-    { ...accounts[0]!, windows: [weekly(40, "2026-10-24T10:00:00.000Z")] },
-    { ...accounts[1]!, windows: [weekly(55, "2026-10-24T11:57:00.000Z")] },
+  let state = snapshot([
+    {
+      ...accounts[0]!,
+      windows: [
+        window(40, "2026-10-24T10:00:00.000Z"),
+        window(12, "2026-10-24T10:00:00.000Z", "five_hour", "session"),
+      ],
+    },
+    { ...accounts[1]!, windows: [window(55, "2026-10-24T11:57:00.000Z")] },
     { ...account("acer", "codex_ara", "ARA", "ara"), availableForWorkers: false },
     { ...account("acer", "codex_off", "OFF", "off"), enabled: false },
     { ...account("acer", "grok", "Grok", null, "grok"), ...unsupported },
     { ...account("acer", "pi", "Pi", null, "pi"), ...unsupported },
   ]);
+  const running = [
+    demand("alien", "codex", "sl", true),
+    demand("alien", "codex", "sl"),
+    demand("alien", "codex", "sl", false),
+    demand("acer", "codex_sl", "sl", true),
+  ];
+  state = {
+    ...state,
+    inventories: state.inventories.map((inventory) => ({
+      ...inventory,
+      demand: running.filter((d) => d.environmentId === inventory.environmentId),
+    })),
+  };
   const pi = allocationAccountGroups(state).find((group) => group.label === "Pi")!;
   const policy = {
     ...defaultAllocationPolicy,
-    accountRules: [{ key: pi.key, kind: "exclude" as const }],
+    accountCaps: [
+      {
+        key: pi.key,
+        weeklyPercent: 80,
+        fiveHourPercent: null,
+        stopWorkers: true,
+        stopMasters: false,
+      },
+    ],
   };
   const rows = allocationAccountRows({ ...state, policy }, policy, now);
   expect(rows.map((row) => [row.label, row.other])).toEqual([
@@ -181,56 +171,91 @@ it("collapses accounts that cannot take a setting and reads usage from the newes
     ["OFF", true],
     ["SL", false],
     ["Grok", true],
-    // A saved rule keeps a quota-less account with the rest.
+    // A saved cap keeps a quota-less account with the rest.
     ["Pi", false],
   ]);
   const sl = rows.find((row) => row.label === "SL")!;
-  expect(sl.usage.weekly?.usedPoints).toBe(55);
-  expect(rows.find((row) => row.label === "ARA")?.workersOffOn).toEqual(["acer"]);
-  expect(rows.find((row) => row.label === "Pi")?.rules.exclude).toBeDefined();
-
-  // A temporary budget covers each weekly window and leaves a use-by plan in place when it ends.
-  const two = allocationAccountRows(
-    snapshot([
-      {
-        ...accounts[0]!,
-        windows: [
-          weekly(40, "2026-10-24T11:00:00.000Z"),
-          weekly(10, "2026-10-24T11:00:00.000Z", "seven_day_opus"),
-        ],
-      },
-    ]),
-    defaultAllocationPolicy,
-    now,
-  )[0]!;
-  const plan = {
-    accountKey: "sl",
-    windowId: "seven_day",
-    createdAt: "2026-10-24T09:00:00.000Z",
-    expiresAt: "2026-10-27T09:00:00.000Z",
-    useBy: "2026-10-26T09:00:00.000Z",
-    baselineUsedPoints: 30,
-  };
-  const set = withAllocationTarget(
-    { ...defaultAllocationPolicy, overrides: [plan] },
-    two,
-    { dailyPoints: 25 },
-    now,
-  );
-  const curve = { ...defaultAllocationPolicy.codex, preset: "custom", dailyPoints: 25 };
-  expect(set.overrides).toEqual([
-    { ...plan, expiresAt: "2026-10-28T12:00:00.000Z", curve },
+  expect(sl.windows).toEqual([
     {
-      accountKey: "sl",
-      windowId: "seven_day_opus",
-      createdAt: "2026-10-24T12:00:00.000Z",
-      baselineUsedPoints: 10,
-      expiresAt: "2026-10-28T12:00:00.000Z",
-      curve,
+      id: "seven_day",
+      label: "Weekly",
+      kind: "weekly",
+      models: [],
+      usedPercent: 55,
+      resetsAt: "2026-10-28T12:00:00.000Z",
+      checkedAt: "2026-10-24T11:57:00.000Z",
+      age: "3 min",
     },
+    expect.objectContaining({ id: "five_hour", usedPercent: 12, age: "2 h" }),
   ]);
-  const row = allocationAccountRows(snapshot(), set, now);
-  expect(row.find((r) => r.label === "SL")?.target).toBeUndefined();
-  const ended = withAllocationTarget(set, { ...two, target: set.overrides[0] }, undefined, now);
-  expect(ended.overrides).toEqual([{ ...plan, expiresAt: "2026-10-28T12:00:00.000Z" }]);
+  expect(sl.workers).toBe(2);
+  expect(sl.workersEnabled).toBe(true);
+  expect(sl.instances).toEqual([
+    { environmentId: "alien", computer: "alien", instanceId: "codex", workersEnabled: true },
+    { environmentId: "acer", computer: "acer", instanceId: "codex_sl", workersEnabled: true },
+  ]);
+  const ara = rows.find((row) => row.label === "ARA")!;
+  expect([ara.workers, ara.workersEnabled, ara.workersOffOn]).toEqual([0, false, ["acer"]]);
+  expect(rows.find((row) => row.label === "Pi")?.cap?.weeklyPercent).toBe(80);
+});
+
+it("orders logins by the policy, then the rest, and moves one up or down", () => {
+  const rows = allocationAccountRows(snapshot(), defaultAllocationPolicy, now);
+  const labels = (policy = defaultAllocationPolicy) =>
+    allocationAccountOrder(rows, policy).map((row) => row.label);
+  expect(labels()).toEqual(["ES", "XL", "AD", "ARA", "SL"]);
+  const key = (label: string) => rows.find((row) => row.label === label)!.key;
+  const listed = { ...defaultAllocationPolicy, accountOrder: ["gone", key("SL"), key("XL")] };
+  expect(labels(listed)).toEqual(["SL", "XL", "ES", "AD", "ARA"]);
+  const moved = withAllocationAccountMoved(listed, rows, key("ES"), -1);
+  expect(labels(moved)).toEqual(["SL", "ES", "XL", "AD", "ARA"]);
+  // Every shown login is now listed, and a key for a login that is not shown is kept.
+  expect(moved.accountOrder).toEqual([...["SL", "ES", "XL", "AD", "ARA"].map(key), "gone"]);
+  expect(labels(withAllocationAccountMoved(moved, rows, key("SL"), -1))).toEqual(labels(moved));
+  expect(labels(withAllocationAccountMoved(moved, rows, key("AD"), 1))).toEqual([
+    "SL",
+    "ES",
+    "XL",
+    "ARA",
+    "AD",
+  ]);
+  expect(allocationMoved([1, 2, 3], 2, 1)).toEqual([1, 2, 3]);
+});
+
+it("edits the ladder starting from the default one", () => {
+  const rung = { model: "typed-model", effort: "high" };
+  const added = withModelLadderEdit(defaultModelRoutingPolicy, { type: "add", rung });
+  expect(added.ladder).toEqual([...defaultModelLadder, rung]);
+  const last = added.ladder!.length - 1;
+  const moved = withModelLadderEdit(added, { type: "move", index: last, delta: -1 });
+  expect(moved.ladder?.at(-2)).toEqual(rung);
+  const set = withModelLadderEdit(moved, { type: "set", index: last - 1, rung: { effort: "low" } });
+  expect(set.ladder?.at(-2)).toEqual({ model: "typed-model", effort: "low" });
+  expect(withModelLadderEdit(set, { type: "remove", index: last - 1 }).ladder).toEqual(
+    defaultModelLadder,
+  );
+});
+
+it("lists the models connected accounts offer with their efforts", () => {
+  const efforts = (ids: string[]) => ({
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Effort",
+        type: "select" as const,
+        options: ids.map((id) => ({ id, label: id })),
+      },
+    ],
+  });
+  const state = snapshot([
+    { ...accounts[0]!, models: [{ slug: "astra", capabilities: efforts(["low", "high"]) }] },
+    { ...accounts[1]!, models: [{ slug: "astra", capabilities: efforts(["high", "max"]) }] },
+    accounts[5]!,
+  ]);
+  expect(allocationModelChoices(state.inventories, "codex")).toEqual([
+    { model: "astra", efforts: ["low", "high", "max"] },
+  ]);
+  expect(allocationModelChoices(state.inventories).map((choice) => choice.model)).toEqual([
+    "astra",
+  ]);
 });

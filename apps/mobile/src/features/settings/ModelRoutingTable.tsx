@@ -33,7 +33,12 @@ export function Action(props: { label: string; onPress: () => void; disabled?: b
     </Pressable>
   );
 }
-function Chip(props: { label: string; active: boolean; onPress: () => void; disabled?: boolean }) {
+export function Chip(props: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+  disabled?: boolean;
+}) {
   return (
     <Pressable
       accessibilityRole="button"

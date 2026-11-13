@@ -7,34 +7,31 @@ import {
   PROVIDER_DISPLAY_NAMES,
   ProviderInstanceId,
   ThreadId,
-  AllocationPolicy,
   defaultAllocationPolicy,
+  type AllocationPolicy,
   type AllocationDecision,
   type AllocationOperation,
   type AllocationRequest,
   type AllocationSnapshot,
   type AllocationResponse,
 } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import {
   createAllocationCommands,
   allocationPreviewKey,
-  allocationChartPoints,
   allocationSummary,
   allocationAccountLabel,
+  type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useProjects } from "../../state/entities";
 import { useEnvironment } from "../../state/environments";
 import { randomUUID } from "../../lib/utils";
-import { AllocationControls, AllocationAnalytics } from "./AllocationControls";
+import { AllocationControls } from "./AllocationControls";
 import { Button } from "../ui/button";
-import { Switch } from "../ui/switch";
 import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
-const decodePolicy = Schema.decodeUnknownSync(AllocationPolicy);
 const time = (value: string | null) =>
   value ? new Date(value).toLocaleString("en-CA", { timeZone: "America/Toronto" }) : "Unknown";
 const field =
@@ -80,16 +77,6 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [projectId, setProjectId] = useState("");
   const [prompt, setPrompt] = useState("");
   const [title, setTitle] = useState("Allocated session");
-  // The JSON view's text while it is being typed; null shows the draft's overrides.
-  const [overridesText, setOverridesText] = useState<string | null>(null);
-  const overrides = overridesText ?? JSON.stringify(policy.overrides, null, 2);
-  const [overrideAccount, setOverrideAccount] = useState("");
-  const [overrideWindow, setOverrideWindow] = useState("");
-  const [useBy, setUseBy] = useState("");
-  const [expires, setExpires] = useState("");
-  const [resetPlan, setResetPlan] = useState<"possible" | "planned" | "manual-confirmed">(
-    "possible",
-  );
   const call = async (operation: AllocationOperation) => {
     const epoch = generation.current;
     setBusy(true);
@@ -120,10 +107,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     setSnapshot(response.snapshot);
     setReadAt(Date.now());
     setSnapshotEpoch(connectionState.epoch);
-    if (replaceDraft || !hydrated.current) {
-      setPolicy(response.snapshot.policy);
-      setOverridesText(null);
-    }
+    if (replaceDraft || !hydrated.current) setPolicy(response.snapshot.policy);
     hydrated.current = true;
     setPreviewKey(null);
   };
@@ -192,94 +176,63 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     ).values(),
   ];
   const model = models.find((m) => m.slug === request.model);
-  const overrideSource = snapshot?.inventories
-    .flatMap((i) => i.accounts)
-    .find((a) => a.accountKey === overrideAccount);
-  // Typed JSON is the newest edit, whether or not the table could show it.
-  const draft = () =>
-    decodePolicy(
-      overridesText === null ? policy : { ...policy, overrides: JSON.parse(overridesText) },
+  const inRange = (value: number | null | undefined, max: number) =>
+    value == null || (Number.isFinite(value) && value >= 0 && value <= max);
+  const previewCurrent = previewKey === allocationPreviewKey(policy, request);
+  const canSave =
+    policy.version === snapshot?.policy.version &&
+    inRange(policy.closeMarginPoints, 50) &&
+    inRange(policy.longWaitHours, 168) &&
+    (policy.accountCaps ?? []).every(
+      (cap) => inRange(cap.weeklyPercent, 100) && inRange(cap.fiveHourPercent, 100),
     );
-  const addOverride = () => {
-    try {
-      const source = overrideSource?.windows.find((w) => w.id === overrideWindow);
-      if (!source || !expires) throw new Error("Missing window or expiry");
-      const current = draft();
-      const value = decodePolicy({
-        ...current,
-        overrides: [
-          ...current.overrides,
-          {
-            accountKey: overrideAccount,
-            windowId: overrideWindow,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(expires).toISOString(),
-            baselineUsedPoints: source.usedPoints,
-            ...(useBy ? { useBy: new Date(useBy).toISOString() } : {}),
-            resetPlan,
-          },
-        ],
-      });
-      setPolicy(value);
-      setOverridesText(null);
-      setPreviewKey(null);
-    } catch {
-      setError("Choose an account, window and valid expiry before adding a temporary target.");
-    }
-  };
-  let previewCurrent = false;
-  let canSave = false;
-  try {
-    previewCurrent = previewKey === allocationPreviewKey(draft(), request);
-    const capsValid = (policy.accountCaps ?? []).every(
-      (cap) =>
-        (cap.weeklyPercent === null ||
-          (Number.isFinite(cap.weeklyPercent) &&
-            cap.weeklyPercent >= 0 &&
-            cap.weeklyPercent <= 100)) &&
-        (cap.fiveHourPercent === null ||
-          (Number.isFinite(cap.fiveHourPercent) &&
-            cap.fiveHourPercent >= 0 &&
-            cap.fiveHourPercent <= 100)),
-    );
-    canSave =
-      policy.version === snapshot?.policy.version &&
-      policy.defaultHours <= policy.maxForecastHours &&
-      capsValid &&
-      (policy.accountRules ?? []).every(
-        (rule) =>
-          rule.kind === "exclude" ||
-          (rule.value !== undefined && (rule.kind === "priority" || rule.value >= 1)),
-      );
-  } catch {
-    /* Validation appears when preview is requested. */
-  }
   const preview = async () => {
-    try {
-      const next = draft();
-      const response = await call({ _tag: "preview", request, policy: next });
-      if (response?.result) {
-        setDecision(response.result.decision);
-        setPreviewKey(allocationPreviewKey(next, request));
-      }
-    } catch {
-      setError("Check policy numbers, dates, and temporary override JSON.");
+    const response = await call({ _tag: "preview", request, policy });
+    if (response?.result) {
+      setDecision(response.result.decision);
+      setPreviewKey(allocationPreviewKey(policy, request));
     }
   };
   const save = async () => {
+    const response = await call({
+      _tag: "policy",
+      input: { expectedVersion: policy.version, policy },
+    });
+    if (response?.policy) {
+      setNotice("Settings saved.");
+      setPolicy(response.policy);
+      await load();
+    }
+  };
+  /** Each computer keeps its own list of accounts that workers may not use. */
+  const setWorkers = async (row: AllocationAccountRow, enabled: boolean) => {
+    setBusy(true);
+    setError("");
     try {
-      const response = await call({
-        _tag: "policy",
-        input: { expectedVersion: policy.version, policy: draft() },
-      });
-      if (response?.policy) {
-        setNotice("Settings saved.");
-        setPolicy(response.policy);
-        setOverridesText(null);
-        await load();
-      }
-    } catch {
-      setError("Check the highlighted numeric ranges and temporary targets before saving.");
+      const results = await Promise.all(
+        [...new Set(row.instances.map((instance) => instance.environmentId))].map((host) =>
+          updateSettings({
+            environmentId: EnvironmentId.make(host),
+            input: {
+              patch: {
+                workerDisabledInstanceIds: (
+                  snapshot?.inventories.find((i) => i.environmentId === host)?.accounts ?? []
+                )
+                  .filter((account) =>
+                    row.members.includes(account)
+                      ? !enabled
+                      : account.availableForWorkers === false,
+                  )
+                  .map((account) => account.instanceId),
+              },
+            },
+          }),
+        ),
+      );
+      if (results.every((result) => result._tag === "Success")) await load();
+      else setError("Could not save worker availability. Reconnect and retry.");
+    } finally {
+      setBusy(false);
     }
   };
   const startSession = async () => {
@@ -317,8 +270,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <header>
         <h1 className="text-xl font-semibold">Provider allocation</h1>
         <p className="text-sm text-muted-foreground">
-          What every worker start obeys: budgets and priorities advise, account rules and hard caps
-          block.
+          A worker starts on the account with the most room. Hard caps and the workers switch block
+          an account.
         </p>
       </header>
       {error && (
@@ -353,9 +306,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         disabled={busy || !ready || !snapshot?.authorityAvailable}
         onChange={(next) => {
           setPolicy(next);
-          if (next.overrides !== policy.overrides) setOverridesText(null);
           setPreviewKey(null);
         }}
+        onWorkersChange={(row, enabled) => void setWorkers(row, enabled)}
       />
       <div className="flex min-w-0 flex-wrap gap-2">
         <Button
@@ -375,14 +328,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
               version: policy.version,
               coordinatorEnvironmentId: policy.coordinatorEnvironmentId,
               mode: policy.mode,
-              accountRules: [],
-              workerModels: {},
             });
-            setOverridesText(null);
             setPreviewKey(null);
-            setNotice(
-              "Defaults restored in your draft. Save settings to apply; recommendations remain advisory.",
-            );
+            setNotice("Defaults restored in your draft. Save settings to apply.");
           }}
         >
           Reset to defaults
@@ -396,10 +344,6 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           Reload saved settings
         </Button>
       </div>
-      {policy.defaultHours > policy.maxForecastHours && (
-        <p role="alert">Default forecast duration must fit within the forecast horizon.</p>
-      )}
-      <AllocationAnalytics snapshot={snapshot} policy={snapshot?.policy ?? policy} />
       <details className="rounded-lg border p-4">
         <summary className="cursor-pointer font-medium">
           Advanced connection, assignment simulator and diagnostics
@@ -413,9 +357,6 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   {n}
                 </p>
               ))}
-              <p className="text-sm">
-                Quota history and charts cover only accounts opted into usage measurements.
-              </p>
             </details>
           )}
           <div className="grid min-w-0 grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
@@ -473,15 +414,13 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </details>
           <p className="text-sm">
             {ready && snapshot?.authorityAvailable
-              ? `Coordinator ready · policy ${snapshot.policy.version} · advisory`
+              ? `Coordinator ready · policy ${snapshot.policy.version}`
               : "Coordinator not ready. Choose this environment or a linked coordinator before managed startup."}
           </p>
           <section className="flex flex-col gap-3">
             <h2 className="font-semibold">Try this assignment</h2>
             {decision && !previewCurrent && (
-              <p className="text-sm">
-                Settings or assignment changed; preview again for a current recommendation.
-              </p>
+              <p className="text-sm">Settings or assignment changed; preview again.</p>
             )}
             <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
               <label>
@@ -584,26 +523,13 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                     ))}
                 </select>
               </label>
-              <label>
-                Expected hours
-                <input
-                  className={field}
-                  type="number"
-                  min="0.01"
-                  max="168"
-                  value={request.expectedHours ?? 1}
-                  onChange={(e) =>
-                    setRequest({ ...request, expectedHours: Number(e.target.value) })
-                  }
-                />
-              </label>
             </div>
             <Button
               size="sm-multiline"
               disabled={busy || !ready || !request.model}
               onClick={() => void preview()}
             >
-              Preview assignment and policy
+              Preview account
             </Button>
             {decision && (
               <DecisionView
@@ -655,306 +581,10 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   Request allocation and start
                 </Button>
                 <p className="text-xs text-muted-foreground">
-                  Preview starts nothing; Start submits your chosen profile, even with advisory
-                  warnings.
+                  Preview starts nothing; Start submits this model on the chosen account.
                 </p>
               </div>
             </details>
-          </section>
-          <section className="flex flex-col gap-4">
-            <h2 className="font-semibold">Temporary targets</h2>
-            <details>
-              <summary>Temporary targets and reset plans</summary>
-              <div className="my-3 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
-                <label>
-                  Account
-                  <select
-                    className={field}
-                    value={overrideAccount}
-                    onChange={(e) => {
-                      setOverrideAccount(e.target.value);
-                      setOverrideWindow("");
-                    }}
-                  >
-                    <option value="">Choose account</option>
-                    {[
-                      ...new Map(
-                        snapshot?.inventories
-                          .flatMap((i) => i.accounts)
-                          .filter((a) => a.accountKey)
-                          .map((a) => [a.accountKey, a]) ?? [],
-                      ).values(),
-                    ].map((a) => (
-                      <option key={a.accountKey} value={a.accountKey!}>
-                        {a.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Allowance window
-                  <select
-                    className={field}
-                    value={overrideWindow}
-                    onChange={(e) => setOverrideWindow(e.target.value)}
-                  >
-                    <option value="">Choose window</option>
-                    {overrideSource?.windows.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Use allowance by (local time)
-                  <input
-                    className={field}
-                    type="datetime-local"
-                    value={useBy}
-                    onChange={(e) => setUseBy(e.target.value)}
-                  />
-                </label>
-                <label>
-                  Override expires (local time)
-                  <input
-                    className={field}
-                    type="datetime-local"
-                    value={expires}
-                    onChange={(e) => setExpires(e.target.value)}
-                  />
-                </label>
-                <label>
-                  Reset plan
-                  <select
-                    className={field}
-                    value={resetPlan}
-                    onChange={(e) => setResetPlan(e.target.value as typeof resetPlan)}
-                  >
-                    <option value="possible">Possible, unconfirmed</option>
-                    <option value="planned">Planned, unconfirmed</option>
-                    <option value="manual-confirmed">Manual reset reported</option>
-                  </select>
-                </label>
-                <Button size="sm-multiline" variant="outline" onClick={addOverride}>
-                  Add temporary target
-                </Button>
-              </div>
-              <p className="my-2 text-sm">
-                A reset plan never replenishes quota; targets expire by themselves.
-              </p>
-              <details>
-                <summary>Advanced override values and removal</summary>
-                <label>
-                  Temporary overrides (JSON)
-                  <textarea
-                    className={`${field} w-full font-mono`}
-                    rows={7}
-                    value={overrides}
-                    onChange={(e) => {
-                      setOverridesText(e.target.value);
-                      setPreviewKey(null);
-                      try {
-                        const parsed: unknown = JSON.parse(e.target.value);
-                        // Shown in the table at once; the schema checks it on preview and save.
-                        if (
-                          Array.isArray(parsed) &&
-                          parsed.every((entry) => entry !== null && typeof entry === "object")
-                        )
-                          setPolicy({
-                            ...policy,
-                            overrides: parsed as AllocationPolicy["overrides"],
-                          });
-                      } catch {
-                        /* Save stays disabled until the text parses. */
-                      }
-                    }}
-                  />
-                </label>
-                <Button
-                  size="sm-multiline"
-                  variant="outline"
-                  onClick={() => {
-                    setPolicy({ ...policy, overrides: [] });
-                    setOverridesText(null);
-                    setPreviewKey(null);
-                  }}
-                >
-                  End all temporary targets on save
-                </Button>
-              </details>
-              {policy.overrides.map((o) => (
-                <div
-                  key={`${o.accountKey}:${o.windowId}:${o.createdAt}`}
-                  className="my-2 rounded border p-2 text-sm"
-                >
-                  <p>
-                    {o.windowId} ·{" "}
-                    {snapshot?.inventories
-                      .flatMap((i) => i.accounts)
-                      .find((a) => a.accountKey === o.accountKey)?.label ?? "Unavailable account"}
-                  </p>
-                  <p>
-                    Use by {time(o.useBy ?? null)}; expires {time(o.expiresAt)}.{" "}
-                    {o.resetPlan === "manual-confirmed"
-                      ? "Manual reset reported; provider confirmation is still required."
-                      : `${o.resetPlan ?? "No"} reset plan; unconfirmed.`}
-                  </p>
-                </div>
-              ))}
-            </details>
-          </section>
-          <section className="flex flex-col gap-4">
-            <h2 className="font-semibold">Accounts and allowance windows</h2>
-            {snapshot?.inventories.map((host) => (
-              <div key={host.environmentId}>
-                <h3>
-                  {environmentLabel(host.environmentId)} ·{" "}
-                  {host.complete ? "load observed" : "load unknown"}
-                </h3>
-                {host.accounts.map((a) => (
-                  <article key={a.instanceId} className="my-3 rounded border p-3">
-                    <h4 className="font-medium">
-                      {a.label} · {PROVIDER_DISPLAY_NAMES[a.driver] ?? "Other provider"}
-                    </h4>
-                    <label>
-                      Available for workers
-                      <Switch
-                        checked={a.availableForWorkers !== false}
-                        disabled={busy || !ready}
-                        onCheckedChange={async (checked) => {
-                          setBusy(true);
-                          setError("");
-                          try {
-                            const result = await updateSettings({
-                              environmentId: EnvironmentId.make(host.environmentId),
-                              input: {
-                                patch: {
-                                  workerDisabledInstanceIds: host.accounts
-                                    .filter((account) =>
-                                      account.instanceId === a.instanceId
-                                        ? !checked
-                                        : account.availableForWorkers === false,
-                                    )
-                                    .map((account) => account.instanceId),
-                                },
-                              },
-                            });
-                            if (result._tag === "Success") await load();
-                            else
-                              setError("Could not save worker availability. Reconnect and retry.");
-                          } finally {
-                            setBusy(false);
-                          }
-                        }}
-                      />
-                    </label>
-                    <p className="text-xs">
-                      Short window:{" "}
-                      {a.shortWindow === "known-absent"
-                        ? "none reported in complete read"
-                        : a.shortWindow}{" "}
-                      ·{" "}
-                      {
-                        host.demand.filter((d) =>
-                          a.accountKey !== null
-                            ? d.accountKey === a.accountKey
-                            : d.instanceId === a.instanceId,
-                        ).length
-                      }{" "}
-                      ongoing ·{" "}
-                      {
-                        snapshot.reservations.filter(
-                          (r) =>
-                            (a.accountKey !== null
-                              ? r.accountKey === a.accountKey
-                              : r.request.environmentId === a.environmentId &&
-                                r.instanceId === a.instanceId) &&
-                            ["reserved", "starting"].includes(r.state),
-                        ).length
-                      }{" "}
-                      pending
-                    </p>
-                    <details>
-                      <summary>Advanced account details</summary>
-                      <p>Account identity: {a.accountKey ?? "unknown"}</p>
-                      <p>Provider instance ID: {a.instanceId}</p>
-                      <p>Environment ID: {host.environmentId}</p>
-                      {a.shortWindowAbsentCheckedAt && (
-                        <p>Complete window read: {time(a.shortWindowAbsentCheckedAt)}</p>
-                      )}
-                    </details>
-                    {a.unavailableReason && <p>Observed warning: {a.unavailableReason}</p>}
-                    {a.windows.map((w) => {
-                      const points = a.accountKey
-                        ? allocationChartPoints(snapshot, a.accountKey, w.id)
-                        : [];
-                      return (
-                        <div key={w.id} className="mt-3">
-                          <p>
-                            {w.label}: {w.usedPoints.toFixed(1)}% used · reset {time(w.resetsAt)}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            Read {time(w.checkedAt)} · {w.samples} quota samples ·{" "}
-                            {w.ratePointsPerHour === null
-                              ? "rate unknown"
-                              : `${w.ratePointsPerHour.toFixed(2)} points/hour`}{" "}
-                            ·{" "}
-                            {w.rateAgeMinutes === null
-                              ? "rate age unknown"
-                              : `${w.rateAgeMinutes.toFixed(1)} min old`}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            Prediction error:{" "}
-                            {w.predictionErrorPointsPerHour == null
-                              ? "insufficient comparable samples"
-                              : `${w.predictionErrorPointsPerHour.toFixed(2)} points/hour`}
-                            . Model/effort/context profile: {a.profileSamples} comparable turns.
-                          </p>
-                          <progress
-                            className="w-full"
-                            max={100}
-                            value={w.usedPoints}
-                            aria-label={`${w.label} actual usage`}
-                          />
-                          {points.length > 1 && (
-                            <svg
-                              viewBox="0 0 400 100"
-                              className="h-24 w-full"
-                              role="img"
-                              aria-label="Observed actual usage (solid) and policy target (dashed) over decision history"
-                            >
-                              <polyline
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                points={points
-                                  .map((p) => `${p.xPercent * 4},${100 - p.actual}`)
-                                  .join(" ")}
-                              />
-                              <polyline
-                                fill="none"
-                                stroke="currentColor"
-                                strokeDasharray="5 4"
-                                points={points
-                                  .map((p) => `${p.xPercent * 4},${100 - p.target}`)
-                                  .join(" ")}
-                              />
-                            </svg>
-                          )}
-                        </div>
-                      );
-                    })}
-                    {a.resetCredits && (
-                      <p className="mt-2 text-xs">
-                        Banked resets: {a.resetCredits.count}; next expiry{" "}
-                        {time(a.resetCredits.expiresAt)}. {a.resetCredits.scope}
-                      </p>
-                    )}
-                  </article>
-                ))}
-              </div>
-            ))}
           </section>
           <section className="flex flex-col gap-2">
             <h2 className="font-semibold">Reservations</h2>
@@ -1042,46 +672,16 @@ function DecisionView({
       <p className="font-medium">
         {decision.selectedInstanceId
           ? accountLabel(decision.request.environmentId, decision.selectedInstanceId)
-          : summary.choice}{" "}
-        · {summary.confidence} confidence
+          : decision.outcome === "wait"
+            ? `Drained until ${time(decision.waitUntil)}`
+            : "No account"}
       </p>
       <p>{summary.reason}</p>
-      <p className="text-sm">
-        {summary.eligible} compatible / {summary.excluded} outside constraints
-      </p>
       {decision.candidates.map((c) => (
-        <details key={`${c.environmentId}:${c.instanceId}`}>
-          <summary>
-            {accountLabel(c.environmentId, c.instanceId)} · {environmentLabel(c.environmentId)}:{" "}
-            {c.eligible ? "compatible" : "outside constraints"}
-          </summary>
-          <p className="text-sm">{c.reasons.join(" ")}</p>
-          {(c.warnings?.length ?? 0) > 0 && (
-            <p className="text-sm">Warnings: {c.warnings!.join(" ")}</p>
-          )}
-          {c.windows.map((w) => (
-            <p key={w.id} className="text-xs">
-              {w.id}: actual {w.actualPoints.toFixed(1)} / target {w.targetPoints.toFixed(1)};
-              forecast {w.forecastPoints.toFixed(1)} points, remaining headroom{" "}
-              {w.headroomPoints.toFixed(1)}.
-              {w.budgetHeadroomPoints !== undefined && (
-                <>
-                  {" "}
-                  Running {w.runningForecastPoints?.toFixed(1)}, queued/reserved{" "}
-                  {w.queuedForecastPoints?.toFixed(1)}, incoming{" "}
-                  {w.incomingForecastPoints?.toFixed(1)}, aggregate/reading-age allowance{" "}
-                  {w.unobservedForecastPoints?.toFixed(1)}; budget {w.budgetPoints?.toFixed(1)},
-                  projected budget headroom {w.budgetHeadroomPoints.toFixed(1)}
-                  {w.budgetHeadroomPoints ===
-                  Math.min(...c.windows.map((v) => v.budgetHeadroomPoints ?? v.headroomPoints))
-                    ? " (limiting)"
-                    : ""}
-                  .
-                </>
-              )}
-            </p>
-          ))}
-        </details>
+        <p key={`${c.environmentId}:${c.instanceId}`} className="text-sm">
+          {c.line ??
+            `${accountLabel(c.environmentId, c.instanceId)} · ${environmentLabel(c.environmentId)}: ${c.reasons.join(" ")}`}
+        </p>
       ))}
     </div>
   );

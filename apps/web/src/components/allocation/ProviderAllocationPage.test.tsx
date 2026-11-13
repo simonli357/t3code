@@ -7,6 +7,7 @@ import {
   EnvironmentId,
   ProviderInstanceId,
   ProviderDriverKind,
+  ThreadId,
   type AllocationSnapshot,
   type AllocationOperation,
   type AllocationRequest,
@@ -53,9 +54,8 @@ vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }))
 import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
-  accountRulesSupported: true,
   accountCapsSupported: true,
-  workerModelsSupported: true,
+  accountOrderSupported: true,
   policy: { ...defaultAllocationPolicy, version: 4, coordinatorEnvironmentId: "host" },
   authorityAvailable: true,
   reservations: [],
@@ -104,10 +104,6 @@ const snapshot: AllocationSnapshot = {
     },
   ],
 };
-const localTime = (iso: string) => {
-  const date = new Date(iso);
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
-};
 const decision = (request: AllocationRequest) => ({
   at: "2026-10-23T12:00:00.000Z",
   policyVersion: 4,
@@ -115,7 +111,7 @@ const decision = (request: AllocationRequest) => ({
   outcome: "selected",
   selectedInstanceId: "sl",
   candidates: [],
-  reasons: ["Safe headroom"],
+  reasons: ["SL has the most room"],
   confidence: "low",
   waitUntil: null,
 });
@@ -188,6 +184,47 @@ afterEach(async () => {
   container.remove();
   vi.unstubAllGlobals();
 });
+/** The snapshot with a second login, one managed worker on SL and one human session. */
+const two: AllocationSnapshot = {
+  ...snapshot,
+  inventories: snapshot.inventories.map((host) => ({
+    ...host,
+    accounts: [
+      ...host.accounts,
+      {
+        ...host.accounts[0]!,
+        instanceId: ProviderInstanceId.make("ad"),
+        label: "AD",
+        accountKey: "ad",
+      },
+    ],
+    demand: [true, false].map((worker) => ({
+      environmentId: "host",
+      threadId: ThreadId.make(`thread-${worker}`),
+      instanceId: ProviderInstanceId.make("sl"),
+      accountKey: "identity",
+      model: "astra",
+      options: [],
+      state: "running" as const,
+      worker,
+    })),
+  })),
+};
+/** Saves succeed and later reads return what was saved. */
+function savePolicies(base = snapshot) {
+  const saved = { policy: base.policy };
+  const previous = state.execute.getMockImplementation()!;
+  state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+    if (arg.input._tag === "snapshot")
+      return { _tag: "Success", value: { snapshot: { ...base, policy: saved.policy } } };
+    if (arg.input._tag === "policy") {
+      saved.policy = { ...arg.input.input.policy, version: saved.policy.version + 1 };
+      return { _tag: "Success", value: { policy: saved.policy } };
+    }
+    return previous(arg);
+  });
+  return saved;
+}
 describe("Provider allocation editor", () => {
   const connect = (phase: string) =>
     act(async () => {
@@ -220,10 +257,9 @@ describe("Provider allocation editor", () => {
     },
   );
   it("refreshes reconnect snapshots while retaining drafts and rejecting obsolete reads", async () => {
-    await change("Codex Daily usage budget", "40");
-    await change("Temporary overrides (JSON)", "[ ]");
+    await change("Closeness margin", "40");
     await change("Model", "astra");
-    await act(async () => button("Preview assignment and policy").click());
+    await act(async () => button("Preview account").click());
     expect(button("Save settings").disabled).toBe(false);
     await connect("offline");
     let resolveOld!: (value: unknown) => void;
@@ -237,7 +273,7 @@ describe("Provider allocation editor", () => {
     );
     await connect("connected");
     expect(readCalls("snapshot")).toHaveLength(2);
-    expect(button("Preview assignment and policy").disabled).toBe(true);
+    expect(button("Preview account").disabled).toBe(true);
     expect(button("Save settings").disabled).toBe(true);
     await connect("offline");
     state.execute.mockImplementation(({ input: operation }: { input: AllocationOperation }) =>
@@ -250,102 +286,87 @@ describe("Provider allocation editor", () => {
     );
     await connect("connected");
     expect(readCalls("snapshot")).toHaveLength(3);
-    expect(input("Codex Daily usage budget").value).toBe("40");
-    expect(input("Temporary overrides (JSON)").value).toBe("[ ]");
+    expect(input("Closeness margin").value).toBe("40");
     expect(container.textContent).toContain("policy 5");
     await act(async () => resolveOld({ _tag: "Success", value: { snapshot } }));
     expect(container.textContent).toContain("policy 5");
     expect(button("Save settings").disabled).toBe(true);
-    await act(async () => button("Preview assignment and policy").click());
+    await act(async () => button("Preview account").click());
     expect(button("Save settings").disabled).toBe(true);
     await act(async () => button("Reload saved settings").click());
-    expect(input("Codex Daily usage budget").value).toBe("10");
+    expect(input("Closeness margin").value).toBe("10");
     expect(button("Save settings").disabled).toBe(false);
   });
-  it("shows primary numeric defaults first and saves edits, account rules and resets without an assignment preview", async () => {
-    let savedPolicy = snapshot.policy;
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
-      if (arg.input._tag === "snapshot")
-        return { _tag: "Success", value: { snapshot: { ...snapshot, policy: savedPolicy } } };
-      if (arg.input._tag === "policy") {
-        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
-        return { _tag: "Success", value: { policy: savedPolicy } };
-      }
-      return previous(arg);
-    });
-    expect(input("Codex Initial weekly budget").value).toBe("30");
-    expect(input("Claude Initial weekly budget").value).toBe("0");
-    expect(input("Codex Daily usage budget").value).toBe("10");
-    expect(input("Claude Daily usage budget").value).toBe("17");
-    const budgets = container.querySelector('[aria-label="Family defaults"]')!;
-    expect(budgets.textContent).toContain("default 17");
-    expect(budgets.closest("details")).toBeNull();
+  it("saves the closeness margin and long wait, and resets them, without an assignment preview", async () => {
+    const saved = savePolicies();
     expect(container.querySelector("section")?.getAttribute("aria-label")).toBe("Accounts");
     expect(input("Coordinator").closest("details")?.open).toBe(false);
-    expect(input("Model").closest("details")?.open).toBe(false);
-    await change("Claude Daily usage budget", "40");
-    await change("SL priority", "10");
-    await change("SL priority until", "2026-11-12T09:30");
-    await change("SL priority note", "prefer SL this week");
-    await change("SL max workers", "0");
-    expect(button("Save settings").disabled).toBe(true);
-    await change("SL max workers", "2");
-    await act(() => named("SL workers allowed").click());
-    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("false");
+    expect(input("Closeness margin").value).toBe("10");
+    expect(input("Long wait").value).toBe("3");
+    await change("Closeness margin", "20");
+    await change("Long wait", "5.5");
     await act(() => button("Save settings").click());
     expect(readCalls("preview")).toHaveLength(0);
-    expect(savedPolicy.claude.dailyPoints).toBe(40);
-    expect(savedPolicy.claude.preset).toBe("custom");
-    const key = savedPolicy.accountRules?.[0]?.key;
-    expect(savedPolicy.accountRules).toEqual([
-      {
-        key,
-        kind: "priority",
-        value: 10,
-        expiresAt: new Date("2026-11-12T09:30").toISOString(),
-        note: "prefer SL this week",
-      },
-      { key, kind: "maxWorkers", value: 2 },
-      { key, kind: "exclude" },
-    ]);
-    expect(input("SL priority until").value).toBe("2026-11-12T09:30");
-    expect(input("Claude Daily usage budget").value).toBe("40");
+    expect(saved.policy).toMatchObject({ version: 5, closeMarginPoints: 20, longWaitHours: 5.5 });
+    expect(input("Closeness margin").value).toBe("20");
     expect(container.querySelector('[role="status"]')?.textContent).toContain("Settings saved");
     await act(() => button("Reset to defaults").click());
-    expect(input("Claude Daily usage budget").value).toBe("17");
-    expect(input("SL priority").value).toBe("");
-    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("true");
-    expect(savedPolicy.claude.dailyPoints).toBe(40);
+    expect(input("Closeness margin").value).toBe("10");
+    expect(saved.policy.closeMarginPoints).toBe(20);
     await act(() => button("Save settings").click());
-    expect(savedPolicy.claude.dailyPoints).toBe(17);
-    expect(savedPolicy.codex.burstPoints).toBe(30);
-    expect(savedPolicy.mode).toBe("observation");
-    await act(() => button("Reload saved settings").click());
-    expect(input("Claude Daily usage budget").value).toBe("17");
+    expect(saved.policy).toMatchObject({ closeMarginPoints: 10, longWaitHours: 3 });
+    expect(saved.policy.mode).toBe("observation");
     expect(state.start).not.toHaveBeenCalled();
   });
-  it("keeps legacy cycle policies unchanged until an explicit edit or reset", async () => {
+  it("moves an account up the preference order, saves it, and shows workers now", async () => {
+    const saved = savePolicies(two);
+    await act(() => button("Reload saved settings").click());
+    const order = () =>
+      [...container.querySelectorAll('[aria-label="Preference order"] li')].map((item) =>
+        item.textContent?.replace(/^\d+\. /, ""),
+      );
+    expect(order()).toEqual(["ADCodex", "SLCodex"]);
+    expect(named("Move AD up").hasAttribute("disabled")).toBe(true);
+    await act(() => named("Move SL up").click());
+    expect(order()).toEqual(["SLCodex", "ADCodex"]);
+    await act(() => button("Save settings").click());
+    const key = (login: string) => JSON.stringify(["codex", ["account", login]]);
+    expect(saved.policy.accountOrder).toEqual([key("identity"), key("ad")]);
+    expect(order()).toEqual(["SLCodex", "ADCodex"]);
+    const rows = [...container.querySelectorAll('[aria-label="Accounts"] tbody tr')];
+    expect(rows.map((row) => row.textContent?.match(/\d+ now/)?.[0])).toEqual(["0 now", "1 now"]);
+  });
+  it("says the coordinator must be updated before the order can be saved", async () => {
     const previous = state.execute.getMockImplementation()!;
-    const legacy = {
-      ...snapshot.policy,
-      claude: { ...snapshot.policy.claude, preset: "sustainable" as const, dailyPoints: 100 / 7 },
-    };
     state.execute.mockImplementation(async (arg) =>
       arg.input._tag === "snapshot"
-        ? { _tag: "Success", value: { snapshot: { ...snapshot, policy: legacy } } }
+        ? {
+            _tag: "Success",
+            value: { snapshot: { ...two, accountOrderSupported: undefined } },
+          }
         : previous(arg),
     );
-    await act(() => button("Reload saved settings").click());
-    expect(input("Claude Daily usage budget").value).toBe("Derived");
-    expect(input("Claude Daily usage budget").disabled).toBe(true);
+    await act(() => button("Refresh").click());
+    expect(container.textContent).toContain("Update the coordinator before the order");
+    expect(named("Move SL up").hasAttribute("disabled")).toBe(true);
+    expect(input("Closeness margin").disabled).toBe(true);
+    expect(input("SL weekly cap").disabled).toBe(false);
+  });
+  it("turns workers off for an account on the computer that has it", async () => {
+    const previous = state.execute.getMockImplementation()!;
+    const patches: unknown[] = [];
+    state.execute.mockImplementation(async (arg) => {
+      if (!("patch" in arg.input)) return previous(arg);
+      patches.push(arg);
+      return { _tag: "Success", value: {} };
+    });
+    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("true");
+    await act(async () => named("SL workers allowed").click());
+    expect(patches).toEqual([
+      { environmentId: "host", input: { patch: { workerDisabledInstanceIds: ["sl"] } } },
+    ]);
+    expect(readCalls("snapshot")).toHaveLength(2);
     expect(readCalls("policy")).toHaveLength(0);
-    await act(() => button("Use saved numeric budgets for Claude").click());
-    expect(Number(input("Claude Daily usage budget").value)).toBeCloseTo(100 / 7);
-    await change("Claude Daily usage budget", "22");
-    await act(() => button("Save settings").click());
-    const save = readCalls("policy").at(-1)![0].input.input.policy;
-    expect(save.claude).toMatchObject({ preset: "custom", dailyPoints: 22 });
   });
   it("saves optional hard caps with independent worker and master stop actions", async () => {
     let savedPolicy = snapshot.policy;
@@ -393,7 +414,7 @@ describe("Provider allocation editor", () => {
       stopMasters: true,
     });
   });
-  it("offers the 5-hour cap only for Claude and shows the account's reading and its age", async () => {
+  it("offers the 5-hour cap only for Claude and shows each window's usage, reset and reading age", async () => {
     expect(container.querySelector('[aria-label="Accounts"]')?.textContent).not.toContain("5h");
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:04:00.000Z"));
     const previous = state.execute.getMockImplementation()!;
@@ -435,8 +456,9 @@ describe("Provider allocation editor", () => {
     });
     await act(() => button("Refresh").click());
     const accounts = container.querySelector('[aria-label="Accounts"]')!;
-    expect(accounts.textContent).toContain("Week 42%");
-    expect(accounts.textContent).toContain("4 min ago");
+    expect(accounts.textContent).toContain("Weekly 42%");
+    expect(accounts.textContent).toContain("resets ");
+    expect(accounts.textContent).toContain("read 4 min ago");
     expect(input("SL 5-hour cap").value).toBe("");
     clock.mockRestore();
   });
@@ -475,10 +497,9 @@ describe("Provider allocation editor", () => {
     expect(other.open).toBe(false);
     expect(other.textContent).toContain("No subscription quota");
     expect(other.textContent).not.toContain("SL weekly cap");
-    // Its rules stay editable, and an account with a saved rule is listed with the rest.
-    expect(input("SL priority").closest("details")).toBe(other);
+    expect(named("SL workers allowed").closest("details")).toBe(other);
   });
-  it("lists a quota-less account with the rest once a rule is saved for it, unless its provider is off", async () => {
+  it("lists a quota-less account with the rest once a cap is saved for it, unless its provider is off", async () => {
     const previous = state.execute.getMockImplementation()!;
     const host = snapshot.inventories[0]!;
     const account = {
@@ -494,7 +515,18 @@ describe("Provider allocation editor", () => {
               value: {
                 snapshot: {
                   ...snapshot,
-                  policy: { ...snapshot.policy, accountRules: [{ key, kind: "exclude" }] },
+                  policy: {
+                    ...snapshot.policy,
+                    accountCaps: [
+                      {
+                        key,
+                        weeklyPercent: 80,
+                        fiveHourPercent: null,
+                        stopWorkers: true,
+                        stopMasters: false,
+                      },
+                    ],
+                  },
                   inventories: [{ ...host, accounts: [{ ...account, enabled }] }],
                 },
               },
@@ -503,7 +535,6 @@ describe("Provider allocation editor", () => {
       );
     read(true);
     await act(() => button("Reload saved settings").click());
-    expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("false");
     expect(named("SL workers allowed").closest("details")).toBeNull();
     read(false);
     await act(() => button("Reload saved settings").click());
@@ -575,123 +606,20 @@ describe("Provider allocation editor", () => {
     expect(weekly.disabled).toBe(false);
     expect(container.textContent).toContain("Quota read failed");
   });
-  it("edits an account's temporary budget in place and ends it without touching JSON", async () => {
-    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:00:00.000Z"));
-    let savedPolicy = snapshot.policy;
-    const previous = state.execute.getMockImplementation()!;
-    const host = snapshot.inventories[0]!;
-    const weekly = {
-      id: "seven_day",
-      label: "Weekly",
-      kind: "weekly" as const,
-      usedPoints: 42,
-      checkedAt: host.observedAt,
-      resetsAt: "2026-10-28T12:00:00.000Z",
-      cycleStartedAt: "2026-10-21T12:00:00.000Z",
-      durationHours: 168,
-      ratePointsPerHour: null,
-      samples: 0,
-      rateAgeMinutes: null,
-    };
-    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
-      if (arg.input._tag === "snapshot")
-        return {
-          _tag: "Success",
-          value: {
-            snapshot: {
-              ...snapshot,
-              policy: savedPolicy,
-              inventories: [
-                { ...host, accounts: host.accounts.map((a) => ({ ...a, windows: [weekly] })) },
-              ],
-            },
-          },
-        };
-      if (arg.input._tag === "policy") {
-        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
-        return { _tag: "Success", value: { policy: savedPolicy } };
-      }
-      return previous(arg);
-    });
-    await act(() => button("Reload saved settings").click());
-    // Blank follows the family: Codex starts at 30 and adds 10 a day.
-    expect(input("SL initial budget").value).toBe("");
-    expect((input("SL initial budget") as HTMLInputElement).placeholder).toBe("30");
-    await change("SL daily budget", "25");
-    expect(input("SL initial budget").value).toBe("30");
-    expect(input("SL budget until").value).toBe(localTime("2026-10-28T12:00:00.000Z"));
-    expect(input("Temporary overrides (JSON)").value).toContain('"dailyPoints": 25');
-    await change("SL budget until", "2026-10-25T09:30");
-    await change("SL initial budget", "");
-    expect(button("Save settings").disabled).toBe(true);
-    await change("SL initial budget", "5");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.overrides).toEqual([
-      {
-        accountKey: "identity",
-        windowId: "seven_day",
-        createdAt: "2026-10-23T12:00:00.000Z",
-        baselineUsedPoints: 42,
-        expiresAt: new Date("2026-10-25T09:30").toISOString(),
-        curve: { ...snapshot.policy.codex, preset: "custom", burstPoints: 5, dailyPoints: 25 },
-      },
-    ]);
-    await act(() => button("Use family default").click());
-    expect(input("SL daily budget").value).toBe("");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.overrides).toEqual([]);
-    clock.mockRestore();
-  });
-  it("sets, times and clears a provider family's default worker model", async () => {
-    let savedPolicy = snapshot.policy;
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
-      if (arg.input._tag === "snapshot")
-        return { _tag: "Success", value: { snapshot: { ...snapshot, policy: savedPolicy } } };
-      if (arg.input._tag === "policy") {
-        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
-        return { _tag: "Success", value: { policy: savedPolicy } };
-      }
-      return previous(arg);
-    });
-    expect(input("Codex default worker model").value).toBe("");
-    expect(input("Codex default worker effort").disabled).toBe(true);
-    // Claude has no account here, so it has no model to offer.
-    expect([...(input("Claude default worker model") as HTMLSelectElement).options]).toHaveLength(
-      1,
-    );
-    await change("Codex default worker model", "astra");
-    expect(input("Codex default worker effort").value).toBe("high");
-    await change("Codex default worker model until", "2099-11-12T09:30");
-    await change("Codex default worker model note", "today only");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.workerModels).toEqual({
-      codex: {
-        model: "astra",
-        effort: "high",
-        expiresAt: new Date("2099-11-12T09:30").toISOString(),
-        note: "today only",
-      },
-    });
-    expect(input("Codex default worker model").value).toBe("astra");
-    await change("Codex default worker model", "");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.workerModels).toEqual({});
-  });
   it("rejects empty or out-of-range numbers and retains offline last-known drafts", async () => {
-    await change("Codex Daily usage budget", "");
+    await change("Closeness margin", "");
     expect(button("Save settings").disabled).toBe(true);
-    expect(input("Codex Daily usage budget").getAttribute("aria-invalid")).toBe("true");
-    await change("Codex Daily usage budget", "101");
+    expect(input("Closeness margin").getAttribute("aria-invalid")).toBe("true");
+    await change("Closeness margin", "51");
     expect(button("Save settings").disabled).toBe(true);
-    await change("Codex Daily usage budget", "12");
+    await change("Closeness margin", "12");
     await connect("offline");
-    expect(input("Codex Daily usage budget").disabled).toBe(true);
-    expect(input("Codex Daily usage budget").value).toBe("12");
+    expect(input("Closeness margin").disabled).toBe(true);
+    expect(input("Closeness margin").value).toBe("12");
     expect(button("Save settings").disabled).toBe(true);
     expect(container.textContent).toContain("last-known settings are read-only");
     await connect("connected");
-    expect(input("Codex Daily usage budget").value).toBe("12");
+    expect(input("Closeness margin").value).toBe("12");
     expect(button("Save settings").disabled).toBe(false);
   });
   it("chooses a named linked coordinator without exposing IDs and preserves edits when connection fails", async () => {
@@ -701,12 +629,7 @@ describe("Provider allocation editor", () => {
       "Build computer",
     ]);
     expect(container.textContent).toContain("Workstation");
-    expect(container.querySelector("h4")?.textContent).toContain("SL · Codex");
-    const identity = [...container.querySelectorAll("p")].find((p) =>
-      p.textContent?.includes("Account identity: identity"),
-    );
-    expect(identity?.closest("details")?.open).toBe(false);
-    await change("Codex Target reserve", "12");
+    await change("Closeness margin", "12");
     await change("Coordinator", "peer");
     await act(() => button("Connect coordinator").click());
     expect(state.execute.mock.calls.at(-1)?.[0]).toMatchObject({
@@ -714,7 +637,7 @@ describe("Provider allocation editor", () => {
       input: { _tag: "connect", coordinatorEnvironmentId: "peer" },
     });
     expect(input("Coordinator").value).toBe("peer");
-    expect(input("Codex Target reserve").value).toBe("12");
+    expect(input("Closeness margin").value).toBe("12");
   });
   it("retains a disconnected saved coordinator and resets the assignment when settings scope changes", async () => {
     state.execute.mockImplementation(
@@ -760,7 +683,7 @@ describe("Provider allocation editor", () => {
       "not linked",
     );
     expect(input("Model").value).toBe("");
-    expect(container.querySelector("h4")?.textContent).toContain("Claude");
+    expect(container.querySelector('[aria-label="Accounts"]')?.textContent).toContain("Claude");
     await act(() => button("Refresh").click());
     expect(input("Coordinator").value).toBe("unlinked");
     expect(state.execute.mock.calls.at(-1)?.[0].environmentId).toBe("other");
@@ -768,17 +691,17 @@ describe("Provider allocation editor", () => {
   it("saves against the draft version and preserves edits on a stale save", async () => {
     expect(button("Save settings").disabled).toBe(false);
     await change("Model", "astra");
-    await act(() => button("Preview assignment and policy").click());
+    await act(() => button("Preview account").click());
     expect(button("Save settings").disabled).toBe(false);
-    await change("Codex Target reserve", "12");
+    await change("Closeness margin", "12");
     expect(button("Save settings").disabled).toBe(false);
-    await act(() => button("Preview assignment and policy").click());
+    await act(() => button("Preview account").click());
     await act(() => button("Save settings").click());
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("newer policy");
-    expect(input("Codex Target reserve").value).toBe("12");
+    expect(input("Closeness margin").value).toBe("12");
     const save = state.execute.mock.calls.find(([call]) => call.input._tag === "policy")![0];
     expect(save.input.input.expectedVersion).toBe(4);
-    expect(save.input.input.policy.codex.reservePoints).toBe(12);
+    expect(save.input.input.policy.closeMarginPoints).toBe(12);
   });
   it("submits the exact model and effort and keeps observation from navigating to a fabricated session", async () => {
     await change("Model", "astra");
@@ -811,13 +734,12 @@ describe("Provider allocation editor", () => {
   });
 });
 
-it("shows compatible choices and advisory warnings while allowing the chosen exact profile to start", async () => {
+it("shows the choice, its reason and one line per account, and starts the chosen profile", async () => {
   const previous = state.execute.getMockImplementation()!;
-  const warning = "Weekly: Projected consumption exceeds the target plus bounded borrowing.";
+  const line = "SL: 58 points left, resets in 30 h, 0 workers";
   state.execute.mockImplementation(async (arg) => {
     const result = await previous(arg);
     if (arg.input._tag !== "preview") return result;
-    const d = decision(arg.input.request);
     return {
       _tag: "Success",
       value: {
@@ -825,19 +747,21 @@ it("shows compatible choices and advisory warnings while allowing the chosen exa
           mode: "observation",
           reservation: null,
           decision: {
-            ...d,
-            reasons: [warning],
+            ...decision(arg.input.request),
             candidates: [
               {
                 environmentId: "host",
                 instanceId: "sl",
                 accountKey: "identity",
+                label: "SL",
                 eligible: true,
                 reasons: [],
-                warnings: [warning],
+                roomPoints: 58,
+                resetInHours: 30,
+                workers: 0,
+                line,
                 behindPoints: 0,
-                resetInHours: null,
-                confidence: "low",
+                confidence: "medium",
                 windows: [],
               },
             ],
@@ -849,11 +773,10 @@ it("shows compatible choices and advisory warnings while allowing the chosen exa
   await change("Model", "astra");
   await change("Effort", "high");
   await change("Explicit account", "sl");
-  await act(() => button("Preview assignment and policy").click());
-  expect(container.textContent).toContain("1 compatible / 0 outside constraints");
-  expect(container.textContent).toContain(`Warnings: ${warning}`);
-  expect(container.textContent).toContain("never prevent an explicit Start");
-  expect(container.textContent).not.toContain("Automatic mode starts");
+  await act(() => button("Preview account").click());
+  expect(container.textContent).toContain("SL has the most room");
+  expect(container.textContent).toContain(line);
+  expect(container.textContent).not.toContain("confidence");
   await change("Project", "project");
   await change("Task", "Perform the chosen task");
   state.start.mockImplementation(async ({ input: startInput }) => ({
@@ -879,85 +802,6 @@ it("shows compatible choices and advisory warnings while allowing the chosen exa
   expect(state.navigate).toHaveBeenCalledTimes(1);
 });
 
-it("labels unknown model quota rates honestly and displays measured account burn separately", async () => {
-  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:00:00.000Z"));
-  const previous = state.execute.getMockImplementation()!;
-  const host = snapshot.inventories[0]!;
-  const account = host.accounts[0]!;
-  state.execute.mockImplementation(async (arg) =>
-    arg.input._tag === "snapshot"
-      ? {
-          _tag: "Success",
-          value: {
-            snapshot: {
-              ...snapshot,
-              inventories: [
-                {
-                  ...host,
-                  accounts: [
-                    {
-                      ...account,
-                      windows: [
-                        {
-                          id: "week",
-                          label: "Weekly",
-                          kind: "weekly",
-                          usedPoints: 33,
-                          checkedAt: host.observedAt,
-                          resetsAt: "2026-10-29T12:00:00.000Z",
-                          cycleStartedAt: "2026-10-22T12:00:00.000Z",
-                          durationHours: 168,
-                          ratePointsPerHour: 2.5,
-                          samples: 8,
-                          rateAgeMinutes: 2,
-                        },
-                      ],
-                      usageProfiles: [
-                        {
-                          model: "astra",
-                          effort: "high",
-                          contextBand: "under32k",
-                          samples: 6,
-                          observedAt: host.observedAt,
-                          outputTokensPerHour: 1000,
-                        },
-                      ],
-                    },
-                  ],
-                },
-              ],
-            },
-          },
-        }
-      : previous(arg),
-  );
-  await act(() => button("Refresh").click());
-  const analytics = container.querySelector('[aria-label="Usage analytics"]')!;
-  expect(analytics.textContent).toContain("Measured burn: 2.5 allowance points / hour");
-  expect(analytics.textContent).toContain("8 samples");
-  expect(analytics.textContent).toContain("Medium confidence");
-  expect(analytics.textContent).toContain("Allowance points/hour: Not enough data");
-  expect(analytics.textContent).toContain("6 token samples");
-  expect(analytics.textContent).toContain("1000 tokens / turn-hour");
-  clock.mockRestore();
-});
-
-it("keeps account rules read-only when the coordinator cannot persist them", async () => {
-  const previous = state.execute.getMockImplementation()!;
-  state.execute.mockImplementation(async (arg) =>
-    arg.input._tag === "snapshot"
-      ? {
-          _tag: "Success",
-          value: { snapshot: { ...snapshot, accountRulesSupported: undefined } },
-        }
-      : previous(arg),
-  );
-  await act(() => button("Refresh").click());
-  expect(input("SL priority").disabled).toBe(true);
-  expect(input("Claude Daily usage budget").disabled).toBe(false);
-  expect(container.textContent).toContain("Update the coordinator to edit account rules");
-});
-
 it("keeps hard caps read-only when the coordinator cannot persist them", async () => {
   const previous = state.execute.getMockImplementation()!;
   state.execute.mockImplementation(async (arg) =>
@@ -971,20 +815,4 @@ it("keeps hard caps read-only when the coordinator cannot persist them", async (
   await act(() => button("Refresh").click());
   expect(input("SL weekly cap").disabled).toBe(true);
   expect(container.textContent).toContain("Update the coordinator to edit hard caps.");
-});
-
-it("keeps the default worker model read-only when the coordinator cannot persist it", async () => {
-  const previous = state.execute.getMockImplementation()!;
-  state.execute.mockImplementation(async (arg) =>
-    arg.input._tag === "snapshot"
-      ? {
-          _tag: "Success",
-          value: { snapshot: { ...snapshot, workerModelsSupported: undefined } },
-        }
-      : previous(arg),
-  );
-  await act(() => button("Refresh").click());
-  expect(input("Codex default worker model").disabled).toBe(true);
-  expect(input("Codex Daily usage budget").disabled).toBe(false);
-  expect(container.textContent).toContain("Update the coordinator to set a default worker model");
 });

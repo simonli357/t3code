@@ -1,34 +1,36 @@
 import {
   ProviderDriverKind,
   accountSupportsRoutingProfile,
-  allocationWorkerModel,
-  automaticModelAllowed,
+  modelFallback,
+  modelLadder,
+  profileLabel,
   routingEffortOptionId,
+  type AllocationDecision,
   type AllocationInventory,
   type AllocationPolicy,
   type AllocationRequest,
+  type AllocationReservation,
   type ModelRoutingPolicy,
   type ModelRoutingRequest,
-  type ModelRoutingDecision,
   type RoutingProfile,
 } from "@t3tools/contracts";
+import { findCatalogModel } from "@t3tools/shared/model";
+import { decideAllocation } from "./decision.ts";
 
 /**
- * Resolves capabilities only. Allowance pressure cannot activate an alternative profile.
- * `workers` carries the allocation policy whose default worker model replaces the table for a
- * worker that pins no model.
+ * The profile each allowed provider family wants before quota is looked at: the pinned model,
+ * or the table's entry for the scores. A table alternative applies only when no account on the
+ * computer offers the entry itself.
  */
-export function modelCandidates(
+export function wantedProfiles(
   policy: ModelRoutingPolicy,
   request: ModelRoutingRequest,
   inventories: readonly AllocationInventory[],
-  retained?: ModelRoutingDecision,
-  workers?: { readonly policy: AllocationPolicy; readonly at: string },
 ) {
   const { difficulty, stakes } = request.assessment;
   const rule = `Difficulty ${difficulty}, stakes ${stakes}`;
   const reasons: string[] = [];
-  const candidates: { request: AllocationRequest; profile: number | null; reason: string }[] = [];
+  const candidates: { request: AllocationRequest; reason: string }[] = [];
   const {
     selection: _selection,
     assessment: _assessment,
@@ -38,35 +40,6 @@ export function modelCandidates(
     reassessment: _reassessment,
     ...constraints
   } = request;
-  // Admission retries reuse the resolved exact capabilities, even after policy or
-  // catalog changes. The allocator still validates today's account capabilities.
-  if (retained) {
-    const selected = retained.allocation?.decision.request;
-    const profiles = selected
-      ? retained.profiles.filter((p) => p.driver === selected.driver)
-      : retained.profiles;
-    return {
-      rule: retained.rule,
-      reasons: profiles.length ? [] : [...retained.reasons],
-      candidates: profiles.map((p) => ({
-        request: selected
-          ? {
-              ...constraints,
-              driver: selected.driver,
-              model: selected.model,
-              options: selected.options,
-            }
-          : {
-              ...constraints,
-              driver: p.driver,
-              model: p.model,
-              options: p.options,
-            },
-        profile: p.profile,
-        reason: p.reason,
-      })),
-    };
-  }
   if (new Set(allowedDrivers).size !== allowedDrivers.length)
     return { rule, candidates, reasons: ["Allowed provider families must be unique."] };
   if (override) {
@@ -74,9 +47,7 @@ export function modelCandidates(
       return {
         rule,
         candidates,
-        reasons: [
-          "Exact user override conflicts with allowed provider families. Resolve the instruction explicitly.",
-        ],
+        reasons: ["The pinned model's provider family is not among the allowed ones."],
       };
     let options = override.options;
     if (!options) {
@@ -85,57 +56,22 @@ export function modelCandidates(
         return {
           rule,
           candidates,
-          reasons: [
-            `${override.driver}: the table has no effort for this provider; give the override's options.`,
-          ],
+          reasons: [`${override.driver}: the table has no effort for this provider; pin one.`],
         };
       const table = override.driver === "codex" ? policy.codex : policy.claudeAgent;
       const cell = table.cells[difficulty]![stakes]!;
       options = [{ id: routingEffortOptionId(override.driver), value: cell.effort }];
     }
     candidates.push({
-      request: {
-        ...constraints,
-        driver: override.driver,
-        model: override.model,
-        options,
-      },
-      profile: null,
-      reason: override.options
-        ? `Exact user override: ${override.reason}`
-        : `Exact user model override with table effort: ${override.reason}`,
+      request: { ...constraints, driver: override.driver, model: override.model, options },
+      reason: `${override.driver}: pinned model.`,
     });
-    return {
-      rule: override.options ? "Exact user override" : `${rule}; model pinned`,
-      candidates,
-      reasons,
-    };
+    return { rule: `${rule}; model pinned`, candidates, reasons };
   }
-  const defaults: string[] = [];
+  // Claude first: Codex is used only when a start asks for it.
   for (const driver of [...allowedDrivers].sort()) {
     if (driver !== "codex" && driver !== "claudeAgent") {
-      reasons.push(
-        `${driver}: automatic model selection is unsupported; use exact explicit selection.`,
-      );
-      continue;
-    }
-    // The user's standing default is exact, like an override: no table, allowlist or alternative.
-    const standing =
-      workers && request.kind !== "session"
-        ? allocationWorkerModel(workers.policy, driver, workers.at)
-        : undefined;
-    if (standing) {
-      candidates.push({
-        request: {
-          ...constraints,
-          driver: ProviderDriverKind.make(driver),
-          model: standing.model,
-          options: [{ id: routingEffortOptionId(driver), value: standing.effort }],
-        },
-        profile: null,
-        reason: `${driver}: default worker model ${standing.model} / ${standing.effort}${standing.expiresAt ? ` until ${standing.expiresAt}` : ""}${standing.note ? ` (${standing.note})` : ""}.`,
-      });
-      defaults.push(driver);
+      reasons.push(`${driver}: the table covers Claude and Codex only; pin a model.`);
       continue;
     }
     const table = driver === "codex" ? policy.codex : policy.claudeAgent;
@@ -151,91 +87,257 @@ export function modelCandidates(
           (!request.nativeInstanceId || a.instanceId === request.nativeInstanceId) &&
           (!request.allowedInstanceIds || request.allowedInstanceIds.includes(a.instanceId)),
       );
-    let found = false;
-    for (const [index, profile] of profiles.entries()) {
-      const label = `${profile.model} / ${profile.effort}`;
-      if (!table.allowedModels.includes(profile.model) || !automaticModelAllowed(profile.model)) {
-        reasons.push(`${driver}: ${label} is excluded from automatic selection.`);
-        continue;
-      }
-      if (!accounts.some((a) => accountSupportsRoutingProfile(a, profile))) {
-        reasons.push(
-          `${driver}: ${label} is unavailable in the constrained target catalogs. Refresh the target catalog or configure an approved alternative.`,
-        );
-        continue;
-      }
-      candidates.push({
-        request: {
-          ...constraints,
-          driver: ProviderDriverKind.make(driver),
-          model: profile.model,
-          options: [{ id: routingEffortOptionId(driver), value: profile.effort }],
-        },
-        profile: null,
-        reason:
-          index === 0
-            ? `${driver}: table choice for difficulty ${difficulty}, stakes ${stakes}.`
-            : `${driver}: configured capability alternative for difficulty ${difficulty}, stakes ${stakes}; no profile ranking is implied.`,
-      });
-      found = true;
-      break;
-    }
-    if (!found)
+    const index = profiles.findIndex((profile) =>
+      accounts.some((a) => accountSupportsRoutingProfile(a, profile)),
+    );
+    const profile = profiles[index];
+    if (!profile) {
       reasons.push(
-        `${driver}: no approved capability is available; no quota-based downgrade is permitted.`,
+        `${driver}: no account on this computer offers ${profiles.map((p) => `${p.model} / ${p.effort}`).join(" or ")}.`,
       );
+      continue;
+    }
+    candidates.push({
+      request: {
+        ...constraints,
+        driver: ProviderDriverKind.make(driver),
+        model: profile.model,
+        options: [{ id: routingEffortOptionId(driver), value: profile.effort }],
+      },
+      reason:
+        index === 0
+          ? `${driver}: table choice for difficulty ${difficulty}, stakes ${stakes}.`
+          : `${driver}: table alternative for difficulty ${difficulty}, stakes ${stakes}; the entry itself is not offered here.`,
+    });
+  }
+  return { rule, candidates, reasons };
+}
+
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const effortRank = (effort: string) => {
+  const index = EFFORTS.indexOf(effort);
+  return index < 0 ? EFFORTS.length : index;
+};
+/** `claude-opus-5-5` and `claude-opus-4-8` are both `opus`. */
+const family = (model: string) => model.replace(/^claude-/, "").split("-")[0];
+
+/**
+ * Where a profile stands on the ladder. One that is not a rung stands between the rungs of
+ * its model (or of its model family) by effort; undefined when the ladder has none of those.
+ */
+export function ladderPosition(ladder: readonly RoutingProfile[], profile: RoutingProfile) {
+  const exact = ladder.findIndex((r) => r.model === profile.model && r.effort === profile.effort);
+  if (exact >= 0) return exact;
+  const indexed = ladder.map((rung, index) => ({ rung, index }));
+  const sameModel = indexed.filter(({ rung }) => rung.model === profile.model);
+  const same = sameModel.length
+    ? sameModel
+    : indexed.filter(({ rung }) => family(rung.model) === family(profile.model));
+  if (!same.length) return undefined;
+  const equal = same.find(({ rung }) => rung.effort === profile.effort);
+  if (equal) return equal.index;
+  const below = same.filter(({ rung }) => effortRank(rung.effort) < effortRank(profile.effort));
+  return below.length ? below.at(-1)!.index + 0.5 : same[0]!.index - 0.5;
+}
+
+/** The other rungs, nearest first; a tie goes to the lower rung. */
+export function nearestRungs(ladder: readonly RoutingProfile[], profile: RoutingProfile) {
+  const position = ladderPosition(ladder, profile);
+  if (position === undefined) return [];
+  return ladder
+    .map((rung, index) => ({ rung, index }))
+    .filter(({ index }) => index !== position)
+    .sort(
+      (a, b) => Math.abs(a.index - position) - Math.abs(b.index - position) || a.index - b.index,
+    )
+    .map(({ rung }) => rung);
+}
+
+const requestProfile = (request: AllocationRequest): RoutingProfile => ({
+  model: request.model,
+  effort: String(
+    request.options.find((o) => o.id === routingEffortOptionId(request.driver))?.value ?? "",
+  ),
+});
+
+export interface ProfileChoice {
+  /** The decision that selected an account; absent when nothing has room. */
+  readonly decision?: AllocationDecision;
+  /** Every profile that was tried for a family, the wanted one first. */
+  readonly tried: readonly { request: AllocationRequest; reason: string; chosen: boolean }[];
+  /** The table's or pinned profile, when the chosen one differs. */
+  readonly wanted?: AllocationRequest;
+  readonly rule: string;
+  readonly reason: string;
+  /** Present when the start is refused because everything is drained. */
+  readonly drainedUntil?: string | null;
+  /** One line per account of the wanted family on the computer. */
+  readonly accounts: readonly string[];
+}
+
+/**
+ * Picks account, model and effort together. The wanted model on the account with the most
+ * room; when it is drained on every account, the nearest ladder rung that has room; when no
+ * Claude rung has room and the wanted rung is below the fallback's threshold, the fallback
+ * model. Codex and a pinned account never change model: drained there is a refusal.
+ */
+export function chooseProfile(input: {
+  readonly at: string;
+  readonly policy: AllocationPolicy;
+  readonly modelPolicy: ModelRoutingPolicy;
+  readonly request: ModelRoutingRequest;
+  readonly inventories: readonly AllocationInventory[];
+  readonly reservations: readonly AllocationReservation[];
+  readonly authorityAvailable: boolean;
+}): ProfileChoice {
+  const { modelPolicy, request, inventories } = input;
+  const resolved = wantedProfiles(modelPolicy, request, inventories);
+  const decide = (candidate: AllocationRequest) =>
+    decideAllocation({ ...input, request: candidate });
+  const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
+  let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
+  const failures: string[] = [...resolved.reasons];
+  // With a pinned account, the others are not part of the choice.
+  const lines = (decision: AllocationDecision) =>
+    decision.candidates
+      .filter((c) => !request.explicitInstanceId || c.instanceId === request.explicitInstanceId)
+      .map((c) => c.line ?? c.instanceId);
+  for (const wanted of resolved.candidates) {
+    const first = decide(wanted.request);
+    const label = (r: AllocationRequest) => profileLabel(r.driver, r.model, r.options);
+    if (first.selectedInstanceId) {
+      tried.push({ ...wanted, chosen: true });
+      return {
+        decision: first,
+        tried,
+        rule: resolved.rule,
+        reason: first.reasons[0]!,
+        accounts: lines(first),
+      };
+    }
+    tried.push({ ...wanted, chosen: false });
+    if (first.outcome !== "wait") {
+      failures.push(...first.reasons, ...first.candidates.flatMap((c) => c.reasons));
+      continue;
+    }
+    const resets = first.waitUntil ? [first.waitUntil] : [];
+    const substitute = (candidate: AllocationRequest, why: string) => {
+      const decision = decide(candidate);
+      if (decision.waitUntil) resets.push(decision.waitUntil);
+      if (!decision.selectedInstanceId) return undefined;
+      tried.push({ request: candidate, reason: why, chosen: true });
+      return {
+        decision,
+        tried,
+        wanted: wanted.request,
+        rule: resolved.rule,
+        reason: `${label(wanted.request)} is drained on every account (earliest reset ${first.waitUntil ?? "unknown"}); ${why} ${decision.reasons[0]}`,
+        accounts: lines(first),
+      } satisfies ProfileChoice;
+    };
+    if (wanted.request.driver === "claudeAgent" && !request.explicitInstanceId) {
+      const ladder = modelLadder(modelPolicy);
+      const profile = requestProfile(wanted.request);
+      for (const rung of nearestRungs(ladder, profile)) {
+        const chosen = substitute(
+          {
+            ...wanted.request,
+            model: rung.model,
+            options: [{ id: routingEffortOptionId("claudeAgent"), value: rung.effort }],
+          },
+          `the nearest ladder rung with room is ${rung.model} / ${rung.effort}.`,
+        );
+        if (chosen) return chosen;
+      }
+      const fallback = modelFallback(modelPolicy);
+      const position = ladderPosition(ladder, profile);
+      const threshold = fallback ? ladderPosition(ladder, fallback.below) : undefined;
+      if (fallback && position !== undefined && threshold !== undefined && position < threshold) {
+        const drivers = new Set(
+          inventories
+            .flatMap((i) => i.accounts)
+            .filter(
+              (a) =>
+                a.environmentId === request.environmentId &&
+                findCatalogModel(a.models, fallback.model),
+            )
+            .map((a) => a.driver),
+        );
+        for (const driver of [...drivers].sort()) {
+          const chosen = substitute(
+            {
+              ...wanted.request,
+              driver,
+              model: fallback.model,
+              options: [{ id: routingEffortOptionId(driver), value: fallback.effort }],
+            },
+            `no Claude rung has room, and below ${fallback.below.model} / ${fallback.below.effort} the fallback ${fallback.model} / ${fallback.effort} applies.`,
+          );
+          if (chosen) return chosen;
+        }
+      }
+    }
+    const drainedUntil = resets.sort()[0] ?? null;
+    refusal ??= {
+      drainedUntil,
+      reason: request.explicitInstanceId
+        ? first.reasons[0]!
+        : `Drained: ${label(wanted.request)} and every model that may stand in for it have no room; earliest reset ${drainedUntil ?? "unknown"}.`,
+      accounts: lines(first),
+    };
   }
   return {
-    rule: defaults.length ? `${rule}; default worker model for ${defaults.join(", ")}` : rule,
-    candidates,
-    reasons,
+    tried,
+    rule: resolved.rule,
+    reason:
+      refusal?.reason ??
+      ([...new Set(failures)].join(" ") || "No account can run the wanted model on this computer."),
+    ...(refusal ? { drainedUntil: refusal.drainedUntil } : {}),
+    accounts: refusal?.accounts ?? [],
   };
 }
 
-/** Validate edits without destroying retained choices that a catalog no longer offers. */
-export function modelPolicyIssues(
-  next: ModelRoutingPolicy,
-  previous: ModelRoutingPolicy,
+/**
+ * What a saved model policy names that no connected account offers. A warning, never a
+ * refusal: a model can be configured before its account is connected.
+ */
+export function modelPolicyWarnings(
+  policy: ModelRoutingPolicy,
   inventories: readonly AllocationInventory[],
 ) {
-  const issues = new Set<string>();
+  const warnings = new Set<string>();
   const accounts = inventories.flatMap((i) => i.accounts);
-  for (const driver of ["codex", "claudeAgent"] as const) {
-    const table = next[driver];
-    const prior = previous[driver];
-    const ofDriver = accounts.filter((a) => a.driver === driver);
-    if (table.allowedModels.some((m) => !automaticModelAllowed(m)))
-      issues.add(`${driver}: Luna is excluded from automatic selection.`);
-    if (new Set(table.allowedModels).size !== table.allowedModels.length)
-      issues.add(`${driver}: approved models must be unique.`);
-    for (const model of table.allowedModels)
-      if (
-        !prior.allowedModels.includes(model) &&
-        !ofDriver.some((a) => a.models.some((m) => m.slug === model))
+  const check = (profile: RoutingProfile, where: string, driver?: string) => {
+    const offering = accounts.flatMap((a) => {
+      const model = findCatalogModel(a.models, profile.model);
+      return model && (driver === undefined || a.driver === driver) ? [{ a, model }] : [];
+    });
+    if (!offering.length) warnings.add(`${where}: no connected account offers ${profile.model}.`);
+    else if (
+      !offering.some(({ a, model }) =>
+        accountSupportsRoutingProfile(a, { ...profile, model: model.slug }),
       )
-        issues.add(`${driver}: ${model} is not advertised by a connected account.`);
-    table.cells.forEach((row, difficulty) =>
-      row.forEach((cell, stakes) => {
-        const old = prior.cells[difficulty]![stakes]!;
-        const choices = [cell, ...(cell.alternatives ?? [])];
-        const known = [old, ...(old.alternatives ?? [])];
-        for (const choice of choices) {
-          if (!automaticModelAllowed(choice.model) || !table.allowedModels.includes(choice.model))
-            issues.add(`${driver}: ${choice.model} must be an approved automatic model.`);
-          if (
-            !known.some((k) => k.model === choice.model && k.effort === choice.effort) &&
-            !ofDriver.some((a) => accountSupportsRoutingProfile(a, choice))
-          )
-            issues.add(
-              `${driver}: ${choice.model} / ${choice.effort} is not advertised by a connected account. Refresh catalogs before saving this edit.`,
-            );
-        }
-        if (
-          new Set(choices.map((c) => JSON.stringify([c.model, c.effort]))).size !== choices.length
-        )
-          issues.add(`${driver}: alternatives must be unique and cannot repeat the table choice.`);
-      }),
-    );
+    )
+      warnings.add(`${where}: no connected account offers ${profile.model} at ${profile.effort}.`);
+  };
+  for (const driver of ["codex", "claudeAgent"] as const) {
+    const table = policy[driver];
+    for (const cell of table.cells.flat()) {
+      for (const choice of [cell, ...(cell.alternatives ?? [])]) {
+        check(choice, `${driver} table`, driver);
+        if (!table.allowedModels.includes(choice.model))
+          warnings.add(`${driver} table: ${choice.model} is not in the table's model list.`);
+      }
+    }
   }
-  return [...issues];
+  for (const rung of modelLadder(policy)) check(rung, "Ladder", "claudeAgent");
+  const fallback = modelFallback(policy);
+  if (fallback) {
+    check(fallback, "Fallback");
+    if (ladderPosition(modelLadder(policy), fallback.below) === undefined)
+      warnings.add(
+        `Fallback: ${fallback.below.model} / ${fallback.below.effort} is not on the ladder, so the fallback never applies.`,
+      );
+  }
+  return [...warnings];
 }

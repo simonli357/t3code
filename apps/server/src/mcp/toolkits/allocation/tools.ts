@@ -1,106 +1,103 @@
 import {
   AllocationPolicyEdit,
   AllocationPolicyView,
-  AllocationResult,
-  AllocationStart,
-  AllocationWorkerStartResult,
-  compactAllocationStart,
   AllocationError,
-  ComputerPlacement,
-  ComputerPlacementRequest,
-  ModelRoutingDecision,
-  tierAssessment,
+  ComputersReport,
+  ComputersRequest,
+  ThreadId,
+  WorkerChoice,
+  WorkerChoiceInput,
+  WorkerStartInput,
+  WorkerStartResult,
+  workerChoice,
+  workerChoiceRequest,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
 import * as Tool from "effect/unstable/ai/Tool";
 import * as Toolkit from "effect/unstable/ai/Toolkit";
 import * as Allocation from "../../../allocation/ProviderAllocation.ts";
 import * as Assignments from "../../../allocation/AllocationAssignments.ts";
 import * as Invocation from "../../McpInvocationContext.ts";
 
+const CHOICE =
+  "Give difficulty and stakes (integers 0-10) and the computer (environmentId). The server picks account, model and effort together: the table's model for the scores on the account with the most room; when that model is drained on every account, the nearest ladder model that has room. Drained means a usage window is used up, a provider limit rejection is in force, or a hard cap is reached; nothing softer changes the model. Pin account, model or effort only when the user named one: a pinned model is the starting point and may still be replaced when drained; a pinned account is exact and is refused when drained. driver codex only when the user asked for Codex; it never changes model. The result has the chosen account/model/effort, `wanted` when the table's choice differs, one reason line, and one line per account. State drained means nothing has room until drainedUntil.";
 const recommendComputer = Tool.make("t3_recommend_computer", {
   description:
-    "Compare ALL connected computers (this one and every linked peer) for a new worker using fresh CPU, memory, work-disk and job telemetry, and say why each ranks where it does. Call it before choosing an execution environment when the user did not name a computer. Optional needs (memoryBytes, cpuThreads, diskBytes as extra peak load; os for a native runtime), projectId (finds the same repository's checkout and project ID on each computer), and driver/model/instanceId (the provider runtime the worker needs) refine the order; an environmentId the user already chose is always the recommendedEnvironmentId, even when it is offline or short (null when it is not connected), reported with its own warnings; a better computer is only described in reasons, never put in its place. Every computer is listed with its reading age and state (fresh, stale, unknown, offline); unknown or offline is never zero, and a computer that does not answer is listed offline after about 15 seconds. Advice only: it reserves nothing and never blocks t3_allocate_account or t3_start_allocated_assignment, so quota and resource forecasts are not an admission veto. Use the returned environmentId and that computer's project ID with those tools, keeping the exact model, options and account. It is a first-pass estimate, not a reservation; heavy work should still be checked with the workstation's own capacity tool on the chosen computer.",
-  parameters: ComputerPlacementRequest,
-  success: ComputerPlacement,
+    "Numbers for this computer and every linked one: idle and total CPU threads, free and total memory, free space on the work disk, running agent sessions, whether it answered, and (with projectId) the project's ID there. Unmeasured is null, never zero. Nothing is ranked: choose the computer yourself from these, what the task needs and where its data is, unless the user named one.",
+  parameters: ComputersRequest,
+  success: ComputersReport,
   failure: AllocationError,
   dependencies: [Allocation.ProviderAllocation],
 });
 const allocate = Tool.make("t3_allocate_account", {
-  description:
-    "Recommend compatible accounts and profiles with visible quota, pacing and load warnings. The master decides; forecasts and historical rejection projections never veto managed startup. Supply stable assignmentId/threadId and exact execution environment (when the user named no computer, choose it first with t3_recommend_computer). preview=true recommends without reserving or starting; otherwise records accounting for the proposed account. For model recommendations use selection=automatic with allowedDrivers; optional tier routine | normal | hard (default normal) picks the table entry, and request.assessment {difficulty, difficultyReason, stakes, stakesReason} gives exact 0-10 scores instead. Only configured capability alternatives apply, never quota-driven downgrades. Preview does not promise runtime success. t3_start_allocated_assignment runs every recommendation itself; preview is optional.",
-  parameters: Schema.Struct({
-    request: AllocationStart.fields.request,
-    tier: AllocationStart.fields.tier,
-    preview: Schema.optional(Schema.Boolean),
-  }),
-  success: Schema.Union([AllocationResult, ModelRoutingDecision]),
+  description: `Preview the account, model and effort a worker start would get, without reserving or starting anything. ${CHOICE}`,
+  parameters: WorkerChoiceInput,
+  success: WorkerChoice,
   failure: AllocationError,
-  dependencies: [Allocation.ProviderAllocation],
+  dependencies: [Allocation.ProviderAllocation, Invocation.McpInvocationContext],
 });
 const start = Tool.make("t3_start_allocated_assignment", {
-  description:
-    "Start a fresh managed worker (kind=worker) on the recommendation: model/effort from the allocation policy's default worker model when one is set, otherwise from the difficulty/stakes table, account from allocation and its account rules, and computer advice. Optional tier routine | normal | hard (default normal) picks the table entry; assessment {difficulty, difficultyReason, stakes, stakesReason} (request.assessment with selection=automatic) gives exact 0-10 scores instead. Pin only what the user specified: selection=automatic with explicitInstanceId pins the account, override {driver, model, reason} pins the model with the table's effort, and override options pin the effort too; selection=explicit pins model and options. environmentId is always the chosen computer; compare computers first with t3_recommend_computer unless the user named one. A pinned choice that differs from its recommendation starts as it is and the difference is recorded; overrides.model/account/computer may note why. A standing account preference belongs in t3_allocation_policy, not in each start. Quota, pacing and stale/unknown warnings are advice, never an admission veto; unavailable advice is recorded and the start proceeds. Refused: a pinned account that an account rule excludes or that is at its worker limit (the error names the rule), unsupported requests, ownership conflicts, transport and provider errors. After an attempted startup, retry the entire input unchanged to prevent duplicates. Does not replace native sessions. Returns the chosen profile and a compact recommended-vs-chosen summary.",
-  parameters: Schema.Struct({ ...AllocationStart.fields, kind: Schema.Literal("worker") }),
-  success: AllocationWorkerStartResult,
+  description: `Start a fresh managed worker. ${CHOICE} started=false means no worker was created. After an attempted startup, retry the entire input unchanged to prevent duplicates.`,
+  parameters: WorkerStartInput,
+  success: WorkerStartResult,
   failure: AllocationError,
   dependencies: [Assignments.AllocationAssignments, Invocation.McpInvocationContext],
 });
 const policy = Tool.make("t3_allocation_policy", {
   description:
-    'Read or change the allocation policy that every worker start obeys, on the allocation coordinator. With no fields it returns the policy with accounts by label. When the user states a standing allocation rule, set it here once instead of repeating it per start. setRules entries are {account, kind, value?, expiresAt?, note?}: kind exclude keeps workers off the account ("never XL"); maxWorkers with value N allows at most N concurrent workers ("1 ARA max"); priority with value -100..100 (unset accounts are 0) prefers the higher account while it has quota headroom, and headroom orders equal priorities ("prefer ES"). Excluded accounts and accounts at their limit are never recommended, and a start pinned to one is refused. Give expiresAt (an ISO time) when the rule is for a duration; it then stops applying by itself. account is a display label such as ES or an instance ID and means that login on every computer. Each set replaces the account\'s rule of that kind; clearRules {account, kind?} removes them. curves {claude, codex, other} set pacing curves (null restores the default), setCaps/clearCaps set hard usage caps, and setOverrides/clearOverrides set a timed pacing override for one usage window (windowIds are listed per account). workerModels {claude, codex} set the default worker model of a provider family as {model, effort, expiresAt?, note?} with the exact model ID and effort ("workers on Fable medium today"): a worker start that pins no model then uses it instead of the difficulty/stakes table, until expiresAt; null clears it. After "Policy changed", call again.',
+    'Read or change the stored policy behind every worker choice, on the allocation coordinator; a change applies to the next start on every computer, with no restart. With no fields it returns the policy. accountOrder is the whole preference order of accounts (labels such as ES, or instance IDs; a label means that login on every computer): it decides only between accounts whose room is within closeMarginPoints of the best. longWaitHours is how long a running worker that hit a limit waits for a reset before it changes model. setCaps/clearCaps set hard usage caps {account, weeklyPercent, fiveHourPercent, stopWorkers, stopMasters}. ladder is the whole list of Claude {model, effort}, weakest first. fallback {model, effort, below} is used when no ladder model has room and the wanted one is below `below`; null turns it off. setCells writes table entries {table?, difficulty, difficultyTo?, stakes, stakesTo?, model, effort}; showTable returns a table. Any model ID is accepted; one that no connected account offers comes back in warnings. Turning an account off for workers is a Provider allocation setting. After "Policy changed", call again.',
   parameters: AllocationPolicyEdit,
   success: AllocationPolicyView,
   failure: AllocationError,
   dependencies: [Allocation.ProviderAllocation],
 });
 export const AllocationToolkit = Toolkit.make(recommendComputer, allocate, start, policy);
+const missing = () =>
+  new AllocationError({ code: "invalid", detail: "Missing allocation result." });
 export const handlers = AllocationToolkit.toLayer(
   Effect.gen(function* () {
     const allocation = yield* Allocation.ProviderAllocation;
     const assignments = yield* Assignments.AllocationAssignments;
     return {
-      t3_recommend_computer: (input) =>
-        allocation
-          .execute({ _tag: "placement", request: input })
-          .pipe(
-            Effect.flatMap((response) =>
-              response.placement
-                ? Effect.succeed(response.placement)
-                : Effect.fail(
-                    new AllocationError({ code: "invalid", detail: "Missing placement result." }),
-                  ),
-            ),
-          ),
+      t3_recommend_computer: (input) => allocation.computers(input),
       t3_allocate_account: (input) =>
-        allocation
-          .execute(
-            input.request.selection === "automatic"
-              ? {
-                  _tag: input.preview ? "modelPreview" : "modelAllocate",
-                  request: {
-                    ...input.request,
-                    assessment: input.request.assessment ?? tierAssessment(input.tier),
-                  },
-                }
-              : input.preview
-                ? { _tag: "preview", request: input.request }
-                : { _tag: "allocate", request: input.request },
-          )
-          .pipe(
-            Effect.flatMap((response) =>
-              response.selection || response.result
-                ? Effect.succeed(response.selection ?? response.result!)
-                : Effect.fail(
-                    new AllocationError({ code: "invalid", detail: "Missing allocation result." }),
-                  ),
-            ),
-          ),
-      t3_allocation_policy: (input) => allocation.editPolicy(input),
-      t3_start_allocated_assignment: (input) =>
         Effect.flatMap(Invocation.McpInvocationContext, (caller) =>
-          assignments.start(input, caller.threadId).pipe(Effect.map(compactAllocationStart)),
+          allocation
+            .execute({
+              _tag: "modelPreview",
+              request: workerChoiceRequest({
+                ...input,
+                assignmentId: `preview:${caller.threadId}`,
+                threadId: ThreadId.make(`preview:${caller.threadId}`),
+              }),
+            })
+            .pipe(
+              Effect.flatMap((response) =>
+                response.selection
+                  ? Effect.succeed(workerChoice(response.selection))
+                  : Effect.fail(missing()),
+              ),
+            ),
+        ),
+      t3_allocation_policy: (input) => allocation.editPolicy(input),
+      t3_start_allocated_assignment: ({ projectId, title, prompt, ...choice }) =>
+        Effect.flatMap(Invocation.McpInvocationContext, (caller) =>
+          assignments
+            .start(
+              { kind: "worker", projectId, title, prompt, request: workerChoiceRequest(choice) },
+              caller.threadId,
+            )
+            .pipe(
+              Effect.flatMap((result) =>
+                result.selection
+                  ? Effect.succeed({
+                      threadId: result.threadId,
+                      started: result.state === "submitted",
+                      ...workerChoice(result.selection),
+                    })
+                  : Effect.fail(missing()),
+              ),
+            ),
         ),
     };
   }),

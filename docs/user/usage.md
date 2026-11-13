@@ -43,175 +43,61 @@ update model pricing.
 
 ## Allocate accounts for new work
 
-Open **Settings > Provider allocation** for account recommendations using your chosen model,
-reasoning options and computer. Quota, pacing, reserve and load forecasts are advisory.
-You or your master decide whether to start; warnings never veto a compatible explicit choice.
-A recommendation does not promise that the provider will accept or complete the work.
+A master that starts a worker gives two scores, difficulty and stakes, and the computer. T3 then
+picks the account, model and effort together:
 
-Preview starts nothing. **Start** submits the selected profile, including when an older saved
-policy says Observation. Actual unsupported profiles, ownership conflicts, unavailable execution
-connections and provider authentication/quota failures remain errors. Choose one shared coordinator
-for durable assignment accounting and keep it reachable; missing readings from other hosts are
-warnings. While the coordinator cannot be reached, or runs a version that cannot read the request,
-a start is decided on the requesting computer from its own readings and the policy it last read
-from the coordinator, so account rules still apply, and records that warning. A computer that has
-not read the policy since its server started records that account rules were not checked. A recommendation first refreshes quota readings older than the policy allows, for
-at most a few seconds. Existing threads, forks and retries retain their selections. Agents that were not told
-which computer to use can compare them first; see
-[Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
+1. The table on the [Model selection](#model-selection) page gives the wanted model and effort.
+2. That model runs on the account with the most room: the percentage left on the tightest usage
+   window that applies to the model (5-hour, weekly, or a model's own weekly window such as
+   Fable's). Between accounts whose room is within the **closeness margin**, the earlier one in
+   the **preference order** wins, then the one with fewer workers, then the one that resets
+   sooner. The order never overrides a clear difference.
+3. A model is **drained** on an account when one of those windows is used up, the provider's
+   recorded limit rejection is still in force, or the account's hard cap is reached. Nothing
+   softer counts: a forecast or a nearly full window never changes the model.
+4. When the wanted model is drained on every account, the nearest model on the **ladder** that
+   has room replaces it; a tie goes to the weaker one. When no Claude model has room, work whose
+   wanted model is below the fallback's threshold starts on the **fallback** model, and anything
+   else is refused as drained, with the earliest reset time. Codex is used only when a start
+   asks for it and never changes model.
 
-The page opens with the **Accounts** table: one row per account that can run workers, the same
-login on several computers counted once. Each row shows the account's usage now (weekly and
-5-hour percent when the provider reports them, with the age of the reading) and every value you
-can tune for it, editable in place: whether workers are allowed, the most concurrent workers, the
-priority, the budget, the hard cap, and the end time and note of each rule. Accounts whose
-provider is turned off, or that report no subscription quota and have nothing saved, are folded
-into **Other accounts** below the table; they can still be given a rule there.
+A model the user named is the starting point and is replaced the same way. An account the user
+named is exact: when the model is drained there, the start is refused. The result names the
+choice, the table's choice when it differs, one reason line and one line per account.
 
-**Family defaults** sit under the table. Each number is a percentage of the provider's weekly
-allowance: the initial budget plus the daily budget builds a target from the weekly reset, capped
-below the reserve, and the borrowing allowance is how far projected use may exceed the target
-before a warning. Codex defaults to 30% initially plus 10 points per 24 hours since reset; Claude
-defaults to 0% initially plus 17 points per 24 hours, which can use a weekly allowance before
-seven days. Existing saved policies keep their values, including cycle-based pacing, until you
-edit or reset them.
+A running worker that hits a limit moves to another account with the same model. If there is
+none, it waits when the reset is within the **long wait** time (3 hours unless changed);
+otherwise it continues on the nearest model with room and its master is told; otherwise it waits
+and its master is told. A worker that supervises its own workers only waits.
 
-An account follows its family's budget unless you type an initial or daily budget in its row.
-That is a **temporary budget** for that account's weekly windows: it ends by itself at the time
-shown, by default the next weekly reset, and **Use family default** ends it at once. It needs a
-known login and a weekly usage reading.
-
-Each family can also have a **default worker model**: a model and effort, with an optional end
-time and note. A worker start that names no model then uses it instead of the difficulty/stakes
-table on the [Model selection](#model-selection) page, even a model the table never chooses, and
-after the end time the table applies again. A start that names its model, and sessions you start
-yourself, are unaffected.
-
-Use **Save settings** to apply changes; no assignment preview is required. **Reset to defaults**
-changes the draft, then Save applies it. Reconnecting keeps unsaved edits. If someone saved a newer
-version, **Reload saved settings** discards your old draft explicitly.
+Open **Settings > Provider allocation** for the accounts: each one's usage windows with their
+resets, its workers now, whether workers may use it, its hard cap, and the preference order.
+The closeness margin and the long wait are set there too. Choose one shared coordinator and
+keep it reachable: it holds the policy and decides every start. Every value is stored there, so
+a change made on any computer applies to the next start on every computer, without a restart.
+While the coordinator cannot be reached, a start is decided on the requesting computer from the
+policy it last read. A decision first refreshes usage readings older than the policy allows, for
+at most a few seconds. Agents that were not told which computer to use read each computer's
+numbers first; see [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
 Optional **hard caps** apply per account identity. Weekly caps use the provider's
 account-wide weekly window; Claude accounts also support its 5-hour session. Enter a percentage
 and choose whether reaching it stops workers, masters, or both. Blank fields are disabled. A fresh
 reading at or above the cap is checked immediately and at least every 15 seconds, and blocks new
 turns on that account, including queued, scheduled, renewal, and notification-triggered ones.
-Turns that are already running finish. Stopping a worker leaves one notice for its owning master. A worker assignment headed
-for a capped account moves to another account of the same provider that has headroom; otherwise it
-stays queued and starts by itself when the cap no longer applies. Turning both block actions off
-keeps the threshold saved but inactive. The cap remains latched until the provider window resets, a
-newer reading is below the cap, the cap is raised or removed, or both block actions are disabled.
+Turns that are already running finish. Stopping a worker leaves one notice for its owning master.
+A capped account counts as drained for new workers. Turning both block actions off keeps the
+threshold saved but inactive. The cap remains latched until the provider window resets, a newer
+reading is below the cap, the cap is raised or removed, or both block actions are disabled.
 Missing, unsupported, or stale readings are shown honestly and cannot create a new hard stop; they
-also do not imply zero usage. Raising a cap or waiting for a reset makes the account eligible
-again, and held worker assignments start within about half a minute.
-
-A transient provider quota read failure keeps an already reached cap enforced until its reported
-reset, a below-cap verified reading, or a configuration change. A failed read cannot create a new
-crossing on its own.
+also do not imply zero usage.
 
 Accounts whose provider proves that subscription quota does not apply, such as an API-key-backed
-or custom model provider, do not offer these controls. Cached subscription windows from another
-login are ignored rather than borrowed by that account. Caps also stay inactive while the quota
-source cannot be verified, rather than assuming a subscription applies.
+or custom model provider, do not offer caps and have no room reading; they are used only when
+nothing with a reading is close.
 
-**Account rules** are standing instructions that every worker start obeys, so you state them
-once instead of at each start. For each account you can set three rules, each with an optional
-end time, after which it stops applying by itself, and a note:
-
-- **Workers** off: the account is never recommended for a worker, and a worker
-  pinned to it is refused with the rule as the reason. Sessions you start yourself still run.
-  A computer's own **Available for workers** switch, under the advanced account details, shows
-  beside it when it is off.
-- **Max workers**: once that many workers are running or starting on the account,
-  the next one goes elsewhere and a worker pinned to it is refused.
-- **Priority** (-100 to 100, 0 when unset): among the remaining accounts the higher priority
-  wins while the account has quota headroom, meaning its projected use fits every allowance
-  window. Out of headroom, the preference no longer counts. A negative priority is used last.
-
-Equal priorities are ordered by projected budget headroom: recommendations subtract forecast
-running, queued, reserved and incoming work from the available budget, comparing the tightest
-short or weekly window. The **Account preference margin** under advanced estimation settings
-favors the previous account among close choices. A rule covers the same login on every
-computer; unidentified accounts stay separate. Agents read and change the same rules, budgets,
-hard caps, temporary budgets and default worker models with the `t3_allocation_policy` tool. Usage analytics show account allowance points/hour when measured. Model and
-effort token samples are separate evidence, not subscription percentages; missing rates say
-**Not enough data**. Collection remains limited to accounts already opted into measurements.
-
-Advanced sections contain forecast estimates, connection setup, the assignment simulator, use-by
-targets, reset plans, the JSON view of every temporary override, and diagnostics. Short-window
-forecasts use their own observed rate or the fallback burn. Reset plans do not replenish quota or
-change the reset schedule; allocation never redeems credits or enables overage.
-
-An earlier denied or observation-only proposal can start with the same assignment and thread IDs.
-The master may choose an account before startup. After startup is attempted, retry the entire input
-unchanged if a response is lost; this reconciles its durable receipt without duplicating the work.
-A confirmed failed start remains recorded as an error. Stop or cancel running work before releasing
-its accounting; unused reservations expire.
-
-History charts remain limited to accounts opted into usage retention. Native mobile shows the
-same account rows and family defaults read-only, with usage inspection and assignment preview;
-server enforcement is shared, but use the web page to edit settings and start human sessions.
-
-## Set custom model prices
-
-On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
-edit, or reset a model's estimated price. **Apply to** starts with your current Usage filter;
-choose all environments or select individual destinations. Enter the exact model ID and USD
-rates per million input and output tokens. You can enter any model ID, including models
-without public pricing.
-
-Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
-tokens that are free. Saved prices replace automatic pricing for all of that environment's
-history and are shared with clients connected to it. When environments have different prices,
-cells show **Mixed**. Edit rates directly in the table, then choose **Save changes** to apply all
-edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
-prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
-it before saving.
-
-Each destination reports whether the change saved. Offline or unavailable environments are
-marked **Not saved**. Reconnect them and choose **Retry failed saves** to finish the same change
-without writing again to environments that already saved. Changes are not queued after you close
-the dialog.
-
-## Track subscription limits
-
-**Usage → Limits** pools every subscription account it can see per provider, so with several Codex
-or Claude accounts across your environments and hubs you read one number per window rather than a
-list. Each window card shows how much of the pool is left and a bar with one segment per account,
-kept in the same column across windows. Accounts are ordered by their 5-hour reset, soonest
-first, or by the first available window when no account reports a 5-hour limit. A gap means the
-account does not report that window. When the provider reports reset times, the card also says
-when the next reset lands and how much it hands back. The hatched
-part of a segment is what that reset restores. Tap a segment or account row for the account's plan,
-where it is signed in, and its reset time. On web, you can hover too. Codex and Claude accounts
-with banked reset credits show a ticket count and the **Use reset** action in the account details.
-Claude resets are not available when the server runs on macOS, where Claude keeps its login in the
-Keychain. On narrow screens, numbered rows below
-the bar show each account's quota, countdown, and credits. Tap a row to open its details.
-
-The same account signed in on more than one environment, or reported by a hub as well, counts once.
-Filter with the environment dropdown to see what a single machine has.
-
-Opening Limits checks the selected connected environments automatically. Each client waits at
-least five minutes between automatic checks of an environment, including after a failed check.
-If a window still looks stale, refresh Limits to re-check every provider and hub.
-
-Pick `/usage-limits` from the composer's command menu, or send it as a message, to check the
-current model's limits without leaving the conversation. The result opens above the composer and
-closes when you dismiss it or send your next message. It uses the same snapshot as **Usage → Limits**, so it does not run the agent or refresh
-anything. The command is offered only for providers that appear under **Usage → Limits**.
-
-OpenCode Go reports its session, weekly, and monthly allowance when OpenCode runs locally in
-the environment. T3 cannot report limits for external OpenCode servers because their credentials
-belong to the remote server. Cursor reports
-its monthly allowance, including separate Auto and API usage, using the CLI login or
-`CURSOR_AUTH_TOKEN`. On macOS, this includes the default Keychain login after you enable Cursor
-usage. Keychain login is used for limits only with Cursor's default API endpoint. If you configure
-a custom Cursor endpoint, use an explicit token or file-based CLI login for limits.
-
-Grok reports the remaining subscription allowance and reset time for its current billing period
-after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
-or endpoint configurations do not report subscription limits.
+Agents read and change the same values with the `t3_allocation_policy` tool. A limit on how many
+workers a master may run is not stored in T3: the master that was given it keeps to it.
 
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
@@ -220,58 +106,37 @@ using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 
 Open **Settings → Model selection** beside Provider allocation, or find it through
 Settings search or the command palette. Choose the shared coordinator in Provider
-allocation first. Automatic selection is opt-in through this page or an agent automatic
-request; ordinary model pickers keep their explicit choices. While a provider family has a
-default worker model in [Provider allocation](#allocate-accounts-for-new-work), workers that
-name no model use that instead of this table, and a preview here says so.
+allocation first.
 
 The page is one lookup table per provider, on separate Codex and Claude tabs. Columns are
 an assignment's difficulty and rows are its stakes, each scored 0–10. Each cell is the model
-and reasoning that assignment gets, for example difficulty 7 with stakes 8. Select a cell,
-then change its model or reasoning, or set an alternative that is used only when that choice
-is unavailable. Only that cell changes. Choices come from what your connected accounts
-advertise, and a cell they cannot currently offer is flagged and keeps its saved value.
-Changing a model keeps the cell's reasoning when the new model offers it; otherwise you
-choose the reasoning yourself. Automatic selection never uses Luna.
+and reasoning that assignment wants, for example difficulty 7 with stakes 8. Select a cell,
+then change its model or reasoning, or set an alternative that is used only when no account on
+the computer offers that choice. The table's model list takes any model ID, typed or picked
+from what connected accounts advertise. A model no connected account offers is saved with a
+warning, never refused, so a model can be set up before its account is connected.
 
-Edited cells are marked until you press **Save table**, which creates a new policy version.
-**Discard changes** returns to the saved table, and **Reset to defaults** restores the built-in
-table for the provider you are viewing as an unsaved edit. Tables saved before cells were
-editable one by one keep the same choice for every score pair until you save again. If another
-editor saves while you are editing, keep your edits on top of the newer version or discard
-them; a save never overwrites changes you have not seen. Existing sessions and assignment
-retries retain their selections.
+Below the table are the **ladder**, the Claude models and efforts from weakest to strongest
+that stand in for a drained model, and the **fallback**: the model and effort used when no
+ladder model has room, and the ladder entry below which it applies. Turn the fallback off to
+refuse such starts instead.
 
-Assess the scoped assignment on two integer axes, each from 0 to 10, with a short reason.
-Difficulty measures reasoning, uncertainty and interactions. Stakes measures failure impact,
-reversibility and detectability. Use 0–3 for routine/low, 4–6 for moderate, 7 for
-demanding/high, 8 for very demanding/very high, 9 for extreme, and 10 only for exceptional
-assignments. An assignment started without an assessment uses the `normal` tier, 5 on both
-axes; the `routine` and `hard` tiers use 2 and 8.
+Edits are marked until you save, which creates a new policy version used by the next start on
+every computer. If another editor saves while you are editing, keep your edits on top of the
+newer version or discard them. Existing sessions and assignment retries retain their selections.
 
-The collapsed sections below the table hold the rest. **Test an assignment** previews the
-exact model, effort, rule, account recommendation and warnings using your unsaved table, and
-starts a new assignment from a saved one. The master chooses the account and starts it; quota
-forecasts do not block that choice. Exact user overrides remain authoritative; conflicts are
-shown for you to resolve. A missing capability uses only an explicitly configured
-alternative; low quota never chooses a weaker choice or another computer. **Policy settings,
-versions and raw JSON** holds the reassessment limit, reverts and the raw policy.
-**Recent decisions** can start an explicit reassessment as a new session after substantive
-failure or a justified scope change, within the configured bound. A provider-family change
-requires explicit consent. Transport or installation failures alone are not reasons to
-escalate. **Connection** shows coordinator status and refreshes the saved version.
+Score the scoped assignment on two integer axes from 0 to 10. Difficulty measures reasoning,
+uncertainty and interactions. Stakes measures failure impact, reversibility and detectability.
+Use 0–3 for routine/low, 4–6 for moderate, 7 for demanding/high, 8 for very demanding/very
+high, 9 for extreme, and 10 only for exceptional assignments.
 
-Agents use the same preview and managed startup services through `t3_allocate_account` and
-`t3_start_allocated_assignment`. Every agent-created worker, including forks, has an assessment
-or a tier; the server always records the table's model/effort, the recommended account and
-computer advice next to the actual choice. A choice that differs starts as it is, with the
-master's reason when it gave one. They read the same saved table. Retry the identical IDs and intent after a lost
-response; use new IDs for new work. Native mobile edits the same table in **Settings → Model
-selection**, including relay connections, with the same version and catalog checks. Use the web
-editor for human-session startup, exact-override and reassessment controls, previous-policy
-reverts, raw JSON and full history. A direct connection offers an editor link; relay and SSH
-connections require opening this custom build's web client and selecting the same environment.
-Pair the browser if prompted.
+**Test an assignment** previews the choice for a pair of scores with your unsaved table: the
+account, model and effort, the table's choice when it differs, and the reason. **Policy
+settings, versions and raw JSON** holds reverts and the raw policy.
+
+Agents use the same choice through `t3_allocate_account` (preview) and
+`t3_start_allocated_assignment`, and edit the table, ladder and fallback with
+`t3_allocation_policy`. Native mobile edits the same policy in **Settings → Model selection**.
 
 ## Connect a CLIProxyAPI hub
 

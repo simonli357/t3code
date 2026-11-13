@@ -9,8 +9,11 @@ import {
 } from "react-native";
 import * as Schema from "effect/Schema";
 import {
+  defaultModelFallback,
   defaultModelRoutingPolicy,
   MODEL_SCORING_RUBRIC,
+  modelFallback,
+  modelLadder,
   ModelRoutingRequest,
   ProviderDriverKind,
   ThreadId,
@@ -18,6 +21,8 @@ import {
   type EnvironmentId,
   type ModelRoutingSnapshot,
   type ModelRoutingDecision,
+  type ModelRoutingPolicy,
+  workerChoice,
 } from "@t3tools/contracts";
 import {
   MODEL_DRIVERS,
@@ -33,6 +38,7 @@ import {
   modelEditorUrl,
   modelFailureMessage,
   modelPreviewKey,
+  modelProfileLabel,
   rebaseModelDraft,
   receiveSavedModelPolicy,
   resetModelTable,
@@ -41,15 +47,20 @@ import {
   type ModelDraft,
   type ModelDriver,
 } from "@t3tools/client-runtime/state/model-routing";
-import { createAllocationCommands } from "@t3tools/client-runtime/state/provider-allocation";
+import {
+  createAllocationCommands,
+  withModelLadderEdit,
+} from "@t3tools/client-runtime/state/provider-allocation";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { AppText as Text } from "../../components/AppText";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { SettingsScreen } from "./components/SettingsScreen";
+import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { useEnvironments } from "../../state/environments";
 import {
   Action,
+  Chip,
   ModelCellEditor,
   ModelRoutingLegend,
   ModelRoutingMatrix,
@@ -98,12 +109,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [assessment, setAssessment] = useState({
-    difficulty: NaN,
-    stakes: NaN,
-    difficultyReason: "",
-    stakesReason: "",
-  });
+  const [warnings, setWarnings] = useState<readonly string[]>([]);
+  const [rung, setRung] = useState({ model: "", effort: "" });
+  const [assessment, setAssessment] = useState({ difficulty: NaN, stakes: NaN });
   const [preview, setPreview] = useState<{ key: string; decision: ModelRoutingDecision } | null>(
     null,
   );
@@ -137,7 +145,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     request,
     `${connection}:${connectionState.epoch}`,
   );
-  const decision = preview?.key === key && connection === "connected" ? preview.decision : null;
+  const choice =
+    preview?.key === key && connection === "connected" ? workerChoice(preview.decision) : null;
+  const ladder = policy ? modelLadder(policy) : [];
+  const fallback = policy ? modelFallback(policy) : null;
+  const edit = (update: (policy: ModelRoutingPolicy) => ModelRoutingPolicy) =>
+    setDraft((current) => editModelDraft(current, update));
   const ready =
     snapshot?.authorityAvailable &&
     connection === "connected" &&
@@ -214,6 +227,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const save = async () => {
     if (!policy || !draft.baseline) return;
     const epoch = generation.current;
+    setWarnings([]);
     const result = await call({
       _tag: "modelPolicy",
       expectedVersion: draft.baseline.version,
@@ -229,6 +243,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     setPendingModel(null);
     await refresh();
     setMessage(`Saved as version ${result.modelPolicy.version}.`);
+    setWarnings(result.warnings ?? []);
   };
   const example = policy ? modelCellSummary(modelCell(policy, driver, 7, 8)) : "";
   return (
@@ -250,6 +265,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         {example || "the choice shown in that cell"}.
       </Text>
       <Text>{message}</Text>
+      {warnings.map((warning) => (
+        <Text key={warning} className="text-warning-foreground">
+          {warning}
+        </Text>
+      ))}
       <Text className="text-foreground-muted">
         {draft.saved ? `Saved version ${draft.saved.version}` : "Saved table not loaded"} ·{" "}
         {ready
@@ -328,7 +348,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             <Action
               label="Save table"
               onPress={() => void save()}
-              disabled={busy || !ready || !dirty || stale}
+              disabled={
+                busy ||
+                !ready ||
+                !dirty ||
+                stale ||
+                (fallback !== null && !(fallback.model && fallback.effort))
+              }
             />
             <Action
               label="Discard changes"
@@ -364,6 +390,123 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             }}
           />
           <ModelRoutingLegend driver={driver} policy={policy} />
+          <Text className="font-t3-medium">Claude ladder</Text>
+          <Text className="text-foreground-muted">
+            Weakest first. When the wanted model is used up on every account, a worker gets the
+            closest rung that has room.
+          </Text>
+          {ladder.map((r, index) => (
+            <View key={modelProfileLabel(r)} className="flex-row flex-wrap gap-4">
+              <Text className="flex-1">
+                {index + 1}. {modelProfileLabel(r)}
+              </Text>
+              <Action
+                label="Up"
+                disabled={index === 0}
+                onPress={() =>
+                  edit((p) => withModelLadderEdit(p, { type: "move", index, delta: -1 }))
+                }
+              />
+              <Action
+                label="Down"
+                disabled={index === ladder.length - 1}
+                onPress={() =>
+                  edit((p) => withModelLadderEdit(p, { type: "move", index, delta: 1 }))
+                }
+              />
+              <Action
+                label="Remove"
+                onPress={() => edit((p) => withModelLadderEdit(p, { type: "remove", index }))}
+              />
+            </View>
+          ))}
+          <TextInput
+            accessibilityLabel="New rung model"
+            placeholder="Model ID"
+            autoCapitalize="none"
+            autoCorrect={false}
+            className={field}
+            value={rung.model}
+            onChangeText={(model) => setRung({ ...rung, model: model.trim() })}
+          />
+          <TextInput
+            accessibilityLabel="New rung effort"
+            placeholder="Effort"
+            autoCapitalize="none"
+            autoCorrect={false}
+            className={field}
+            value={rung.effort}
+            onChangeText={(effort) => setRung({ ...rung, effort: effort.trim() })}
+          />
+          <Action
+            label="Add as strongest rung"
+            disabled={
+              !rung.model ||
+              !rung.effort ||
+              ladder.some((r) => modelProfileLabel(r) === modelProfileLabel(rung))
+            }
+            onPress={() => {
+              edit((p) => withModelLadderEdit(p, { type: "add", rung }));
+              setRung({ model: "", effort: "" });
+            }}
+          />
+          <View className="flex-row items-center justify-between gap-4">
+            <Text className="flex-1 font-t3-medium">Fallback when no Claude rung has room</Text>
+            <ThemedSwitch
+              accessibilityLabel="Fallback when no Claude rung has room"
+              value={fallback !== null}
+              onValueChange={(on) =>
+                edit((p) => ({ ...p, fallback: on ? defaultModelFallback : null }))
+              }
+            />
+          </View>
+          {fallback && (
+            <>
+              <TextInput
+                accessibilityLabel="Fallback model"
+                placeholder="Model ID"
+                autoCapitalize="none"
+                autoCorrect={false}
+                className={field}
+                value={fallback.model}
+                onChangeText={(model) =>
+                  edit((p) => ({ ...p, fallback: { ...fallback, model: model.trim() } }))
+                }
+              />
+              <TextInput
+                accessibilityLabel="Fallback effort"
+                placeholder="Effort"
+                autoCapitalize="none"
+                autoCorrect={false}
+                className={field}
+                value={fallback.effort}
+                onChangeText={(effort) =>
+                  edit((p) => ({ ...p, fallback: { ...fallback, effort: effort.trim() } }))
+                }
+              />
+              <Text className="text-foreground-muted">
+                Used only when the wanted rung is below:
+              </Text>
+              <View className="flex-row flex-wrap gap-2">
+                {(ladder.some((r) => modelProfileLabel(r) === modelProfileLabel(fallback.below))
+                  ? ladder
+                  : [fallback.below, ...ladder]
+                ).map((r) => (
+                  <Chip
+                    key={modelProfileLabel(r)}
+                    label={modelProfileLabel(r)}
+                    active={modelProfileLabel(r) === modelProfileLabel(fallback.below)}
+                    onPress={() =>
+                      edit((p) => ({
+                        ...p,
+                        fallback: { ...fallback, below: { model: r.model, effort: r.effort } },
+                      }))
+                    }
+                  />
+                ))}
+              </View>
+            </>
+          )}
         </>
       ) : (
         <Text className="text-foreground-muted">
@@ -389,14 +532,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   setAssessment({ ...assessment, [axis]: value ? Number(value) : NaN })
                 }
               />
-              <TextInput
-                accessibilityLabel={`${axis} reason`}
-                className={field}
-                multiline
-                maxLength={500}
-                value={assessment[`${axis}Reason`]}
-                onChangeText={(value) => setAssessment({ ...assessment, [`${axis}Reason`]: value })}
-              />
             </View>
           ))}
           <Action
@@ -406,7 +541,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               try {
                 decodeRequest(request);
               } catch {
-                setMessage("Use integer scores 0–10 with a reason for each.");
+                setMessage("Use integer scores 0–10.");
                 return;
               }
               const captured = key;
@@ -416,19 +551,22 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             }}
             disabled={busy || !ready}
           />
-          {decision ? (
+          {choice ? (
             <View className="gap-2">
               <Text>
-                {decision.rule}; version {decision.policyVersion}
+                {choice.chosen
+                  ? `${choice.chosen.model} / ${choice.chosen.effort ?? "default"}${
+                      choice.wanted ? ` (wanted ${choice.wanted})` : ""
+                    }`
+                  : choice.state === "drained"
+                    ? `Used up until ${choice.drainedUntil ? new Date(choice.drainedUntil).toLocaleString() : "an unknown reset"}`
+                    : "No account can run it"}
               </Text>
-              {decision.profiles.map((p) => (
-                <Text key={p.driver}>
-                  {p.model} / {p.options.map((o) => o.value).join(", ")}:{" "}
-                  {p.eligible ? "compatible" : "outside constraints"}
+              <Text>{choice.reason}</Text>
+              {choice.accounts.map((line) => (
+                <Text key={line} className="text-foreground-muted">
+                  {line}
                 </Text>
-              ))}
-              {decision.reasons.map((reason) => (
-                <Text key={reason}>{reason}</Text>
               ))}
             </View>
           ) : (
@@ -447,10 +585,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               Version {d.policyVersion}; {d.allocation?.decision.request.model ?? "unavailable"}
             </Text>
             <Text>
-              Difficulty {d.request.assessment.difficulty}: {d.request.assessment.difficultyReason}
-            </Text>
-            <Text>
-              Stakes {d.request.assessment.stakes}: {d.request.assessment.stakesReason}
+              Difficulty {d.request.assessment.difficulty} · stakes {d.request.assessment.stakes}
             </Text>
           </View>
         ))}

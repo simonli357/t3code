@@ -3,6 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
   defaultModelRoutingPolicy,
+  modelFallback,
+  modelLadder,
+  workerChoice,
   MODEL_SCORING_RUBRIC,
   ModelRoutingRequest,
   ProviderDriverKind,
@@ -17,7 +20,11 @@ import {
   type AllocationStart,
   type RoutingCell,
 } from "@t3tools/contracts";
-import { createAllocationCommands } from "@t3tools/client-runtime/state/provider-allocation";
+import {
+  allocationModelChoices,
+  createAllocationCommands,
+  withModelLadderEdit,
+} from "@t3tools/client-runtime/state/provider-allocation";
 import {
   MODEL_DRIVERS,
   acknowledgeModelSave,
@@ -35,6 +42,7 @@ import {
   rebaseModelDraft,
   receiveSavedModelPolicy,
   resetModelTable,
+  setAllowedModels,
   setModelCell,
   summarizeModelDraft,
   type ModelDraft,
@@ -49,6 +57,9 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
   ModelCellEditor,
+  ModelFallbackEditor,
+  ModelLadderEditor,
+  ModelListEditor,
   ModelRoutingLegend,
   ModelRoutingMatrix,
   type ModelCellPosition,
@@ -107,6 +118,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   });
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState("");
+  const [warnings, setWarnings] = useState<readonly string[]>([]);
   const [preview, setPreview] = useState<{ key: string; decision: ModelRoutingDecision } | null>(
     null,
   );
@@ -116,7 +128,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     threadId: ThreadId.make(randomUUID()),
     environmentId,
     allowedDrivers: [ProviderDriverKind.make("codex")],
-    assessment: { difficulty: NaN, stakes: NaN, difficultyReason: "", stakesReason: "" },
+    assessment: { difficulty: NaN, stakes: NaN },
   }));
   const [project, setProject] = useState("");
   const [title, setTitle] = useState("Automatically selected assignment");
@@ -166,6 +178,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       !modelCellChanges(defaultModelRoutingPolicy, policy).some((c) => c.driver === driver),
     [policy, driver],
   );
+  const claudeChoices = useMemo(
+    () => allocationModelChoices(snapshot?.inventories ?? [], "claudeAgent"),
+    [snapshot],
+  );
+  const fallback = policy ? modelFallback(policy) : null;
+  const choice = validPreview ? workerChoice(validPreview) : null;
   const selectedCell = policy && selected ? modelCell(policy, driver, ...at(selected)) : null;
   const call = async (operation: AllocationOperation, keepMessage = false) => {
     const epoch = generation.current;
@@ -239,7 +257,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     try {
       decodeRequest(previewRequest);
     } catch {
-      setMessage("Supply integer scores from 0 to 10 and a concise reason for each axis.");
+      setMessage("Supply integer scores from 0 to 10.");
       return;
     }
     setRequest(previewRequest);
@@ -263,6 +281,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     if (response?.modelPolicy) {
       setDraft((current) => acknowledgeModelSave(current, policy, response.modelPolicy!));
       setPendingModel(null);
+      setWarnings(response.warnings ?? []);
       await refresh();
       setMessage(
         `Saved as version ${response.modelPolicy.version}. Existing assignments keep their choices.`,
@@ -306,7 +325,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       setMessage(
         result.value.state === "observation"
           ? "Observation mode: proposal recorded; no session started."
-          : "No approved model/account can start. Inspect the decision.",
+          : "No account can start this. Inspect the decision.",
       );
   };
   const select = useCallback((cell: ModelCellPosition) => {
@@ -364,6 +383,16 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </AlertDescription>
         </Alert>
       )}
+      {warnings.length > 0 && (
+        <Alert variant="warning">
+          <AlertTitle>Saved with warnings</AlertTitle>
+          <AlertDescription>
+            {warnings.map((warning) => (
+              <span key={warning}>{warning}</span>
+            ))}
+          </AlertDescription>
+        </Alert>
+      )}
       <div role="tablist" aria-label="Provider model table" className="flex flex-wrap gap-2">
         {MODEL_DRIVERS.map((d) => (
           <Button
@@ -392,6 +421,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               selected && draft.baseline ? modelCell(draft.baseline, driver, ...at(selected)) : null
             }
             catalog={catalog}
+            allowed={policy[driver].allowedModels}
             online={Boolean(ready)}
             pendingModel={pendingModel}
             onPendingModel={setPendingModel}
@@ -408,10 +438,16 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
-              disabled={busy || !ready || !dirty || stale}
+              disabled={
+                busy ||
+                !ready ||
+                !dirty ||
+                stale ||
+                (fallback !== null && !(fallback.model && fallback.effort))
+              }
               onClick={() => void save()}
             >
-              Save table
+              Save changes
             </Button>
             <Button
               size="sm"
@@ -445,6 +481,30 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             onSelect={select}
           />
           <ModelRoutingLegend driver={driver} policy={policy} />
+          <ModelListEditor
+            driver={driver}
+            models={policy[driver].allowedModels}
+            catalog={catalog}
+            onChange={(models) =>
+              setDraft((current) =>
+                editModelDraft(current, (p) => setAllowedModels(p, driver, models)),
+              )
+            }
+          />
+          <ModelLadderEditor
+            ladder={modelLadder(policy)}
+            choices={claudeChoices}
+            onEdit={(edit) =>
+              setDraft((current) => editModelDraft(current, (p) => withModelLadderEdit(p, edit)))
+            }
+          />
+          <ModelFallbackEditor
+            fallback={fallback}
+            ladder={modelLadder(policy)}
+            onChange={(next) =>
+              setDraft((current) => editModelDraft(current, (p) => ({ ...p, fallback: next })))
+            }
+          />
         </div>
       ) : (
         <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
@@ -470,20 +530,19 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                           driver: ProviderDriverKind.make(driver),
                           model: base.model,
                           options: [{ id: routingEffortOptionId(driver), value: base.effort }],
-                          reason: "",
                         },
                       }
                     : rest,
                 );
               }}
             />{" "}
-            Exact user override
+            Pin a model
           </label>
           {request.override && (
             <div className={group}>
               <p>
-                Exact instructions take precedence over the automatic allowlist. Conflicting
-                provider or account constraints are reported without substitution.
+                A pinned model is where the choice starts. When it is drained on every account, the
+                closest ladder rung is used.
               </p>
               <label>
                 Override model
@@ -528,20 +587,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   .join(", ") || "none"}
                 . Editing effort preserves these options.
               </p>
-              <label>
-                Override reason
-                <textarea
-                  className={field}
-                  maxLength={500}
-                  value={request.override.reason}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      override: { ...request.override!, reason: e.target.value },
-                    })
-                  }
-                />
-              </label>
               <p>
                 Override provider: {request.override.driver === "codex" ? "Codex" : "Claude"}. To
                 choose another provider, clear the override, select its table tab and enable an
@@ -671,53 +716,34 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   }
                 />
               </label>
-              <label>
-                {axis === "difficulty" ? "Difficulty" : "Stakes"} reason
-                <textarea
-                  className={field}
-                  maxLength={500}
-                  value={request.assessment[`${axis}Reason`]}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      assessment: { ...request.assessment, [`${axis}Reason`]: e.target.value },
-                    })
-                  }
-                />
-              </label>
             </div>
           ))}
           <Button size="sm-multiline" disabled={busy || !ready} onClick={() => void showPreview()}>
-            Preview exact selection
+            Preview choice
           </Button>
-          {validPreview ? (
+          {choice ? (
             <div aria-label="Selection preview">
-              <p>
-                {validPreview.rule}; policy version {validPreview.policyVersion}
+              <p className="font-medium">
+                {choice.chosen
+                  ? `${
+                      accounts.find((a) => a.instanceId === choice.chosen!.instanceId)?.label ??
+                      choice.chosen.instanceId
+                    } · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
+                  : choice.state === "drained"
+                    ? `Drained until ${
+                        choice.drainedUntil
+                          ? new Date(choice.drainedUntil).toLocaleString()
+                          : "an unknown time"
+                      }`
+                    : "Unavailable"}
               </p>
-              <p>
-                {validPreview.allocation
-                  ? `${validPreview.allocation.decision.request.model} / ${validPreview.allocation.decision.request.options.map((o) => o.value).join(", ")}`
-                  : "Unavailable"}
-              </p>
-              <p>
-                Account:{" "}
-                {accounts.find(
-                  (a) => a.instanceId === validPreview.allocation?.decision.selectedInstanceId,
-                )?.label ?? "No compatible account"}
-              </p>
-              {validPreview.profiles?.map((p) => (
-                <p key={p.driver}>
-                  {p.driver === "codex" ? "Codex" : "Claude"}: {p.model} /{" "}
-                  {p.options.map((o) => o.value).join(", ")};{" "}
-                  {p.eligible ? "compatible" : "outside constraints"}. {p.reason}
+              {choice.wanted && <p>Wanted {choice.wanted}</p>}
+              <p>{choice.reason}</p>
+              {choice.accounts.map((line) => (
+                <p key={line} className="text-sm">
+                  {line}
                 </p>
               ))}
-              {validPreview.reasons
-                .filter((reason) => !validPreview.profiles?.some((p) => p.reason === reason))
-                .map((reason) => (
-                  <p key={reason}>{reason}</p>
-                ))}
             </div>
           ) : (
             <p>Preview required after input, table or connection changes.</p>
@@ -725,10 +751,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         </fieldset>
         <fieldset className={group}>
           <legend>Start a new human assignment</legend>
-          <p>
-            Save the table first. Startup checks the exact catalog and starts the table&apos;s
-            choice. Quota and pacing estimates remain advisory; provider errors remain visible.
-          </p>
+          <p>Save your changes first. Start uses the previewed choice.</p>
           <label>
             Project
             <select className={field} value={project} onChange={(e) => setProject(e.target.value)}>
@@ -862,11 +885,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 {new Date(d.at).toLocaleString()} · version {d.policyVersion}
               </p>
               <p>
-                Difficulty {d.request.assessment.difficulty}:{" "}
-                {d.request.assessment.difficultyReason}
-              </p>
-              <p>
-                Stakes {d.request.assessment.stakes}: {d.request.assessment.stakesReason}
+                Difficulty {d.request.assessment.difficulty} · stakes {d.request.assessment.stakes}
               </p>
               <p>
                 {d.allocation?.decision.request.model ?? "Unavailable"}{" "}
@@ -917,8 +936,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           Table edits, tests and new assignments use the shared coordinator.{" "}
           {ready
             ? "It is connected."
-            : "It is not ready; choose or reconnect the coordinator in Provider allocation."}{" "}
-          Advisory account recommendations use the same coordinator.
+            : "It is not ready; choose or reconnect the coordinator in Provider allocation."}
         </p>
         <div className="flex flex-wrap gap-2">
           <Button size="sm" disabled={busy} onClick={() => void refresh()}>

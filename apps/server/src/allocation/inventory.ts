@@ -129,6 +129,22 @@ export function allocationInventory(input: {
           ? { usageLimitsUnavailableReason: limits.unavailable.reason }
           : {}),
       limitedUntil,
+      // A rejection is in force until its reset; which window it names decides the models it closes.
+      limits: rejected.flatMap((e) =>
+        e.resetsAt && e.resetsAt > at
+          ? [
+              {
+                windowId:
+                  limits?.windows.find((w) =>
+                    e.usageWindowId
+                      ? w.id === e.usageWindowId
+                      : w.id === e.windowId || w.enforcement?.windowId === e.windowId,
+                  )?.id ?? null,
+                until: e.resetsAt,
+              },
+            ]
+          : [],
+      ),
       models: p.models.map(({ slug, capabilities }) => ({ slug, capabilities })),
       shortWindow: limits?.windows.some(
         (w) =>

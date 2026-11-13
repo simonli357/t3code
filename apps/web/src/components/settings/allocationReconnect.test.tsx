@@ -125,6 +125,7 @@ const reservedRequest = {
   options: [],
 };
 const allocationSnapshot: AllocationSnapshot = {
+  accountOrderSupported: true,
   policy: { ...defaultAllocationPolicy, version: 1 },
   inventories: [inventory],
   authorityAvailable: true,
@@ -234,15 +235,7 @@ beforeEach(() => {
                     ...allocationSnapshot,
                     reservations: [],
                     inventories: [],
-                    policy: {
-                      ...allocationSnapshot.policy,
-                      version: 8,
-                      claude: {
-                        ...allocationSnapshot.policy.claude,
-                        preset: "custom",
-                        dailyPoints: 17,
-                      },
-                    },
+                    policy: { ...allocationSnapshot.policy, version: 8 },
                   },
           },
         };
@@ -344,25 +337,15 @@ it.each(["allocation", "model-selection"] as const)(
       root.render(<RouterProvider router={router} />);
     });
     const isAllocation = page === "allocation";
-    const preview = isAllocation ? "Preview assignment and policy" : "Preview exact selection";
-    const save = isAllocation ? "Save settings" : "Save table";
+    const preview = isAllocation ? "Preview account" : "Preview choice";
+    const save = isAllocation ? "Save settings" : "Save changes";
     const summary = (title: string) =>
       act(async () => {
         [...container.querySelectorAll("summary")].find((s) => s.textContent === title)!.click();
       });
-    const edited = isAllocation ? "Codex Daily usage budget" : "Maximum explicit reassessments";
+    const edited = isAllocation ? "Closeness margin" : "Maximum explicit reassessments";
     if (isAllocation) {
       await change(edited, "40");
-      await act(async () => {
-        for (const title of [
-          "Temporary targets and reset plans",
-          "Advanced override values and removal",
-        ])
-          [...container.querySelectorAll("summary")]
-            .find((summary) => summary.textContent === title)!
-            .click();
-      });
-      await change("Temporary overrides (JSON)", "[\n  \n]");
       await change("Model", "gpt-6-astra");
     } else {
       await summary("Test an assignment");
@@ -370,8 +353,6 @@ it.each(["allocation", "model-selection"] as const)(
       await change(edited, "3");
       await change("Difficulty score", "3");
       await change("Stakes score", "3");
-      await change("Difficulty reason", "Scoped reasoning");
-      await change("Stakes reason", "Reversible failure");
     }
     await act(async () => button(preview).click());
     expect(button(save).disabled).toBe(false);
@@ -382,8 +363,6 @@ it.each(["allocation", "model-selection"] as const)(
     expect(button(preview).disabled).toBe(true);
     expect(button(save).disabled).toBe(true);
     if (isAllocation) {
-      expect(control("Temporary overrides (JSON)")?.value).toBe("[\n  \n]");
-      expect(control("Temporary overrides (JSON)")?.closest("details")?.open).toBe(true);
       expect(button("Connect coordinator").disabled).toBe(true);
       await act(async () => button("Connect coordinator").click());
       expect(button("Cancel unused reservation").disabled).toBe(true);
@@ -427,7 +406,6 @@ it.each(["allocation", "model-selection"] as const)(
     expect(control(edited)).not.toBe(original);
     // A cold offline model editor shows no table, so its advanced controls are absent.
     expect(control(edited)?.value).toBe(isAllocation ? "10" : undefined);
-    if (isAllocation) expect(control("Temporary overrides (JSON)")?.value).toBe("[]");
     expect(button(preview)?.disabled).toBe(isAllocation ? true : undefined);
     expect(button(save)?.disabled).toBe(isAllocation ? true : undefined);
     state.execute.mockClear();
