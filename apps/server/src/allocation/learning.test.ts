@@ -1,0 +1,186 @@
+import * as DateTime from "effect/DateTime";
+import { describe, expect, it } from "@effect/vitest";
+import {
+  ProviderDriverKind,
+  type AllocationEvidence,
+  type EvidenceReading,
+  type EvidenceTurn,
+} from "@t3tools/contracts";
+import { learnAllocation, quarterOf, type PriceOf } from "./learning.ts";
+
+const HOUR = 3_600_000;
+const base = Date.parse("2026-11-08T00:00:00.000Z");
+const iso = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
+const driver = ProviderDriverKind.make("claudeAgent");
+const price: PriceOf = (model) =>
+  model === "opus"
+    ? { input: 5e-6, cacheRead: 0.5e-6, cacheWrite: 6.25e-6, output: 25e-6 }
+    : model === "sonnet"
+      ? { input: 3e-6, cacheRead: 0.3e-6, cacheWrite: 3.75e-6, output: 15e-6 }
+      : null;
+const evidence = (turns: EvidenceTurn[], readings: EvidenceReading[] = []): AllocationEvidence => ({
+  environmentId: "host",
+  observedAt: iso(base),
+  turns,
+  readings,
+});
+/** A 30-minute turn starting ten minutes into hour `hour`. */
+const turn = (thread: string, hour: number, costUsd: number, extra: Partial<EvidenceTurn> = {}) =>
+  ({
+    key: "acct",
+    driver,
+    model: "opus",
+    effort: "high",
+    kind: "worker",
+    threadId: thread,
+    startedAt: iso(base + hour * HOUR + 10 * 60_000),
+    endedAt: iso(base + hour * HOUR + 40 * 60_000),
+    contextTokens: null,
+    costUsd,
+    ...extra,
+  }) satisfies EvidenceTurn;
+const reading = (hour: number, usedPercent: number, plan = "Max 5x"): EvidenceReading => ({
+  key: "acct",
+  label: "AC",
+  driver,
+  windowId: "weekly",
+  windowLabel: "Weekly",
+  kind: "weekly",
+  usedPercent,
+  checkedAt: iso(base + hour * HOUR),
+  resetsAt: "2026-11-15T00:00:00.000Z",
+  durationHours: 168,
+  plan,
+});
+const account = (key: string, plan: string) => ({
+  key,
+  label: key === "acct" ? "AC" : "XY",
+  driver,
+  plan,
+  windows: [{ id: "weekly", label: "Weekly" }],
+});
+
+describe("cost per working hour", () => {
+  // Turns an hour apart: each stands for its 30 minutes and the 15-minute idle tail after it.
+  const contexts = Array.from({ length: 30 }, (_, i) => 50_000 + ((i * 7) % 30) * 7_000);
+  const worker = contexts.map((x, i) =>
+    turn("worker", i, 0.75 * (4 + 3e-5 * x), {
+      contextTokens: x,
+      tokens: { input: 1_000, cacheRead: 0, cacheWrite: 0, output: 1_000 },
+    }),
+  );
+  const master = Array.from({ length: 10 }, (_, i) =>
+    turn("master", i, 0.75 * 2, { kind: "master", contextTokens: 120_000 }),
+  );
+  const learned = learnAllocation({
+    at: iso(base + 100 * HOUR),
+    evidence: [evidence([...worker, ...master])],
+    accounts: [],
+    profiles: [
+      { driver, model: "sonnet", effort: "high" },
+      { driver, model: "opus", effort: "max" },
+    ],
+    price,
+  });
+  const cost = (model: string, effort: string, kind: string) =>
+    learned.costs.find((c) => c.model === model && c.effort === effort && c.kind === kind);
+
+  it("charges working time with at most 15 idle minutes per turn, and context raises the rate", () => {
+    const worker = cost("opus", "high", "worker")!;
+    expect(worker).toMatchObject({ source: "measured", samples: 30, hours: 22.5 });
+    // The rate is quoted at the typical context, and every 100k tokens more add $3 an hour.
+    expect(worker.dollarsPerHour).toBeCloseTo(4 + 3e-5 * worker.contextTokens, 4);
+    expect(worker.perHundredK).toBeCloseTo(3, 6);
+  });
+
+  it("learns masters separately, at their own lower rate", () => {
+    expect(cost("opus", "high", "master")).toMatchObject({ source: "measured", perHundredK: 0 });
+    expect(cost("opus", "high", "master")!.dollarsPerHour).toBeCloseTo(2, 6);
+  });
+
+  it("estimates an unmeasured model by price and an unmeasured effort from the nearest one, marked estimated", () => {
+    const sonnet = cost("sonnet", "high", "worker")!;
+    expect(sonnet).toMatchObject({ source: "estimated", basis: "opus / high repriced" });
+    expect(sonnet.dollarsPerHour).toBeCloseTo(
+      cost("opus", "high", "worker")!.dollarsPerHour * 0.6,
+      6,
+    );
+    expect(cost("opus", "max", "worker")).toMatchObject({
+      source: "estimated",
+      basis: "as opus / high",
+    });
+  });
+});
+
+describe("share of a limit per dollar", () => {
+  // T3 spends 2 to 12 dollars an hour; the limit moves 0.1% a dollar, and someone outside T3
+  // uses 0.4% an hour every afternoon (12–18 UTC).
+  const spendAt = (hour: number) => 2 + ((hour * 7) % 11);
+  const outside = (hour: number) => (quarterOf(base + hour * HOUR) === 2 ? 0.4 : 0);
+  const history = (share: (hour: number) => number, plan: (hour: number) => string) => {
+    const turns = Array.from({ length: 48 }, (_, h) => turn("limit", h, spendAt(h)));
+    let used = 0;
+    const readings = Array.from({ length: 49 }, (_, h) => {
+      const r = reading(h, used, plan(h));
+      used += share(h) * spendAt(h) + outside(h);
+      return r;
+    });
+    return evidence(turns, readings);
+  };
+
+  it("separates T3's own use from outside use, by time of day, and never counts outside use as T3's", () => {
+    const learned = learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: [
+        history(
+          () => 0.1,
+          () => "Max 5x",
+        ),
+      ],
+      accounts: [account("acct", "Max 5x")],
+      profiles: [],
+      price,
+    });
+    const limit = learned.limits.find((l) => l.key === "acct")!;
+    expect(limit).toMatchObject({ source: "measured", samples: 48, plan: "Max 5x" });
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
+    expect(limit.backgroundByQuarter?.map((b) => Number(b.toFixed(6)))).toEqual([0, 0, 0.4, 0]);
+    expect(limit.backgroundPercentPerHour).toBeCloseTo(0.1, 6);
+  });
+
+  it("starts again when the plan changes", () => {
+    const learned = learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: [
+        history(
+          (h) => (h < 24 ? 0.4 : 0.1),
+          (h) => (h < 24 ? "Max 5x" : "Max 20x"),
+        ),
+      ],
+      accounts: [account("acct", "Max 20x")],
+      profiles: [],
+      price,
+    });
+    const limit = learned.limits.find((l) => l.key === "acct")!;
+    expect(limit).toMatchObject({ plan: "Max 20x", samples: 24 });
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
+  });
+
+  it("estimates an account without readings from a measured one, scaled by published plan size", () => {
+    const learned = learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: [
+        history(
+          () => 0.1,
+          () => "Max 5x",
+        ),
+      ],
+      accounts: [account("acct", "Max 5x"), account("other", "Max 20x")],
+      profiles: [],
+      price,
+    });
+    const other = learned.limits.find((l) => l.key === "other")!;
+    expect(other).toMatchObject({ source: "estimated", samples: 0, basis: "AC × 0.25 by plan" });
+    expect(other.percentPerDollar).toBeCloseTo(0.025, 6);
+  });
+});
