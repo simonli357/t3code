@@ -530,7 +530,9 @@ describe("worker choice", () => {
       "accounts",
       "chosen",
       "drainedUntil",
+      "notes",
       "reason",
+      "startAt",
       "state",
       "wanted",
     ]);
