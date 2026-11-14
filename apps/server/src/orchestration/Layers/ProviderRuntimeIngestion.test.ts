@@ -25,6 +25,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import { IDLE_COMPACTION_SOURCE } from "@t3tools/shared/claudeCompaction";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -4904,6 +4905,41 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activity?.summary).toBe("Compacted context 899K → 0 tokens");
     expect(activity?.tone).toBe("info");
     expect(activity?.payload).toMatchObject({ requestId: "message-compact" });
+  });
+
+  it("projects an idle compaction as one line outside any turn", async () => {
+    const harness = await createHarness();
+    const before = await waitForThread(harness.readModel, () => true);
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-idle-compacted"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      createdAt: "2026-01-01T00:58:30.000Z",
+      threadId: asThreadId("thread-1"),
+      payload: {
+        state: "compacted",
+        beforeTokens: 335_000,
+        afterTokens: 18_000,
+        detail: { source: IDLE_COMPACTION_SOURCE },
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-idle-compacted",
+      ),
+    );
+    const activity = thread.activities.find(
+      (candidate: ProviderRuntimeTestActivity) => candidate.id === "evt-idle-compacted",
+    );
+    expect(activity?.summary).toBe(
+      "Compacted while idle, before the prompt cache expired: 335K → 18K tokens",
+    );
+    expect(activity?.turnId).toBeNull();
+    // No turn, message or session change: the thread reads as it did before.
+    expect(thread.latestTurn).toEqual(before.latestTurn);
+    expect(thread.messages).toEqual(before.messages);
+    expect(thread.session).toEqual(before.session);
   });
 
   it("projects Codex task lifecycle chunks into thread activities", async () => {

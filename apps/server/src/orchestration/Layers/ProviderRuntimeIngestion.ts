@@ -32,6 +32,7 @@ import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
+import { isIdleCompactionDetail } from "@t3tools/shared/claudeCompaction";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
@@ -910,9 +911,14 @@ export function runtimeEventToActivities(
 
       const beforeTokens = event.payload.beforeTokens;
       const afterTokens = event.payload.afterTokens;
-      const summary =
+      const tokens =
         beforeTokens !== undefined && afterTokens !== undefined
-          ? `Compacted context ${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens`
+          ? `${formatTokens(beforeTokens)} → ${formatTokens(afterTokens)} tokens`
+          : undefined;
+      const summary = isIdleCompactionDetail(event.payload.detail)
+        ? `Compacted while idle, before the prompt cache expired${tokens ? `: ${tokens}` : ""}`
+        : tokens
+          ? `Compacted context ${tokens}`
           : "Context compacted";
       return [
         {
@@ -1847,10 +1853,7 @@ const make = Effect.gen(function* () {
         event.payload.retracted === true &&
         eventTurnId !== undefined
       ) {
-        const messageIds = yield* getAssistantMessageIdsForTurn(
-          thread.id,
-          eventTurnId,
-        );
+        const messageIds = yield* getAssistantMessageIdsForTurn(thread.id, eventTurnId);
         yield* Effect.forEach(
           messageIds,
           (messageId) =>
@@ -1875,16 +1878,8 @@ const make = Effect.gen(function* () {
           { discard: true },
         );
         yield* clearAssistantMessageIdsForTurn(thread.id, eventTurnId);
-        yield* clearAssistantSegmentStateForTurn(
-          thread.id,
-          eventTurnId,
-          "assistant",
-        );
-        yield* clearAssistantSegmentStateForTurn(
-          thread.id,
-          eventTurnId,
-          "reasoning",
-        );
+        yield* clearAssistantSegmentStateForTurn(thread.id, eventTurnId, "assistant");
+        yield* clearAssistantSegmentStateForTurn(thread.id, eventTurnId, "reasoning");
         return;
       }
 

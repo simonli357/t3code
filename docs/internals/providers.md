@@ -108,6 +108,18 @@ current conversation lacks it: the record names the account, the native session 
 A new path that replaces a Claude conversation must change the native session id or emit one
 of those states. Otherwise later turns silently go without the instructions.
 
+## Idle compaction is not a turn
+
+The [idle compaction reactor](../../apps/server/src/orchestration/IdleCompactionReactor.ts)
+compacts an idle Claude thread shortly before its prompt cache expires, using the expiry the
+Claude adapter stamps on each context reading. Its compaction must not look like work: worker
+jobs, master wakes, reports, completion notifications, auto-settle clocks and restart
+continuation all key on turns, user messages and session state. So it sends no user message,
+and `ProviderService.compactThread(..., { idle: true })` publishes none of the compaction turn's
+runtime events except the compacted marker, context size and usage limits, all without a turn
+id. Routing it through a `/compact` message instead would need an exclusion in each of those
+paths.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)

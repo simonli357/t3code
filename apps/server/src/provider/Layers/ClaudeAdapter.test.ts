@@ -8419,6 +8419,132 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("stamps context readings with when the latest request's prompt cache expires", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const usageFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.filter((event) => event.type === "thread.token-usage.updated"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      const request = (
+        id: string,
+        cacheCreation: { ephemeral_1h_input_tokens: number; ephemeral_5m_input_tokens: number },
+        parentToolUseId: string | null = null,
+      ) => {
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-cache",
+          uuid: `start-${id}`,
+          parent_tool_use_id: parentToolUseId,
+          event: {
+            type: "message_start",
+            message: { id, usage: { input_tokens: 2, cache_creation: cacheCreation } },
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session-cache",
+          uuid: `delta-${id}`,
+          parent_tool_use_id: parentToolUseId,
+          event: {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: {
+              input_tokens: 2,
+              cache_creation_input_tokens: 1_000,
+              cache_read_input_tokens: 300_000,
+              output_tokens: 50,
+            },
+          },
+        } as unknown as SDKMessage);
+      };
+
+      request("hour", { ephemeral_1h_input_tokens: 1_000, ephemeral_5m_input_tokens: 0 });
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("10 minutes");
+      // A fully cached request writes nothing but refreshes the cache it read for its lifetime.
+      request("cached", { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 0 });
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("20 minutes");
+      request("minutes", { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 1_000 });
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("10 minutes");
+      // A subagent's requests do not touch the main thread's cache.
+      request("subagent", { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 9 }, "tool-1");
+      yield* Effect.yieldNow;
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        usage: { input_tokens: 2, cache_read_input_tokens: 300_000, output_tokens: 50 },
+        session_id: "sdk-session-cache",
+        uuid: "result-cache",
+      } as unknown as SDKMessage);
+
+      const expiries = Array.from(yield* Fiber.join(usageFiber)).map((event) =>
+        event.type === "thread.token-usage.updated"
+          ? event.payload.usage.promptCacheExpiresAt
+          : null,
+      );
+      assert.deepEqual(expiries, [
+        "1970-01-01T01:00:00.000Z",
+        "1970-01-01T01:10:00.000Z",
+        "1970-01-01T00:35:00.000Z",
+        "1970-01-01T00:35:00.000Z",
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("lets a /compact turn answer Claude's resume compaction question itself", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000" },
+        runtimeMode: "full-access",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      // Global instructions follow the command as its summary instructions.
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "/compact\n\nT3 user-configured global instructions (current snapshot).",
+        attachments: [],
+      });
+      const onUserDialog = harness.getLastCreateQueryInput()?.options.onUserDialog;
+      assert.equal(typeof onUserDialog, "function");
+      if (!onUserDialog) return;
+      const answer = yield* Effect.promise(() =>
+        onUserDialog(
+          {
+            dialogKind: "resume_return",
+            payload: { sessionAgeMinutes: 58, estimatedTokens: 335_000 },
+          },
+          { signal: new AbortController().signal, requestId: "request-compact-dialog" },
+        ),
+      );
+      // Keep the history as it is: the turn's own /compact is the compaction.
+      assert.deepEqual(answer, { behavior: "completed", result: "continue" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("routes Claude resume compaction through the shared user-input UI", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

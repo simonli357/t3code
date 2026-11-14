@@ -415,6 +415,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "idle-compaction",
+    title: "Idle compaction",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["claude compact idle prompt cache expiry context tokens cold return cost"],
+  },
+  {
     id: "base-session-prompt",
     title: "Base session prompt",
     to: "/settings/projects",

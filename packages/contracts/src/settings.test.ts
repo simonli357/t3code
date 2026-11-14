@@ -1037,6 +1037,34 @@ it("defaults worker placement and usage recovery settings and accepts live chang
     expect(() => decodeServerSettingsPatch({ maxActiveAgentSessions: cap })).toThrow();
 });
 
+it("turns idle compaction on by default at 200k tokens, 2 minutes before the cache expires", () => {
+  expect(DEFAULT_SERVER_SETTINGS.idleCompaction).toEqual({
+    enabled: true,
+    contextTokens: 200_000,
+    leadMinutes: 2,
+  });
+  // Settings written before the setting existed get the defaults.
+  expect(decodeServerSettings({ maxActiveAgentSessions: 4 }).idleCompaction).toEqual(
+    DEFAULT_SERVER_SETTINGS.idleCompaction,
+  );
+  expect(decodeServerSettings({ idleCompaction: { leadMinutes: 5 } }).idleCompaction).toEqual({
+    enabled: true,
+    contextTokens: 200_000,
+    leadMinutes: 5,
+  });
+  expect(decodeServerSettingsPatch({ idleCompaction: { enabled: false } })).toEqual({
+    idleCompaction: { enabled: false },
+  });
+  for (const idleCompaction of [
+    { contextTokens: 9_999 },
+    { contextTokens: 250_000.5 },
+    { leadMinutes: 0 },
+    { leadMinutes: 31 },
+    { leadMinutes: 1.5 },
+  ])
+    expect(() => decodeServerSettingsPatch({ idleCompaction })).toThrow();
+});
+
 it("defaults every account to available for workers on existing installs and persists disabled instances", () => {
   expect(decodeServerSettings({}).workerDisabledInstanceIds).toEqual([]);
   const workerDisabledInstanceIds = [ProviderInstanceId.make("codex_ara")];

@@ -40,6 +40,7 @@ import { AgentScope } from "@t3tools/shared/AgentScope";
 import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import { IDLE_COMPACTION_SOURCE } from "@t3tools/shared/claudeCompaction";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { isDeepseekModel } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -599,6 +600,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
+  const idleCompactions = new Set<ThreadId>();
   const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
     Effect.gen(function* () {
       if (pendingCompactions.get(threadId) !== pending) return false;
@@ -1112,7 +1114,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ),
         );
 
-  const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+  const publishCanonicalEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
       Effect.tap(recordContextReset),
       Effect.tap((canonicalEvent) =>
@@ -1123,6 +1125,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
       Effect.asVoid,
     );
+
+  /** What an idle compaction publishes: its outcome, outside any turn, and nothing else. */
+  const idleCompactionEvent = (event: ProviderRuntimeEvent): ProviderRuntimeEvent | undefined => {
+    if (!idleCompactions.has(event.threadId) || event.type === "account.rate-limits.updated") {
+      return event;
+    }
+    if (event.type === "thread.token-usage.updated") {
+      const { turnId: _turnId, ...usage } = event;
+      return usage;
+    }
+    if (event.type === "thread.state.changed" && event.payload.state === "compacted") {
+      const { turnId: _turnId, ...compacted } = event;
+      return {
+        ...compacted,
+        payload: { ...event.payload, detail: { source: IDLE_COMPACTION_SOURCE } },
+      };
+    }
+    return undefined;
+  };
+
+  const publishRuntimeEvent = (runtimeEvent: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const event = idleCompactionEvent(runtimeEvent);
+    return event === undefined ? recordContextReset(runtimeEvent) : publishCanonicalEvent(event);
+  };
 
   const isCompactedEvent = (
     event: ProviderRuntimeEvent,
@@ -2130,7 +2156,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
-  const compactThread: ProviderServiceMethod<"compactThread"> = Effect.fn("compactThread")(
+  const compactNow: ProviderServiceMethod<"compactThread"> = Effect.fn("compactNow")(
     function* (threadId, modelSelection, requestId) {
       const routed = yield* resolveRoutableSession({
         threadId,
@@ -2464,6 +2490,48 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const compactThread: ProviderServiceMethod<"compactThread"> = Effect.fn("compactThread")(
+    function* (threadId, modelSelection, requestId, options) {
+      if (options?.idle !== true) {
+        return yield* compactNow(threadId, modelSelection, requestId);
+      }
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      const live =
+        binding?.providerInstanceId !== undefined &&
+        (yield* (yield* registry.getByInstance(binding.providerInstanceId)).hasSession(threadId));
+      // Resuming without history would start an empty session with nothing to compact.
+      if (!live && binding?.resumeCursor == null) {
+        return yield* toValidationError(
+          "ProviderService.compactThread",
+          `Thread '${threadId}' has no provider session to compact.`,
+        );
+      }
+      if (idleCompactions.has(threadId)) {
+        return yield* toValidationError(
+          "ProviderService.compactThread",
+          "Context compaction is already in progress.",
+        );
+      }
+      idleCompactions.add(threadId);
+      yield* compactNow(threadId, modelSelection, requestId).pipe(
+        // Leave the session as it was found: one this call resumed stops again, still quietly.
+        Effect.ensuring(
+          live
+            ? Effect.void
+            : stopSession({ threadId }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("failed to stop the session an idle compaction resumed", {
+                    threadId,
+                    cause,
+                  }),
+                ),
+              ),
+        ),
+        Effect.ensuring(Effect.sync(() => idleCompactions.delete(threadId))),
+      );
+    },
+  );
+
   const listSessions: ProviderServiceMethod<"listSessions"> = Effect.fn("listSessions")(
     function* () {
       const currentAdapters = yield* getAdapterEntries;
@@ -2750,8 +2818,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ).pipe(Effect.map((sessionsByAdapter) => sessionsByAdapter.flatMap((sessions) => sessions)));
     yield* Effect.forEach(activeSessions, (session) =>
       Effect.gen(function* () {
+        // An idle compaction is not work to continue after the restart.
         const continueAfterRestart =
-          session.status === "running" && session.activeTurnId
+          session.status === "running" &&
+          session.activeTurnId &&
+          !idleCompactions.has(session.threadId)
             ? yield* continueAfterRestartFor(session.threadId)
             : false;
         const lastRuntimeEventAt = yield* nowIso;

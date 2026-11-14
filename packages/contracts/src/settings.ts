@@ -1213,6 +1213,22 @@ export const WorkerRenewalSettings = Schema.Struct({
 });
 export type WorkerRenewalSettings = typeof WorkerRenewalSettings.Type;
 
+const IdleCompactionContextTokens = Schema.Int.check(
+  Schema.isBetween({ minimum: 10_000, maximum: 100_000_000 }),
+);
+const IdleCompactionLeadMinutes = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30 }));
+/** Compacts an idle Claude thread shortly before its prompt cache expires. */
+export const IdleCompactionSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Context size from which an idle thread is compacted. */
+  contextTokens: IdleCompactionContextTokens.pipe(
+    Schema.withDecodingDefault(Effect.succeed(200_000)),
+  ),
+  /** How long before the cache expires the compaction starts. */
+  leadMinutes: IdleCompactionLeadMinutes.pipe(Schema.withDecodingDefault(Effect.succeed(2))),
+});
+export type IdleCompactionSettings = typeof IdleCompactionSettings.Type;
+
 const WorkerCommunicationWindowMinutes = Schema.Number.check(
   Schema.isFinite(),
   Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER / 60_000 }),
@@ -1263,6 +1279,9 @@ export const ServerSettings = Schema.Struct({
   ),
   workerRenewal: WorkerRenewalSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorkerRenewalSettings)({}))),
+  ),
+  idleCompaction: IdleCompactionSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(IdleCompactionSettings)({}))),
   ),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
@@ -1688,6 +1707,13 @@ export const ServerSettingsPatch = Schema.Struct({
       codexScale: Schema.optionalKey(RenewalScale),
       toolWaitSeconds: Schema.optionalKey(RenewalWaitSeconds),
       workerContextTokens: Schema.optionalKey(RenewalContextTokens),
+    }),
+  ),
+  idleCompaction: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      contextTokens: Schema.optionalKey(IdleCompactionContextTokens),
+      leadMinutes: Schema.optionalKey(IdleCompactionLeadMinutes),
     }),
   ),
   storageCleanup: Schema.optionalKey(

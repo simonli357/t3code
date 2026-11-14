@@ -326,6 +326,10 @@
     "./state/worker-communication": {
       "types": "./src/state/worker-communication.ts",
       "default": "./src/state/worker-communication.ts"
+    },
+    "./state/idle-compaction": {
+      "types": "./src/state/idle-compaction.ts",
+      "default": "./src/state/idle-compaction.ts"
     }
   },
   "scripts": {

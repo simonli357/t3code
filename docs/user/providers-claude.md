@@ -53,6 +53,22 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
 a large older thread. See [commands and skills](./composer.md#commands-and-skills)
 for using composer commands.
 
+### Idle compaction
+
+Claude caches a thread's prompt for about an hour on a subscription (5 minutes
+with an API key). Returning after that re-reads the whole thread at full price.
+To avoid that, T3 Code compacts an idle Claude thread of 200,000 tokens or more
+about 2 minutes before its cache expires, so coming back reads a summary. The
+thread then shows **Compacted while idle, before the prompt cache expired**,
+and it keeps less detail than before.
+
+A thread is left alone while it runs, waits for an approval, an answer or
+background work, has work queued, is settled, archived, snoozed, being moved or
+handed off, or is a worker that reported done, and when its account is out of
+usage or at its hard cap. Change the threshold and lead time, or turn it off,
+under **Settings → General → Idle compaction** on web or **Settings → Agent
+behavior** on mobile. Changes apply right away.
+
 ## Usage limits
 
 If your Claude subscription runs out of usage mid-turn, the thread shows which
