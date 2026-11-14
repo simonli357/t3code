@@ -560,6 +560,20 @@ export function AllocationControls({
               nearest rung without it, and a running worker never moves onto it.
             </span>
           </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <label className="flex items-center gap-2 text-sm">
+              <Switch
+                size="sm"
+                checked={policy.fableOnly === true}
+                disabled={disabled || snapshot?.runways === undefined}
+                onCheckedChange={(fableOnly) => onChange({ ...policy, fableOnly })}
+              />
+              Fable mode
+            </label>
+            <span className="text-xs text-muted-foreground">
+              Workers use only Fable low, medium or high.
+            </span>
+          </div>
         </div>
       </section>
       <section aria-label="Learned numbers" className="grid min-w-0 gap-3">

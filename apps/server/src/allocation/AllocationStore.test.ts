@@ -616,3 +616,33 @@ it.effect("keeps the stored daily goals when a save does not change them", () =>
     expect(yield* store.policy).toEqual(second);
   }).pipe(Effect.provide(layer)),
 );
+
+it.effect("stores Fable mode, keeps it through saves that omit it, and couples the switches", () =>
+  Effect.gen(function* () {
+    yield* migration;
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* Store.AllocationStore;
+    // A policy stored before Fable mode reads without it, which means off.
+    const stored = { ...defaultAllocationPolicy, version: 4 };
+    yield* sql`INSERT INTO provider_allocation_policy (id, version, policy_json) VALUES (1, 4, ${json(stored)})`;
+    expect((yield* store.policy).fableOnly).toBeUndefined();
+    // Turned on from a settings page where Fable workers were off: both are on.
+    const on = yield* store.savePolicy({
+      expectedVersion: 4,
+      policy: { ...(yield* store.policy), fableWorkers: false, fableOnly: true },
+    });
+    expect(on).toMatchObject({ fableWorkers: true, fableOnly: true });
+    // A save that omits it keeps what is stored.
+    const { fableOnly: _fableOnly, ...partial } = on;
+    expect(yield* store.savePolicy({ expectedVersion: 5, policy: partial })).toMatchObject({
+      fableOnly: true,
+    });
+    // Fable workers turned off, even by a build that sends no Fable mode: Fable mode is off.
+    const off = yield* store.savePolicy({
+      expectedVersion: 6,
+      policy: { ...partial, fableWorkers: false },
+    });
+    expect(off).toMatchObject({ fableWorkers: false, fableOnly: false });
+    expect(yield* store.policy).toEqual(off);
+  }).pipe(Effect.provide(layer)),
+);

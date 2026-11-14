@@ -100,6 +100,7 @@ export function allocationPolicyView(
         }),
     ),
     fableWorkers: policy.fableWorkers !== false,
+    fableOnly: policy.fableOnly === true,
     ...(options?.learned ? { learned: learnedLines(options.learned) } : {}),
     ladder: modelLadder(model).map(profile),
     fallback: fallback
@@ -200,11 +201,24 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     accountCaps: caps,
     ...(policy.accountGoals || edit.setGoals || edit.clearGoals ? { accountGoals: goals } : {}),
     ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
+    ...(edit.fableOnly === undefined ? {} : { fableOnly: edit.fableOnly }),
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),
     ...(edit.longWaitHours === undefined ? {} : { longWaitHours: edit.longWaitHours }),
   } satisfies AllocationPolicy;
 });
+
+/**
+ * The two Fable switches never contradict: turning Fable mode on turns Fable workers on, and
+ * turning Fable workers off turns Fable mode off. Every save of the policy, from an agent's edit
+ * or a settings page, passes through here.
+ */
+export function withFableSwitches(stored: AllocationPolicy, next: AllocationPolicy) {
+  if (next.fableOnly !== true || next.fableWorkers !== false) return next;
+  return stored.fableOnly === true
+    ? { ...next, fableOnly: false }
+    : { ...next, fableWorkers: true };
+}
 
 /** The model policy after `edit`; a cell's model joins its table's model list. */
 export function editModelPolicy(

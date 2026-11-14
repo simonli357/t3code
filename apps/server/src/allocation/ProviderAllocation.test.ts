@@ -2693,6 +2693,45 @@ it.effect(
   },
 );
 
+it.effect("in Fable mode a limited worker changes model only between Fable rungs", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const current = {
+      instanceId: ProviderInstanceId.make("a"),
+      model: FABLE,
+      options: [{ id: "effort", value: "high" }],
+    };
+    // Fable is drained everywhere and resets far away; Opus has room.
+    f.state.providers = [
+      claudeAccount("a", { fable: 100, fableResetHours: 10 }),
+      claudeAccount("b", { fable: 100, fableResetHours: 50 }),
+    ];
+    // Turning Fable mode on turns Fable workers on.
+    yield* allocation.editPolicy({ fableWorkers: false });
+    expect(yield* allocation.editPolicy({ fableOnly: true })).toMatchObject({
+      fableWorkers: true,
+      fableOnly: true,
+    });
+    expect(yield* allocation.reroute(ThreadId.make("worker"), current)).toEqual({
+      _tag: "wait",
+      until: hoursIn(10),
+      observed: true,
+      long: true,
+    });
+    // Turning Fable workers off turns Fable mode off: the worker leaves Fable.
+    expect(yield* allocation.editPolicy({ fableWorkers: false })).toMatchObject({
+      fableWorkers: false,
+      fableOnly: false,
+    });
+    expect(yield* allocation.reroute(ThreadId.make("worker"), current)).toMatchObject({
+      _tag: "switch",
+      selection: { model: OPUS },
+      modelChanged: true,
+    });
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
 it.effect(
   "a rejected worker takes the same model on another login, and otherwise retries in half an hour",
   () => {

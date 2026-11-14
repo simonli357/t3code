@@ -412,6 +412,18 @@ export function SettingsAllocationRouteScreen() {
               Off: no worker runs on Fable; a table cell or pin naming Fable starts from the nearest
               rung without it.
             </Text>
+            {policy && (
+              <View className="flex-row items-center justify-between">
+                <Text>Fable mode</Text>
+                <ThemedSwitch
+                  accessibilityLabel="Fable mode"
+                  value={policy.fableOnly === true}
+                  disabled={busy || !goalsEditable}
+                  onValueChange={(fableOnly) => setDraft({ ...policy, fableOnly })}
+                />
+              </View>
+            )}
+            <Text>Workers use only Fable low, medium or high.</Text>
             {snapshot.learned ? (
               <View className="gap-1">
                 <Text className="font-semibold">Learned numbers</Text>
