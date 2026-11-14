@@ -42,6 +42,21 @@ interrupted restore finish before either version boots. Keep the snapshot until
 commit, or until both restoration and the terminal rollback state are durable.
 Attachments and other files outside SQLite are outside this rollback boundary.
 
+## Copied databases
+
+Startup continues a thread only for the installation that left it running. The
+database records that installation as the host name and the database file's real
+path (`custom_installation_owner`). A launcher rollback restores the file in place,
+so it keeps the record. A copy, whether made for testing or moved to another path or
+computer, carries a record that does not match the server starting on it. Before any
+reactor starts,
+`claimInstallation` settles the copy's work in one transaction with the new
+record: provider sessions, worker jobs and reports, handoffs, renewals, session
+moves and ownership changes. Startup reconciliation then shows the copy's running
+threads as stopped. A new table whose rows make the server act on its own at
+startup belongs in that list. Databases from builds before the record are adopted
+only by the launcher-managed service or the packaged desktop app.
+
 ## Client acknowledgement
 
 An accepted update is still pending. Clients correlate the launcher's update ID

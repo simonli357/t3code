@@ -34,6 +34,8 @@ bun -e "new (require('bun:sqlite').Database)(process.env.HOME + '/.t3/userdata/s
 
 Copy `secrets` and `settings.json` only if the flow needs them. Copy in, never symlink.
 
+A server started on the copy resumes none of its turns or queued work. A message you send in a copied thread still resumes the original's provider session, so test in new threads.
+
 ## Verifying
 
 - Smallest proof: `vp test run <files>` plus targeted lint and typecheck. No repo-wide `vp check`, `vp run -r test` or `vp run -r typecheck` unless asked.

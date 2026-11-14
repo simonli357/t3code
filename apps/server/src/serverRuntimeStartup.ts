@@ -50,6 +50,7 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
+import * as InstallationOwner from "./installationOwner.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -359,6 +360,8 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
 
 const ORPHANED_PROVIDER_SESSION_ERROR =
   "Provider session did not survive a server restart. Send a new message to continue.";
+const COPIED_PROVIDER_SESSION_ERROR =
+  "Not resumed: this database was copied from another installation, where this thread was running.";
 const SERVER_UPDATE_CONTINUATION_KEY = "continueAfterServerUpdate";
 const SERVER_UPDATE_CONTINUATION_PROMPT = "Continue where you left off.";
 
@@ -503,6 +506,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
   const providerService = yield* ProviderService.ProviderService;
   const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const settings = yield* ServerSettings.ServerSettingsService;
+  const installation = yield* InstallationOwner.CurrentInstallationClaim;
   const restartSettings = yield* settings.getSettings.pipe(
     Effect.asSome,
     Effect.catch((cause) =>
@@ -603,7 +607,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
       Option.isSome(binding) &&
       binding.value.status === "running" &&
       binding.value.resumeCursor != null;
-    const settleAsError = (lastError: string) =>
+    const settle = (lastError: string, status: "error" | "stopped" = "error") =>
       Effect.gen(function* () {
         yield* Effect.gen(function* () {
           if (Option.isSome(binding)) {
@@ -641,7 +645,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
             threadId: thread.id,
             session: {
               ...session,
-              status: "error",
+              status,
               activeTurnId: null,
               lastError,
               updatedAt: reconciledAt,
@@ -660,6 +664,12 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           ),
         );
       });
+
+    // A copy's running threads belong to the installation it was copied from.
+    if (installation.copied) {
+      yield* settle(COPIED_PROVIDER_SESSION_ERROR, "stopped");
+      continue;
+    }
 
     if (
       Option.isSome(binding) &&
@@ -704,7 +714,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           threadId: thread.id,
           cause: prepared.cause,
         });
-        yield* settleAsError(ORPHANED_PROVIDER_SESSION_ERROR);
+        yield* settle(ORPHANED_PROVIDER_SESSION_ERROR);
         continue;
       }
 
@@ -755,7 +765,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
             threadId: thread.id,
             cause: continuationExit.cause,
           });
-          yield* settleAsError(
+          yield* settle(
             "Could not continue this thread after the server restart. Send a new message to continue.",
           ).pipe(Effect.ignoreCause);
         }),
@@ -763,7 +773,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
       continue;
     }
 
-    yield* settleAsError(ORPHANED_PROVIDER_SESSION_ERROR);
+    yield* settle(ORPHANED_PROVIDER_SESSION_ERROR);
   }
 }).pipe(
   Effect.catchCauseIf(
@@ -985,6 +995,16 @@ export const make = (options?: StartupOptions) =>
         ),
       );
 
+      // Before any reactor reads the database: a copy's running and queued work is settled here.
+      const installation = yield* runStartupPhase(
+        "installation.claim",
+        InstallationOwner.claimInstallation({
+          adoptUnrecorded:
+            serverConfig.devUrl === undefined &&
+            (launcher.managed || serverConfig.mode === "desktop"),
+        }),
+      );
+
       yield* Effect.logDebug("startup phase: parking orchestration roots at activation");
       yield* runStartupPhase(
         "reactors.start",
@@ -994,7 +1014,12 @@ export const make = (options?: StartupOptions) =>
         }),
       );
 
-      yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
+      yield* runStartupPhase(
+        "provider-sessions.reconcile",
+        reconcileProviderSessions.pipe(
+          Effect.provideService(InstallationOwner.CurrentInstallationClaim, installation),
+        ),
+      );
       yield* runStartupPhase("worktree-setups.reconcile", reconcileWorktreeSetups);
 
       yield* Effect.logDebug("startup phase: syncing clean projects");

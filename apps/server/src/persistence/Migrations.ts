@@ -6,6 +6,7 @@ import Migration0074 from "./Migrations/074_RemainingQueryIndexes.ts";
 import Migration0075 from "./Migrations/075_UsageCapEnforcement.ts";
 import Migration0076 from "./Migrations/076_WorkerJobResumeAt.ts";
 import Migration0077 from "./Migrations/077_AllocationLearned.ts";
+import Migration0078 from "./Migrations/078_InstallationOwner.ts";
 import Migration0070 from "./Migrations/070_SessionRenewals.ts";
 /**
  * Migration runner with an inline loader.
@@ -109,6 +110,7 @@ const migrationEntries = [
   [75, "UsageCapEnforcement", Migration0075],
   [76, "WorkerJobResumeAt", Migration0076],
   [77, "AllocationLearned", Migration0077],
+  [78, "InstallationOwner", Migration0078],
   [68, "BaseSessions", Migration0068],
   [69, "SessionWorkspaces", Migration0069],
   [67, "AllocationSessionEvidenceIndex", Migration0067],

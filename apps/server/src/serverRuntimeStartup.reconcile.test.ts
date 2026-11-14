@@ -28,6 +28,7 @@ import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDi
 import { ServerActivation } from "./serverActivation.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as InstallationOwner from "./installationOwner.ts";
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const updatedAt = "2026-08-20T12:00:00.000Z";
@@ -87,12 +88,16 @@ const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>)
 const runReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof makeThread>>;
   readonly continueAfterRestart?: boolean;
+  readonly copied?: boolean;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
   readonly providerService?: ProviderService.ProviderService["Service"];
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
   readonly dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
 }) =>
   ServerRuntimeStartup.reconcileProviderSessions.pipe(
+    Effect.provideService(InstallationOwner.CurrentInstallationClaim, {
+      copied: input.copied ?? false,
+    }),
     Effect.provideService(
       ProjectionSnapshotQuery.ProjectionSnapshotQuery,
       queryWithThreads(input.threads),
@@ -1020,4 +1025,87 @@ it.effect("settles failed opt-in recovery without retrying the provider turn", (
       continueAfterServerUpdatePrepared: null,
     });
   }),
+);
+
+it.effect(
+  "a copied database settles marked and interrupted threads as stopped without a turn",
+  () =>
+    Effect.gen(function* () {
+      const marked = makeThread("thread-copied-marked", "starting");
+      const interrupted = makeThread(
+        "thread-copied-interrupted",
+        "running",
+        TurnId.make("turn-copied-interrupted"),
+      );
+      const sends: ProviderSendTurnInput[] = [];
+      const dispatched: OrchestrationCommand[] = [];
+      const bindings = new Map<ThreadId, ProviderSessionDirectory.ProviderRuntimeBinding>(
+        [marked, interrupted].map((thread) => [
+          thread.id,
+          {
+            threadId: thread.id,
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId,
+            status: "running" as const,
+            resumeCursor: { threadId: thread.id },
+            runtimePayload: {
+              activeTurnId: thread.session.activeTurnId,
+              ...(thread.id === marked.id
+                ? { continueAfterServerUpdate: "turn-copied-marked" }
+                : {}),
+            },
+          },
+        ]),
+      );
+
+      yield* runReconciliation({
+        threads: [marked, interrupted],
+        continueAfterRestart: true,
+        copied: true,
+        providerService: {
+          ...makeProviderService(),
+          sendTurn: (input) =>
+            Effect.sync(() => {
+              sends.push(input);
+              return { threadId: input.threadId, turnId: TurnId.make("unexpected") };
+            }),
+        },
+        directory: {
+          getBinding: (threadId) =>
+            Effect.sync(() => Option.fromUndefinedOr(bindings.get(threadId))),
+          upsert: (binding) => Effect.sync(() => void bindings.set(binding.threadId, binding)),
+          recordImportedTranscript: () => Effect.die("unused"),
+          getProvider: () => Effect.die("unused"),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
+        },
+        dispatch: (command) =>
+          Effect.sync(() => dispatched.push(command)).pipe(
+            Effect.as({ sequence: dispatched.length }),
+          ),
+      });
+
+      assert.deepStrictEqual(sends, []);
+      assert.deepStrictEqual(
+        dispatched.map(
+          (command) =>
+            command.type === "thread.session.set" && {
+              threadId: command.threadId,
+              status: command.session.status,
+              activeTurnId: command.session.activeTurnId,
+            },
+        ),
+        [
+          { threadId: marked.id, status: "stopped", activeTurnId: null },
+          { threadId: interrupted.id, status: "stopped", activeTurnId: null },
+        ],
+      );
+      for (const binding of bindings.values()) {
+        assert.equal(binding.status, "stopped");
+        assert.deepInclude(binding.runtimePayload as object, {
+          activeTurnId: null,
+          continueAfterServerUpdate: null,
+        });
+      }
+    }),
 );
