@@ -1,6 +1,7 @@
 import { useNavigation } from "@react-navigation/native";
 import { SettingsRow } from "./components/SettingsRow";
 import { WorkerCommunicationSettings } from "./components/WorkerCommunicationSettings";
+import { IdleCompactionSettings } from "./components/IdleCompactionSettings";
 import { SessionRenewalSettings } from "./components/SessionRenewalSettings";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { SymbolView } from "../../components/AppSymbol";
@@ -210,6 +211,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  // Older servers drop the key, so editing them would silently do nothing.
+  const supportsIdleCompaction = targets.every(
+    (target) => target.environment.serverConfig.environment.capabilities.idleCompaction === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -373,6 +378,23 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                         (target) =>
                           target.settings.workerCommunicationWindowMinutes !==
                           reference.settings.workerCommunicationWindowMinutes,
+                      )}
+                      onChange={write}
+                    />
+                  )}
+                  {!projectSelected && (
+                    <IdleCompactionSettings
+                      key={`idle:${targets.map((target) => target.environment.environmentId).join(",")}`}
+                      value={reference.settings.idleCompaction}
+                      disabled={disabledFor("idleCompaction") || !supportsIdleCompaction}
+                      mixed={displayTargets.some(
+                        (target) =>
+                          target.settings.idleCompaction.enabled !==
+                            reference.settings.idleCompaction.enabled ||
+                          target.settings.idleCompaction.contextTokens !==
+                            reference.settings.idleCompaction.contextTokens ||
+                          target.settings.idleCompaction.leadMinutes !==
+                            reference.settings.idleCompaction.leadMinutes,
                       )}
                       onChange={write}
                     />

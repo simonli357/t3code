@@ -1,5 +1,6 @@
 import { GlobalInstructionsSettings } from "./GlobalInstructionsSettings";
 import { WorkerCommunicationSettings } from "./WorkerCommunicationSettings";
+import { IdleCompactionSettings } from "./IdleCompactionSettings";
 import { SessionRenewalSettings } from "./SessionRenewalSettings";
 import { SettingsGroup } from "./SettingsGroup";
 import { Spinner } from "~/components/ui/spinner";
@@ -2244,6 +2245,7 @@ export function GeneralSettingsPanel() {
       <GlobalInstructionsSettings key={scope.environmentIds.join(",")} />
       <WorkerCommunicationSettings />
       <SessionRenewalSettings key={`renewal:${scope.environmentIds.join(",")}`} />
+      <IdleCompactionSettings />
       <SettingsSection id="organization" title="Organization">
         <SettingsRow
           {...searchableSetting("project-grouping")}
