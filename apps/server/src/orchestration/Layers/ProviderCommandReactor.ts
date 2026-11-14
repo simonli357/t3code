@@ -2058,7 +2058,48 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  const processIdleCompaction = Effect.fn("processIdleCompaction")(function* (threadId: ThreadId) {
+    const thread = yield* resolveThreadShell(threadId);
+    if (
+      !thread?.session ||
+      thread.session.status === "starting" ||
+      thread.session.status === "running" ||
+      thread.session.activeTurnId !== null ||
+      compactingThreadIds.has(threadId) ||
+      turnsAfterCompaction.has(threadId) ||
+      stoppingThreadIds.has(threadId)
+    ) {
+      return;
+    }
+    compactingThreadIds.add(threadId);
+    yield* providerService.compactThread(threadId, undefined, undefined, { idle: true }).pipe(
+      // A missed idle compaction only costs a cold read later; it never fails the thread.
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logWarning("idle compaction failed", { threadId, cause: Cause.pretty(cause) }),
+      ),
+      Effect.ensuring(Effect.sync(() => void compactingThreadIds.delete(threadId))),
+      Effect.andThen(resumeTurnsAfterCompaction(threadId)),
+      Effect.forkScoped,
+    );
+  });
+
+  type ReactorWork = ProviderIntentEvent | { readonly type: "idle-compaction"; threadId: ThreadId };
+  const worker = yield* makeDrainableWorker((work: ReactorWork) =>
+    work.type === "idle-compaction"
+      ? processIdleCompaction(work.threadId).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.interrupt
+              : Effect.logWarning("idle compaction could not start", {
+                  threadId: work.threadId,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+        )
+      : processDomainEventSafely(work),
+  );
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const pendingTitles = yield* findPendingThreadTitles().pipe(
@@ -2127,6 +2168,7 @@ const make = Effect.gen(function* () {
 
   return {
     start,
+    compactIdleThread: (threadId) => worker.enqueue({ type: "idle-compaction", threadId }),
     drain: Effect.gen(function* () {
       yield* worker.drain;
       yield* threadTitleRegenerationWorker.drain;

@@ -162,9 +162,13 @@ export class ProviderAllocation extends Context.Service<
       current: ModelSelection,
       options?: { readonly rejected?: boolean; readonly switchAccount?: boolean },
     ) => Effect.Effect<UsageRoute, AllocationError>;
-    /** True when retained readings or a hard cap already show the model drained there. No probing. */
+    /**
+     * True when retained readings or a hard cap already show the model drained there. No
+     * probing. The cap is the one that stops `kind`: workers unless a session is named.
+     */
     readonly limited: (
       selection: Pick<ModelSelection, "instanceId" | "model">,
+      kind?: AllocationRequest["kind"],
     ) => Effect.Effect<boolean, AllocationError>;
     /** Reads the coordinator's policies, after applying `edit` when it changes anything. */
     readonly editPolicy: (
@@ -442,6 +446,7 @@ const make = Effect.gen(function* () {
   });
   const limited = Effect.fn("ProviderAllocation.limited")(function* (
     selection: Pick<ModelSelection, "instanceId" | "model">,
+    kind: AllocationRequest["kind"] = "worker",
   ) {
     const at = yield* now;
     const provider = (yield* providers.getProviders).find(
@@ -471,7 +476,7 @@ const make = Effect.gen(function* () {
       accountRoom({
         account,
         model: selection.model,
-        cap: accountCap(policy, account, "worker"),
+        cap: accountCap(policy, account, kind),
         at,
       }).drainedUntil !== undefined
     );

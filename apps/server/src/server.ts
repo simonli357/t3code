@@ -99,6 +99,7 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
+import * as IdleCompactionReactor from "./orchestration/IdleCompactionReactor.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as SettledThreadPurge from "./orchestration/SettledThreadPurge.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
@@ -279,6 +280,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(SessionMoves.liveLayer),
   Layer.provideMerge(WorkerControls.liveLayer),
+  Layer.provideMerge(IdleCompactionReactor.liveLayer),
   Layer.provideMerge(UsageCapEnforcement.liveLayer),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
   Layer.provideMerge(ProviderCommandReactorLive),

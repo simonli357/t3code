@@ -24,3 +24,17 @@ const CLAUDE_RESUME_COMPACTION_QUESTION_PATTERN =
 export function isClaudeResumeCompactionQuestion(question: string): boolean {
   return CLAUDE_RESUME_COMPACTION_QUESTION_PATTERN.test(question);
 }
+
+/**
+ * `detail.source` of a compaction T3 Code ran on an idle thread shortly before
+ * its prompt cache expired. The server words the thread's compaction line from it.
+ */
+export const IDLE_COMPACTION_SOURCE = "idle-compaction";
+
+export function isIdleCompactionDetail(detail: unknown): boolean {
+  return (
+    typeof detail === "object" &&
+    detail !== null &&
+    (detail as { readonly source?: unknown }).source === IDLE_COMPACTION_SOURCE
+  );
+}

@@ -623,6 +623,7 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      reactor,
       snapshotQuery,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readPendingTurnStarts: () =>
@@ -1678,6 +1679,82 @@ describe("ProviderCommandReactor", () => {
           afterRestore?.messages.filter((message) => message.text === "second queued"),
         ).toHaveLength(1);
       }),
+  );
+
+  effectIt.effect("runs an idle compaction as no turn and holds turns that arrive meanwhile", () =>
+    Effect.gen(function* () {
+      const releaseCompaction = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({ compactThreadEffect: () => Deferred.await(releaseCompaction) }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+      const setSession = (status: "ready" | "running", suffix: string) =>
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-session-${suffix}`),
+          threadId,
+          session: {
+            threadId,
+            status,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: status === "running" ? asTurnId("turn-running") : null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+
+      // A running turn is never compacted.
+      yield* setSession("running", "running");
+      yield* harness.reactor.compactIdleThread(threadId);
+      yield* harness.reactor.drain;
+      expect(harness.compactThread).not.toHaveBeenCalled();
+
+      yield* setSession("ready", "ready");
+      yield* harness.reactor.compactIdleThread(threadId);
+      yield* harness.reactor.drain;
+      expect(harness.compactThread).toHaveBeenCalledTimes(1);
+      expect(harness.compactThread.mock.calls[0]).toEqual([
+        threadId,
+        undefined,
+        undefined,
+        { idle: true },
+      ]);
+      // A second request while it runs does not start another.
+      yield* harness.reactor.compactIdleThread(threadId);
+      yield* harness.reactor.drain;
+      expect(harness.compactThread).toHaveBeenCalledTimes(1);
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-during-idle-compaction"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-message-during-idle-compaction"),
+          role: "user",
+          text: "back again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+      yield* harness.reactor.drain;
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const during = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      // Orchestration never saw a compaction turn: no message, no running session.
+      expect(during?.messages.map((message) => message.text)).toEqual(["back again"]);
+      expect(during?.session?.status).toBe("ready");
+
+      yield* Deferred.succeed(releaseCompaction, undefined);
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      expect(harness.sendTurn.mock.calls[0]?.[0].input).toContain("back again");
+    }),
   );
 
   effectIt.effect("does not overwrite concurrent session state after compaction failure", () =>

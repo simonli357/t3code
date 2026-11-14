@@ -55,10 +55,16 @@ export interface ProviderServiceShape {
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
+  /**
+   * Compact the thread's provider context. An `idle` compaction is not a turn: until it ends,
+   * only its compacted marker, context size and usage limits are published, without a turn
+   * id, and a session it had to resume is stopped again afterwards.
+   */
   readonly compactThread: (
     threadId: ThreadId,
     modelSelection?: ProviderSendTurnInput["modelSelection"],
     requestId?: MessageId,
+    options?: { readonly idle?: boolean },
   ) => Effect.Effect<void, ProviderServiceError>;
 
   /**

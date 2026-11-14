@@ -279,6 +279,8 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactThreshold: Schema.optional(PositiveInt),
+  /** When the prompt cache of the session's latest request expires: its start plus its cache TTL. */
+  promptCacheExpiresAt: Schema.optional(Schema.String),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

@@ -35,6 +35,7 @@ import {
   serializeAssistantCitation,
 } from "@t3tools/shared/assistantCitations";
 import { createModelSelection } from "@t3tools/shared/model";
+import { IDLE_COMPACTION_SOURCE } from "@t3tools/shared/claudeCompaction";
 import { it, assert, describe, vi } from "@effect/vitest";
 import { afterAll } from "vite-plus/test";
 
@@ -1222,6 +1223,75 @@ for (const [enabled, completed] of [
   );
 }
 
+it.effect("does not continue an idle compaction after a shutdown", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const persistence = yield* Layer.build(
+      ProviderSessionDirectoryLive.pipe(
+        Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+      ),
+    );
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory.pipe(
+      Effect.provide(persistence),
+    );
+    const threadId = asThreadId("shutdown-idle-compaction");
+    const turnId = asTurnId("shutdown-idle-compaction-turn");
+    const scope = yield* Scope.make();
+    const services = yield* Layer.build(
+      makeProviderServiceLive().pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(Layer.succeed(ProviderSessionDirectory.ProviderSessionDirectory, directory)),
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistry,
+            makeStaticInstanceRegistry([[codexInstanceId, codex.adapter]]),
+          ),
+        ),
+        Layer.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true })),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      ),
+    ).pipe(Scope.provide(scope));
+    const provider = yield* ProviderService.ProviderService.pipe(Effect.provide(services));
+    const session = yield* provider.startSession(threadId, {
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      threadId,
+      runtimeMode: "full-access",
+    });
+    codex.listSessions.mockReturnValue(
+      Effect.succeed([{ ...session, status: "running", activeTurnId: turnId }]),
+    );
+    codex.compactThread.mockImplementationOnce(() => Effect.never);
+    const compacting = yield* provider
+      .compactThread(threadId, undefined, undefined, { idle: true })
+      .pipe(Effect.forkChild({ startImmediately: true }));
+    yield* Effect.yieldNow;
+    const markers: unknown[] = [];
+    codex.stopAll.mockImplementation(() =>
+      Effect.gen(function* () {
+        const binding = yield* directory.getBinding(threadId);
+        assert(Option.isSome(binding));
+        markers.push(binding.value.runtimePayload);
+      }).pipe(Effect.orDie),
+    );
+    yield* Scope.close(scope, Exit.void);
+    yield* Fiber.interrupt(compacting);
+    assert.equal(codex.stopAll.mock.calls.length, 1);
+    assert.equal(
+      (markers[0] as { readonly continueAfterServerUpdate?: unknown }).continueAfterServerUpdate ??
+        null,
+      null,
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();
@@ -1784,6 +1854,140 @@ declaredCompaction.layer("ProviderService declared compaction", (it) => {
         modelSelection,
       );
       yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("publishes only an idle compaction's outcome, outside any turn", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("idle-compaction-live");
+      yield* provider.startSession(threadId, {
+        providerInstanceId: slashCompactionInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const published = yield* Ref.make<Array<ProviderRuntimeEvent>>([]);
+      const observer = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Ref.update(published, (events) => [...events, event])),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      const stopsBefore = customSlashCompaction.stopSession.mock.calls.length;
+      const compactFiber = yield* provider
+        .compactThread(threadId, undefined, undefined, { idle: true })
+        .pipe(Effect.forkChild);
+      yield* advanceTestClock(50);
+      const turn = {
+        provider: customCompactionDriver,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        turnId: asTurnId(`turn-${threadId}`),
+      } as const;
+      customSlashCompaction.emit({
+        ...turn,
+        type: "turn.started",
+        eventId: asEventId("idle-turn-started"),
+        payload: {},
+      });
+      customSlashCompaction.emit({
+        ...turn,
+        type: "thread.token-usage.updated",
+        eventId: asEventId("idle-usage"),
+        payload: { usage: { usedTokens: 18_000 } },
+      });
+      customSlashCompaction.emit({
+        ...turn,
+        type: "thread.state.changed",
+        eventId: asEventId("idle-compacted"),
+        payload: { state: "compacted", beforeTokens: 335_000, afterTokens: 18_000 },
+      });
+      customSlashCompaction.emit({
+        ...turn,
+        type: "turn.completed",
+        eventId: asEventId("idle-turn-completed"),
+        payload: { state: "completed" },
+      });
+      yield* Fiber.join(compactFiber);
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(observer);
+
+      const events = yield* Ref.get(published);
+      assert.deepEqual(
+        events.map((event) => [event.type, event.turnId]),
+        [
+          ["thread.token-usage.updated", undefined],
+          ["thread.state.changed", undefined],
+        ],
+      );
+      const compacted = events[1];
+      assert(compacted?.type === "thread.state.changed");
+      assert.deepEqual(compacted.payload.detail, { source: IDLE_COMPACTION_SOURCE });
+      // The summary no longer holds the global instructions, so the next turn resends them.
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(
+        (binding.runtimePayload as { globalInstructionsContextReset?: unknown })
+          .globalInstructionsContextReset,
+        "idle-compacted",
+      );
+      // It found the session running, so it leaves it running.
+      assert.equal(customSlashCompaction.stopSession.mock.calls.length, stopsBefore);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("resumes a stopped session for an idle compaction and stops it again", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("idle-compaction-resumed");
+      yield* provider.startSession(threadId, {
+        providerInstanceId: slashCompactionInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.stopSession({ threadId });
+      const startsBefore = customSlashCompaction.startSession.mock.calls.length;
+      // Resuming touches the real filesystem, so wait for the compaction turn itself.
+      const sent = yield* Deferred.make<void>();
+      const sendTurn = customSlashCompaction.sendTurn.getMockImplementation()!;
+      customSlashCompaction.sendTurn.mockImplementationOnce((input) =>
+        sendTurn(input).pipe(Effect.tap(() => Deferred.succeed(sent, undefined))),
+      );
+      const compactFiber = yield* provider
+        .compactThread(threadId, undefined, undefined, { idle: true })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sent);
+      customSlashCompaction.emit({
+        type: "turn.completed",
+        eventId: asEventId("idle-resumed-completed"),
+        provider: customCompactionDriver,
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        turnId: asTurnId(`turn-${threadId}`),
+        payload: { state: "completed" },
+      });
+      yield* Fiber.join(compactFiber);
+
+      assert.equal(customSlashCompaction.startSession.mock.calls.length, startsBefore + 1);
+      assert.deepEqual(customSlashCompaction.startSession.mock.calls.at(-1)?.[0].resumeCursor, {
+        opaque: `resume-${threadId}`,
+      });
+      assert.equal(yield* customSlashCompaction.adapter.hasSession(threadId), false);
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(binding.status, "stopped");
+    }),
+  );
+
+  it.effect("refuses an idle compaction with no session to resume", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const sendsBefore = customSlashCompaction.sendTurn.mock.calls.length;
+      const failure = yield* provider
+        .compactThread(asThreadId("idle-compaction-unknown"), undefined, undefined, { idle: true })
+        .pipe(Effect.flip);
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.equal(customSlashCompaction.sendTurn.mock.calls.length, sendsBefore);
     }),
   );
 

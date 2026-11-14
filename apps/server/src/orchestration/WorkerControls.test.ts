@@ -27,6 +27,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import { IDLE_COMPACTION_SOURCE } from "@t3tools/shared/claudeCompaction";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -3522,6 +3523,52 @@ it.layer(testLayer)("persistent workers", (it) => {
       expect(yield* texts(owner, "")).toHaveLength(0);
       expect(yield* anchor).toEqual(before);
       expect((yield* service.list(owner))[0]!.latestRequest?.requestId).toBe(`spawn:${worker}`);
+    }),
+  );
+  it.effect("does not take an idle compaction for a worker turn", () =>
+    Effect.gen(function* () {
+      const service = yield* Workers.WorkerControls;
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const { owner, worker, input } = yield* seed("idle-compaction");
+      yield* service.spawn(owner, input);
+      // The reminder went out; the next turn that ends without a report would reach the master.
+      yield* endUnreported(worker, "idle-compaction-turn", "Branch pushed.");
+      yield* endUnreported(worker, "idle-compaction-answer", "Still checking.");
+      const jobs = sql`SELECT id, state FROM custom_worker_jobs ORDER BY rowid`;
+      const before = yield* jobs;
+      const ownerMessages = yield* texts(owner, "");
+      const latest = (yield* service.list(owner))[0]!.latestRequest;
+      // An idle compaction reaches orchestration only as its outcome, outside any turn.
+      for (const [kind, payload] of [
+        ["context-compaction", { state: "compacted", detail: { source: IDLE_COMPACTION_SOURCE } }],
+        ["context-window.updated", { usedTokens: 18_000 }],
+      ] as const) {
+        yield* engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`idle-compaction-${kind}`),
+          threadId: worker,
+          activity: {
+            id: EventId.make(`idle-compaction-${kind}`),
+            tone: "info",
+            kind,
+            summary: kind,
+            payload,
+            turnId: null,
+            createdAt: "2026-01-01T00:58:30.000Z",
+          },
+          createdAt: "2026-01-01T00:58:30.000Z",
+        });
+      }
+      yield* service.drain();
+      yield* service.drain();
+      expect(yield* jobs).toEqual(before);
+      expect(yield* texts(owner, "")).toEqual(ownerMessages);
+      expect(yield* texts(worker, "[T3 reminder]")).toHaveLength(1);
+      expect((yield* service.list(owner))[0]!.latestRequest).toEqual(latest);
+      // A real turn in the same state does reach the master.
+      yield* endUnreported(worker, "idle-compaction-later", "Nothing new.");
+      expect(yield* texts(owner, "completed without a report")).toHaveLength(1);
     }),
   );
   it.effect("sends no notice when the worker reports after the reminder", () =>

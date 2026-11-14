@@ -6,6 +6,7 @@
  *
  * @module ProviderCommandReactor
  */
+import type { ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -25,6 +26,13 @@ export interface ProviderCommandReactorShape {
    * processing.
    */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+
+  /**
+   * Queue an idle compaction of the thread's provider context. It runs as no turn at all, in
+   * order with the thread's turn starts; turns requested meanwhile wait for it as they do for
+   * `/compact`. Skipped while the thread's session is starting or running or already compacting.
+   */
+  readonly compactIdleThread: (threadId: ThreadId) => Effect.Effect<void>;
 
   /**
    * Resolves when the internal processing queue is empty and idle.

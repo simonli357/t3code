@@ -275,6 +275,8 @@ interface ClaudeTurnState {
    * steered instead (the queued message continues the same turn).
    */
   readonly synthetic?: boolean;
+  /** The turn's prompt is `/compact`, which already answers the resume compaction question. */
+  readonly compaction?: boolean;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -463,6 +465,12 @@ interface ClaudeSessionContext {
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
+  /**
+   * The latest main-thread request: when it started, which starts its prompt cache lifetime,
+   * and the TTL of the cache it wrote. A fully cached request refreshes the cache it read, so
+   * it keeps the last TTL.
+   */
+  promptCache: { requestStartedAt: DateTime.Utc; ttlMs: number | undefined } | undefined;
   /** The query's running cost after the previous turn; its results report a cumulative total. */
   lastTotalCostUsd: number | undefined;
   lastAssistantUuid: string | undefined;
@@ -731,6 +739,20 @@ function claudeUsageInputTokens(usage: Record<string, unknown>): number {
     (finiteNonNegativeInteger(usage.cache_creation_input_tokens) ?? 0) +
     (finiteNonNegativeInteger(usage.cache_read_input_tokens) ?? 0)
   );
+}
+
+/** The lifetime of the prompt cache a request wrote, or undefined when it wrote none. */
+function claudePromptCacheTtlMs(usage: unknown): number | undefined {
+  const creation =
+    usage && typeof usage === "object"
+      ? (usage as { readonly cache_creation?: unknown }).cache_creation
+      : undefined;
+  if (!creation || typeof creation !== "object") return undefined;
+  const { ephemeral_1h_input_tokens: hour, ephemeral_5m_input_tokens: minutes } =
+    creation as Record<string, unknown>;
+  if ((finiteNonNegativeInteger(hour) ?? 0) > 0) return 60 * 60_000;
+  if ((finiteNonNegativeInteger(minutes) ?? 0) > 0) return 5 * 60_000;
+  return undefined;
 }
 
 function claudeUsageOutputTokens(usage: Record<string, unknown>): number {
@@ -2576,16 +2598,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const emitThreadTokenUsage = Effect.fn("emitThreadTokenUsage")(function* (
     context: ClaudeSessionContext,
-    usage: ThreadTokenUsageSnapshot | undefined,
+    snapshot: ThreadTokenUsageSnapshot | undefined,
     options?: {
       readonly rawMethod?: string;
       readonly rawPayload?: unknown;
     },
   ) {
-    if (!usage) {
+    if (!snapshot) {
       return;
     }
 
+    const cache = context.promptCache;
+    const usage =
+      cache?.ttlMs === undefined
+        ? snapshot
+        : {
+            ...snapshot,
+            promptCacheExpiresAt: DateTime.formatIso(
+              DateTime.add(cache.requestStartedAt, { milliseconds: cache.ttlMs }),
+            ),
+          };
     context.lastKnownTokenUsage = usage;
     context.lastKnownTotalProcessedTokens =
       usage.totalProcessedTokens ?? context.lastKnownTotalProcessedTokens;
@@ -2941,8 +2973,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    if (event.type === "message_start" && context.turnState && !streamParentToolUseId) {
-      context.turnState.emittedThinkingText = false;
+    if (event.type === "message_start" && !streamParentToolUseId) {
+      // The prompt cache lifetime runs from the request's start, not from its response's end.
+      context.promptCache = {
+        requestStartedAt: yield* DateTime.now,
+        ttlMs: claudePromptCacheTtlMs(event.message.usage) ?? context.promptCache?.ttlMs,
+      };
+      if (context.turnState) context.turnState.emittedThinkingText = false;
     }
 
     if (event.type === "message_delta") {
@@ -4759,6 +4796,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (!context) {
           return { behavior: "cancelled" as const };
         }
+        // Nobody could answer while an idle compaction runs, and compacting first would
+        // compact twice.
+        if (context.turnState?.compaction === true) {
+          return { behavior: "completed" as const, result: "continue" };
+        }
 
         // The question copy lives in @t3tools/shared/claudeCompaction because
         // the web client recognizes this exact text (and the "never" answer)
@@ -5286,6 +5328,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
+        promptCache: undefined,
         lastTotalCostUsd: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
@@ -5439,6 +5482,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const turnState: ClaudeTurnState = {
         turnId,
         startedAt: yield* nowIso,
+        // Global instructions may follow the command as its summary instructions.
+        ...(/^\/compact(?:\s|$)/iu.test(input.input?.trimStart() ?? "")
+          ? { compaction: true }
+          : {}),
         assistantTextBlocks: new Map(),
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
