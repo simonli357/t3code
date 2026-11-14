@@ -729,8 +729,8 @@ const make = Effect.gen(function* () {
         modelChanged: false,
       } as const;
     // Another model continues from the same conversation with other abilities: only when the
-    // reset is far, and then the master is told. It moves at most two rungs and never onto Fable
-    // when Fable workers are off.
+    // reset is far, and then the master is told. It moves at most two rungs, never onto Fable
+    // when Fable workers are off, and only between Fable rungs in Fable mode.
     if (!long) return wait;
     // A reading that shows the drain is scoped to the model, so this account may offer another.
     const choice = chooseProfile({
@@ -1338,6 +1338,7 @@ const make = Effect.gen(function* () {
       changes.setGoals,
       changes.clearGoals,
       changes.fableWorkers,
+      changes.fableOnly,
     ];
     const modelEdit = [changes.ladder, changes.fallback, changes.setCells];
     const edits = (values: readonly unknown[]) => values.some((value) => value !== undefined);

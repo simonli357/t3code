@@ -24,6 +24,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { decideAllocation } from "./decision.ts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { chooseProfile, modelPolicyWarnings } from "./modelDecision.ts";
+import { withFableSwitches } from "./policyEdit.ts";
 
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const policyJson = Schema.decodeUnknownSync(Schema.fromJsonString(AllocationPolicy));
@@ -652,6 +653,7 @@ const make = Effect.gen(function* () {
                 | "closeMarginPoints"
                 | "longWaitHours"
                 | "fableWorkers"
+                | "fableOnly"
                 | "accountGoals",
             ) =>
               kept[name] === undefined && current[name] !== undefined
@@ -667,17 +669,18 @@ const make = Effect.gen(function* () {
                   value,
               ]),
             );
-            const next: AllocationPolicy = {
+            const next = withFableSwitches(current, {
               ...kept,
               ...carried("accountCaps"),
               ...carried("accountOrder"),
               ...carried("closeMarginPoints"),
               ...carried("longWaitHours"),
               ...carried("fableWorkers"),
+              ...carried("fableOnly"),
               ...carried("accountGoals"),
               ...legacy,
               version: current.version + 1,
-            };
+            });
             if (new Set(next.accountOrder).size !== (next.accountOrder ?? []).length)
               return yield* new AllocationError({
                 code: "invalid",

@@ -80,6 +80,11 @@ normally. Only a hard cap or a real limit stops work.
 pin that names Fable starts from the nearest ladder model without it, and a running worker never
 moves onto it. The result says so.
 
+**Fable mode** keeps every worker on Fable low, medium or high: a table entry starts from the
+first of those at or above it, and when it has no room only another of them stands in, never
+another model or the fallback. A model you pin for one worker is kept, with a note. Turning Fable
+mode on turns Fable workers on; turning Fable workers off turns Fable mode off.
+
 A running worker that hits a limit moves to another account with the same model that lasts the
 rest of its job. If there is none, it waits when the reset is within the **long wait** time
 (3 hours unless changed); otherwise it continues on the nearest model that fits, at most two

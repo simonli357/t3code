@@ -176,6 +176,8 @@ describe("allocation policy", () => {
     expect(decoded.accountOrder).toBeUndefined();
     expect(decoded.closeMarginPoints).toBeUndefined();
     expect(decoded.longWaitHours).toBeUndefined();
+    expect(decoded.fableOnly).toBeUndefined();
+    expect(decodePolicy(wire({ ...before, fableOnly: true })).fableOnly).toBe(true);
     // Even values a later build would never write do not make the policy unreadable.
     expect(() =>
       decodePolicy({ ...before, claude: "gone", accountRules: 3, overrides: null }),
@@ -256,6 +258,8 @@ describe("allocation policy", () => {
         },
       ],
       clearCaps: ["XL"],
+      fableWorkers: true,
+      fableOnly: true,
       ladder: [{ model: "a-model-no-code-lists", effort: "ultra" }],
       fallback: null,
       setCells: [
@@ -278,6 +282,7 @@ describe("allocation policy", () => {
       { setCells: [{ table: "cursor", difficulty: 0, stakes: 0, model: "m", effort: "high" }] },
       { fallback: { model: "m", effort: "max" } },
       { closeMarginPoints: 51 },
+      { fableOnly: "yes" },
     ])
       expect(() => decode(broken), JSON.stringify(broken)).toThrow();
   });

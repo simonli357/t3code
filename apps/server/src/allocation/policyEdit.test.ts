@@ -14,7 +14,12 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { decideAllocation } from "./decision.ts";
-import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
+import {
+  allocationPolicyView,
+  editAllocationPolicy,
+  editModelPolicy,
+  withFableSwitches,
+} from "./policyEdit.ts";
 
 const at = "2026-11-09T12:00:00.000Z";
 const account = (
@@ -177,6 +182,7 @@ it("reads both policies with accounts by label", () => {
       { account: "XL", percentPerDay: 17, from: "family" },
     ],
     fableWorkers: true,
+    fableOnly: false,
     ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
     fallback: "deepseek-flash / max when the wanted rung is below claude-sonnet-5-5 / xhigh",
     accounts: [
@@ -220,6 +226,38 @@ it("reads both policies with accounts by label", () => {
   expect(custom.table![0]![0]).toBe("gpt-6.1-sol / medium");
   expect(custom.table![10]![10]).toBe("gpt-6-astra / xhigh");
 });
+
+it.effect("keeps the two Fable switches from contradicting each other", () =>
+  Effect.gen(function* () {
+    const switches = (policy: AllocationPolicy) => ({
+      fableWorkers: policy.fableWorkers,
+      fableOnly: policy.fableOnly,
+    });
+    const save = (stored: Partial<AllocationPolicy>, change: AllocationPolicyEdit) =>
+      Effect.map(edit(change, stored), (next) =>
+        switches(withFableSwitches(snapshot(stored).policy, next)),
+      );
+    // Turning Fable mode on turns Fable workers on.
+    expect(yield* save({ fableWorkers: false }, { fableOnly: true })).toEqual({
+      fableWorkers: true,
+      fableOnly: true,
+    });
+    // Turning Fable workers off turns Fable mode off.
+    expect(yield* save({ fableOnly: true }, { fableWorkers: false })).toEqual({
+      fableWorkers: false,
+      fableOnly: false,
+    });
+    // Anything that does not contradict is stored as sent.
+    expect(yield* save({ fableOnly: true }, { fableOnly: false })).toEqual({
+      fableWorkers: undefined,
+      fableOnly: false,
+    });
+    expect(yield* save({}, { fableWorkers: false })).toEqual({
+      fableWorkers: false,
+      fableOnly: undefined,
+    });
+  }),
+);
 
 it.effect("lists an account with no known login once and prefers it on every computer", () =>
   Effect.gen(function* () {

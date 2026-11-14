@@ -206,7 +206,9 @@ const fits = (decision: AllocationDecision) =>
  * away; else the fallback model below its threshold; else the wanted model on the account
  * that lasts longest. When every candidate is out, the same choice as of a reset within the
  * wait, queued for it; refused only when nothing comes back within the wait. With Fable
- * workers off, no worker gets a Fable model. Codex and a pinned account never change model.
+ * workers off, no worker gets a Fable model. In Fable mode a worker's table entry starts from
+ * the first Fable rung at or above it and only Fable rungs stand in; a pinned model is kept.
+ * Codex and a pinned account never change model.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -226,7 +228,14 @@ export function chooseProfile(input: {
   const ladder = modelLadder(modelPolicy);
   const workers = request.kind !== "session";
   const fableOff = workers && policy.fableWorkers === false;
-  const allowed = (r: RoutingProfile) => !(fableOff && isFable(r.model));
+  const fableOnly = workers && policy.fableOnly === true;
+  const fableRungs = ladder.filter((r) => isFable(r.model));
+  const allowed = (r: RoutingProfile) => (isFable(r.model) ? !fableOff : !fableOnly);
+  /** Fable mode's rung for a profile: the first Fable rung at or above it, else the top one. */
+  const fableRung = (profile: RoutingProfile) => {
+    const position = ladderPosition(ladder, profile) ?? -1;
+    return ladder.find((r, i) => isFable(r.model) && i >= position) ?? fableRungs.at(-1);
+  };
   const notes: string[] = [];
   const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
   let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
@@ -240,8 +249,28 @@ export function chooseProfile(input: {
       .map((c) => c.line ?? c.instanceId);
   for (const asked of resolved.candidates) {
     let wanted = asked;
-    if (fableOff && isFable(asked.request.model)) {
-      const rung = nearestRungs(ladder, requestProfile(asked.request)).find(allowed);
+    const profile = requestProfile(asked.request);
+    if (fableOnly && request.override) {
+      if (!fableRungs.some((r) => r.model === profile.model && r.effort === profile.effort))
+        notes.push(
+          `Fable mode is on, but ${label(asked.request)} is pinned for this worker and runs as pinned.`,
+        );
+    } else if (fableOnly) {
+      const rung = asked.request.driver === "claudeAgent" ? fableRung(profile) : undefined;
+      if (!rung) {
+        failures.push(
+          `${asked.request.driver}: Fable mode is on and ${asked.request.driver === "claudeAgent" ? "the ladder has no Fable rung" : "only Claude runs Fable"}.`,
+        );
+        continue;
+      }
+      if (rung.model !== profile.model || rung.effort !== profile.effort) {
+        notes.push(
+          `Fable mode: ${label(asked.request)} starts from ${rung.model} / ${rung.effort}, the first Fable rung at or above it.`,
+        );
+        wanted = { request: onRung(asked.request, rung), reason: `${asked.reason} Fable mode.` };
+      }
+    } else if (fableOff && isFable(asked.request.model)) {
+      const rung = nearestRungs(ladder, profile).find(allowed);
       if (!rung) {
         failures.push(
           `${asked.request.driver}: Fable workers are off and the ladder has no other rung.`,
@@ -309,7 +338,11 @@ export function chooseProfile(input: {
     }
     const claude = wanted.request.driver === "claudeAgent" && !request.explicitInstanceId;
     const rungs = claude
-      ? nearestRungs(ladder, requestProfile(wanted.request), MAX_RUNG_DISTANCE).filter(allowed)
+      ? nearestRungs(
+          fableOnly ? fableRungs : ladder,
+          requestProfile(wanted.request),
+          MAX_RUNG_DISTANCE,
+        ).filter(allowed)
       : [];
     const fallback = modelFallback(modelPolicy);
     const position = ladderPosition(ladder, requestProfile(wanted.request));
@@ -410,7 +443,7 @@ export function chooseProfile(input: {
       drainedUntil,
       reason: request.explicitInstanceId
         ? first.reasons[0]!
-        : `Drained: ${label(wanted.request)} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.`,
+        : `Drained: ${label(wanted.request)} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.${fableOnly ? " Fable mode is on: only Fable rungs may stand in." : ""}`,
       accounts: lines(first),
     };
   }

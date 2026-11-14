@@ -132,6 +132,8 @@ export const AllocationPolicy = Schema.Struct({
   ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
+  /** Fable mode. True: every worker runs on a Fable rung of the ladder unless its model is pinned. */
+  fableOnly: Schema.optional(Schema.Boolean),
   /**
    * Daily goals by `allocationPreferenceKey`: the percentage of the account's weekly (or
    * monthly) window to use per day. An account without one takes its family's stored
@@ -477,7 +479,7 @@ export const ModelRoutingDecision = Schema.Struct({
   accounts: Schema.optional(Schema.Array(Schema.String)),
   /** The start waits for a limit's reset and begins then. */
   startAt: Schema.optional(IsoDateTime),
-  /** What else shaped the choice: the Fable switch, a settings copy used without the coordinator. */
+  /** What else shaped the choice: the Fable switches, a settings copy used without the coordinator. */
   notes: Schema.optional(Schema.Array(Schema.String)),
 });
 export type ModelRoutingDecision = typeof ModelRoutingDecision.Type;
@@ -719,6 +721,7 @@ export const AllocationPolicyEdit = Schema.Struct({
   /** Back to the family's goal. */
   clearGoals: Schema.optional(Schema.Array(AccountRef)),
   fableWorkers: AllocationPolicy.fields.fableWorkers,
+  fableOnly: AllocationPolicy.fields.fableOnly,
   /** The whole Claude ladder, weakest first. */
   ladder: ModelRoutingPolicy.fields.ladder,
   /** Null turns the fallback off. */
@@ -759,6 +762,7 @@ export const AllocationPolicyView = Schema.Struct({
     ),
   ),
   fableWorkers: Schema.optional(Schema.Boolean),
+  fableOnly: Schema.optional(Schema.Boolean),
   /** The learned numbers, one line each, and when they were learned. */
   learned: Schema.optional(
     Schema.Struct({
