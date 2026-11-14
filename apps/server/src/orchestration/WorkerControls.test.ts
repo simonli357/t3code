@@ -52,6 +52,7 @@ import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDi
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as Workers from "./WorkerControls.ts";
+import { claimInstallation } from "../installationOwner.ts";
 import { makeCoordination } from "./SessionMoveCoordination.ts";
 import * as Computers from "../computers/Computers.ts";
 import * as Allocation from "../allocation/ProviderAllocation.ts";
@@ -6964,3 +6965,47 @@ it.effect(
       expect((yield* bw.readOwnership(b.worker)).ownerThreadId).toBe(a.owner);
     }).pipe(Effect.scoped),
 );
+
+for (const copied of [false, true]) {
+  it.layer(testLayer)(copied ? "a copied database" : "the database's own installation", (it) => {
+    it.effect(
+      copied
+        ? "settles queued assignments before they reach a provider"
+        : "dispatches queued assignments",
+      () =>
+        Effect.gen(function* () {
+          const service = yield* Workers.WorkerControls;
+          const sql = yield* SqlClient.SqlClient;
+          const engine = yield* OrchestrationEngineService;
+          const { owner, worker, input } = yield* seed("copied");
+          yield* service.spawn(owner, input);
+          yield* session(worker, "running", "copied-turn");
+          yield* reply(worker, "copied-turn", "Still working");
+          yield* session(worker, "ready", "copied-end");
+          // Queued by the original before the copy was taken.
+          yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at)
+            VALUES ('copied-follow-up', ${worker}, ${worker}, 'work', 'second task', ${timestamp})`;
+          const copiedAt = yield* engine.latestSequence;
+
+          if (copied) yield* claimInstallation({ adoptUnrecorded: false });
+          yield* service.drain();
+
+          const turnStarts = yield* engine.readEvents(copiedAt).pipe(
+            Stream.filter((event) => event.type === "thread.turn-start-requested"),
+            Stream.runCollect,
+          );
+          if (!copied) {
+            expect(turnStarts.length).toBeGreaterThan(0);
+            return;
+          }
+          expect(turnStarts).toHaveLength(0);
+          expect(
+            yield* sql`SELECT id, state, reported FROM custom_worker_jobs WHERE worker_id = ${worker} ORDER BY id`,
+          ).toEqual([
+            { id: "copied-follow-up", state: "cancelled", reported: 1 },
+            { id: `spawn:${worker}`, state: "cancelled", reported: 1 },
+          ]);
+        }),
+    );
+  });
+}

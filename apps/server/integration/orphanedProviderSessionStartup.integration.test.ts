@@ -27,6 +27,9 @@ import * as EnvironmentAuth from "../src/auth/EnvironmentAuth.ts";
 import * as ServiceLauncherClient from "../src/cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../src/config.ts";
 import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { claimInstallation } from "../src/installationOwner.ts";
 import * as Keybindings from "../src/keybindings.ts";
 import { OrchestrationLayerLive } from "../src/orchestration/runtimeLayer.ts";
 import * as OrchestrationEngine from "../src/orchestration/Services/OrchestrationEngine.ts";
@@ -143,6 +146,8 @@ it.effect(
       yield* Effect.gen(function* () {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
         const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        // The same installation ran this database before the restart.
+        yield* claimInstallation({ adoptUnrecorded: true });
 
         yield* engine.dispatch({
           type: "project.create",
@@ -471,6 +476,7 @@ it.effect.each(["opt-in desktop restart", "marked remote update"] as const)(
         assert.equal(after.session?.lastError, null);
         assert.deepStrictEqual(yield* Deferred.await(sent), {
           threadId,
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
           continuation: true,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         });
@@ -486,4 +492,179 @@ it.effect.each(["opt-in desktop restart", "marked remote update"] as const)(
         ),
       ),
     ),
+);
+
+it.effect.each([
+  { boot: "the installation that recorded it", recorded: true, copy: false, managed: false },
+  {
+    boot: "the installed service on an older build's",
+    recorded: false,
+    copy: false,
+    managed: true,
+  },
+  { boot: "the installed service on a copy of it", recorded: true, copy: true, managed: true },
+  { boot: "a dev server on an older build's", recorded: false, copy: false, managed: false },
+] as const)("$boot database with running and marked turns", ({ recorded, copy, managed }) =>
+  Effect.gen(function* () {
+    const resumes = !copy && (recorded || managed);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const config = yield* ServerConfig.ServerConfig;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const markedThreadId = ThreadId.make("thread-marked-before-copy");
+    const runningTurnId = TurnId.make("turn-running-when-copied");
+
+    yield* Effect.gen(function* () {
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      if (recorded) yield* claimInstallation({ adoptUnrecorded: true });
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("create-copied-project"),
+        projectId,
+        title: "Copied database",
+        workspaceRoot: "/tmp/startup-orphan-project",
+        defaultModelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+        createdAt,
+      });
+      for (const id of [threadId, markedThreadId]) {
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${id}`),
+          threadId: id,
+          projectId,
+          title: id,
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`running-${id}`),
+          threadId: id,
+          session: {
+            threadId: id,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId,
+            runtimeMode: "full-access",
+            activeTurnId: runningTurnId,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+        yield* directory.upsert({
+          threadId: id,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          status: "running",
+          resumeCursor,
+          runtimePayload: { activeTurnId: runningTurnId },
+        });
+      }
+      // One thread was marked by an update's shutdown; the other was left by a crash.
+      const directoryBinding = Option.getOrThrow(yield* directory.getBinding(markedThreadId));
+      yield* directory.upsert({
+        ...directoryBinding,
+        status: "stopped",
+        runtimePayload: { continueAfterServerUpdate: runningTurnId },
+      });
+    }).pipe(Effect.provide(makePersistedRuntimeLayer(config.dbPath)));
+
+    let dbPath = config.dbPath;
+    if (copy) {
+      const copyDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-copied-database-" });
+      dbPath = path.join(copyDir, "state.sqlite");
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql.unsafe(`VACUUM INTO '${dbPath.replaceAll("'", "''")}'`);
+      }).pipe(Effect.provide(makeSqlitePersistenceLive(config.dbPath)));
+    }
+
+    const sends: ProviderSendTurnInput[] = [];
+    const bothSent = yield* Deferred.make<void>();
+    const provider = Layer.mock(ProviderService.ProviderService)({
+      startSession: () => Effect.die("A provider session started"),
+      listSessions: () => Effect.succeed([]),
+      streamEvents: Stream.empty,
+      getCapabilities: () =>
+        Effect.succeed({ sessionModelSwitch: "in-session", promptlessTurnContinuation: true }),
+      sendTurn: (input) =>
+        Effect.sync(() => sends.push(input)).pipe(
+          Effect.tap(() =>
+            sends.length === 2 ? Deferred.succeed(bothSent, undefined) : Effect.void,
+          ),
+          Effect.as({ threadId: input.threadId, turnId: TurnId.make("continued-turn") }),
+        ),
+    });
+    const startupLayer = ServerRuntimeStartup.layer.pipe(
+      Layer.provideMerge(makePersistedRuntimeLayer(dbPath)),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          provider,
+          ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
+          Layer.succeed(ServiceLauncherClient.ServiceLauncherClient, {
+            managed,
+            requestUpdate: () => Effect.die("unused"),
+            prepareTrial: Effect.undefined,
+          }),
+        ),
+      ),
+      Layer.provideMerge(startupDependencies),
+      Layer.provideMerge(Layer.succeed(ServerConfig.ServerConfig, { ...config, dbPath })),
+    );
+
+    const result = yield* Effect.gen(function* () {
+      const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+      const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      yield* startup.markHttpListening;
+      yield* startup.awaitCommandReady;
+      if (resumes) yield* Deferred.await(bothSent);
+      return yield* Effect.forEach([threadId, markedThreadId], (id) =>
+        Effect.gen(function* () {
+          const thread = Option.getOrThrow(yield* query.getThreadDetailById(id));
+          const binding = Option.getOrThrow(yield* directory.getBinding(id));
+          return {
+            status: thread.session?.status,
+            lastError: thread.session?.lastError,
+            bindingStatus: binding.status,
+            bindingPayload: binding.runtimePayload,
+          };
+        }),
+      );
+    }).pipe(Effect.provide(startupLayer));
+
+    if (resumes) {
+      assert.deepStrictEqual(
+        sends.map((input) => input.threadId).toSorted(),
+        [markedThreadId, threadId].toSorted(),
+      );
+      return;
+    }
+    assert.deepStrictEqual(sends, []);
+    const stopped = {
+      status: "stopped",
+      lastError:
+        "Not resumed: this database was copied from another installation, where this thread was running.",
+      bindingStatus: "stopped",
+      bindingPayload: {
+        activeTurnId: null,
+        continueAfterServerUpdate: null,
+        continueAfterServerUpdatePrepared: null,
+      },
+    } as const;
+    assert.deepStrictEqual(result, [stopped, stopped]);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-copied-database-original-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
+  ),
 );

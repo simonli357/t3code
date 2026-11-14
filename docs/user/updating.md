@@ -18,6 +18,8 @@ different value, use **Apply to all** in Settings after it connects.
 T3 Code must start again on that machine;
 the setting does not enable automatic startup. Terminal commands may still be
 interrupted, and threads without saved provider resume state need a new message.
+Threads in T3 Code data that was copied or moved to another folder or computer
+are stopped rather than continued.
 If you previously enabled continuation for updates, enable this setting once
 to allow recovery without a connected client.
 
