@@ -31,6 +31,7 @@ import {
   type ComputerCapacity,
   type OrchestrationCommand,
   type UsageMeasurementsReport,
+  type UsageTurnMeasurement,
 } from "@t3tools/contracts";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as Store from "./AllocationStore.ts";
@@ -345,7 +346,9 @@ function fixture(
     capacity: ComputerCapacity;
     workPaths: Array<string | undefined>;
     refresh: (instanceId: string) => Effect.Effect<void>;
+    turns: Array<UsageTurnMeasurement & { readonly priced: number | null }>;
   } = {
+    turns: [],
     threads: [],
     peers: [],
     providers: [provider],
@@ -377,7 +380,7 @@ function fixture(
         Effect.succeed(Option.fromNullishOr(state.threads.find((t) => t.id === id))),
     }),
     Layer.succeed(UsageMeasurements, {
-      evidence: Effect.succeed({ turns: [], quotas: [] }),
+      evidence: Effect.sync(() => ({ turns: state.turns, quotas: [] })),
       prices: Effect.succeed(() => null),
       read: () => Effect.succeed(report),
     }),
@@ -1549,6 +1552,103 @@ it.effect(
       // An independently rejected weekly window must not be cleared by the scoped reset.
       yield* sql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES ('other-reject', 'worker', 'info', 'account.quota-state', '', ${encodeUnknown({ providerInstanceId: "chosen", quotaStates: [{ windowId: "seven_day", status: "rejected", resetsAt: "1970-01-08T00:30:00.000Z" }] })}, ${at})`;
       expectHistoricalWarning(yield* preview(), true);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "a restored model-scoped rejection clears only on a later accepted turn measured on that model",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const sql = yield* SqlClient.SqlClient;
+      const reset = "1970-01-08T00:30:00.000Z";
+      const now = "1970-01-01T01:00:00.000Z";
+      f.state.threads = [
+        { ...shell("ready"), session: { ...shell("ready").session!, status: "stopped" } },
+      ];
+      f.state.providers = [
+        {
+          ...provider,
+          driver: ProviderDriverKind.make("claudeAgent"),
+          usageLimits: claudeUsageResponseToLimits({
+            checkedAt: now,
+            response: {
+              rate_limits_available: true,
+              rate_limits: {
+                seven_day: { utilization: 40, resets_at: reset },
+                ...({
+                  model_scoped: [{ display_name: "Fable", utilization: 20, resets_at: reset }],
+                } as object),
+              },
+            },
+          }).limits,
+        },
+      ];
+      const write = (id: string, turn: string, kind: string, payload: unknown, createdAt: string) =>
+        sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
+          VALUES (${id}, 'worker', ${turn}, 'info', ${kind}, '', ${encodeUnknown(payload)}, ${createdAt})`;
+      // Claude rejected the Fable bucket at 100% of its use, then accepted a later turn.
+      yield* write(
+        "fable-rejected",
+        "rejected-turn",
+        "runtime.warning",
+        {
+          detail: {
+            status: "rejected",
+            rateLimitType: "seven_day_overage_included",
+            resetsAt: Date.parse(reset) / 1000,
+            isUsingOverage: false,
+            unifiedWindows: { seven_day_overage_included: { utilization: 1 } },
+          },
+        },
+        at,
+      );
+      yield* write(
+        "accepted",
+        "later-turn",
+        "account.quota-state",
+        {
+          providerInstanceId: "chosen",
+          quotaStates: [{ windowId: "seven_day", status: "allowed" }],
+        },
+        "1970-01-01T00:30:00.000Z",
+      );
+      yield* TestClock.adjust("1 hour");
+      const preview = () => allocation.execute({ _tag: "snapshot" });
+      const measured = (model: string) => ({
+        instanceId: "chosen",
+        accountKey: "chosen",
+        threadId: "worker",
+        turnId: "later-turn",
+        model,
+        effort: "high",
+        selectionSource: "provider" as const,
+        sessionCreatedAt: at,
+        observedAt: "1970-01-01T00:29:00.000Z",
+        startedAt: "1970-01-01T00:29:00.000Z",
+        endedAt: "1970-01-01T00:31:00.000Z",
+        state: "completed" as const,
+        lastObservedAt: "1970-01-01T00:31:00.000Z",
+        initialContextTokens: null,
+        latestContextTokens: null,
+        peakContextTokens: null,
+        contextCapacityTokens: null,
+        compactions: 0,
+        mixedModels: false,
+        toolWallMs: 0,
+        toolTimingComplete: true,
+        apiDurationMs: null,
+        tokens: null,
+        priced: null,
+      });
+      // Unmeasured, or measured on another model: the acceptance proves nothing about Fable.
+      expectHistoricalWarning(yield* preview(), true);
+      f.state.turns = [measured("claude-opus-5-5")];
+      expectHistoricalWarning(yield* preview(), true);
+      f.state.turns = [measured("claude-fable-5-2")];
+      expectHistoricalWarning(yield* preview(), false);
     }).pipe(Effect.provide(f.layer));
   },
 );

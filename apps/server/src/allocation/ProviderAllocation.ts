@@ -348,6 +348,15 @@ const make = Effect.gen(function* () {
            ORDER BY e.occurred_at DESC, e.sequence DESC LIMIT 1)) AS historical_session_json
           FROM projection_thread_activities a INDEXED BY idx_projection_thread_activities_quota_evidence WHERE ${sql.in("thread_id", [...byThread.keys()])} AND kind IN ('account.quota-state', 'runtime.error', 'runtime.warning') AND (kind = 'account.quota-state' OR kind = 'runtime.error' OR (kind = 'runtime.warning' AND json_extract(payload_json, '$.detail.status') = 'rejected')) ORDER BY created_at DESC, rowid DESC`
       : [];
+    // The model each measured turn ran: a later acceptance clears a model-scoped rejection
+    // only when its turn used a model that bucket covers.
+    const turnModels = new Map(
+      (rows.length ? (yield* measurements.evidence).turns : []).flatMap((t) =>
+        t.model && !t.mixedModels
+          ? [[`${t.instanceId}:${t.threadId}:${t.turnId}`, t.model] as const]
+          : [],
+      ),
+    );
     const quotaEvidence = readQuotaEvidenceRows(
       rows.flatMap((row) => {
         const thread = byThread.get(row.thread_id)!;
@@ -358,7 +367,11 @@ const make = Effect.gen(function* () {
           thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
           currentProviders,
           row.payload_json,
-        ).map((instanceId) => ({ ...row, instanceId }));
+        ).map((instanceId) => ({
+          ...row,
+          instanceId,
+          model: turnModels.get(`${instanceId}:${row.thread_id}:${row.turn_id}`),
+        }));
       }),
     );
     const current = allocationInventory({

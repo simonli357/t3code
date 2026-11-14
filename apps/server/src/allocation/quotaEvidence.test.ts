@@ -1,6 +1,14 @@
 import { expect, it } from "@effect/vitest";
+import {
+  defaultAllocationPolicy,
+  ServerProvider,
+  ThreadId,
+  type ServerProviderUsageLimits,
+} from "@t3tools/contracts";
 import { claudeUsageResponseToLimits } from "../provider/Layers/claudeUsageLimits.ts";
 import { applyUsageLimitsUpdate } from "../provider/providerUsageLimits.ts";
+import { decideAllocation } from "./decision.ts";
+import { allocationInventory } from "./inventory.ts";
 import {
   readQuotaEvidenceRows,
   unresolvedQuotaRejections,
@@ -360,4 +368,346 @@ it("recovers only the session scope stated by the native message on the exact fa
     },
   ])
     expect(readQuotaEvidenceRows([{ ...row, ...patch }])[0]?.windowId).toBe("unknown");
+});
+
+// Account XY on 2026-11-13/14, copied from its projection rows and usage reading: Claude
+// rejected the Fable bucket at 100%, restored it while keeping the weekly reset, and accepted
+// Fable turns again.
+const xyThread = "6c8de02d-495c-4023-b91c-926989ecc0e8";
+const xyTurn = "e3d43fee-fd82-4b2e-86d6-45787240c0a9";
+const xyRejection: QuotaEvidenceRow[] = [
+  {
+    instanceId: "claude_xiyang",
+    thread_id: xyThread,
+    turn_id: xyTurn,
+    ordinal: 1618746,
+    created_at: "2026-11-13T22:04:58.883Z",
+    kind: "account.quota-state",
+    payload_json: encode({
+      quotaStates: [
+        {
+          windowId: "seven_day_overage_included",
+          usageWindowId: "seven_day_fable",
+          status: "rejected",
+          resetsAt: "2026-11-15T23:00:00.000Z",
+        },
+      ],
+      providerInstanceId: "claude_xiyang",
+    }),
+  },
+  {
+    instanceId: "claude_xiyang",
+    thread_id: xyThread,
+    turn_id: xyTurn,
+    ordinal: 1618747,
+    created_at: "2026-11-13T22:04:58.890Z",
+    kind: "runtime.warning",
+    payload_json: encode({
+      message:
+        "Claude usage limit reached. This turn is paused until the 7-day Fable limit resets in 48h 56m.",
+      detail: {
+        status: "rejected",
+        resetsAt: 1794783600,
+        rateLimitType: "seven_day_overage_included",
+        overageStatus: "rejected",
+        overageDisabledReason: "org_level_disabled",
+        isUsingOverage: false,
+        unifiedWindows: {
+          five_hour: { utilization: 0.56, resetsAt: 1794615000, status: "allowed" },
+          seven_day: { utilization: 0.59, resetsAt: 1794783600, status: "allowed" },
+          seven_day_overage_included: {
+            utilization: 1,
+            resetsAt: 1794783600,
+            status: "rejected",
+            surpassedThreshold: 1,
+          },
+        },
+      },
+    }),
+  },
+  {
+    instanceId: "claude_xiyang",
+    thread_id: xyThread,
+    turn_id: xyTurn,
+    ordinal: 1618748,
+    created_at: "2026-11-13T22:04:59.511Z",
+    kind: "runtime.error",
+    payload_json: encode({
+      message: "Claude usage limit reached. Send the message again once the limit resets.",
+    }),
+  },
+];
+/** A later receipt the provider accepted, on a turn measured to run `model`. */
+const xyAccepted = (
+  created_at: string,
+  model: string | undefined,
+  patch: Partial<QuotaEvidenceRow> = {},
+): QuotaEvidenceRow => ({
+  instanceId: "claude_xiyang",
+  thread_id: xyThread,
+  turn_id: "2ba47af2-fbcf-4112-b260-0a2c7ac84cd3",
+  ordinal: 1627868,
+  created_at,
+  kind: "account.quota-state",
+  payload_json: encode({
+    quotaStates: [
+      { windowId: "seven_day", status: "allowed", resetsAt: "2026-11-15T23:00:00.000Z" },
+    ],
+    providerInstanceId: "claude_xiyang",
+  }),
+  model,
+  ...patch,
+});
+const FABLE = "claude-fable-5-2";
+const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
+const fableAccepted = xyAccepted("2026-11-14T15:43:48.066Z", FABLE);
+const opusAccepted = xyAccepted("2026-11-14T15:46:33.907Z", "claude-opus-5-5", {
+  thread_id: "f24a522c-f59f-46ea-b92c-4fac440e25bc",
+  turn_id: "01a56c80-6f2a-478a-b61b-7f76008cce42",
+  ordinal: 1627942,
+});
+const xyChecked = "2026-11-14T15:48:09.811Z";
+const xyAt = "2026-11-14T15:51:42.373Z";
+const xyReading: ServerProviderUsageLimits = {
+  checkedAt: xyChecked,
+  windows: [
+    {
+      id: "five_hour",
+      kind: "session",
+      label: "Session",
+      usedPercent: 5,
+      checkedAt: "2026-11-14T05:04:26.226Z",
+      resetsAt: "2026-11-14T08:50:00.624Z",
+      windowDurationMins: 300,
+    },
+    {
+      id: "seven_day",
+      kind: "weekly",
+      label: "Weekly",
+      usedPercent: 44,
+      checkedAt: xyChecked,
+      resetsAt: "2026-11-15T23:00:01.142Z",
+      windowDurationMins: 10080,
+    },
+    {
+      enforcement: { windowId: "seven_day_overage_included", checkedAt: xyChecked },
+      modelScope: "Fable",
+      id: "seven_day_fable",
+      kind: "weekly",
+      label: "Weekly · Fable",
+      usedPercent: 49,
+      checkedAt: xyChecked,
+      resetsAt: "2026-11-15T23:00:00.142Z",
+      windowDurationMins: 10080,
+    },
+  ],
+};
+const fableWindow = (patch: object, reading = xyReading): ServerProviderUsageLimits => ({
+  ...reading,
+  windows: reading.windows.map((w) => (w.id === "seven_day_fable" ? { ...w, ...patch } : w)),
+});
+const xyUnresolved = (
+  rows: QuotaEvidenceRow[],
+  reading: ServerProviderUsageLimits | undefined = xyReading,
+  now = xyAt,
+) => unresolvedQuotaRejections(readQuotaEvidenceRows(rows), reading, now, 15);
+
+it("clears a restored model-scoped rejection once its own bucket reads room and the provider accepted a turn on that model", () => {
+  // Without a measured model on the acceptance (as before this rule), XY stays drained for Fable.
+  expect(xyUnresolved([...xyRejection, xyAccepted(fableAccepted.created_at, undefined)])).toEqual([
+    expect.objectContaining({ windowId: "seven_day_overage_included", exhausted: true }),
+  ]);
+  expect(xyUnresolved([...xyRejection, fableAccepted])).toEqual([]);
+  expect(xyUnresolved([fableAccepted, ...xyRejection].toReversed())).toEqual([]);
+  // A bound receipt names its bucket directly; its fresh reading needs no separate mapping.
+  expect(
+    unresolvedQuotaRejections(
+      [
+        {
+          ...readQuotaEvidenceRows(xyRejection).at(-1)!,
+          usageWindowId: "seven_day_fable",
+        },
+        ...readQuotaEvidenceRows([fableAccepted]),
+      ],
+      fableWindow({ enforcement: undefined }),
+      xyAt,
+      15,
+    ),
+  ).toEqual([]);
+});
+
+it("keeps a model-scoped rejection without that bucket's own fresh room and a later acceptance on its model", () => {
+  const held = (rows: QuotaEvidenceRow[], reading?: ServerProviderUsageLimits, now?: string) =>
+    expect(xyUnresolved(rows, reading, now)).toHaveLength(1);
+  // The scoped window still reads full.
+  held([...xyRejection, fableAccepted], fableWindow({ usedPercent: 100 }));
+  // The reading is older than the rejection, or older than the maximum reading age.
+  const before = "2026-11-13T22:04:00.000Z";
+  held(
+    [...xyRejection, xyAccepted("2026-11-13T22:05:30.000Z", FABLE)],
+    fableWindow({
+      checkedAt: before,
+      enforcement: { windowId: "seven_day_overage_included", checkedAt: before },
+    }),
+    "2026-11-13T22:10:00.000Z",
+  );
+  held([...xyRejection, fableAccepted], xyReading, "2026-11-14T16:04:10.000Z");
+  // Only the account-wide windows recovered; the scoped bucket has no reading at all.
+  held([...xyRejection, fableAccepted], {
+    ...xyReading,
+    windows: xyReading.windows.filter((w) => w.id !== "seven_day_fable"),
+  });
+  expect(
+    unresolvedQuotaRejections(
+      readQuotaEvidenceRows([...xyRejection, fableAccepted]),
+      undefined,
+      xyAt,
+      15,
+    ),
+  ).toHaveLength(1);
+  // A stale bucket association cannot identify the fresh numeric reading.
+  held(
+    [...xyRejection, fableAccepted],
+    fableWindow({
+      enforcement: {
+        windowId: "seven_day_overage_included",
+        checkedAt: "2026-11-14T15:00:00.000Z",
+      },
+    }),
+  );
+  // The reading belongs to another cycle than the one the rejection named.
+  held([...xyRejection, fableAccepted], fableWindow({ resetsAt: "2026-11-15T21:00:00.000Z" }));
+  // No acceptance after the rejection, or only one that came before it or after the reading.
+  held(xyRejection);
+  held([...xyRejection, xyAccepted("2026-11-13T21:58:26.846Z", FABLE)]);
+  held([...xyRejection, xyAccepted("2026-11-14T15:50:00.000Z", FABLE)]);
+  // An acceptance on another model, or on another account, says nothing about this bucket.
+  held([...xyRejection, opusAccepted]);
+  held([
+    ...xyRejection,
+    {
+      ...fableAccepted,
+      instanceId: "claude_xinya",
+      payload_json: fableAccepted.payload_json.replace("claude_xiyang", "claude_xinya"),
+    },
+  ]);
+  // A rejection that did not record the bucket exhausted is not explained by it.
+  const notExhausted = xyRejection.map((row) =>
+    row.kind === "runtime.warning"
+      ? {
+          ...row,
+          payload_json: row.payload_json.replace('"utilization":1,', '"utilization":0.99,'),
+        }
+      : row,
+  );
+  expect(notExhausted[1]!.payload_json).toContain('"utilization":0.99,');
+  held([...notExhausted, fableAccepted]);
+  // A new rejection after the acceptance is authoritative even with a lower reading.
+  held([
+    ...xyRejection,
+    fableAccepted,
+    ...xyRejection.map((row) => ({
+      ...row,
+      created_at: row.created_at.replace("2026-11-13T22:04", "2026-11-14T15:47"),
+      ordinal: row.ordinal + 20_000,
+    })),
+  ]);
+});
+
+it("offers XY for a Fable high worker once its restored Fable bucket clears the rejection", () => {
+  const claudeProvider = (instanceId: string, label: string, limits: ServerProviderUsageLimits) =>
+    decodeProvider({
+      instanceId,
+      displayName: label,
+      driver: "claudeAgent",
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated", email: `${instanceId}@example.test` },
+      checkedAt: xyAt,
+      models: ["claude-opus-5-5", FABLE].map((slug) => ({
+        slug,
+        name: slug,
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select",
+              options: ["high", "xhigh"].map((id) => ({ id, label: id })),
+            },
+          ],
+        },
+      })),
+      usageLimits: limits,
+    });
+  // ARA is 94% into its week, as when XY was passed over.
+  const ara = claudeProvider("claude_ara", "ARA", {
+    checkedAt: xyChecked,
+    windows: [
+      {
+        id: "seven_day",
+        kind: "weekly",
+        label: "Weekly",
+        usedPercent: 94,
+        checkedAt: xyChecked,
+        resetsAt: "2026-11-16T02:00:00.000Z",
+        windowDurationMins: 10080,
+      },
+    ],
+  });
+  const decide = (accepted: QuotaEvidenceRow) => {
+    const inventory = allocationInventory({
+      environmentId: "sliara",
+      at: xyAt,
+      providers: [claudeProvider("claude_xiyang", "XY", xyReading), ara],
+      threads: [],
+      measurements: {
+        observedAt: xyAt,
+        monitoredInstanceIds: [],
+        retentionDays: 14,
+        persistenceError: null,
+        accounts: [],
+        turns: [],
+        totalMatchingTurns: 0,
+        profiles: [],
+        limitations: [],
+      },
+      quotaEvidence: readQuotaEvidenceRows([...xyRejection, accepted]),
+      maxReadingAgeMinutes: 15,
+    });
+    return decideAllocation({
+      at: xyAt,
+      policy: defaultAllocationPolicy,
+      request: {
+        kind: "worker",
+        assignmentId: "fable-high",
+        environmentId: "sliara",
+        threadId: ThreadId.make("fable-high"),
+        driver: inventory.accounts[0]!.driver,
+        model: FABLE,
+        options: [{ id: "effort", value: "high" }],
+        expectedHours: 2,
+      },
+      inventories: [inventory],
+      reservations: [],
+      authorityAvailable: true,
+    });
+  };
+  const before = decide(opusAccepted);
+  expect(before.selectedInstanceId).toBe("claude_ara");
+  expect(before.candidates.find((c) => c.instanceId === "claude_xiyang")).toMatchObject({
+    drainedUntil: "2026-11-15T23:00:00.000Z",
+    line: expect.stringContaining(
+      "drained until 2026-11-15T23:00:00.000Z (provider limit rejection on Weekly · Fable)",
+    ),
+  });
+  const after = decide(fableAccepted);
+  expect(after.selectedInstanceId).toBe("claude_xiyang");
+  expect(after.candidates.find((c) => c.instanceId === "claude_xiyang")).toMatchObject({
+    eligible: true,
+    roomPoints: 51,
+  });
 });
