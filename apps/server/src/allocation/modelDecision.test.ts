@@ -983,3 +983,52 @@ describe("Fable switch", () => {
     expect(offChoice.tried.map((t) => t.request.model)).not.toContain(FABLE);
   });
 });
+
+describe("a pinned account's refusal", () => {
+  const xy = (patch: Partial<AllocationAccount> = {}) =>
+    claude("XY", [weekly(44), only(FABLE, 49)], {
+      instanceId: ProviderInstanceId.make("claude_xiyang"),
+      ...patch,
+    });
+  const fableHigh = { model: FABLE, effort: "high" };
+
+  it("names the account, the limit and its end when that account is out of the model", () => {
+    const refused = choose(
+      [xy({ limits: [{ windowId: `weekly_${FABLE}`, until: inHours(30) }] }), claude("ARA")],
+      fableHigh,
+      { request: { explicitInstanceId: ProviderInstanceId.make("claude_xiyang") } },
+    );
+    expect(picked(refused)).toBeNull();
+    expect(refused.drainedUntil).toBe(inHours(30));
+    expect(refused.reason).toBe(
+      `XY: drained until ${inHours(30)} (provider limit rejection on Weekly · ${FABLE}), 0 workers; a pinned account is exact.`,
+    );
+  });
+
+  it("says the pin names no account here, not that no account offers the model", () => {
+    const byLabel = choose([xy(), claude("ARA")], fableHigh, {
+      request: { explicitInstanceId: ProviderInstanceId.make("xy") },
+    });
+    expect(picked(byLabel)).toBeNull();
+    expect(byLabel.reason).toBe(
+      "claudeAgent: the pinned account xy is not an account ID on this computer; XY is claude_xiyang, pin it by that ID.",
+    );
+    expect(
+      choose([xy()], fableHigh, {
+        request: { explicitInstanceId: ProviderInstanceId.make("elsewhere") },
+      }).reason,
+    ).toBe("claudeAgent: the pinned account elsewhere is not an account ID on this computer.");
+    // A pin on another family's account is there; that family's table entry is what is missing.
+    expect(
+      wantedProfiles(
+        wanting({ model: FABLE, effort: "high" }),
+        {
+          ...request,
+          allowedDrivers: [claudeAgent, codex],
+          explicitInstanceId: ProviderInstanceId.make("claude_xiyang"),
+        },
+        [host([xy(), gpt("G")])],
+      ).reasons,
+    ).toEqual([expect.stringMatching(/^codex: no account on this computer offers /)]);
+  });
+});

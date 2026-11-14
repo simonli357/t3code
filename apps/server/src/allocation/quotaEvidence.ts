@@ -12,8 +12,10 @@ export type QuotaEvidence = typeof ProviderQuotaState.Type & {
   at: string;
   ordinal?: number;
   threadId?: string;
-  /** Native Claude rejection identifies exhaustion of this account-wide bucket. */
+  /** Native Claude rejection identifies exhaustion of the rejected bucket. */
   exhausted?: boolean;
+  /** The model this receipt's turn ran, when this computer measured that turn. */
+  model?: string;
 };
 export type QuotaEvidenceRow = {
   payload_json: string;
@@ -24,6 +26,7 @@ export type QuotaEvidenceRow = {
   turn_id: string | null;
   instanceId: string;
   native_error_text?: string | null;
+  model?: string | undefined;
 };
 const Payload = Schema.Struct({
   providerInstanceId: Schema.optional(Schema.String),
@@ -112,7 +115,7 @@ export function readQuotaEvidence(
           ...base,
           windowId: detail.rateLimitType ?? "unknown",
           ...(detail.isUsingOverage === false &&
-          (detail.rateLimitType === "five_hour" || detail.rateLimitType === "seven_day") &&
+          detail.rateLimitType !== undefined &&
           typeof utilization === "number" &&
           Number.isFinite(utilization) &&
           utilization >= 1
@@ -189,8 +192,28 @@ export function readQuotaEvidenceRows(rows: readonly QuotaEvidenceRow[]): QuotaE
         windowId: nativeWindow === "session" ? "five_hour" : "seven_day",
       }));
     }
-    return evidence.map((e) => ({ ...e, threadId: row.thread_id }));
+    return evidence.map((e) => ({
+      ...e,
+      threadId: row.thread_id,
+      ...(row.model ? { model: row.model } : {}),
+    }));
   });
+}
+
+/** True when `model` is one the model-scoped window (such as `Fable`) applies to. */
+export function inModelScope(
+  window: {
+    readonly modelScope?: string | undefined;
+    readonly applicableModels?: readonly string[] | undefined;
+  },
+  model: string,
+) {
+  if (window.applicableModels) return window.applicableModels.includes(model);
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return (
+    window.modelScope !== undefined &&
+    `-${normalize(model)}-`.includes(`-${normalize(window.modelScope)}-`)
+  );
 }
 
 export function unresolvedQuotaRejections(
@@ -269,6 +292,27 @@ export function unresolvedQuotaRejections(
               a.instanceId === e.instanceId &&
               a.status === "allowed" &&
               (a.windowId === "five_hour" || a.windowId === "seven_day") &&
+              a.at > e.at &&
+              Date.parse(a.at) <= checked,
+          )
+        )
+          return true;
+        // The same holds for a model-scoped allowance, on that bucket's own evidence only: its
+        // rejection recorded it exhausted, and the provider later accepted a turn on a model the
+        // bucket covers (an acceptance on another model proves nothing about this bucket).
+        if (
+          e.exhausted &&
+          e.windowId !== "five_hour" &&
+          e.windowId !== "seven_day" &&
+          e.windowId !== "unknown" &&
+          e.resetsAt &&
+          Math.abs(Date.parse(w.resetsAt) - Date.parse(e.resetsAt)) <= 1000 &&
+          evidence.some(
+            (a) =>
+              a.instanceId === e.instanceId &&
+              a.status === "allowed" &&
+              a.model !== undefined &&
+              inModelScope(w, a.model) &&
               a.at > e.at &&
               Date.parse(a.at) <= checked,
           )

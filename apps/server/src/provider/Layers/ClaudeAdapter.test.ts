@@ -4821,6 +4821,13 @@ describe("ClaudeAdapterLive", () => {
         },
         {
           type: "system",
+          subtype: "session_title_changed",
+          title: "Audit custom features and workflows",
+          session_id: "session",
+          uuid: "title",
+        },
+        {
+          type: "system",
           subtype: "code_change_published",
           provider: "github",
           url: "https://github.com/pingdotgg/t3code/pull/1",

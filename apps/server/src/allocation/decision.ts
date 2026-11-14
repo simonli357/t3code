@@ -193,6 +193,9 @@ export function accountRoom(input: {
           .sort()
           .at(-1) ?? null);
     const first = closed[0];
+    const rejected = account.windows.find(
+      (w) => w.id === (rejections.find((r) => r.until === drainedUntil) ?? rejections[0])?.windowId,
+    );
     return {
       drainedUntil,
       roomPoints: 0,
@@ -202,7 +205,7 @@ export function accountRoom(input: {
           ? first.limit < 100
             ? `${first.w.label} ${first.w.usedPoints}% used, hard cap ${first.limit}%`
             : `${first.w.label} ${first.w.usedPoints}% used`
-          : "provider limit rejection"
+          : `provider limit rejection${rejected ? ` on ${rejected.label}` : ""}`
       })`,
     };
   }

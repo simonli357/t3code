@@ -1,4 +1,4 @@
-import { unresolvedQuotaRejections, type QuotaEvidence } from "./quotaEvidence.ts";
+import { inModelScope, unresolvedQuotaRejections, type QuotaEvidence } from "./quotaEvidence.ts";
 import * as NodeCrypto from "node:crypto";
 import * as DateTime from "effect/DateTime";
 import { IDLE_AFTER_MINUTES } from "@t3tools/contracts";
@@ -43,10 +43,8 @@ export function windowModels(
   modelScope: string | undefined,
   models: readonly { readonly slug: string }[],
 ) {
-  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const scope = modelScope ? normalize(modelScope) : null;
-  return scope
-    ? models.filter((m) => `-${normalize(m.slug)}-`.includes(`-${scope}-`)).map((m) => m.slug)
+  return modelScope
+    ? models.filter((m) => inModelScope({ modelScope }, m.slug)).map((m) => m.slug)
     : [];
 }
 
