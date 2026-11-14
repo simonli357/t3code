@@ -622,7 +622,10 @@ describe("drained", () => {
   });
 
   it("drains while a provider limit rejection is in force, for the models its window covers", () => {
-    const scoped = [weekly(20), weekly(60, { id: "weekly_astra", models: ["astra"] })];
+    const scoped = [
+      weekly(20),
+      weekly(60, { id: "weekly_astra", label: "Weekly · astra", models: ["astra"] }),
+    ];
     const limited = (patch: Partial<AllocationAccount>) =>
       account("a", 20, { windows: scoped, ...patch });
 
@@ -642,6 +645,9 @@ describe("drained", () => {
       limits: [{ windowId: "weekly_astra", until: inHours(3) }],
     };
     expect(decide([limited(forAstra)])).toMatchObject({ outcome: "wait", waitUntil: inHours(3) });
+    expect(candidate(decide([limited(forAstra)]), "a").line).toContain(
+      `drained until ${inHours(3)} (provider limit rejection on Weekly · astra)`,
+    );
     expect(decide([limited(forAstra)], { request: { model: "sol" } }).selectedInstanceId).toBe("a");
 
     // A rejection whose reset has passed is no longer in force.

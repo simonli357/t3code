@@ -98,8 +98,16 @@ export function wantedProfiles(
     );
     const profile = profiles[index];
     if (!profile) {
+      // A pin that names no account here is the problem, not the model.
+      const local = inventories
+        .flatMap((i) => i.accounts)
+        .filter((a) => a.environmentId === request.environmentId);
+      const pin = request.explicitInstanceId;
+      const named = local.find((a) => a.label.toLowerCase() === pin?.toLowerCase());
       reasons.push(
-        `${driver}: no account on this computer offers ${profiles.map((p) => `${p.model} / ${p.effort}`).join(" or ")}.`,
+        pin && !local.some((a) => a.instanceId === pin)
+          ? `${driver}: the pinned account ${pin} is not an account ID on this computer${named ? `; ${named.label} is ${named.instanceId}, pin it by that ID` : ""}.`
+          : `${driver}: no account on this computer offers ${profiles.map((p) => `${p.model} / ${p.effort}`).join(" or ")}.`,
       );
       continue;
     }
