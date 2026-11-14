@@ -98,6 +98,8 @@ export const SpawnInput = Schema.Struct({
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   prompt: TrimmedNonEmptyString,
+  /** A start queued for a limit's reset: the first assignment waits until then. */
+  startAt: Schema.optional(Schema.String),
 });
 export const SendInput = Schema.Struct({
   threadId: ThreadId,
@@ -982,11 +984,13 @@ const make = Effect.gen(function* () {
     kind: string,
     prompt: string,
     turnId?: string,
+    /** Not delivered before this time. */
+    resumeAt?: string,
   ) {
     const createdAt = yield* now;
     const inserted =
-      yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id)
-      VALUES (${id}, ${worker.thread_id}, ${target}, ${kind}, ${prompt}, ${createdAt}, ${turnId ?? null}) ON CONFLICT(id) DO NOTHING RETURNING id`;
+      yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, turn_id, resume_at)
+      VALUES (${id}, ${worker.thread_id}, ${target}, ${kind}, ${prompt}, ${createdAt}, ${turnId ?? null}, ${resumeAt ?? null}) ON CONFLICT(id) DO NOTHING RETURNING id`;
     const rows = yield* sql<Job>`SELECT * FROM custom_worker_jobs WHERE id = ${id}`;
     const job = rows[0]!;
     if (
@@ -2534,7 +2538,15 @@ const make = Effect.gen(function* () {
       );
     }
     worker = yield* owned(owner, input.threadId);
-    yield* enqueue(`spawn:${input.threadId}`, worker, worker.thread_id, "work", input.prompt);
+    yield* enqueue(
+      `spawn:${input.threadId}`,
+      worker,
+      worker.thread_id,
+      "work",
+      input.prompt,
+      undefined,
+      input.startAt,
+    );
     return yield* describe(worker);
   }, Effect.mapError(failure));
 

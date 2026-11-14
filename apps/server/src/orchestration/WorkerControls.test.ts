@@ -245,6 +245,8 @@ const allocatedWorkerLayer = AllocationAssignments.layer.pipe(
   Layer.provide(computersStub),
   Layer.provide(
     Layer.succeed(UsageMeasurements, {
+      evidence: Effect.succeed({ turns: [], quotas: [] }),
+      prices: Effect.succeed(() => null),
       read: () =>
         Effect.succeed({
           observedAt: "1970-01-01T00:00:00.000Z",
@@ -5406,6 +5408,8 @@ for (const automatic of [false, true])
           Layer.provide(computersStub),
           Layer.provide(
             Layer.succeed(UsageMeasurements, {
+              evidence: Effect.succeed({ turns: [], quotas: [] }),
+              prices: Effect.succeed(() => null),
               read: () =>
                 Effect.succeed({
                   observedAt: "1970-01-01T00:00:00.000Z",
@@ -5573,7 +5577,7 @@ for (const automatic of [false, true])
         const retried = yield* assignments.start(accepted, owner);
         expect(retried.state).toBe("submitted");
         expect(retried.allocation?.decision.reasons.join(" ")).toContain(
-          "the only account that is not drained.",
+          "the only account that is not out.",
         );
         yield* betaWorkers.drain();
         yield* assignments.start(accepted, owner);

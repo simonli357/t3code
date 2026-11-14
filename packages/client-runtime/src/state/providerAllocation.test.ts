@@ -3,6 +3,7 @@ import {
   defaultAllocationPolicy,
   defaultModelLadder,
   defaultModelRoutingPolicy,
+  legacyAllocationPolicyFields,
   ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -16,6 +17,7 @@ import {
   allocationAccountRows,
   allocationModelChoices,
   allocationMoved,
+  withAllocationAccountGoal,
   withAllocationAccountMoved,
   withModelLadderEdit,
 } from "./providerAllocation.ts";
@@ -220,6 +222,31 @@ it("orders logins by the policy, then the rest, and moves one up or down", () =>
     "AD",
   ]);
   expect(allocationMoved([1, 2, 3], 2, 1)).toEqual([1, 2, 3]);
+});
+
+it("reads each login's daily goal, its own or its provider's, and sets or clears its own", () => {
+  const goal = (policy = defaultAllocationPolicy) =>
+    Object.fromEntries(
+      allocationAccountRows(snapshot(), policy, now).map((row) => [row.label, row.goal]),
+    );
+  const claude = { ...legacyAllocationPolicyFields.claude, dailyPoints: 20 };
+  const stored = { ...defaultAllocationPolicy, claude };
+  expect(goal(stored)).toMatchObject({
+    ES: { percentPerDay: 20, own: false },
+    SL: { percentPerDay: 10, own: false },
+  });
+  const sl = allocationAccountRows(snapshot(), stored, now).find((row) => row.label === "SL")!;
+  const set = withAllocationAccountGoal(stored, sl, 12);
+  expect(goal(set)).toMatchObject({
+    ES: { percentPerDay: 20, own: false },
+    SL: { percentPerDay: 12, own: true },
+  });
+  // The family values are the user's and stay as they are.
+  expect(set.claude).toEqual(claude);
+  expect(goal(withAllocationAccountGoal(set, sl, undefined)).SL).toEqual({
+    percentPerDay: 10,
+    own: false,
+  });
 });
 
 it("edits the ladder starting from the default one", () => {

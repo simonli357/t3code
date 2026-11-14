@@ -43,42 +43,69 @@ update model pricing.
 
 ## Allocate accounts for new work
 
-A master that starts a worker gives two scores, difficulty and stakes, and the computer. T3 then
-picks the account, model and effort together:
+A master that starts a worker gives two scores, difficulty and stakes, the computer, and its
+estimate of the job's length in hours. T3 then picks the account, model and effort together:
 
 1. The table on the [Model selection](#model-selection) page gives the wanted model and effort.
-2. That model runs on the account with the most room: the percentage left on the tightest usage
-   window that applies to the model (5-hour, weekly, or a model's own weekly window such as
-   Fable's). Between accounts whose room is within the **closeness margin**, the earlier one in
-   the **preference order** wins, then the one with fewer workers, then the one that resets
-   sooner. The order never overrides a clear difference.
-3. A model is **drained** on an account when one of those windows is used up, the provider's
-   recorded limit rejection is still in force, or the account's hard cap is reached. Nothing
-   softer counts: a forecast or a nearly full window never changes the model.
-4. When the wanted model is drained on every account, the nearest model on the **ladder** that
-   has room replaces it; a tie goes to the weaker one. When no Claude model has room, work whose
-   wanted model is below the fallback's threshold starts on the **fallback** model, and anything
-   else is refused as drained, with the earliest reset time. Codex is used only when a start
-   asks for it and never changes model.
+2. Every usage limit of each account (5-hour, weekly, or a model's own weekly window such as
+   Fable's) is projected to the job's end: every working session on that login on any computer
+   at its own model, effort and context, masters at their lower rate, idle sessions not at all,
+   plus the account's use outside T3. An account **fits** when no limit runs out before the job
+   ends; a hard cap counts as the limit.
+3. Among accounts that fit, those within their **daily goal** come first, then the one with the
+   most spare capacity per hour until the tightest limit resets. Between accounts within the
+   **closeness margin** (percent of the best one's room), the earlier one in the **preference
+   order** wins, then the one with fewer workers, then the one that resets sooner. Accounts over
+   their goal are used only when none is within it, the least over first.
+4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
+   (45 at stakes 8 or more); otherwise it takes the nearest ladder model that fits, at most two
+   rungs away; otherwise, below the fallback's threshold, the **fallback** model; otherwise the
+   wanted model on the account that lasts longest. When every account is out now but a limit
+   resets within that wait, the same choice is made as of the reset and the start waits for it.
+   It is refused only when everything stays out beyond the wait, with the earliest reset time.
+   Codex is used only when a start asks for it and never changes model.
 
-A model the user named is the starting point and is replaced the same way. An account the user
-named is exact: when the model is drained there, the start is refused. The result names the
-choice, the table's choice when it differs, one reason line and one line per account.
+The result names the choice, the table's choice when it differs, when a waiting start begins,
+one reason line with the numbers (for example "XY: room for about 3 more Fable-medium workers
+until the weekly reset; tightest limit Fable weekly"), and one line per account. A model the
+user named is the starting point and is replaced the same way. An account the user named is
+exact: when the model is used up there, the start is refused.
 
-A running worker that hits a limit moves to another account with the same model. If there is
-none, it waits when the reset is within the **long wait** time (3 hours unless changed);
-otherwise it continues on the nearest model with room and its master is told; otherwise it waits
-and its master is told. A worker that supervises its own workers only waits.
+A **daily goal** is the share of the weekly (or monthly) limit an account should use each day.
+Without one, an account uses its provider's default. A goal only changes which account is
+recommended: it never stops, queues or changes a start, and a pinned account over its goal starts
+normally. Only a hard cap or a real limit stops work.
+
+**Fable workers** is one switch. Turned off, no worker runs on a Fable model: a table entry or
+pin that names Fable starts from the nearest ladder model without it, and a running worker never
+moves onto it. The result says so.
+
+A running worker that hits a limit moves to another account with the same model that lasts the
+rest of its job. If there is none, it waits when the reset is within the **long wait** time
+(3 hours unless changed); otherwise it continues on the nearest model that fits, at most two
+rungs away, and its master is told. A worker that supervises its own workers only waits.
+
+The numbers behind these choices are learned, not set: what an hour of work costs at API prices
+for each model, effort and context, and how much of each account's limit a dollar of use takes,
+including use T3 does not see. Every computer records its turns and the limit readings it
+already fetches; the coordinator learns from all of them and sends the result to every computer.
+A model without history is estimated from a measured one by price; one with only a little
+history is marked thin and leans on that estimate until it has enough turns and hours. An
+account without history is sized from a measured one by plan tier (Pro, Max 5x, Max 20x), marked
+as estimated, until its own readings replace it.
 
 Open **Settings > Provider allocation** for the accounts: each one's usage windows with their
-resets, its workers now, whether workers may use it, its hard cap, and the preference order.
-The closeness margin and the long wait are set there too. Choose one shared coordinator and
-keep it reachable: it holds the policy and decides every start. Every value is stored there, so
-a change made on any computer applies to the next start on every computer, without a restart.
-While the coordinator cannot be reached, a start is decided on the requesting computer from the
-policy it last read. A decision first refreshes usage readings older than the policy allows, for
-at most a few seconds. Agents that were not told which computer to use read each computer's
-numbers first; see [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
+resets, what each limit holds, how long the account lasts at the current load, its workers now,
+whether workers may use it, its daily goal and its hard cap; then the preference order, the
+closeness margin, the long wait, the Fable switch, and the learned numbers with their sample
+counts. Choose one shared coordinator and keep it reachable: it holds the settings and decides
+every start. Every value is stored there, so a change made on any computer applies to the next
+start on every computer, without a restart. Every computer keeps a copy of the settings and
+learned numbers the coordinator last sent; while the coordinator cannot be reached, a start is
+decided on the requesting computer from that copy, and the result says how old it is. A decision
+first refreshes usage readings older than the policy allows, for at most a few seconds. Agents
+that were not told which computer to use read each computer's numbers first; see
+[Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
 Optional **hard caps** apply per account identity. Weekly caps use the provider's
 account-wide weekly window; Claude accounts also support its 5-hour session. Enter a percentage
@@ -93,8 +120,8 @@ Missing, unsupported, or stale readings are shown honestly and cannot create a n
 also do not imply zero usage.
 
 Accounts whose provider proves that subscription quota does not apply, such as an API-key-backed
-or custom model provider, do not offer caps and have no room reading; they are used only when
-nothing with a reading is close.
+or custom model provider, do not offer caps and have no limit reading; they come after accounts
+with a reading.
 
 Agents read and change the same values with the `t3_allocation_policy` tool. A limit on how many
 workers a master may run is not stored in T3: the master that was given it keeps to it.
@@ -165,11 +192,10 @@ turn and tool duration, provider API time when available, token/cache totals, an
 recent account quota consumption. Optional filters are `instanceId`, `threadId`,
 `lookbackHours` (1–336), and `turnLimit` (1–100).
 
-Collection is off by default. Set the server's `usageMeasurementInstanceIds` to
-the provider instance IDs you own; leave shared accounts out. Removing an instance
-also removes its retained measurements. History starts at installation, is bounded
-to 14 days/5,000 turns/30,000 quota changes, and survives server restarts. No prompts,
-responses, tool arguments, or credentials are stored by this collector.
+Every configured account is recorded, from the turns T3 runs and the limit readings it already
+fetches; nothing is polled for it, and account allocation learns from it. History starts at
+installation, is bounded to 14 days/5,000 turns/30,000 quota changes, and survives server
+restarts. No prompts, responses, tool arguments, or credentials are stored by this collector.
 
 Quota rates include all traffic on an account, including other machines. Per-model
 token baselines are grouped by effort and context size; they are not subscription

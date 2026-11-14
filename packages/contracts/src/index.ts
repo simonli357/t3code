@@ -52,6 +52,7 @@ export * from "./worktreeSetup.ts";
 
 export * from "./computers.ts";
 export * from "./providerAllocation.ts";
+export * from "./allocationLearning.ts";
 export * from "./modelRouting.ts";
 
 export * from "./baseSessions.ts";

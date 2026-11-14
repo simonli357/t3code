@@ -1,5 +1,9 @@
 import {
+  HIGH_STAKES,
+  MAX_RUNG_DISTANCE,
   ProviderDriverKind,
+  START_WAIT_MINUTES,
+  START_WAIT_MINUTES_HIGH_STAKES,
   accountSupportsRoutingProfile,
   modelFallback,
   modelLadder,
@@ -7,6 +11,7 @@ import {
   routingEffortOptionId,
   type AllocationDecision,
   type AllocationInventory,
+  type AllocationLearned,
   type AllocationPolicy,
   type AllocationRequest,
   type AllocationReservation,
@@ -16,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
 import { decideAllocation } from "./decision.ts";
+import { span } from "./runway.ts";
 
 /**
  * The profile each allowed provider family wants before quota is looked at: the pinned model,
@@ -141,17 +147,23 @@ export function ladderPosition(ladder: readonly RoutingProfile[], profile: Routi
 }
 
 /** The other rungs, nearest first; a tie goes to the lower rung. */
-export function nearestRungs(ladder: readonly RoutingProfile[], profile: RoutingProfile) {
+export function nearestRungs(
+  ladder: readonly RoutingProfile[],
+  profile: RoutingProfile,
+  maxDistance = Infinity,
+) {
   const position = ladderPosition(ladder, profile);
   if (position === undefined) return [];
   return ladder
     .map((rung, index) => ({ rung, index }))
-    .filter(({ index }) => index !== position)
+    .filter(({ index }) => index !== position && Math.abs(index - position) <= maxDistance)
     .sort(
       (a, b) => Math.abs(a.index - position) - Math.abs(b.index - position) || a.index - b.index,
     )
     .map(({ rung }) => rung);
 }
+
+export const isFable = (model: string) => /fable/i.test(model);
 
 const requestProfile = (request: AllocationRequest): RoutingProfile => ({
   model: request.model,
@@ -159,9 +171,14 @@ const requestProfile = (request: AllocationRequest): RoutingProfile => ({
     request.options.find((o) => o.id === routingEffortOptionId(request.driver))?.value ?? "",
   ),
 });
+const onRung = (request: AllocationRequest, rung: RoutingProfile): AllocationRequest => ({
+  ...request,
+  model: rung.model,
+  options: [{ id: routingEffortOptionId(request.driver), value: rung.effort }],
+});
 
 export interface ProfileChoice {
-  /** The decision that selected an account; absent when nothing has room. */
+  /** The decision that selected an account; absent when nothing can run it. */
   readonly decision?: AllocationDecision;
   /** Every profile that was tried for a family, the wanted one first. */
   readonly tried: readonly { request: AllocationRequest; reason: string; chosen: boolean }[];
@@ -171,15 +188,25 @@ export interface ProfileChoice {
   readonly reason: string;
   /** Present when the start is refused because everything is drained. */
   readonly drainedUntil?: string | null;
+  /** The start waits for a limit's reset and begins then. */
+  readonly startAt?: string;
   /** One line per account of the wanted family on the computer. */
   readonly accounts: readonly string[];
+  readonly notes: readonly string[];
 }
+
+const fits = (decision: AllocationDecision) =>
+  decision.selectedInstanceId !== null &&
+  decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId)?.fits !== false;
 
 /**
  * Picks account, model and effort together. The wanted model on the account with the most
- * room; when it is drained on every account, the nearest ladder rung that has room; when no
- * Claude rung has room and the wanted rung is below the fallback's threshold, the fallback
- * model. Codex and a pinned account never change model: drained there is a refusal.
+ * spare capacity, when it fits the job somewhere. Otherwise: wait for a limit that resets
+ * within 30 minutes (45 at high stakes); else the nearest ladder rung that fits, at most two
+ * away; else the fallback model below its threshold; else the wanted model on the account
+ * that lasts longest. When every candidate is out, the same choice as of a reset within the
+ * wait, queued for it; refused only when nothing comes back within the wait. With Fable
+ * workers off, no worker gets a Fable model. Codex and a pinned account never change model.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -189,100 +216,201 @@ export function chooseProfile(input: {
   readonly inventories: readonly AllocationInventory[];
   readonly reservations: readonly AllocationReservation[];
   readonly authorityAvailable: boolean;
+  readonly learned?: AllocationLearned | undefined;
 }): ProfileChoice {
-  const { modelPolicy, request, inventories } = input;
+  const { modelPolicy, request, inventories, policy } = input;
   const resolved = wantedProfiles(modelPolicy, request, inventories);
-  const decide = (candidate: AllocationRequest) =>
-    decideAllocation({ ...input, request: candidate });
+  const decide = (candidate: AllocationRequest, startAt?: string) =>
+    decideAllocation({ ...input, request: startAt ? { ...candidate, startAt } : candidate });
+  const label = (r: AllocationRequest) => profileLabel(r.driver, r.model, r.options);
+  const ladder = modelLadder(modelPolicy);
+  const workers = request.kind !== "session";
+  const fableOff = workers && policy.fableWorkers === false;
+  const allowed = (r: RoutingProfile) => !(fableOff && isFable(r.model));
+  const notes: string[] = [];
   const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
   let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
   const failures: string[] = [...resolved.reasons];
+  const waitMinutes =
+    request.assessment.stakes >= HIGH_STAKES ? START_WAIT_MINUTES_HIGH_STAKES : START_WAIT_MINUTES;
   // With a pinned account, the others are not part of the choice.
   const lines = (decision: AllocationDecision) =>
     decision.candidates
       .filter((c) => !request.explicitInstanceId || c.instanceId === request.explicitInstanceId)
       .map((c) => c.line ?? c.instanceId);
-  for (const wanted of resolved.candidates) {
-    const first = decide(wanted.request);
-    const label = (r: AllocationRequest) => profileLabel(r.driver, r.model, r.options);
-    if (first.selectedInstanceId) {
-      tried.push({ ...wanted, chosen: true });
-      return {
-        decision: first,
-        tried,
-        rule: resolved.rule,
-        reason: first.reasons[0]!,
-        accounts: lines(first),
+  for (const asked of resolved.candidates) {
+    let wanted = asked;
+    if (fableOff && isFable(asked.request.model)) {
+      const rung = nearestRungs(ladder, requestProfile(asked.request)).find(allowed);
+      if (!rung) {
+        failures.push(
+          `${asked.request.driver}: Fable workers are off and the ladder has no other rung.`,
+        );
+        continue;
+      }
+      notes.push(
+        `Fable workers are off: ${label(asked.request)} starts from ${rung.model} / ${rung.effort}, the nearest rung without Fable.`,
+      );
+      wanted = {
+        request: onRung(asked.request, rung),
+        reason: `${asked.reason} Fable workers are off.`,
       };
     }
-    tried.push({ ...wanted, chosen: false });
-    if (first.outcome !== "wait") {
-      failures.push(...first.reasons, ...first.candidates.flatMap((c) => c.reasons));
-      continue;
-    }
-    const resets = first.waitUntil ? [first.waitUntil] : [];
-    const substitute = (candidate: AllocationRequest, why: string) => {
-      const decision = decide(candidate);
-      if (decision.waitUntil) resets.push(decision.waitUntil);
-      if (!decision.selectedInstanceId) return undefined;
-      tried.push({ request: candidate, reason: why, chosen: true });
+    const first = decide(wanted.request);
+    const chosen = (
+      decision: AllocationDecision,
+      candidate: AllocationRequest,
+      why: string | undefined,
+      extra: Partial<ProfileChoice> = {},
+    ): ProfileChoice => {
+      const same =
+        candidate.driver === wanted.request.driver && label(candidate) === label(wanted.request);
+      if (candidate !== wanted.request) tried.push({ ...wanted, chosen: false });
+      tried.push({ request: candidate, reason: why ?? wanted.reason, chosen: true });
       return {
         decision,
         tried,
-        wanted: wanted.request,
+        ...(same && wanted === asked ? {} : { wanted: asked.request }),
         rule: resolved.rule,
-        reason: `${label(wanted.request)} is drained on every account (earliest reset ${first.waitUntil ?? "unknown"}); ${why} ${decision.reasons[0]}`,
+        reason: why ? `${why} ${decision.reasons[0]}` : decision.reasons[0]!,
         accounts: lines(first),
-      } satisfies ProfileChoice;
+        notes,
+        ...extra,
+      };
     };
-    if (wanted.request.driver === "claudeAgent" && !request.explicitInstanceId) {
-      const ladder = modelLadder(modelPolicy);
-      const profile = requestProfile(wanted.request);
-      for (const rung of nearestRungs(ladder, profile)) {
-        const chosen = substitute(
-          {
-            ...wanted.request,
-            model: rung.model,
-            options: [{ id: routingEffortOptionId("claudeAgent"), value: rung.effort }],
-          },
-          `the nearest ladder rung with room is ${rung.model} / ${rung.effort}.`,
+    if (fits(first)) return chosen(first, wanted.request, undefined);
+    if (first.outcome === "unavailable") {
+      tried.push({ ...wanted, chosen: false });
+      failures.push(...first.reasons, ...first.candidates.flatMap((c) => c.reasons));
+      continue;
+    }
+    // The limit in the way resets soon: wait for it rather than change model or account.
+    const soon = Date.parse(input.at) + waitMinutes * 60_000;
+    const resets = [
+      ...new Set(
+        first.candidates.flatMap((c) =>
+          c.reasons.length
+            ? []
+            : [c.fitsFrom, c.drainedUntil].filter((t): t is string => !!t && Date.parse(t) <= soon),
+        ),
+      ),
+    ].sort();
+    for (const reset of resets) {
+      const later = decide(wanted.request, reset);
+      if (fits(later))
+        return chosen(
+          later,
+          { ...wanted.request, startAt: reset },
+          `${label(wanted.request)} fits on no account now; a limit in its way resets in ${span(
+            (Date.parse(reset) - Date.parse(input.at)) / 3_600_000,
+          )}, so the start waits for it.`,
+          { startAt: reset },
         );
-        if (chosen) return chosen;
-      }
-      const fallback = modelFallback(modelPolicy);
-      const position = ladderPosition(ladder, profile);
-      const threshold = fallback ? ladderPosition(ladder, fallback.below) : undefined;
-      if (fallback && position !== undefined && threshold !== undefined && position < threshold) {
-        const drivers = new Set(
-          inventories
-            .flatMap((i) => i.accounts)
-            .filter(
-              (a) =>
-                a.environmentId === request.environmentId &&
-                findCatalogModel(a.models, fallback.model),
-            )
-            .map((a) => a.driver),
-        );
-        for (const driver of [...drivers].sort()) {
-          const chosen = substitute(
-            {
+    }
+    const claude = wanted.request.driver === "claudeAgent" && !request.explicitInstanceId;
+    const rungs = claude
+      ? nearestRungs(ladder, requestProfile(wanted.request), MAX_RUNG_DISTANCE).filter(allowed)
+      : [];
+    const fallback = modelFallback(modelPolicy);
+    const position = ladderPosition(ladder, requestProfile(wanted.request));
+    const threshold = fallback ? ladderPosition(ladder, fallback.below) : undefined;
+    const fallbacks =
+      claude &&
+      fallback &&
+      position !== undefined &&
+      threshold !== undefined &&
+      position < threshold &&
+      allowed(fallback)
+        ? [
+            ...new Set(
+              inventories
+                .flatMap((i) => i.accounts)
+                .filter(
+                  (a) =>
+                    a.environmentId === request.environmentId &&
+                    findCatalogModel(a.models, fallback.model),
+                )
+                .map((a) => a.driver),
+            ),
+          ]
+            .sort()
+            .map((driver) => ({
               ...wanted.request,
               driver,
               model: fallback.model,
               options: [{ id: routingEffortOptionId(driver), value: fallback.effort }],
-            },
-            `no Claude rung has room, and below ${fallback.below.model} / ${fallback.below.effort} the fallback ${fallback.model} / ${fallback.effort} applies.`,
-          );
-          if (chosen) return chosen;
-        }
+            }))
+        : [];
+    /** The nearest rung, the fallback, then the account that lasts longest, as of `startAt`. */
+    const standIn = (base: AllocationDecision, startAt?: string) => {
+      const why = base.selectedInstanceId
+        ? `${label(wanted.request)} fits on no account for this job;`
+        : `${label(wanted.request)} is drained on every account (earliest reset ${base.waitUntil ?? "unknown"});`;
+      for (const rung of rungs) {
+        const candidate = onRung(wanted.request, rung);
+        const decision = decide(candidate, startAt);
+        if (fits(decision))
+          return {
+            decision,
+            candidate,
+            why: `${why} the nearest ladder rung that fits is ${rung.model} / ${rung.effort}.`,
+          };
       }
+      for (const candidate of fallbacks) {
+        const decision = decide(candidate, startAt);
+        if (fits(decision))
+          return {
+            decision,
+            candidate,
+            why: `${why} no Claude rung within ${MAX_RUNG_DISTANCE} fits, and below ${fallback!.below.model} / ${fallback!.below.effort} the fallback ${fallback!.model} / ${fallback!.effort} applies.`,
+          };
+      }
+      // Nothing fits the whole job: the account that lasts longest, as long as one is not out.
+      if (base.selectedInstanceId)
+        return { decision: base, candidate: wanted.request, why: undefined };
+      for (const rung of rungs) {
+        const candidate = onRung(wanted.request, rung);
+        const decision = decide(candidate, startAt);
+        if (decision.selectedInstanceId)
+          return {
+            decision,
+            candidate,
+            why: `${label(wanted.request)} is out on every account; ${rung.model} / ${rung.effort} is the nearest rung that is not.`,
+          };
+      }
+      for (const candidate of fallbacks) {
+        const decision = decide(candidate, startAt);
+        if (decision.selectedInstanceId)
+          return {
+            decision,
+            candidate,
+            why: `${label(wanted.request)} and its nearest rungs are out on every account; the fallback ${candidate.model} is not.`,
+          };
+      }
+      return undefined;
+    };
+    const now = standIn(first);
+    if (now) return chosen(now.decision, now.candidate, now.why);
+    // Everything is out now: decide as of a reset within the wait by the same rules, and queue.
+    for (const reset of resets) {
+      const then = standIn(decide(wanted.request, reset), reset);
+      if (then)
+        return chosen(
+          then.decision,
+          { ...then.candidate, startAt: reset },
+          `Every account is out now and a limit resets in ${span(
+            (Date.parse(reset) - Date.parse(input.at)) / 3_600_000,
+          )}, so the start waits for it. ${then.why ?? `Then ${label(wanted.request)} runs on the account that lasts longest.`}`,
+          { startAt: reset },
+        );
     }
-    const drainedUntil = resets.sort()[0] ?? null;
+    tried.push({ ...wanted, chosen: false });
+    const drainedUntil = first.waitUntil;
     refusal ??= {
       drainedUntil,
       reason: request.explicitInstanceId
         ? first.reasons[0]!
-        : `Drained: ${label(wanted.request)} and every model that may stand in for it have no room; earliest reset ${drainedUntil ?? "unknown"}.`,
+        : `Drained: ${label(wanted.request)} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.`,
       accounts: lines(first),
     };
   }
@@ -294,6 +422,7 @@ export function chooseProfile(input: {
       ([...new Set(failures)].join(" ") || "No account can run the wanted model on this computer."),
     ...(refusal ? { drainedUntil: refusal.drainedUntil } : {}),
     accounts: refusal?.accounts ?? [],
+    notes,
   };
 }
 

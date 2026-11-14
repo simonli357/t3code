@@ -3,6 +3,7 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import {
@@ -11,6 +12,7 @@ import {
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
   mergeClaudeProcessEnvironment,
+  readClaudePlanTier,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
@@ -102,6 +104,35 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const first = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-a");
         const second = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-b");
         expect(first).not.toBe(second);
+      }),
+    );
+
+    it.effect("reads the plan tier from the login record and keeps it through a failed read", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const homePath = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-tier-" });
+        const record = (tier?: string) =>
+          fs.writeFileString(
+            path.join(homePath, ".credentials.json"),
+            JSON.stringify({
+              claudeAiOauth: {
+                accessToken: "never-read",
+                subscriptionType: "max",
+                rateLimitTier: tier,
+              },
+            }),
+          );
+
+        yield* record("default_claude_max_20x");
+        expect(yield* readClaudePlanTier({ homePath })).toBe("Max 20x");
+        yield* record("default_claude_ai");
+        expect(yield* readClaudePlanTier({ homePath })).toBe("Pro");
+        // Caught mid-rewrite: the last tier stands, so the plan does not flicker.
+        yield* fs.writeFileString(path.join(homePath, ".credentials.json"), '{"claudeAiOa');
+        expect(yield* readClaudePlanTier({ homePath })).toBe("Pro");
+        yield* record(undefined);
+        expect(yield* readClaudePlanTier({ homePath })).toBeUndefined();
       }),
     );
   });

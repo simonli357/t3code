@@ -63,6 +63,8 @@ export const ServerProviderAuth = Schema.Struct({
   type: Schema.optional(TrimmedNonEmptyString),
   label: Schema.optional(TrimmedNonEmptyString),
   email: Schema.optional(TrimmedNonEmptyString),
+  /** The plan's usage tier as the login records it, such as "Max 20x", when the label is vaguer. */
+  tier: Schema.optional(TrimmedNonEmptyString),
   subscriptionSharing: Schema.optional(Schema.Boolean),
   profileId: Schema.optional(TrimmedNonEmptyString),
 });

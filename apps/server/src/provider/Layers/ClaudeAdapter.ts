@@ -463,6 +463,8 @@ interface ClaudeSessionContext {
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
+  /** The query's running cost after the previous turn; its results report a cumulative total. */
+  lastTotalCostUsd: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
   /** Limits already announced for the running turn, keyed `window:resetsAt`. */
@@ -2868,7 +2870,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(result?.usage ? { usage: result.usage } : {}),
         ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
         ...(typeof result?.total_cost_usd === "number"
-          ? { totalCostUsd: result.total_cost_usd }
+          ? {
+              totalCostUsd: result.total_cost_usd,
+              // A total below the last one means the query started over (resume, /clear).
+              turnCostUsd:
+                result.total_cost_usd >= (context.lastTotalCostUsd ?? 0)
+                  ? result.total_cost_usd - (context.lastTotalCostUsd ?? 0)
+                  : result.total_cost_usd,
+            }
           : {}),
         ...(errorMessage ? { errorMessage } : {}),
         tokenUsage: normalizeClaudeTurnTokenUsage(result, turnState.hasSubagents, status),
@@ -2879,6 +2888,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       providerRefs: nativeProviderRefs(context),
     });
 
+    if (typeof result?.total_cost_usd === "number")
+      context.lastTotalCostUsd = result.total_cost_usd;
     const updatedAt = yield* nowIso;
     context.turnState = undefined;
     if (context.interruptedTurnSettled) {
@@ -5256,6 +5267,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
+        lastTotalCostUsd: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,

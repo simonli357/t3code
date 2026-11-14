@@ -171,6 +171,12 @@ it("reads both policies with accounts by label", () => {
     closeMarginPoints: 7,
     longWaitHours: 1.5,
     caps: [{ account: "ES", ...cap }],
+    // Without a goal of its own an account reads its provider family's.
+    goals: [
+      { account: "ES", percentPerDay: 17, from: "family" },
+      { account: "XL", percentPerDay: 17, from: "family" },
+    ],
+    fableWorkers: true,
     ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
     fallback: "deepseek-flash / max when the wanted rung is below claude-sonnet-5-5 / xhigh",
     accounts: [

@@ -353,6 +353,8 @@ const TurnCompletedPayload = Schema.Struct({
   usage: Schema.optional(Schema.Unknown),
   modelUsage: Schema.optional(UnknownRecordSchema),
   totalCostUsd: Schema.optional(Schema.Number),
+  /** This turn's own estimated cost at API prices, subagents included. */
+  turnCostUsd: Schema.optional(Schema.Number),
   errorMessage: Schema.optional(TrimmedNonEmptyStringSchema),
   tokenUsage: Schema.optional(TurnTokenUsage),
 });

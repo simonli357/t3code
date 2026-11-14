@@ -118,9 +118,19 @@ it.effect(
             authorityAvailable: true,
             reserve: false,
           });
-        // a has half a point more room.
-        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
+        // Both keep within their daily goals, so room decides: a has half a point more.
         let current = yield* store.policy;
+        current = yield* store.savePolicy({
+          expectedVersion: current.version,
+          policy: {
+            ...current,
+            accountGoals: [a, b].map((x) => ({
+              key: allocationPreferenceKey(x),
+              percentPerDay: 100,
+            })),
+          },
+        });
+        expect((yield* recommend()).decision.selectedInstanceId).toBe("a");
         current = yield* store.savePolicy({
           expectedVersion: current.version,
           policy: { ...current, accountOrder: [allocationPreferenceKey(b)] },
@@ -470,9 +480,12 @@ it.effect(
             accountCaps: [cap],
           },
         });
+        // The user's values of the removed fields stay; only the rules go.
+        const { accountRules: _rules, workerModels: _models, ...kept } = removed;
         expect(saved).toEqual({
           ...before,
           ...legacyAllocationPolicyFields,
+          ...kept,
           version: 8,
           accountOrder: [allocationPreferenceKey(b)],
           closeMarginPoints: 4,
@@ -490,6 +503,7 @@ it.effect(
         );
         expect(yield* stored).toMatchObject({
           ...legacyAllocationPolicyFields,
+          ...kept,
           mode: "observation",
           maxReadingAgeMinutes: 10,
           reservationMinutes: 5,
@@ -570,4 +584,35 @@ it.effect(
         expect(explicitAfterReset.reservation).not.toBeNull();
       }),
     ),
+);
+
+it.effect("keeps the stored daily goals when a save does not change them", () =>
+  Effect.gen(function* () {
+    yield* migration;
+    const sql = yield* SqlClient.SqlClient;
+    const store = yield* Store.AllocationStore;
+    // The user's own values, unlike the fixed ones builds from before smart allocation wrote.
+    const claude = { ...legacyAllocationPolicyFields.claude, dailyPoints: 20, reservePoints: 7 };
+    const codex = { ...legacyAllocationPolicyFields.codex, dailyPoints: 12 };
+    const stored = { ...defaultAllocationPolicy, version: 12, claude, codex };
+    yield* sql`INSERT INTO provider_allocation_policy (id, version, policy_json) VALUES (1, 12, ${json(stored)})`;
+    const goal = { key: "account-key", percentPerDay: 12 };
+    // A save from this build sends what it read, with its own change.
+    const first = yield* store.savePolicy({
+      expectedVersion: 12,
+      policy: { ...(yield* store.policy), accountGoals: [goal], fableWorkers: false },
+    });
+    expect(first).toMatchObject({ claude, codex, accountGoals: [goal], fableWorkers: false });
+    // A save that omits them keeps what is stored, never a constant.
+    const {
+      claude: _claude,
+      codex: _codex,
+      accountGoals: _goals,
+      fableWorkers: _fable,
+      ...partial
+    } = first;
+    const second = yield* store.savePolicy({ expectedVersion: 13, policy: partial });
+    expect(second).toMatchObject({ claude, codex, accountGoals: [goal], fableWorkers: false });
+    expect(yield* store.policy).toEqual(second);
+  }).pipe(Effect.provide(layer)),
 );

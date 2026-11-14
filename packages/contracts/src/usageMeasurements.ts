@@ -36,6 +36,8 @@ export const UsageTurnMeasurement = Schema.Struct({
   toolTimingComplete: Schema.Boolean,
   apiDurationMs: Schema.NullOr(NonNegativeInt),
   tokens: Schema.NullOr(TurnTokenUsage),
+  /** The turn's own cost at API prices, subagents included, when the provider reports it. */
+  costUsd: Schema.optional(Schema.Number),
 });
 export type UsageTurnMeasurement = typeof UsageTurnMeasurement.Type;
 

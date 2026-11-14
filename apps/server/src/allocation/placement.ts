@@ -24,7 +24,8 @@ export function computerNumbers(inventory: AllocationInventory): ComputerNumbers
     memoryTotalGiB: resources ? gib(resources.totalMemoryBytes) : null,
     workDiskFreeGiB: disk ? gib(disk.availableBytes) : null,
     sessions: inventory.complete
-      ? inventory.demand.filter((session) => session.state !== "uncertain").length
+      ? inventory.demand.filter((session) => session.state !== "uncertain" && !session.recent)
+          .length
       : null,
     projectId: inventory.projects?.[0]?.id ?? null,
   };

@@ -5,13 +5,16 @@ import {
   DEFAULT_LONG_WAIT_HOURS,
   PROVIDER_DISPLAY_NAMES,
   type AllocationAccountCap,
+  type AllocationLearned,
   type AllocationPolicy,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
 import {
   allocationAccountOrder,
   allocationAccountRows,
+  allocationReadingAge,
   allocationSupportsFiveHourCap,
+  withAllocationAccountGoal,
   withAllocationAccountMoved,
   type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
@@ -24,6 +27,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 const number = (value: number) =>
   Number.isFinite(value) ? Number(value.toFixed(2)).toString() : "";
 const time = (value: string) => new Date(value).toLocaleString();
+const dollars = (value: number) =>
+  `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
 
 /** A compact field. Its name is what assistive technology reads; the caption is what shows. */
 function Field({
@@ -118,6 +123,8 @@ function AccountsTable({
   onWorkersChange: (row: AllocationAccountRow, enabled: boolean) => void;
 }) {
   const capsDisabled = disabled || snapshot?.accountCapsSupported !== true;
+  // Coordinators from before runway allocation neither keep nor apply goals.
+  const goalsDisabled = disabled || snapshot?.runways === undefined;
   const setCap = (row: AllocationAccountRow, patch: Partial<Omit<AllocationAccountCap, "key">>) => {
     const next = {
       ...(row.cap ?? {
@@ -145,6 +152,7 @@ function AccountsTable({
           <TableHead>Account</TableHead>
           <TableHead>Usage now</TableHead>
           <TableHead>Workers</TableHead>
+          <TableHead>Daily goal %</TableHead>
           <TableHead>Hard cap %</TableHead>
         </TableRow>
       </TableHeader>
@@ -159,30 +167,43 @@ function AccountsTable({
               <TableCell>
                 <div className="font-medium">{row.label}</div>
                 <div className="text-muted-foreground">
-                  {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver} · {row.hosts.join(", ")}
+                  {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver}
+                  {row.plan && ` ${row.plan}`} · {row.hosts.join(", ")}
                 </div>
                 {row.login === null && (
                   <div className="text-muted-foreground">login unknown; matched by label</div>
                 )}
               </TableCell>
               <TableCell>
-                {row.windows.map((window) => (
-                  <div key={window.id}>
-                    {window.label} {number(window.usedPercent)}%
-                    <span className="text-muted-foreground">
-                      {" · "}
-                      {window.resetsAt === null
-                        ? "reset unknown"
-                        : Date.parse(window.resetsAt) <= now
-                          ? "reset"
-                          : `resets ${time(window.resetsAt)}`}
-                      {` · read ${window.age} ago`}
-                      {now - Date.parse(window.checkedAt) > policy.maxReadingAgeMinutes * 60_000
-                        ? ", stale"
-                        : ""}
-                    </span>
-                  </div>
-                ))}
+                {row.windows.map((window) => {
+                  const runway = row.runway?.windows.find((w) => w.id === window.id);
+                  return (
+                    <div key={window.id}>
+                      {window.label} {number(window.usedPercent)}%
+                      <span className="text-muted-foreground">
+                        {" · "}
+                        {window.resetsAt === null
+                          ? "reset unknown"
+                          : Date.parse(window.resetsAt) <= now
+                            ? "reset"
+                            : `resets ${time(window.resetsAt)}`}
+                        {` · read ${window.age} ago`}
+                        {now - Date.parse(window.checkedAt) > policy.maxReadingAgeMinutes * 60_000
+                          ? ", stale"
+                          : ""}
+                        {runway?.sizeDollars != null &&
+                          ` · holds about ${dollars(runway.sizeDollars)}${
+                            runway.source === "estimated" ? " (estimated)" : ""
+                          }`}
+                        {runway?.goalPercent != null &&
+                          ` · goal ${Math.round(runway.goalPercent)}% by now`}
+                      </span>
+                    </div>
+                  );
+                })}
+                {row.runway && row.windows.length > 0 && (
+                  <div className="text-muted-foreground">{row.runway.line}</div>
+                )}
                 {!row.windows.length && (
                   <div className="text-muted-foreground">
                     {row.capSource === "unsupported"
@@ -208,6 +229,22 @@ function AccountsTable({
                 </div>
                 {row.workersEnabled && row.workersOffOn.length > 0 && (
                   <div className="text-muted-foreground">off on {row.workersOffOn.join(", ")}</div>
+                )}
+              </TableCell>
+              <TableCell>
+                <NumberField
+                  name={`${row.name} daily goal`}
+                  className="w-16"
+                  value={row.goal?.own ? row.goal.percentPerDay : undefined}
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  placeholder={row.goal ? number(row.goal.percentPerDay) : "Off"}
+                  disabled={goalsDisabled}
+                  onChange={(value) => onChange(withAllocationAccountGoal(policy, row, value))}
+                />
+                {row.goal && !row.goal.own && (
+                  <div className="text-muted-foreground">provider default</div>
                 )}
               </TableCell>
               <TableCell>
@@ -281,6 +318,92 @@ function AccountsTable({
   );
 }
 
+/** What T3 learned from every computer's history. Nobody edits these. */
+function LearnedNumbers({ learned, now }: { learned: AllocationLearned; now: number }) {
+  return (
+    <div className="grid min-w-0 gap-3">
+      <p className="text-sm text-muted-foreground">
+        Learned {allocationReadingAge(learned.learnedAt, now)} ago from every computer&apos;s turns
+        and limit readings. Measured numbers come from this history; estimated ones are scaled from
+        a measured model or account until their own history is enough.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Model</TableHead>
+            <TableHead>Session</TableHead>
+            <TableHead>Per working hour</TableHead>
+            <TableHead>Turns</TableHead>
+            <TableHead>Source</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {learned.costs.map((cost) => (
+            <TableRow key={`${cost.driver}:${cost.model}:${cost.effort}:${cost.kind}`}>
+              <TableCell>
+                {cost.model} / {cost.effort ?? "default"}
+              </TableCell>
+              <TableCell>{cost.kind}</TableCell>
+              <TableCell>
+                {dollars(cost.dollarsPerHour)} at {Math.round(cost.contextTokens / 1000)}k context
+                {cost.perHundredK > 0 && (
+                  <div className="text-muted-foreground">
+                    +{dollars(cost.perHundredK)} per 100k more
+                  </div>
+                )}
+              </TableCell>
+              <TableCell>
+                {cost.samples} over {number(cost.hours)} h
+              </TableCell>
+              <TableCell>
+                {cost.measuredShare === undefined ? cost.source : "thin"}
+                {cost.basis && <div className="text-muted-foreground">{cost.basis}</div>}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Account</TableHead>
+            <TableHead>Limit</TableHead>
+            <TableHead>Holds</TableHead>
+            <TableHead>Outside use</TableHead>
+            <TableHead>Reading pairs</TableHead>
+            <TableHead>Source</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {learned.limits.map((limit) => (
+            <TableRow key={`${limit.key}:${limit.windowId}`}>
+              <TableCell>
+                {limit.label}
+                {limit.plan && <div className="text-muted-foreground">{limit.plan}</div>}
+              </TableCell>
+              <TableCell>{limit.windowLabel}</TableCell>
+              <TableCell>about {dollars(100 / limit.percentPerDollar)}</TableCell>
+              <TableCell>{number(limit.backgroundPercentPerHour)}% an hour</TableCell>
+              <TableCell>
+                {limit.samples} over {number(limit.hours)} h
+              </TableCell>
+              <TableCell>
+                {limit.source}
+                {limit.basis && <div className="text-muted-foreground">{limit.basis}</div>}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      {learned.notes.map((note) => (
+        <p key={note} className="text-sm text-muted-foreground">
+          {note}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 export function AllocationControls({
   policy,
   snapshot,
@@ -318,6 +441,12 @@ export function AllocationControls({
     <>
       <section aria-label="Accounts" className="grid min-w-0 gap-3">
         <h2 className="font-semibold">Accounts</h2>
+        <p className="text-sm text-muted-foreground">
+          A daily goal is the share of the weekly limit an account should use each day; blank uses
+          the provider&apos;s default. It only changes which account is recommended: accounts on
+          pace come first. It never stops, queues or changes a start, and a pinned account over its
+          goal starts normally. Only a hard cap or a real limit stops work.
+        </p>
         {snapshot && snapshot.accountCapsSupported !== true && (
           <p className="text-sm">
             Update the coordinator to edit hard caps. Existing saved caps remain enforced.
@@ -343,8 +472,9 @@ export function AllocationControls({
       <section aria-label="Preference order" className="grid min-w-0 gap-3">
         <h2 className="font-semibold">Preference order</h2>
         <p className="text-sm text-muted-foreground">
-          The account with the most room wins. Between accounts that are close, the one higher in
-          this list wins.
+          Among accounts that fit the job and keep within their daily goal, the one with the most
+          room until its reset wins. Between accounts that are close, the one higher in this list
+          wins.
         </p>
         {snapshot && snapshot.accountOrderSupported !== true && (
           <p className="text-sm">
@@ -385,7 +515,7 @@ export function AllocationControls({
           <div className="grid min-w-0 content-start gap-1">
             <NumberField
               name="Closeness margin"
-              caption="Closeness margin (points)"
+              caption="Closeness margin (%)"
               value={policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS}
               required
               min={0}
@@ -394,7 +524,8 @@ export function AllocationControls({
               onChange={(value = Number.NaN) => onChange({ ...policy, closeMarginPoints: value })}
             />
             <span className="text-xs text-muted-foreground">
-              Accounts whose room differs by this many percentage points or fewer are close.
+              Accounts with at least this much less room than the best account, in percent of its
+              room, are not close.
             </span>
           </div>
           <div className="grid min-w-0 content-start gap-1">
@@ -414,7 +545,34 @@ export function AllocationControls({
               moves to the closest model.
             </span>
           </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <label className="flex items-center gap-2 text-sm">
+              <Switch
+                size="sm"
+                checked={policy.fableWorkers !== false}
+                disabled={disabled || snapshot?.runways === undefined}
+                onCheckedChange={(fableWorkers) => onChange({ ...policy, fableWorkers })}
+              />
+              Fable workers
+            </label>
+            <span className="text-xs text-muted-foreground">
+              Off: no worker runs on Fable. A table cell or pin that names Fable starts from the
+              nearest rung without it, and a running worker never moves onto it.
+            </span>
+          </div>
         </div>
+      </section>
+      <section aria-label="Learned numbers" className="grid min-w-0 gap-3">
+        <h2 className="font-semibold">Learned numbers</h2>
+        {snapshot?.learned ? (
+          <LearnedNumbers learned={snapshot.learned} now={now} />
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {snapshot && snapshot.runways === undefined
+              ? "Update the coordinator to learn costs and limit sizes."
+              : "Nothing learned yet: choices use starting estimates until turns and limit readings are recorded."}
+          </p>
+        )}
       </section>
     </>
   );

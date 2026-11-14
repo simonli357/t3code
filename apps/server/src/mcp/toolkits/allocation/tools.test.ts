@@ -265,8 +265,9 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
         },
       },
     ]);
+    // Nothing learned yet: at the starting estimates no account lasts the whole job.
     const chosen = {
-      instanceId: "claudeAgent",
+      instanceId: "claude_eol",
       driver: "claudeAgent",
       model: OPUS,
       effort: "xhigh",
@@ -276,9 +277,9 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
     // Exactly the compact shape: no candidates, windows, forecasts or history.
     expect(Object.keys(choice).sort()).toEqual(["accounts", "chosen", "reason", "state", "wanted"]);
     expect(choice.reason).toContain(
-      `${FABLE} / high is drained on every account (earliest reset ${inHours(9)}); the nearest ladder rung with room is ${OPUS} / xhigh.`,
+      `${FABLE} / high is out on every account; ${OPUS} / xhigh is the nearest rung that is not.`,
     );
-    expect(choice.reason).toContain("most room of 5 accounts.");
+    expect(choice.reason).toContain("no account lasts the whole job, this one lasts longest.");
     expect(choice.accounts).toEqual([
       `AC: drained until ${inHours(26)} (Weekly · Fable 100% used), 0 workers`,
       `ARA: drained until ${inHours(40)} (Weekly · Fable 100% used), 1 worker`,

@@ -34,7 +34,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { makeClaudeEnvironment, readClaudePlanTier } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import {
@@ -566,6 +566,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       subscriptionType: capabilities.subscriptionType,
       authMethod: capabilities.tokenSource,
     }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+  const tier =
+    capabilities.subscriptionType && authMetadata?.type !== "apiKey"
+      ? yield* readClaudePlanTier(claudeSettings, resolvedEnvironment)
+      : undefined;
   const usageLimits = !capabilities.usage
     ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
     : scopedLimitNames
@@ -596,6 +600,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "authenticated",
         ...(capabilities.email ? { email: capabilities.email } : {}),
         ...(authMetadata ? authMetadata : {}),
+        ...(tier ? { tier } : {}),
       },
       ...(versionUpgradeMessage ? { message: versionUpgradeMessage } : {}),
       usageLimits: resetCredits ? { ...usageLimits, resetCredits } : usageLimits,
