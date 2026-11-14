@@ -62,7 +62,59 @@ export function buildGlobalInstructionContext(
       ? { guidePath: settings.globalInstructionsGuidePath.trim() }
       : {}),
   });
-  return { revision, active, context: { instructions, runtimeFacts } };
+  const digest = NodeCrypto.createHash("sha256")
+    .update(instructions)
+    .update("\0")
+    .update(runtimeFacts)
+    .digest("hex");
+  return { revision, digest, active, context: { instructions, runtimeFacts } };
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Names the provider context a snapshot lands in, or undefined when the provider cannot tell
+ * T3 that its context was replaced; those providers get the snapshot every turn. Claude gives
+ * every fresh context a new native session id (new session, fork, rollback, failed resume)
+ * and reports compaction and in-session resets, which bump `globalInstructionsContextReset`.
+ * A session move or another account also makes a new context.
+ */
+export function globalInstructionContextKey(
+  binding:
+    | {
+        readonly provider: string;
+        readonly providerInstanceId?: string | undefined;
+        readonly resumeCursor?: unknown;
+        readonly runtimePayload?: unknown;
+      }
+    | undefined,
+) {
+  if (binding?.provider !== "claudeAgent") return undefined;
+  const sessionId = isRecord(binding.resumeCursor) ? binding.resumeCursor.resume : undefined;
+  if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+  const payload = isRecord(binding.runtimePayload) ? binding.runtimePayload : {};
+  return JSON.stringify([
+    binding.providerInstanceId ?? null,
+    sessionId,
+    payload.globalInstructionsContextReset ?? null,
+    payload.nativeSessionMove ?? null,
+  ]);
+}
+
+/** Only a record naming this exact snapshot and context proves the context holds it. */
+export function globalInstructionsDelivered(
+  runtimePayload: unknown,
+  digest: string,
+  contextKey: string | undefined,
+) {
+  const last = isRecord(runtimePayload) ? runtimePayload.globalInstructionsSubmission : undefined;
+  return (
+    contextKey !== undefined &&
+    isRecord(last) &&
+    last.digest === digest &&
+    last.contextKey === contextKey
+  );
 }
 
 /** User-context fallback for providers without keyed, replaceable turn context. */

@@ -1828,6 +1828,43 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("reports a /clear conversation reset as a thread reset", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const turn = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "/clear",
+        attachments: [],
+      });
+      harness.query.emit({
+        type: "conversation_reset",
+        new_conversation_id: "550e8400-e29b-41d4-a716-446655440077",
+        uuid: "conversation-reset",
+        session_id: "sdk-session-1",
+      } as unknown as SDKMessage);
+      harness.query.finish();
+
+      const reset = Array.from(yield* Fiber.join(runtimeEventsFiber)).find(
+        (event) => event.type === "thread.state.changed" && event.payload.state === "reset",
+      );
+      assert.equal(String(reset?.turnId), String(turn.turnId));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -50,6 +50,9 @@ T3 supplies the actual hostname and known workspace separately. A guide path is 
 if you configure one for that environment. Provider system and developer instructions still
 apply: Codex receives keyed application context as developer messages identifying user
 preferences; other providers receive user context that supersedes earlier snapshots in history.
+Claude receives the snapshot once per conversation: on its first turn, when the text, enabled
+state or host facts change, and after compaction, `/clear`, a fork, a move or a switch to
+another account. Other providers receive it every turn.
 The submitted revision hash identifies the text, not proof it was read or followed. Text is
 stored in environment settings outside project repositories.
 

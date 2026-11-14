@@ -67,6 +67,8 @@ const RuntimeThreadState = Schema.Literals([
   "archived",
   "closed",
   "compacted",
+  // The provider replaced the conversation inside the same session (Claude /clear).
+  "reset",
   "error",
 ]);
 export type RuntimeThreadState = typeof RuntimeThreadState.Type;

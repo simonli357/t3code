@@ -4313,11 +4313,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* handleSdkTelemetryMessage(context, message);
         return;
       // Composer prompt suggestions have no T3 surface; consumed deliberately.
-      // `conversation_reset` announces a CLI-side conversation id swap
-      // (e.g. /clear); T3 keeps its own thread identity and resume cursor.
       case "prompt_suggestion":
-      case "conversation_reset":
         return;
+      // A CLI-side conversation swap (/clear, plan-mode exit with cleared
+      // context, fresh-session flows). T3 keeps its own thread identity, but
+      // nothing delivered earlier is in context any more.
+      case "conversation_reset": {
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "thread.state.changed",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          createdAt: stamp.createdAt,
+          threadId: context.session.threadId,
+          ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+          payload: { state: "reset", detail: message },
+          providerRefs: nativeProviderRefs(context),
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/conversation_reset",
+            payload: message,
+          },
+        });
+        return;
+      }
       default: {
         // Exhaustiveness guard (see handleSystemMessage): new SDK top-level
         // message types fail typecheck here instead of warning at runtime.

@@ -92,6 +92,8 @@ import * as ServerSettings from "../../serverSettings.ts";
 import {
   buildGlobalInstructionContext,
   appendGlobalInstructionContext,
+  globalInstructionContextKey,
+  globalInstructionsDelivered,
 } from "../GlobalInstructions.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as SessionWorkspaces from "../../workspace/SessionWorkspaces.ts";
@@ -1087,8 +1089,32 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
 
+  // Compaction or a reset may drop the delivered global instruction snapshot,
+  // whoever asked for it; recording it here makes the next turn resend.
+  const recordContextReset = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
+    event.type !== "thread.state.changed" ||
+    (event.payload.state !== "compacted" && event.payload.state !== "reset")
+      ? Effect.void
+      : Effect.gen(function* () {
+          const binding = Option.getOrUndefined(yield* directory.getBinding(event.threadId));
+          if (!binding) return;
+          yield* directory.upsert({
+            threadId: event.threadId,
+            provider: binding.provider,
+            ...(binding.providerInstanceId
+              ? { providerInstanceId: binding.providerInstanceId }
+              : {}),
+            runtimePayload: { globalInstructionsContextReset: event.eventId },
+          });
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to record provider context reset", { cause }),
+          ),
+        );
+
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
+      Effect.tap(recordContextReset),
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
           ? canonicalEventLogger.write(canonicalEvent, canonicalEvent.threadId)
@@ -1937,7 +1963,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         input.input = withHistory;
       }
-      const globalInstructions = buildGlobalInstructionContext(
+      const snapshot = buildGlobalInstructionContext(
         yield* serverSettings.getSettings.pipe(
           Effect.mapError((cause) =>
             toValidationError(
@@ -1965,6 +1991,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ? Option.getOrUndefined(decodeWorkspaceEnvironment(payload.workspaceEnvironment))
           : undefined,
       );
+      const contextKey = globalInstructionContextKey(binding);
+      const globalInstructions =
+        snapshot && !globalInstructionsDelivered(payload, snapshot.digest, contextKey)
+          ? snapshot
+          : undefined;
+      // Claude runs a leading slash command rather than reading the text, so
+      // a snapshot riding on one is not counted as delivered.
+      const recordsDelivery = contextKey !== undefined && !/^\s*\//.test(input.input ?? "");
       if (globalInstructions) {
         if (routed.adapter.provider === "codex") {
           input.globalInstructionContext = globalInstructions.context;
@@ -2058,6 +2092,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                     routed.adapter.provider === "codex" ? "additional-context" : "user-context",
                   turnId: turn.turnId,
                   submittedAt: yield* nowIso,
+                  // Older builds rewrite this whole record without these, which forces a resend.
+                  ...(recordsDelivery ? { digest: globalInstructions.digest, contextKey } : {}),
                 },
               }
             : {}),

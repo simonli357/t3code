@@ -102,6 +102,12 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
+Claude receives the global instruction snapshot only when the binding's record shows that its
+current conversation lacks it: the record names the account, the native session id, the last
+`compacted` or `reset` thread state and the last session move ([GlobalInstructions](../../apps/server/src/provider/GlobalInstructions.ts)).
+A new path that replaces a Claude conversation must change the native session id or emit one
+of those states. Otherwise later turns silently go without the instructions.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)

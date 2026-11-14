@@ -6118,6 +6118,264 @@ describe("current global instructions across provider instances", () => {
   }
 });
 
+describe("global instructions reach each Claude context once", () => {
+  const SNAPSHOT = "T3 user-configured global instructions";
+  const instanceId = ProviderInstanceId.make("once-claude");
+  const otherAccount = ProviderInstanceId.make("once-claude-other");
+  const fake = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const other = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const registry = makeStaticInstanceRegistry([
+    [instanceId, fake.adapter],
+    [otherAccount, other.adapter],
+  ]);
+  const harness = makeProviderServiceLayer({ registry, settingsLayer: ServerSettings.layerTest() });
+  const restartedLayer = makeProviderServiceLive().pipe(
+    Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+    Layer.provide(serverConfigTestLayer),
+    Layer.provide(
+      Layer.succeed(
+        ProviderEventLoggers.ProviderEventLoggers,
+        ProviderEventLoggers.NoOpProviderEventLoggers,
+      ),
+    ),
+  );
+  const start = (threadId: ThreadId, resume: string, providerInstanceId = instanceId) =>
+    Effect.flatMap(ProviderService.ProviderService, (service) =>
+      service.startSession(threadId, {
+        threadId,
+        providerInstanceId,
+        runtimeMode: "full-access",
+        resumeCursor: { resume },
+      }),
+    );
+  /** The text the provider received for a turn whose user message is `input`. */
+  const turn = (threadId: ThreadId, input: string, adapter = fake) =>
+    Effect.gen(function* () {
+      yield* (yield* ProviderService.ProviderService).sendTurn({ threadId, input });
+      return adapter.sendTurn.mock.calls.at(-1)![0].input!;
+    });
+  const emitAndWait = (event: LegacyProviderRuntimeEvent) =>
+    Effect.gen(function* () {
+      const published = yield* (yield* ProviderService.ProviderService).streamEvents.pipe(
+        Stream.filter((candidate) => candidate.eventId === event.eventId),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      fake.emit(event);
+      yield* Fiber.join(published);
+    });
+  const threadState = (threadId: ThreadId, id: string, state: "compacted" | "reset") =>
+    emitAndWait({
+      type: "thread.state.changed",
+      eventId: asEventId(id),
+      provider: CLAUDE_AGENT_DRIVER,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId,
+      payload: { state },
+    });
+  const enable = (text: string, globalInstructionsGuidePath = "") =>
+    Effect.flatMap(ServerSettings.ServerSettingsService, (settings) =>
+      settings.updateSettings({
+        globalInstructions: { enabled: true, text },
+        globalInstructionsGuidePath,
+      }),
+    );
+
+  harness.layer("claudeAgent", (it) => {
+    it.effect("sends again only when the text, enabled state or host facts change", () =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const threadId = asThreadId("once-changes");
+        yield* enable("Alpha");
+        yield* start(threadId, "session-changes");
+        assert.include(yield* turn(threadId, "One"), "Alpha");
+        assert.equal(yield* turn(threadId, "Two"), "Two");
+        yield* enable("Beta");
+        assert.include(yield* turn(threadId, "Three"), "Beta");
+        assert.equal(yield* turn(threadId, "Four"), "Four");
+        yield* settings.updateSettings({ globalInstructions: { enabled: false, text: "Beta" } });
+        assert.include(yield* turn(threadId, "Five"), "No global instructions are active");
+        assert.equal(yield* turn(threadId, "Six"), "Six");
+        yield* enable("Beta");
+        assert.include(yield* turn(threadId, "Seven"), "Beta");
+        yield* enable("Beta", "/guide/v2");
+        assert.include(yield* turn(threadId, "Eight"), '"guidePath":"/guide/v2"');
+        assert.equal(yield* turn(threadId, "Nine"), "Nine");
+      }),
+    );
+
+    it.effect("sends again after compaction or a conversation reset, by any route", () =>
+      Effect.gen(function* () {
+        const threadId = asThreadId("once-compaction");
+        yield* enable("Alpha");
+        yield* start(threadId, "session-compaction");
+        assert.include(yield* turn(threadId, "One"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Two"), "Two");
+        yield* threadState(threadId, "evt-once-compacted", "compacted");
+        assert.include(yield* turn(threadId, "Three"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Four"), "Four");
+        yield* threadState(threadId, "evt-once-reset", "reset");
+        assert.include(yield* turn(threadId, "Five"), SNAPSHOT);
+        // A slash command needs nothing new, and one that carries the snapshot
+        // is not counted: Claude may run it without reading the text.
+        assert.equal(yield* turn(threadId, "/compact"), "/compact");
+        yield* threadState(threadId, "evt-once-compact-command", "compacted");
+        assert.include(yield* turn(threadId, "/compact"), SNAPSHOT);
+        assert.include(yield* turn(threadId, "Six"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Seven"), "Seven");
+      }),
+    );
+
+    it.effect("sends into every new context: /clear, another account, a move, a fork", () =>
+      Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId("once-contexts");
+        yield* enable("Alpha");
+        yield* start(threadId, "session-one");
+        assert.include(yield* turn(threadId, "One"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Two"), "Two");
+        // Claude names the cleared conversation; its turn end persists the new id.
+        fake.updateSession(threadId, (session) => ({
+          ...session,
+          resumeCursor: { resume: "session-cleared" },
+        }));
+        yield* emitAndWait({
+          type: "turn.completed",
+          eventId: asEventId("evt-once-cleared"),
+          provider: CLAUDE_AGENT_DRIVER,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          threadId,
+          turnId: asTurnId(`turn-${threadId}`),
+          payload: { state: "completed" },
+        });
+        assert.include(yield* turn(threadId, "Three"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Four"), "Four");
+        // A handoff to another account starts a fresh session; give it the
+        // native id the real adapter reports.
+        yield* (yield* ProviderService.ProviderService).startSession(threadId, {
+          threadId,
+          providerInstanceId: otherAccount,
+          runtimeMode: "full-access",
+          contextHandoff: "Earlier conversation",
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: otherAccount,
+          resumeCursor: { resume: "session-other-account" },
+        });
+        assert.include(yield* turn(threadId, "Five", other), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Six", other), "Six");
+        yield* directory.upsert({
+          threadId,
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: otherAccount,
+          runtimePayload: { nativeSessionMove: "move-1" },
+        });
+        assert.include(yield* turn(threadId, "Seven", other), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Eight", other), "Eight");
+        yield* start(threadId, "session-rolled-back", otherAccount);
+        assert.include(yield* turn(threadId, "Nine", other), SNAPSHOT);
+        const forkId = asThreadId("once-contexts-fork");
+        yield* start(forkId, "session-fork");
+        assert.include(yield* turn(forkId, "Fork"), SNAPSHOT);
+      }),
+    );
+
+    it.effect("keeps the record across a server restart, including a compaction", () =>
+      Effect.gen(function* () {
+        const threadId = asThreadId("once-restart");
+        yield* enable("Alpha");
+        yield* start(threadId, "session-restart");
+        assert.include(yield* turn(threadId, "One"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Two"), "Two");
+        yield* fake.stopAll();
+        yield* Effect.gen(function* () {
+          assert.equal(yield* turn(threadId, "Resumed"), "Resumed");
+          assert.deepEqual(fake.startSession.mock.calls.at(-1)![0].resumeCursor, {
+            resume: "session-restart",
+          });
+          yield* threadState(threadId, "evt-once-restart-compacted", "compacted");
+        }).pipe(Effect.provide(restartedLayer));
+        yield* fake.stopAll();
+        yield* Effect.gen(function* () {
+          assert.include(yield* turn(threadId, "After compaction and restart"), SNAPSHOT);
+          assert.equal(yield* turn(threadId, "Three"), "Three");
+        }).pipe(Effect.provide(restartedLayer));
+      }),
+    );
+
+    it.effect("sends when the stored record came from an older build", () =>
+      Effect.gen(function* () {
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId("once-old-state");
+        const olderBuildTurn = (turnId: string) =>
+          directory.upsert({
+            threadId,
+            provider: CLAUDE_AGENT_DRIVER,
+            providerInstanceId: instanceId,
+            runtimePayload: {
+              globalInstructionsSubmission: {
+                revision: "older-build",
+                active: true,
+                transport: "user-context",
+                turnId,
+                submittedAt: "2026-01-01T00:00:00.000Z",
+              },
+            },
+          });
+        yield* enable("Alpha");
+        yield* start(threadId, "session-old-state");
+        yield* olderBuildTurn("turn-before-upgrade");
+        assert.include(yield* turn(threadId, "One"), SNAPSHOT);
+        assert.equal(yield* turn(threadId, "Two"), "Two");
+        yield* olderBuildTurn("turn-after-downgrade");
+        assert.include(yield* turn(threadId, "Three"), SNAPSHOT);
+      }),
+    );
+  });
+});
+
+describe("global instructions keep reaching providers without reliable context signals", () => {
+  for (const driver of ["codex", "cursor", "grok", "opencode", "antigravity", "claudeAgent"]) {
+    const instanceId = ProviderInstanceId.make(`every-turn-${driver}`);
+    const fake = makeFakeCodexAdapter(ProviderDriverKind.make(driver));
+    const harness = makeProviderServiceLayer({
+      registry: makeStaticInstanceRegistry([[instanceId, fake.adapter]]),
+      settingsLayer: ServerSettings.layerTest(),
+    });
+    harness.layer(driver, (it) => {
+      it.effect("sends the snapshot on every turn", () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const threadId = asThreadId(`every-turn-${driver}`);
+          yield* settings.updateSettings({
+            globalInstructions: { enabled: true, text: "Every turn" },
+          });
+          yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access",
+            // Claude without a native session id cannot prove the context.
+            ...(driver === "claudeAgent" ? {} : { resumeCursor: { resume: "native-session" } }),
+          });
+          for (const input of ["One", "Two"]) {
+            yield* service.sendTurn({ threadId, input });
+            const sent = fake.sendTurn.mock.calls.at(-1)![0];
+            assert.include(
+              driver === "codex" ? sent.globalInstructionContext!.instructions : sent.input!,
+              "Every turn",
+            );
+          }
+        }),
+      );
+    });
+  }
+});
+
 for (const [driver, id, model] of [
   ["codex", "deepseek_codex", "deepseek-flash"],
   ["deepseekHarness", "deepseekHarness", "deepseek-official/deepseek-flash"],
