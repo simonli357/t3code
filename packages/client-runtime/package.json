@@ -319,6 +319,10 @@
       "types": "./src/state/modelRouting.ts",
       "default": "./src/state/modelRouting.ts"
     },
+    "./state/autosave": {
+      "types": "./src/state/autosave.ts",
+      "default": "./src/state/autosave.ts"
+    },
     "./state/base-sessions": {
       "types": "./src/state/baseSessions.ts",
       "default": "./src/state/baseSessions.ts"

@@ -12,6 +12,7 @@ import {
   type RoutingProfile,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import type { AutosaveOptions } from "./autosave.ts";
 
 export function modelFailureMessage(cause: Cause.Cause<unknown> | undefined) {
   if (!cause) return "Request failed.";
@@ -306,9 +307,13 @@ export function rebaseModelDraft(draft: ModelDraft): ModelDraft {
     merged =
       key === "codex" || key === "claudeAgent"
         ? setAllowedModels(merged, key, [
-            ...policy[key].allowedModels,
-            // Models an edited entry approved on the newer table stay approved.
-            ...merged[key].allowedModels.filter((m) => !saved[key].allowedModels.includes(m)),
+            // The newer list without the models the draft removed, then the ones it added.
+            // Models the newer table or an edited entry approved stay approved.
+            ...merged[key].allowedModels.filter(
+              (m) =>
+                policy[key].allowedModels.includes(m) || !baseline[key].allowedModels.includes(m),
+            ),
+            ...policy[key].allowedModels.filter((m) => !baseline[key].allowedModels.includes(m)),
           ])
         : key === "ladder"
           ? { ...merged, ladder: modelLadder(policy) }
@@ -317,6 +322,47 @@ export function rebaseModelDraft(draft: ModelDraft): ModelDraft {
             : { ...merged, maxReassessments: policy.maxReassessments };
   return { saved, baseline: saved, policy: merged };
 }
+
+/**
+ * Whether the newer saved table changed an entry or setting the draft edited, to something
+ * else. The two model lists never collide: `rebaseModelDraft` merges them.
+ */
+export function modelDraftCollides({ saved, baseline, policy }: ModelDraft) {
+  if (!saved || !baseline || !policy) return false;
+  const [theirs, base, mine] = [saved, baseline, policy].map(modelSettings);
+  return (
+    modelCellChanges(baseline, policy).some(({ driver, difficulty, stakes }) => {
+      const newer = modelCell(saved, driver, difficulty, stakes);
+      return (
+        !sameModelCell(newer, modelCell(baseline, driver, difficulty, stakes)) &&
+        !sameModelCell(newer, modelCell(policy, driver, difficulty, stakes))
+      );
+    }) ||
+    modelSettingChanges(baseline, policy).some((key) => {
+      if (key === "codex" || key === "claudeAgent") return false;
+      const newer = JSON.stringify(theirs![key]);
+      return newer !== JSON.stringify(base![key]) && newer !== JSON.stringify(mine![key]);
+    })
+  );
+}
+
+/** How the model table is compared, merged and checked when it saves itself. */
+export const modelAutosaveRules = {
+  dirty: (baseline, policy) => modelDraftDirty({ saved: baseline, baseline, policy }),
+  rebase: (base, mine, theirs) => {
+    const draft = { saved: theirs, baseline: base, policy: mine };
+    return {
+      policy: rebaseModelDraft(draft).policy ?? theirs,
+      collides: modelDraftCollides(draft),
+    };
+  },
+  invalid: (policy) => {
+    const fallback = modelFallback(policy);
+    return fallback && !(fallback.model && fallback.effort)
+      ? "The fallback needs a model and an effort."
+      : null;
+  },
+} satisfies Pick<AutosaveOptions<ModelRoutingPolicy>, "dirty" | "rebase" | "invalid">;
 
 /** A save acknowledges the submitted table, not edits made while its receipt was in flight. */
 export function acknowledgeModelSave(

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import * as Schema from "effect/Schema";
 import {
+  defaultModelFallback,
   defaultModelRoutingPolicy,
   modelFallback,
   modelLadder,
@@ -11,45 +12,44 @@ import {
   ProviderDriverKind,
   ThreadId,
   type EnvironmentId,
+  type ModelRoutingPolicy,
   type ModelRoutingSnapshot,
   type ModelRoutingDecision,
   type AllocationOperation,
   type RoutingCell,
 } from "@t3tools/contracts";
+import { createAutosave } from "@t3tools/client-runtime/state/autosave";
 import {
   allocationModelChoices,
+  allocationSaveFailure,
   createAllocationCommands,
   withModelLadderEdit,
 } from "@t3tools/client-runtime/state/provider-allocation";
 import {
   MODEL_DRIVERS,
-  acknowledgeModelSave,
-  adoptModelPolicy,
-  discardModelDraft,
-  editModelDraft,
-  emptyModelDraft,
+  modelAutosaveRules,
   modelCatalog,
   modelCell,
   modelCellChanges,
-  modelCellSummary,
   modelDriverLabel,
   modelFailureMessage,
   modelPreviewKey,
-  rebaseModelDraft,
-  receiveSavedModelPolicy,
   resetModelTable,
   setAllowedModels,
   setModelCell,
   summarizeModelDraft,
-  type ModelDraft,
   type ModelDriver,
 } from "@t3tools/client-runtime/state/model-routing";
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironment } from "../../state/environments";
 import { randomUUID } from "../../lib/utils";
-import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
+import { FoldedSettingsSection } from "../settings/FoldedSettingsSection";
+import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
+import { SettingsSection } from "../settings/settingsLayout";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
+import { Switch } from "../ui/switch";
 import {
   ModelCellEditor,
   ModelFallbackEditor,
@@ -59,35 +59,15 @@ import {
   ModelRoutingMatrix,
   type ModelCellPosition,
 } from "./ModelRoutingTable";
+import { SaveState } from "./SaveState";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const decodeRequest = Schema.decodeUnknownSync(ModelRoutingRequest);
 const field =
   "block w-full min-w-0 max-w-full rounded border bg-background px-2 py-1 text-sm disabled:opacity-60";
-type Section = "task" | "versions" | "history";
-
-/** A collapsed section keeps its contents unmounted until opened; state lives in the page. */
-function Disclosure(props: {
-  title: string;
-  open: boolean;
-  onToggle: (open: boolean) => void;
-  children: ReactNode;
-}) {
-  return (
-    <details open={props.open} className="rounded-md border px-3 py-2">
-      <summary
-        className="cursor-pointer text-sm font-medium"
-        onClick={(event) => {
-          event.preventDefault();
-          props.onToggle(!props.open);
-        }}
-      >
-        {props.title}
-      </summary>
-      {props.open && <div className="mt-3 space-y-4">{props.children}</div>}
-    </details>
-  );
-}
+const block = `${ITEM_ROW_CLASSNAME} grid min-w-0 gap-3`;
+/** Quick changes to the table are stored together, as one version. */
+const TABLE_PAUSE = 1200;
 
 export function ModelSelectionPage({ environmentId }: { environmentId: EnvironmentId }) {
   return <ModelEditor key={environmentId} environmentId={environmentId} />;
@@ -97,21 +77,51 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const environment = useEnvironment(environmentId);
   const connection = environment?.connection.phase ?? "offline";
   const [snapshot, setSnapshot] = useState<ModelRoutingSnapshot | null>(null);
+  // The saved tables to go back to, newest first.
+  const [versions, setVersions] = useState<readonly ModelRoutingPolicy[]>([]);
   // What every computer reports arrives after the saved table; the last known list stays offline.
   const [inventories, setInventories] = useState<ModelRoutingSnapshot["inventories"]>([]);
   const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
-  const [draft, setDraft] = useState<ModelDraft>(emptyModelDraft);
+  const [warnings, setWarnings] = useState<readonly string[]>([]);
+  const remember = useCallback(
+    (saved: ModelRoutingPolicy) =>
+      setVersions((current) =>
+        [saved, ...current.filter((p) => p.version !== saved.version)].slice(0, 20),
+      ),
+    [],
+  );
+  // Every change is stored as it is made; `draft` is what the page shows and how far it got.
+  const [store] = useState(() =>
+    createAutosave<ModelRoutingPolicy>({
+      ...modelAutosaveRules,
+      save: async (policy, baseline) => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "modelPolicy", expectedVersion: baseline.version, policy },
+        });
+        if (result._tag !== "Success") return allocationSaveFailure(result.cause);
+        if (!result.value.modelPolicy) return allocationSaveFailure(undefined);
+        setWarnings(result.value.warnings ?? []);
+        remember(result.value.modelPolicy);
+        return { saved: result.value.modelPolicy };
+      },
+      read: async () => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "modelSnapshot", part: "settings" },
+        });
+        return result._tag === "Success" ? (result.value.modelSnapshot?.policy ?? null) : null;
+      },
+    }),
+  );
+  const draft = useSyncExternalStore(store.subscribe, store.getState);
+  // Leaving the page stores an edit that is still waiting.
+  useEffect(() => () => store.flush(), [store]);
   const [driver, setDriver] = useState<ModelDriver>("claudeAgent");
   const [selected, setSelected] = useState<ModelCellPosition | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
-  const [open, setOpen] = useState<Record<Section, boolean>>({
-    task: false,
-    versions: false,
-    history: false,
-  });
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState("");
-  const [warnings, setWarnings] = useState<readonly string[]>([]);
   const [preview, setPreview] = useState<{ key: string; decision: ModelRoutingDecision } | null>(
     null,
   );
@@ -143,7 +153,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   );
   const validPreview = preview?.key === key && connection === "connected" ? preview.decision : null;
   const ready =
-    snapshot?.authorityAvailable &&
+    snapshot?.authorityAvailable === true &&
     connection === "connected" &&
     snapshotEpoch === connectionState.epoch;
   // Only a real disconnection or a failed read is reported as one; until then it is loading.
@@ -162,12 +172,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     () => modelCatalog(inventories, environmentId, driver),
     [inventories, environmentId, driver],
   );
-  const {
-    dirty,
-    stale,
-    count: changeCount,
-    editedCells,
-  } = useMemo(() => summarizeModelDraft(draft), [draft]);
+  const { editedCells } = useMemo(() => summarizeModelDraft(draft), [draft]);
   const unchangedDefault = useMemo(
     () =>
       policy !== null &&
@@ -181,19 +186,20 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const fallback = policy ? modelFallback(policy) : null;
   const choice = validPreview ? workerChoice(validPreview) : null;
   const selectedCell = policy && selected ? modelCell(policy, driver, ...at(selected)) : null;
-  const earlier = snapshot?.policies.filter((p) => p.version !== snapshot.policy.version) ?? [];
-  const call = async (operation: AllocationOperation, keepMessage = false) => {
+  const earlier = versions.filter((p) => p.version !== draft.saved?.version);
+  // A change that is not stored yet, or could not be stored.
+  const unsettled = draft.phase !== "idle" && draft.phase !== "saved";
+  const stuck = draft.phase === "failed" || draft.phase === "conflict";
+  const call = async (operation: AllocationOperation) => {
     const epoch = generation.current;
     setBusy(true);
-    if (!keepMessage) setMessage("");
+    setMessage("");
     try {
       const response = await execute({ environmentId, input: operation });
       if (!mounted.current || epoch !== generation.current) return null;
       if (response._tag !== "Success") {
         setPreview(null);
-        setMessage(
-          `${modelFailureMessage(response.cause)} Your changes are kept. Reconnect, refresh the saved version and try again.`,
-        );
+        setMessage(modelFailureMessage(response.cause));
         return null;
       }
       return response.value;
@@ -215,19 +221,21 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       setAccounts("loaded");
     } else setAccounts("failed");
   }, [environmentId, execute]);
-  const refresh = async (keepMessage = false) => {
+  const receive = useCallback(
+    (next: ModelRoutingSnapshot, epoch: number) => {
+      setSnapshot(next);
+      setVersions(next.policies);
+      setSnapshotEpoch(epoch);
+      store.receive(next.policy);
+    },
+    [store],
+  );
+  const refresh = async () => {
     const epoch = ++generation.current;
     setPreview(null);
-    const response = await call({ _tag: "modelSnapshot", part: "settings" }, keepMessage);
+    const response = await call({ _tag: "modelSnapshot", part: "settings" });
     if (epoch !== generation.current || !response?.modelSnapshot) return;
-    const next = response.modelSnapshot;
-    setSnapshot(next);
-    setSnapshotEpoch(connectionState.epoch);
-    setDraft((current) => receiveSavedModelPolicy(current, next.policy));
-    if (!next.authorityAvailable)
-      setMessage(
-        "No coordinator is connected. Last-known values remain readable; choose one under Provider allocation and refresh.",
-      );
+    receive(response.modelSnapshot, connectionState.epoch);
   };
   useEffect(() => {
     mounted.current = true;
@@ -252,14 +260,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       // Only now: the server runs one database query at a time, and this computer's inventory
       // would otherwise hold up the saved values.
       void readAccounts();
-      if (response._tag === "Success" && response.value.modelSnapshot) {
-        const next = response.value.modelSnapshot;
-        setSnapshot(next);
-        setSnapshotEpoch(connectionState.epoch);
-        setDraft((current) => receiveSavedModelPolicy(current, next.policy));
-      } else {
+      if (response._tag === "Success" && response.value.modelSnapshot)
+        receive(response.value.modelSnapshot, connectionState.epoch);
+      else {
         setFailedEpoch(connectionState.epoch);
-        setMessage("Model coordinator unavailable. Your changes are kept; reconnect and refresh.");
+        setMessage("The saved table could not be read. Reconnect and refresh.");
       }
     });
     return () => {
@@ -267,7 +272,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       mounted.current = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch, readAccounts]);
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, receive]);
   const tryTask = async () => {
     if (!policy) return;
     try {
@@ -281,101 +286,64 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const response = await call({ _tag: "modelPreview", request, policy });
     if (response?.selection) setPreview({ key, decision: response.selection });
   };
-  const save = async () => {
-    if (!policy || !draft.baseline) return;
-    const epoch = generation.current;
-    const response = await call({
-      _tag: "modelPolicy",
-      expectedVersion: draft.baseline.version,
-      policy,
-    });
-    if (!mounted.current || epoch !== generation.current) return;
-    if (response?.modelPolicy) {
-      setDraft((current) => acknowledgeModelSave(current, policy, response.modelPolicy!));
-      setPendingModel(null);
-      setWarnings(response.warnings ?? []);
-      await refresh();
-      setMessage(
-        `Saved as version ${response.modelPolicy.version}. Existing assignments keep their choices.`,
-      );
-    } else if (response === null)
-      // A conflict means a newer version exists: reload it so the page can offer the merge.
-      await refresh(true);
-  };
   const select = useCallback((cell: ModelCellPosition) => {
     setSelected(cell);
     setPendingModel(null);
   }, []);
-  const toggle = (section: Section) => (value: boolean) =>
-    setOpen((current) => ({ ...current, [section]: value }));
-  const example = policy ? modelCellSummary(modelCell(policy, driver, 7, 8)) : "";
-  const status = [
-    draft.saved
-      ? `Saved version ${draft.saved.version}`
-      : loadingTable
-        ? "Loading the saved table…"
-        : "Saved table not loaded",
-    ready
-      ? "Coordinator connected"
-      : loadingTable
-        ? null
-        : connection !== "connected"
-          ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
-          : `Coordinator unavailable${draft.saved ? ": showing the last known table" : ""}`,
-    draft.saved
-      ? dirty
-        ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
-        : "No unsaved changes"
-      : null,
-    loadingAccounts ? "Loading accounts…" : accounts === "failed" ? "Accounts not read" : null,
-  ].filter(Boolean);
   return (
     <div
       id="model-selection"
-      className="w-full min-w-0 max-w-full space-y-4 [overflow-wrap:anywhere]"
+      className="flex w-full min-w-0 max-w-full flex-col gap-8 [overflow-wrap:anywhere] [&>*]:min-w-0"
     >
-      <h1 className="text-xl font-semibold">Model selection</h1>
-      <p className="text-sm">
-        Columns are an assignment&apos;s difficulty and rows its stakes, each scored 0–10; a cell is
-        the model and reasoning it gets. Example: difficulty 7 with stakes 8 gets{" "}
-        {example || "the choice shown in that cell"}.
-      </p>
-      <p role="status" className="text-sm">
-        {message}
-      </p>
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm text-muted-foreground">{status.join(" · ")}</p>
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={busy || connection !== "connected"}
-          onClick={() => void refresh().then(readAccounts)}
-        >
-          Refresh
-        </Button>
-      </div>
-      {stale && draft.saved && draft.baseline && (
-        <Alert variant="warning">
-          <AlertTitle>Version {draft.saved.version} was saved while you were editing</AlertTitle>
+      {message && (
+        <Alert variant="error">
+          <AlertDescription>{message}</AlertDescription>
+        </Alert>
+      )}
+      {!loadingTable && connection !== "connected" && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {policy
+            ? "Not connected: showing the last known table. It can be changed once this computer reconnects."
+            : "Not connected. The table appears once this computer connects."}
+        </p>
+      )}
+      {connection === "connected" && snapshot && !snapshot.authorityAvailable && (
+        <p role="status" className="text-sm text-muted-foreground">
+          The table cannot be changed until the computer that keeps it is reachable. Choose it under
+          Provider allocation.
+        </p>
+      )}
+      {draft.phase === "failed" && (
+        <Alert variant="error">
+          <AlertTitle>Not saved</AlertTitle>
           <AlertDescription>
-            <span>
-              Your edits are based on version {draft.baseline.version}. Keep them on top of the
-              newer table, or discard them, before saving.
-            </span>
-            <span className="flex flex-wrap gap-2">
-              <Button size="sm" disabled={busy} onClick={() => setDraft(rebaseModelDraft)}>
-                Keep my edits on version {draft.saved.version}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => setDraft(discardModelDraft)}
-              >
-                Discard my edits
-              </Button>
-            </span>
+            {draft.error} What is marked • in the table is not in effect.
           </AlertDescription>
+          <AlertAction>
+            <Button size="xs" variant="outline" onClick={store.retry}>
+              Try again
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
+              Drop my change
+            </Button>
+          </AlertAction>
+        </Alert>
+      )}
+      {draft.phase === "conflict" && (
+        <Alert variant="warning">
+          <AlertTitle>Changed elsewhere while you edited</AlertTitle>
+          <AlertDescription>
+            A cell or setting you changed was also changed on another computer or by an agent. Yours
+            is not saved yet.
+          </AlertDescription>
+          <AlertAction>
+            <Button size="xs" onClick={() => store.resolve(true)}>
+              Keep mine
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
+              Use theirs
+            </Button>
+          </AlertAction>
         </Alert>
       )}
       {warnings.length > 0 && (
@@ -388,221 +356,260 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </AlertDescription>
         </Alert>
       )}
-      <div role="tablist" aria-label="Provider model table" className="flex flex-wrap gap-2">
-        {MODEL_DRIVERS.map((d) => (
-          <Button
-            key={d}
-            role="tab"
-            aria-selected={driver === d}
-            variant={driver === d ? "default" : "outline"}
-            size="sm"
-            onClick={() => {
-              setDriver(d);
-              setPendingModel(null);
-            }}
-          >
-            {modelDriverLabel(d)}
-            {editedCells(d) > 0 && ` (${editedCells(d)} edited)`}
-          </Button>
-        ))}
-      </div>
-      {policy ? (
-        <div role="tabpanel" aria-label={`${modelDriverLabel(driver)} table`} className="space-y-4">
-          <ModelCellEditor
-            driver={driver}
-            position={selected}
-            cell={selectedCell}
-            saved={
-              selected && draft.baseline ? modelCell(draft.baseline, driver, ...at(selected)) : null
-            }
-            catalog={catalog}
-            allowed={policy[driver].allowedModels}
-            online={Boolean(ready)}
-            loadingAccounts={loadingAccounts}
-            pendingModel={pendingModel}
-            onPendingModel={setPendingModel}
-            onChange={(cell: RoutingCell) => {
-              if (!selected) return;
-              setPendingModel(null);
-              setDraft((current) =>
-                editModelDraft(current, (p) =>
-                  setModelCell(p, driver, selected.difficulty, selected.stakes, cell),
-                ),
-              );
-            }}
-          />
-          <div className="flex flex-wrap gap-2">
+      <SettingsSection
+        title="Model by difficulty and stakes"
+        headerAction={
+          <div className="flex items-center gap-2">
+            <SaveState phase={loadingTable ? "loading" : draft.phase} />
             <Button
-              size="sm"
-              disabled={
-                busy ||
-                !ready ||
-                !dirty ||
-                stale ||
-                (fallback !== null && !(fallback.model && fallback.effort))
-              }
-              onClick={() => void save()}
-            >
-              Save changes
-            </Button>
-            <Button
-              size="sm"
+              size="xs"
               variant="outline"
-              disabled={busy || !dirty}
-              onClick={() => {
-                setDraft(discardModelDraft);
-                setPendingModel(null);
-              }}
+              disabled={busy || connection !== "connected"}
+              onClick={() => void refresh().then(readAccounts)}
             >
-              Discard changes
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy || unchangedDefault}
-              onClick={() => {
-                setDraft((current) => editModelDraft(current, (p) => resetModelTable(p, driver)));
-                setPendingModel(null);
-              }}
-            >
-              Reset {modelDriverLabel(driver)} to defaults
+              Refresh
             </Button>
           </div>
-          <ModelRoutingMatrix
-            driver={driver}
-            policy={policy}
-            baseline={draft.baseline}
-            catalog={catalog}
-            selected={selected}
-            onSelect={select}
-          />
-          <ModelRoutingLegend driver={driver} policy={policy} />
-          <ModelListEditor
-            driver={driver}
-            models={policy[driver].allowedModels}
-            catalog={catalog}
-            onChange={(models) =>
-              setDraft((current) =>
-                editModelDraft(current, (p) => setAllowedModels(p, driver, models)),
-              )
-            }
-          />
-          <ModelLadderEditor
-            ladder={modelLadder(policy)}
-            choices={claudeChoices}
-            onEdit={(edit) =>
-              setDraft((current) => editModelDraft(current, (p) => withModelLadderEdit(p, edit)))
-            }
-          />
-          <ModelFallbackEditor
-            fallback={fallback}
-            ladder={modelLadder(policy)}
-            onChange={(next) =>
-              setDraft((current) => editModelDraft(current, (p) => ({ ...p, fallback: next })))
-            }
-          />
-        </div>
-      ) : (
-        !loadingTable && (
-          <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-            {connection === "connected"
-              ? "The saved table could not be read. Refresh to try again."
-              : "The saved table has not loaded. Connect to this environment to view and edit it."}
+        }
+      >
+        <div className={block}>
+          <p className="text-xs text-muted-foreground">
+            A worker gets the model and reasoning in the cell for its task&apos;s difficulty
+            (columns) and stakes (rows), each scored 0 to 10. Select a cell to change it.
           </p>
-        )
-      )}
-      <Disclosure title="Try a task" open={open.task} onToggle={toggle("task")}>
-        <p className="text-sm text-muted-foreground">{MODEL_SCORING_RUBRIC}</p>
-        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
-          {(
-            [
-              ["difficulty", "Difficulty (0–10)"],
-              ["stakes", "Stakes (0–10)"],
-              ["hours", "Job length (hours)"],
-            ] as const
-          ).map(([name, caption]) => (
-            <label key={name} className="grid min-w-0 gap-1 text-sm">
-              {caption}
-              <input
-                className={field}
-                type="number"
-                min={0}
-                max={name === "hours" ? 168 : 10}
-                step={name === "hours" ? 0.5 : 1}
-                value={Number.isFinite(task[name]) ? String(task[name]) : ""}
-                onChange={(e) => {
-                  const value = e.target.value === "" ? NaN : Number(e.target.value);
-                  setTask((current) => ({ ...current, [name]: value }));
+          <div role="tablist" aria-label="Provider model table" className="flex flex-wrap gap-2">
+            {MODEL_DRIVERS.map((d) => (
+              <Button
+                key={d}
+                role="tab"
+                aria-selected={driver === d}
+                variant={driver === d ? "default" : "outline"}
+                size="sm"
+                onClick={() => {
+                  setDriver(d);
+                  setPendingModel(null);
+                }}
+              >
+                {modelDriverLabel(d)}
+                {stuck && editedCells(d) > 0 && ` (${editedCells(d)} not saved)`}
+              </Button>
+            ))}
+          </div>
+          {policy ? (
+            <div
+              role="tabpanel"
+              aria-label={`${modelDriverLabel(driver)} table`}
+              className="grid min-w-0 gap-3"
+            >
+              <ModelCellEditor
+                driver={driver}
+                position={selected}
+                cell={selectedCell}
+                catalog={catalog}
+                allowed={policy[driver].allowedModels}
+                online={ready}
+                loadingAccounts={loadingAccounts}
+                pendingModel={pendingModel}
+                onPendingModel={setPendingModel}
+                onChange={(cell: RoutingCell) => {
+                  if (!selected) return;
+                  setPendingModel(null);
+                  store.edit(
+                    (p) => setModelCell(p, driver, selected.difficulty, selected.stakes, cell),
+                    TABLE_PAUSE,
+                  );
                 }}
               />
-            </label>
-          ))}
-        </div>
-        <Button size="sm" disabled={busy || !ready} onClick={() => void tryTask()}>
-          Try
-        </Button>
-        {choice && (
-          <div aria-label="Task result" className="space-y-1 text-sm">
-            <p className="font-medium">
-              {choice.chosen
-                ? `${accountLabel(environmentId, choice.chosen.instanceId)} · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
-                : choice.state === "drained"
-                  ? `Drained until ${
-                      choice.drainedUntil
-                        ? new Date(choice.drainedUntil).toLocaleString()
-                        : "an unknown time"
-                    }`
-                  : "No account can run it"}
-            </p>
-            <p>{choice.reason}</p>
-          </div>
-        )}
-      </Disclosure>
-      <Disclosure title="Earlier versions" open={open.versions} onToggle={toggle("versions")}>
-        {earlier.length ? (
-          <div className="space-y-2">
-            <p className="text-sm">
-              Reverting saves that table again as a new version
-              {dirty ? "; save or discard your changes first" : ""}.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {earlier.map((p) => (
-                <Button
-                  key={p.version}
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !ready || dirty}
-                  onClick={async () => {
-                    const response = await call({
-                      _tag: "modelRevert",
-                      expectedVersion: snapshot!.policy.version,
-                      version: p.version,
-                    });
-                    if (response?.modelPolicy) {
-                      setDraft(adoptModelPolicy(response.modelPolicy));
-                      await refresh();
-                    }
-                  }}
-                >
-                  Revert to version {p.version}
-                </Button>
-              ))}
+              <ModelRoutingMatrix
+                driver={driver}
+                policy={policy}
+                baseline={draft.baseline}
+                catalog={catalog}
+                selected={selected}
+                onSelect={select}
+              />
+              <ModelRoutingLegend driver={driver} policy={policy} />
             </div>
+          ) : (
+            !loadingTable && (
+              <p className="text-sm text-muted-foreground">
+                {connection === "connected"
+                  ? "The saved table could not be read. Refresh to try again."
+                  : "The saved table has not loaded."}
+              </p>
+            )
+          )}
+        </div>
+      </SettingsSection>
+      {policy && (
+        <>
+          <SettingsSection title="Claude ladder">
+            <ModelLadderEditor
+              ladder={modelLadder(policy)}
+              choices={claudeChoices}
+              onEdit={(edit) => store.edit((p) => withModelLadderEdit(p, edit))}
+            />
+          </SettingsSection>
+          <SettingsSection
+            title="Fallback model"
+            headerAction={
+              <Switch
+                size="sm"
+                aria-label="Fallback model"
+                checked={fallback !== null}
+                onCheckedChange={(on) =>
+                  store.edit((p) => ({ ...p, fallback: on ? defaultModelFallback : null }))
+                }
+              />
+            }
+          >
+            <ModelFallbackEditor
+              fallback={fallback}
+              ladder={modelLadder(policy)}
+              onChange={(next, typed) =>
+                // A half-typed model ID must not become the fallback: it waits for the field.
+                store.edit((p) => ({ ...p, fallback: next }), typed ? null : 0)
+              }
+              onCommit={store.flush}
+            />
+          </SettingsSection>
+          <FoldedSettingsSection
+            id="model-selection-models"
+            title="Other model IDs"
+            summary={`A model no account offers yet can be added to the ${modelDriverLabel(driver)} table`}
+          >
+            <ModelListEditor
+              driver={driver}
+              models={policy[driver].allowedModels}
+              catalog={catalog}
+              onChange={(models) => store.edit((p) => setAllowedModels(p, driver, models))}
+            />
+          </FoldedSettingsSection>
+        </>
+      )}
+      <FoldedSettingsSection
+        id="model-selection-try"
+        title="Try a task"
+        summary="See which model and account a task would get"
+      >
+        <div className={block}>
+          <p className="text-xs text-muted-foreground">{MODEL_SCORING_RUBRIC}</p>
+          <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
+            {(
+              [
+                ["difficulty", "Difficulty (0–10)"],
+                ["stakes", "Stakes (0–10)"],
+                ["hours", "Job length (hours)"],
+              ] as const
+            ).map(([name, caption]) => (
+              <label key={name} className="grid min-w-0 gap-1 text-sm">
+                {caption}
+                <input
+                  className={field}
+                  type="number"
+                  min={0}
+                  max={name === "hours" ? 168 : 10}
+                  step={name === "hours" ? 0.5 : 1}
+                  value={Number.isFinite(task[name]) ? String(task[name]) : ""}
+                  onChange={(e) => {
+                    const value = e.target.value === "" ? NaN : Number(e.target.value);
+                    setTask((current) => ({ ...current, [name]: value }));
+                  }}
+                />
+              </label>
+            ))}
           </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No earlier saved versions.</p>
-        )}
-      </Disclosure>
-      <Disclosure title="Recent decisions" open={open.history} onToggle={toggle("history")}>
+          <div>
+            <Button size="sm" disabled={busy || !ready} onClick={() => void tryTask()}>
+              Try
+            </Button>
+          </div>
+          {choice && (
+            <div aria-label="Task result" className="space-y-1 text-sm">
+              <p className="font-medium">
+                {choice.chosen
+                  ? `${accountLabel(environmentId, choice.chosen.instanceId)} · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
+                  : choice.state === "drained"
+                    ? `Used up until ${
+                        choice.drainedUntil
+                          ? new Date(choice.drainedUntil).toLocaleString()
+                          : "an unknown time"
+                      }`
+                    : "No account can run it"}
+              </p>
+              <p>{choice.reason}</p>
+            </div>
+          )}
+        </div>
+      </FoldedSettingsSection>
+      <FoldedSettingsSection
+        id="model-selection-versions"
+        title="Earlier versions"
+        summary="Go back to a table saved before, or to the built-in one"
+      >
+        <div className={block}>
+          <p className="text-xs text-muted-foreground">
+            Going back saves that table again as the newest version.
+          </p>
+          <ul className="grid gap-2">
+            {policy &&
+              earlier.map((p) => {
+                const cells = modelCellChanges(p, policy).length;
+                return (
+                  <li key={p.version} className="flex flex-wrap items-center gap-2 text-sm">
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      disabled={busy || !ready || unsettled}
+                      onClick={async () => {
+                        const response = await call({
+                          _tag: "modelRevert",
+                          expectedVersion: draft.saved?.version ?? p.version,
+                          version: p.version,
+                        });
+                        if (response?.modelPolicy) {
+                          store.adopt(response.modelPolicy);
+                          remember(response.modelPolicy);
+                        }
+                      }}
+                    >
+                      Go back to version {p.version}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">
+                      {cells === 0
+                        ? "same cells as now"
+                        : `${cells} ${cells === 1 ? "cell differs" : "cells differ"} from now`}
+                    </span>
+                  </li>
+                );
+              })}
+            <li className="flex flex-wrap items-center gap-2 text-sm">
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={!ready || !policy || unchangedDefault || unsettled}
+                onClick={() => {
+                  setPendingModel(null);
+                  store.edit((p) => resetModelTable(p, driver));
+                }}
+              >
+                Reset the {modelDriverLabel(driver)} table to the built-in one
+              </Button>
+            </li>
+          </ul>
+        </div>
+      </FoldedSettingsSection>
+      <FoldedSettingsSection
+        id="model-selection-decisions"
+        title="Recent decisions"
+        summary="What recent tasks got, and why"
+      >
         {snapshot?.history.length ? (
-          <ul className="space-y-2">
+          <ul className="[&>*+*]:border-t [&>*+*]:border-border/50">
             {snapshot.history.map((d) => {
               const decided = workerChoice(d);
               return (
-                <li
-                  key={`${d.at}:${d.request.assignmentId}`}
-                  className="rounded border p-2 text-sm"
-                >
+                <li key={`${d.at}:${d.request.assignmentId}`} className={`${block} gap-1 text-sm`}>
                   <p className="font-medium">
                     {new Date(d.at).toLocaleString()} · difficulty {d.request.assessment.difficulty}{" "}
                     · stakes {d.request.assessment.stakes}
@@ -611,11 +618,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                     {decided.chosen
                       ? `${accountLabel(d.request.environmentId, decided.chosen.instanceId)} · ${decided.chosen.model} / ${decided.chosen.effort ?? "default"}`
                       : decided.state === "drained"
-                        ? "Drained: nothing started"
+                        ? "Used up: nothing started"
                         : "No account: nothing started"}
                   </p>
                   {d.reasons.map((reason) => (
-                    <p key={reason} className="text-muted-foreground">
+                    <p key={reason} className="text-xs text-muted-foreground">
                       {reason}
                     </p>
                   ))}
@@ -624,9 +631,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             })}
           </ul>
         ) : (
-          <p className="text-sm text-muted-foreground">No decisions recorded yet.</p>
+          <p className={`${block} text-sm text-muted-foreground`}>No decisions recorded yet.</p>
         )}
-      </Disclosure>
+      </FoldedSettingsSection>
     </div>
   );
 }

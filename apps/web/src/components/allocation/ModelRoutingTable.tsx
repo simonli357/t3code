@@ -1,7 +1,6 @@
 import { memo, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronDownIcon, ChevronUpIcon, XIcon } from "lucide-react";
 import {
-  defaultModelFallback,
   MODEL_SCORES,
   type ModelFallback,
   type ModelRoutingPolicy,
@@ -26,9 +25,9 @@ import {
   type ModelDriver,
 } from "@t3tools/client-runtime/state/model-routing";
 import { cn } from "~/lib/utils";
+import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Switch } from "../ui/switch";
 
 export interface ModelCellPosition {
   readonly difficulty: number;
@@ -152,7 +151,7 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
                       aria-pressed={chosen}
                       aria-label={`Difficulty ${difficulty}, stakes ${stakes}: ${modelProfileLabel(cell)}${
                         cell.alternatives?.length ? ", with an alternative" : ""
-                      }${edited ? ", edited" : ""}${offered ? "" : ", not offered by connected accounts"}`}
+                      }${edited ? ", not saved yet" : ""}${offered ? "" : ", not offered by connected accounts"}`}
                       className={cn(
                         "flex min-h-9 w-full cursor-pointer flex-col items-center justify-center rounded px-0.5 py-0.5 leading-tight outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         tints[used.indexOf(cell.model) % tints.length],
@@ -193,7 +192,7 @@ export function ModelRoutingLegend(props: { driver: ModelDriver; policy: ModelRo
           {modelDisplayName(model)} ({model})
         </span>
       ))}
-      <span>• edited · ! not offered by a connected account · ↳ has an alternative</span>
+      <span>• not saved yet · ! not offered by a connected account · ↳ has an alternative</span>
     </p>
   );
 }
@@ -203,7 +202,6 @@ export function ModelCellEditor(props: {
   driver: ModelDriver;
   position: ModelCellPosition | null;
   cell: RoutingCell | null;
-  saved: RoutingCell | null;
   catalog: ModelCatalog;
   /** The table's model list: offered next to what connected accounts advertise. */
   allowed: readonly string[];
@@ -214,7 +212,7 @@ export function ModelCellEditor(props: {
   onPendingModel: (model: string | null) => void;
   onChange: (cell: RoutingCell) => void;
 }) {
-  const { driver, position, cell, saved, catalog, online, pendingModel, onPendingModel } = props;
+  const { driver, position, cell, catalog, online, pendingModel, onPendingModel } = props;
   const root = useRef<HTMLDivElement>(null);
   // On a phone the table can be taller than the screen: keep the editor in view after a pick.
   useEffect(() => {
@@ -237,21 +235,13 @@ export function ModelCellEditor(props: {
     catalog.efforts(m).map((effort) => ({ model: m, effort })),
   );
   const fallback = cell.alternatives?.[0];
-  const edited = saved !== null && !sameModelCell(saved, cell);
   const offeredFallbacks = pairs.filter((p) => p.model !== cell.model || p.effort !== cell.effort);
   return (
     <div ref={root} className="grid min-w-0 gap-3 rounded-md border p-3 sm:grid-cols-3">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 sm:col-span-3">
-        <h2 className="text-sm font-medium" aria-live="polite">
-          {modelDriverLabel(driver)} · difficulty {position.difficulty}, stakes {position.stakes}:{" "}
-          {modelCellSummary(cell)}
-        </h2>
-        {edited && saved && (
-          <Button size="xs" variant="outline" onClick={() => props.onChange(saved)}>
-            Undo this cell
-          </Button>
-        )}
-      </div>
+      <h3 className="text-sm font-medium sm:col-span-3" aria-live="polite">
+        {modelDriverLabel(driver)} · difficulty {position.difficulty}, stakes {position.stakes}:{" "}
+        {modelCellSummary(cell)}
+      </h3>
       <label className="min-w-0 text-sm">
         Model
         <select
@@ -347,7 +337,7 @@ export function ModelCellEditor(props: {
       ) : (
         !online && (
           <p className="text-sm text-muted-foreground sm:col-span-3">
-            Offline: choices come from the last known model list. Reconnect to save.
+            Not connected: a change is saved once this computer reconnects.
           </p>
         )
       )}
@@ -364,6 +354,7 @@ const rungKeys = (ladder: readonly RoutingProfile[]) =>
   );
 const captioned = "grid min-w-0 gap-1 text-sm";
 const warning = "text-warning-foreground";
+const block = `${ITEM_ROW_CLASSNAME} grid min-w-0 gap-2`;
 
 /** One table's model list. Any model ID can be added; one no account offers is only marked. */
 export function ModelListEditor(props: {
@@ -381,8 +372,10 @@ export function ModelListEditor(props: {
     setText("");
   };
   return (
-    <section aria-label={`${label} models`} className="grid min-w-0 gap-2 rounded-md border p-3">
-      <h2 className="text-sm font-medium">Models the {label} table may use</h2>
+    <section aria-label={`${label} models`} className={block}>
+      <p className="text-xs text-muted-foreground">
+        Models the {label} table may use. A model picked in a cell is added by itself.
+      </p>
       <ul className="flex min-w-0 flex-wrap gap-2 text-sm">
         {models.map((model) => (
           <li key={model} className="flex min-w-0 items-center gap-1 rounded border px-1.5 py-0.5">
@@ -443,10 +436,9 @@ export function ModelLadderEditor(props: {
   const rung = { model: model.trim(), effort: effort.trim() };
   const keys = rungKeys(ladder);
   return (
-    <section aria-label="Model ladder" className="grid min-w-0 gap-2 rounded-md border p-3">
-      <h2 className="text-sm font-medium">Claude ladder</h2>
-      <p className="text-sm text-muted-foreground">
-        Weakest first. When the table&apos;s model is drained on every account, the worker gets the
+    <section aria-label="Model ladder" className={block}>
+      <p className="text-xs text-muted-foreground">
+        Weakest first. When the table&apos;s model is used up on every account, the worker gets the
         closest rung that has room.
       </p>
       <ol className="grid min-w-0 gap-1">
@@ -491,7 +483,7 @@ export function ModelLadderEditor(props: {
           );
         })}
       </ol>
-      <div className="flex min-w-0 items-end gap-2">
+      <div className="flex min-w-0 flex-wrap items-end gap-2">
         <label className={captioned}>
           Rung model
           <Input
@@ -537,28 +529,29 @@ export function ModelLadderEditor(props: {
   );
 }
 
-/** The one automatic change of provider family: on or off, its model, effort and threshold. */
+/** The one automatic change of provider family: its model, effort and threshold. */
 export function ModelFallbackEditor(props: {
+  /** Null when the fallback is off. */
   fallback: ModelFallback | null;
   ladder: readonly RoutingProfile[];
-  onChange: (fallback: ModelFallback | null) => void;
+  /** `typed` marks a change still being typed, which is stored when the field is left. */
+  onChange: (fallback: ModelFallback, typed?: boolean) => void;
+  /** A field was left or Enter was pressed. */
+  onCommit: () => void;
 }) {
   const { fallback, ladder } = props;
   const keys = rungKeys(ladder);
+  const typed = {
+    onBlur: props.onCommit,
+    onKeyDown: (event: KeyboardEvent) => {
+      if (event.key === "Enter") props.onCommit();
+    },
+  };
   return (
-    <section aria-label="Fallback" className="grid min-w-0 gap-2 rounded-md border p-3">
-      <div className="flex items-center gap-2">
-        <Switch
-          size="sm"
-          aria-label="Fallback model"
-          checked={fallback !== null}
-          onCheckedChange={(on) => props.onChange(on ? defaultModelFallback : null)}
-        />
-        <h2 className="text-sm font-medium">Fallback model</h2>
-      </div>
-      <p className="text-sm text-muted-foreground">
-        When no ladder rung has room and the wanted rung is below the one chosen here, the worker
-        starts on the fallback model. From that rung up, the start is refused until a reset.
+    <section aria-label="Fallback" className={block}>
+      <p className="text-xs text-muted-foreground">
+        When no ladder rung has room, a worker that wanted a rung below the one chosen here starts
+        on the fallback model. From that rung up, it waits for a reset instead.
       </p>
       {fallback && (
         <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-3">
@@ -568,7 +561,10 @@ export function ModelFallbackEditor(props: {
               size="compact"
               value={fallback.model}
               aria-invalid={!fallback.model || undefined}
-              onChange={(e) => props.onChange({ ...fallback, model: e.currentTarget.value.trim() })}
+              onChange={(e) =>
+                props.onChange({ ...fallback, model: e.currentTarget.value.trim() }, true)
+              }
+              {...typed}
             />
           </label>
           <label className={captioned}>
@@ -578,8 +574,9 @@ export function ModelFallbackEditor(props: {
               value={fallback.effort}
               aria-invalid={!fallback.effort || undefined}
               onChange={(e) =>
-                props.onChange({ ...fallback, effort: e.currentTarget.value.trim() })
+                props.onChange({ ...fallback, effort: e.currentTarget.value.trim() }, true)
               }
+              {...typed}
             />
           </label>
           <label className={captioned}>

@@ -13,8 +13,10 @@ import {
   type ModelRoutingPolicy,
   type RoutingProfile,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import type { Atom } from "effect/unstable/reactivity";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
+import { sameStoredValue, type AutosaveOptions, type AutosaveResult } from "./autosave.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
 
 export function createAllocationCommands<R, E>(
@@ -295,6 +297,113 @@ export function withAllocationAccountMoved(
     ...policy,
     accountOrder: [...keys, ...(policy.accountOrder ?? []).filter((k) => !keys.includes(k))],
   };
+}
+
+/**
+ * A policy as the parts a page edits one at a time: each account's cap and daily goal, and
+ * every other value whole. The version is not a part.
+ */
+function allocationPolicyParts(policy: AllocationPolicy) {
+  const { version: _version, accountCaps = [], accountGoals = [], ...values } = policy;
+  return new Map<string, unknown>([
+    ...Object.entries(values).filter(([, value]) => value !== undefined),
+    ...accountCaps.map((cap) => [`cap:${cap.key}`, cap] as const),
+    ...accountGoals.map((goal) => [`goal:${goal.key}`, goal] as const),
+  ]);
+}
+
+/**
+ * The parts that differ: a value's name such as `accountOrder`, `cap:` and an account key, or
+ * `goal:` and an account key. Against the stored policy these are the values not stored yet.
+ */
+export function allocationPolicyChanges(from: AllocationPolicy, to: AllocationPolicy) {
+  const [before, after] = [allocationPolicyParts(from), allocationPolicyParts(to)];
+  return new Set(
+    [...new Set([...before.keys(), ...after.keys()])].filter(
+      (part) => !sameStoredValue(before.get(part), after.get(part)),
+    ),
+  );
+}
+
+/**
+ * The edits `mine` made to `base`, applied onto the newer stored `theirs`. `collides` when
+ * `theirs` changed one of the edited parts to something else: the edit still wins in the
+ * returned policy, so the caller asks before storing it.
+ */
+export function rebaseAllocationPolicy(
+  base: AllocationPolicy,
+  mine: AllocationPolicy,
+  theirs: AllocationPolicy,
+): { policy: AllocationPolicy; collides: boolean } {
+  const changed = allocationPolicyChanges(base, mine);
+  const before = allocationPolicyParts(base);
+  const edited = allocationPolicyParts(mine);
+  const newer = allocationPolicyParts(theirs);
+  const ofAccount = (part: string) => part.startsWith("cap:") || part.startsWith("goal:");
+  const perAccount = <T extends { readonly key: string }>(
+    prefix: string,
+    own: readonly T[] = [],
+    stored: readonly T[] = [],
+  ) => [
+    ...stored.filter((item) => !changed.has(`${prefix}:${item.key}`)),
+    ...own.filter((item) => changed.has(`${prefix}:${item.key}`)),
+  ];
+  return {
+    policy: Object.assign(
+      {},
+      theirs,
+      // The whole values the edits changed; one they removed becomes undefined.
+      Object.fromEntries(
+        [...changed].filter((part) => !ofAccount(part)).map((part) => [part, edited.get(part)]),
+      ),
+      {
+        accountCaps: perAccount("cap", mine.accountCaps, theirs.accountCaps),
+        accountGoals: perAccount("goal", mine.accountGoals, theirs.accountGoals),
+      },
+    ),
+    collides: [...changed].some((part) => {
+      const stored = newer.get(part);
+      return (
+        !sameStoredValue(stored, before.get(part)) && !sameStoredValue(stored, edited.get(part))
+      );
+    }),
+  };
+}
+
+/** Why a policy cannot be stored as it is; null when every number is in range. */
+export function allocationPolicyInvalid(policy: AllocationPolicy): string | null {
+  const within = (value: number | null | undefined, max: number) =>
+    value == null || (Number.isFinite(value) && value >= 0 && value <= max);
+  if (!within(policy.closeMarginPoints, 50)) return "The margin must be a number from 0 to 50.";
+  if (!within(policy.longWaitHours, 168)) return "The wait must be a number from 0 to 168 hours.";
+  if (
+    !(policy.accountCaps ?? []).every(
+      (cap) => within(cap.weeklyPercent, 100) && within(cap.fiveHourPercent, 100),
+    )
+  )
+    return "A cap must be a number from 0 to 100.";
+  if (!(policy.accountGoals ?? []).every((goal) => within(goal.percentPerDay, 100)))
+    return "A daily goal must be a number from 0 to 100.";
+  return null;
+}
+
+/** How the allocation policy is compared, merged and checked when it saves itself. */
+export const allocationAutosaveRules = {
+  dirty: (baseline, policy) => allocationPolicyChanges(baseline, policy).size > 0,
+  rebase: rebaseAllocationPolicy,
+  invalid: allocationPolicyInvalid,
+} satisfies Pick<AutosaveOptions<AllocationPolicy>, "dirty" | "rebase" | "invalid">;
+
+/** What a refused save of either policy means: a newer stored version, or why it failed. */
+export function allocationSaveFailure(
+  cause: Cause.Cause<unknown> | undefined,
+): AutosaveResult<never> {
+  const failure = cause ? Cause.squash(cause) : undefined;
+  if (typeof failure === "object" && failure !== null && "code" in failure) {
+    if (failure.code === "conflict") return { conflict: true };
+    if (failure instanceof Error && failure.message) return { error: failure.message };
+  }
+  return { error: "The computer that keeps these settings did not answer." };
 }
 
 /** The ladder (weakest first) changed by one edit, as the policy to save. */

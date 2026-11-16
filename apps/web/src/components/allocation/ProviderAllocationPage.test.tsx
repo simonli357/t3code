@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { act, StrictMode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 import {
+  AllocationError,
   defaultAllocationPolicy,
   EnvironmentId,
   ProviderInstanceId,
@@ -41,6 +43,32 @@ vi.mock("@t3tools/client-runtime/state/provider-allocation", async (original) =>
   createAllocationCommands: () => ({ execute: { label: "execute" } }),
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.execute }));
+// The settings layout reads the settings search and scope; here it is only a frame.
+vi.mock("../settings/settingsLayout", () => ({
+  SettingsSection: (props: { title: string; headerAction?: ReactNode; children: ReactNode }) => (
+    <section aria-label={props.title}>
+      {props.headerAction}
+      {props.children}
+    </section>
+  ),
+}));
+vi.mock("../settings/FoldedSettingsSection", async () => {
+  const { useState } = await import("react");
+  return {
+    FoldedSettingsSection: (props: { title: string; summary?: string; children: ReactNode }) => {
+      const [open, setOpen] = useState(false);
+      return (
+        <section aria-label={props.title}>
+          <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+            {props.title}
+          </button>
+          <span>{props.summary}</span>
+          {open && props.children}
+        </section>
+      );
+    },
+  };
+});
 import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
@@ -106,8 +134,24 @@ const input = (text: string) =>
     | HTMLSelectElement
     | HTMLTextAreaElement;
 const named = (label: string) => container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
+const field = (label: string) => named(label) as HTMLInputElement;
+const section = (label: string) => container.querySelector(`section[aria-label="${label}"]`)!;
+const open = (title: string) => act(() => button(title).click());
+/** Lets `ms` pass, and the save that follows settle. */
+const pass = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
+const leave = (label: string) =>
+  act(() => void named(label).dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+const saves = () =>
+  state.execute.mock.calls
+    .filter(([arg]) => arg.input._tag === "policy")
+    .map(([arg]) => arg.input.input);
+const refused = (code: "conflict" | "unavailable", detail: string) => ({
+  _tag: "Failure",
+  cause: Cause.fail(new AllocationError({ code, detail })),
+});
 async function change(label: string, value: string) {
-  const control = input(label);
+  const control =
+    container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`) ?? input(label);
   await act(() => {
     const proto =
       control instanceof HTMLSelectElement
@@ -122,6 +166,8 @@ async function change(label: string, value: string) {
   });
 }
 beforeEach(async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime("2026-10-23T12:04:00.000Z");
   state.phase = "connected";
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.execute.mockReset();
@@ -153,6 +199,7 @@ afterEach(async () => {
   await act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 /** The snapshot with a second login, one managed worker on SL and one human session. */
 const two: AllocationSnapshot = {
@@ -180,7 +227,7 @@ const two: AllocationSnapshot = {
     })),
   })),
 };
-/** Saves succeed and later reads return what was saved. */
+/** Saves succeed unless a newer version is stored; later reads return what is stored. */
 function savePolicies(base = snapshot) {
   const saved = { policy: base.policy };
   const previous = state.execute.getMockImplementation()!;
@@ -188,6 +235,8 @@ function savePolicies(base = snapshot) {
     if (arg.input._tag === "snapshot")
       return { _tag: "Success", value: { snapshot: { ...base, policy: saved.policy } } };
     if (arg.input._tag === "policy") {
+      if (arg.input.input.expectedVersion !== saved.policy.version)
+        return refused("conflict", "Allocation policy changed.");
       saved.policy = { ...arg.input.input.policy, version: saved.policy.version + 1 };
       return { _tag: "Success", value: { policy: saved.policy } };
     }
@@ -195,6 +244,26 @@ function savePolicies(base = snapshot) {
   });
   return saved;
 }
+/** Reads answer with this snapshot from now on, and the page reads again. */
+async function read(next: AllocationSnapshot) {
+  const previous = state.execute.getMockImplementation()!;
+  state.execute.mockImplementation(async (arg: { input: AllocationOperation }) =>
+    arg.input._tag === "snapshot" ? { _tag: "Success", value: { snapshot: next } } : previous(arg),
+  );
+  await act(() => button("Refresh").click());
+}
+const host = snapshot.inventories[0]!;
+/** The snapshot with its one account changed. */
+const withAccount = (
+  patch: Partial<(typeof host.accounts)[number]>,
+  base = snapshot,
+): AllocationSnapshot => ({
+  ...base,
+  inventories: [{ ...host, accounts: host.accounts.map((account) => ({ ...account, ...patch })) }],
+});
+const status = () => section("Accounts").querySelector('[role="status"]')?.textContent;
+const alert = () => container.querySelector('[role="alert"]');
+
 describe("Provider allocation editor", () => {
   const connect = (phase: string) =>
     act(async () => {
@@ -224,14 +293,173 @@ describe("Provider allocation editor", () => {
         "settings",
         "accounts",
       ]);
-      expect(container.textContent).toContain("settings version 4");
+      expect(field("Close-call margin").value).toBe("10");
       await connect("connected");
       expect(state.execute).toHaveBeenCalledTimes(3);
     },
   );
-  it("refreshes reconnect snapshots while retaining drafts and rejecting obsolete reads", async () => {
-    await change("Closeness margin", "40");
-    expect(button("Save settings").disabled).toBe(false);
+  it("stores a typed number once the typing pauses, with no Save button", async () => {
+    const saved = savePolicies();
+    expect(button("Save settings")).toBeUndefined();
+    expect(status()).toBe("Changes save automatically");
+    await change("Close-call margin", "2");
+    await change("Close-call margin", "20");
+    expect(status()).toBe("Not saved yet");
+    await pass(999);
+    expect(saves()).toEqual([]);
+    await pass(1);
+    expect(saves()).toHaveLength(1);
+    expect(saves()[0]).toMatchObject({ expectedVersion: 4, policy: { closeMarginPoints: 20 } });
+    expect(saved.policy).toMatchObject({ version: 5, closeMarginPoints: 20, mode: "observation" });
+    expect(status()).toBe("Saved");
+    expect(field("Close-call margin").value).toBe("20");
+  });
+  it("stores a waiting number at once when its field is left", async () => {
+    const saved = savePolicies();
+    await change("Wait for a reset", "5.5");
+    await leave("Wait for a reset");
+    await pass();
+    expect(saved.policy.longWaitHours).toBe(5.5);
+  });
+  it("stores a move in the order at once and lists the accounts in that order", async () => {
+    const saved = savePolicies(two);
+    await act(() => button("Refresh").click());
+    const order = () =>
+      [...section("Accounts").querySelectorAll('[aria-label$=" workers allowed"]')].map((item) =>
+        item.getAttribute("aria-label")?.replace(" workers allowed", ""),
+      );
+    expect(order()).toEqual(["AD", "SL"]);
+    expect(named("Move AD up").hasAttribute("disabled")).toBe(true);
+    await act(() => named("Move SL up").click());
+    expect(order()).toEqual(["SL", "AD"]);
+    await pass();
+    const key = (login: string) => JSON.stringify(["codex", ["account", login]]);
+    expect(saved.policy.accountOrder).toEqual([key("identity"), key("ad")]);
+    expect(order()).toEqual(["SL", "AD"]);
+    expect(
+      [...section("Accounts").querySelectorAll("li")].map(
+        (row) => row.textContent?.match(/\d+ running/)?.[0],
+      ),
+    ).toEqual(["1 running", "0 running"]);
+  });
+  it("stores a daily goal after a pause and an account's Fable mode at once", async () => {
+    const claude = withAccount(
+      { driver: ProviderDriverKind.make("claudeAgent") },
+      { ...snapshot, runways: [] },
+    );
+    const saved = savePolicies(claude);
+    await act(() => button("Refresh").click());
+    const key = JSON.stringify(["claudeAgent", ["account", "identity"]]);
+    await change("SL daily goal", "12.5");
+    await pass(1000);
+    expect(saved.policy.accountGoals).toEqual([{ key, percentPerDay: 12.5 }]);
+    await act(() => named("SL Fable mode").click());
+    await pass();
+    expect(saved.policy.fableAccounts).toEqual([key]);
+    expect(named("SL Fable mode").getAttribute("aria-checked")).toBe("true");
+  });
+  it("holds a hard cap until its field is left and never sends one out of range", async () => {
+    const saved = savePolicies();
+    expect(named("SL cap stops workers")).toBeNull();
+    await change("SL weekly cap", "8");
+    await pass(60_000);
+    expect(saves()).toEqual([]);
+    await change("SL weekly cap", "101");
+    expect(field("SL weekly cap").getAttribute("aria-invalid")).toBe("true");
+    await leave("SL weekly cap");
+    await pass();
+    expect(saves()).toEqual([]);
+    expect(alert()?.textContent).toContain("A cap must be a number from 0 to 100");
+    expect(section("Accounts").querySelector("li")?.textContent).toContain("Not saved");
+    await change("SL weekly cap", "80");
+    await leave("SL weekly cap");
+    await pass();
+    expect(saved.policy.accountCaps).toEqual([
+      expect.objectContaining({
+        weeklyPercent: 80,
+        fiveHourPercent: null,
+        stopWorkers: true,
+        stopMasters: false,
+      }),
+    ]);
+    expect(alert()).toBeNull();
+    await act(() => named("SL cap stops workers").click());
+    await pass();
+    expect(saved.policy.accountCaps?.[0]).toMatchObject({ stopWorkers: false, stopMasters: false });
+    expect(container.textContent).toContain("stops nobody: no effect");
+    await act(() => named("SL cap stops masters").click());
+    await pass();
+    expect(saved.policy.accountCaps?.[0]).toMatchObject({ stopWorkers: false, stopMasters: true });
+  });
+  it("shows a refused save beside the value and keeps it marked until it is stored", async () => {
+    await change("Close-call margin", "12");
+    await pass(1000);
+    expect(alert()?.textContent).toContain("Not saved");
+    expect(alert()?.textContent).toContain("did not answer");
+    expect(section("Rules").textContent).toContain("Not saved");
+    expect(status()).toBe("Not saved");
+    expect(field("Close-call margin").value).toBe("12");
+    const saved = savePolicies();
+    await act(() => button("Try again").click());
+    await pass();
+    expect(saved.policy.closeMarginPoints).toBe(12);
+    expect(alert()).toBeNull();
+    expect(section("Rules").textContent).not.toContain("Not saved");
+  });
+  it("shows the stored value again when a change that could not be stored is dropped", async () => {
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) =>
+      arg.input._tag === "policy"
+        ? refused("unavailable", "The settings computer is off.")
+        : { _tag: "Success", value: { snapshot } },
+    );
+    await change("Close-call margin", "12");
+    await pass(1000);
+    expect(alert()?.textContent).toContain("The settings computer is off.");
+    await act(() => button("Drop my change").click());
+    expect(field("Close-call margin").value).toBe("10");
+    expect(alert()).toBeNull();
+  });
+  it("applies a change on top of settings saved elsewhere instead of overwriting them", async () => {
+    const saved = savePolicies();
+    // Another computer stores a cap after this page loaded.
+    const cap = {
+      key: JSON.stringify(["codex", ["account", "identity"]]),
+      weeklyPercent: 60,
+      fiveHourPercent: null,
+      stopWorkers: true,
+      stopMasters: false,
+    };
+    saved.policy = { ...saved.policy, version: 5, accountCaps: [cap] };
+    await change("Wait for a reset", "6");
+    await pass(1000);
+    expect(saves().map((save) => save.expectedVersion)).toEqual([4, 5]);
+    expect(saved.policy).toMatchObject({ version: 6, longWaitHours: 6, accountCaps: [cap] });
+    expect(field("SL weekly cap").value).toBe("60");
+    expect(alert()).toBeNull();
+  });
+  it("asks before replacing a value that was also changed elsewhere", async () => {
+    const saved = savePolicies();
+    saved.policy = { ...saved.policy, version: 5, closeMarginPoints: 30 };
+    await change("Close-call margin", "20");
+    await pass(1000);
+    expect(alert()?.textContent).toContain("Changed elsewhere");
+    expect(section("Rules").textContent).toContain("Not saved");
+    expect(saved.policy).toMatchObject({ version: 5, closeMarginPoints: 30 });
+    await act(() => button("Use theirs").click());
+    expect(field("Close-call margin").value).toBe("30");
+    await pass(1000);
+    expect(saved.policy.version).toBe(5);
+
+    saved.policy = { ...saved.policy, version: 6, closeMarginPoints: 40 };
+    await change("Close-call margin", "25");
+    await pass(1000);
+    await act(() => button("Keep mine").click());
+    await pass();
+    expect(saved.policy).toMatchObject({ version: 7, closeMarginPoints: 25 });
+    expect(alert()).toBeNull();
+  });
+  it("keeps a typed value across reconnects and ignores a read that was overtaken", async () => {
+    await change("SL weekly cap", "40");
     await connect("offline");
     let resolveOld!: (value: unknown) => void;
     const implementation = state.execute.getMockImplementation()!;
@@ -245,8 +473,7 @@ describe("Provider allocation editor", () => {
     await connect("connected");
     // The accounts wait for the held settings read.
     expect(readCalls("snapshot")).toHaveLength(3);
-    expect(container.textContent).toContain("Refreshing saved settings…");
-    expect(button("Save settings").disabled).toBe(true);
+    expect(status()).toBe("Loading…");
     await connect("offline");
     state.execute.mockImplementation(({ input: operation }: { input: AllocationOperation }) =>
       operation._tag === "snapshot"
@@ -258,357 +485,165 @@ describe("Provider allocation editor", () => {
     );
     await connect("connected");
     expect(readCalls("snapshot")).toHaveLength(5);
-    expect(input("Closeness margin").value).toBe("40");
-    expect(container.textContent).toContain("settings version 5");
+    expect(field("SL weekly cap").value).toBe("40");
     await act(async () => resolveOld({ _tag: "Success", value: { snapshot } }));
-    expect(container.textContent).toContain("settings version 5");
-    expect(button("Save settings").disabled).toBe(true);
-    await act(async () => button("Reload saved settings").click());
-    expect(input("Closeness margin").value).toBe("10");
-    expect(button("Save settings").disabled).toBe(false);
+    await leave("SL weekly cap");
+    await pass();
+    expect(saves().at(-1)).toMatchObject({
+      expectedVersion: 5,
+      policy: { accountCaps: [expect.objectContaining({ weeklyPercent: 40 })] },
+    });
   });
-  it("saves the closeness margin and long wait, and resets them, without an assignment preview", async () => {
-    const saved = savePolicies();
-    expect(container.querySelector("section")?.getAttribute("aria-label")).toBe("Accounts");
-    expect(input("Computer").closest("details")?.open).toBe(false);
-    expect(input("Closeness margin").value).toBe("10");
-    expect(input("Long wait").value).toBe("3");
-    await change("Closeness margin", "20");
-    await change("Long wait", "5.5");
-    await act(() => button("Save settings").click());
-    expect(readCalls("preview")).toHaveLength(0);
-    expect(saved.policy).toMatchObject({ version: 5, closeMarginPoints: 20, longWaitHours: 5.5 });
-    expect(input("Closeness margin").value).toBe("20");
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Settings saved");
-    await act(() => button("Reset to defaults").click());
-    expect(input("Closeness margin").value).toBe("10");
-    expect(saved.policy.closeMarginPoints).toBe(20);
-    await act(() => button("Save settings").click());
-    expect(saved.policy).toMatchObject({ closeMarginPoints: 10, longWaitHours: 3 });
-    expect(saved.policy.mode).toBe("observation");
-  });
-  it("moves an account up the preference order, saves it, and shows workers now", async () => {
-    const saved = savePolicies(two);
-    await act(() => button("Reload saved settings").click());
-    const order = () =>
-      [...container.querySelectorAll('[aria-label="Preference order"] li')].map((item) =>
-        item.textContent?.replace(/^\d+\. /, ""),
-      );
-    expect(order()).toEqual(["ADCodex", "SLCodex"]);
-    expect(named("Move AD up").hasAttribute("disabled")).toBe(true);
-    await act(() => named("Move SL up").click());
-    expect(order()).toEqual(["SLCodex", "ADCodex"]);
-    await act(() => button("Save settings").click());
-    const key = (login: string) => JSON.stringify(["codex", ["account", login]]);
-    expect(saved.policy.accountOrder).toEqual([key("identity"), key("ad")]);
-    expect(order()).toEqual(["SLCodex", "ADCodex"]);
-    const rows = [...container.querySelectorAll('[aria-label="Accounts"] tbody tr')];
-    expect(rows.map((row) => row.textContent?.match(/\d+ now/)?.[0])).toEqual(["0 now", "1 now"]);
-  });
-  it("says the coordinator must be updated before the order can be saved", async () => {
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg) =>
-      arg.input._tag === "snapshot"
-        ? {
-            _tag: "Success",
-            value: { snapshot: { ...two, accountOrderSupported: undefined } },
-          }
-        : previous(arg),
-    );
-    await act(() => button("Reload saved settings").click());
-    expect(container.textContent).toContain("Update the coordinator before the order");
+  it("says the settings computer needs an update before the order can be stored", async () => {
+    await read({ ...two, accountOrderSupported: undefined });
+    expect(container.textContent).toContain("needs an update before the order and rules");
     expect(named("Move SL up").hasAttribute("disabled")).toBe(true);
-    expect(input("Closeness margin").disabled).toBe(true);
-    expect(input("SL weekly cap").disabled).toBe(false);
+    expect(field("Close-call margin").disabled).toBe(true);
+    expect(field("SL weekly cap").disabled).toBe(false);
   });
-  it("turns workers off for an account on the computer that has it", async () => {
+  it("turns workers off for an account on the computer that has it, and says when that fails", async () => {
     const previous = state.execute.getMockImplementation()!;
     const patches: unknown[] = [];
+    let stores = true;
     state.execute.mockImplementation(async (arg) => {
       if (!("patch" in arg.input)) return previous(arg);
       patches.push(arg);
-      return { _tag: "Success", value: {} };
+      return stores ? { _tag: "Success", value: {} } : { _tag: "Failure" };
     });
     expect(named("SL workers allowed").getAttribute("aria-checked")).toBe("true");
     await act(async () => named("SL workers allowed").click());
     expect(patches).toEqual([
       { environmentId: "host", input: { patch: { workerDisabledInstanceIds: ["sl"] } } },
     ]);
-    expect(readCalls("snapshot")).toHaveLength(4);
     expect(readCalls("policy")).toHaveLength(0);
+    expect(section("Accounts").textContent).not.toContain("Not saved");
+    stores = false;
+    await act(async () => named("SL workers allowed").click());
+    expect(section("Accounts").querySelector("li")?.textContent).toContain("Not saved");
   });
-  it("saves optional hard caps with independent worker and master stop actions", async () => {
-    let savedPolicy = snapshot.policy;
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
-      if (arg.input._tag === "snapshot")
-        return { _tag: "Success", value: { snapshot: { ...snapshot, policy: savedPolicy } } };
-      if (arg.input._tag === "policy") {
-        savedPolicy = { ...arg.input.input.policy, version: savedPolicy.version + 1 };
-        return { _tag: "Success", value: { policy: savedPolicy } };
-      }
-      return previous(arg);
-    });
-
-    expect(savedPolicy.accountCaps).toEqual([]);
-    expect(input("SL weekly cap").value).toBe("");
-    expect(named("SL cap stops workers")).toBeNull();
-    await change("SL weekly cap", "101");
-    expect(input("SL weekly cap").getAttribute("aria-invalid")).toBe("true");
-    expect(button("Save settings").disabled).toBe(true);
-    await change("SL weekly cap", "80");
-    expect(named("SL cap stops workers").getAttribute("aria-checked")).toBe("true");
-    expect(named("SL cap stops masters").getAttribute("aria-checked")).toBe("false");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.accountCaps).toHaveLength(1);
-    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
-      weeklyPercent: 80,
-      fiveHourPercent: null,
-      stopWorkers: true,
-      stopMasters: false,
-    });
-
-    await act(() => named("SL cap stops workers").click());
-    expect(button("Save settings").disabled).toBe(false);
-    expect(container.textContent).toContain("stops nothing: inactive");
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
-      stopWorkers: false,
-      stopMasters: false,
-    });
-    await act(() => named("SL cap stops masters").click());
-    await act(() => button("Save settings").click());
-    expect(savedPolicy.accountCaps?.[0]).toMatchObject({
-      stopWorkers: false,
-      stopMasters: true,
-    });
-  });
-  it("offers the 5-hour cap only for Claude and shows each window's usage, reset and reading age", async () => {
-    expect(container.querySelector('[aria-label="Accounts"]')?.textContent).not.toContain("5h");
-    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-23T12:04:00.000Z"));
-    const previous = state.execute.getMockImplementation()!;
-    const host = snapshot.inventories[0]!;
-    state.execute.mockImplementation(async (arg) => {
-      if (arg.input._tag !== "snapshot") return previous(arg);
-      return {
-        _tag: "Success",
-        value: {
-          snapshot: {
-            ...snapshot,
-            inventories: [
-              {
-                ...host,
-                accounts: host.accounts.map((account) => ({
-                  ...account,
-                  driver: ProviderDriverKind.make("claudeAgent"),
-                  windows: [
-                    {
-                      id: "seven_day",
-                      label: "Weekly",
-                      kind: "weekly" as const,
-                      usedPoints: 42,
-                      checkedAt: host.observedAt,
-                      resetsAt: "2099-10-30T12:00:00.000Z",
-                      cycleStartedAt: "2026-10-23T12:00:00.000Z",
-                      durationHours: 168,
-                      ratePointsPerHour: null,
-                      samples: 0,
-                      rateAgeMinutes: null,
-                    },
-                  ],
-                })),
-              },
-            ],
+  it("shows each limit's use, reset and an old reading, and offers the 5-hour cap only for Claude", async () => {
+    expect(named("SL 5-hour cap")).toBeNull();
+    vi.setSystemTime("2026-10-23T12:14:00.000Z");
+    await read(
+      withAccount({
+        driver: ProviderDriverKind.make("claudeAgent"),
+        windows: [
+          {
+            id: "seven_day",
+            label: "Weekly",
+            kind: "weekly" as const,
+            usedPoints: 42,
+            checkedAt: host.observedAt,
+            resetsAt: "2099-10-30T12:00:00.000Z",
+            cycleStartedAt: "2026-10-23T12:00:00.000Z",
+            durationHours: 168,
+            ratePointsPerHour: null,
+            samples: 0,
+            rateAgeMinutes: null,
           },
-        },
-      };
-    });
-    await act(() => button("Reload saved settings").click());
-    const accounts = container.querySelector('[aria-label="Accounts"]')!;
-    expect(accounts.textContent).toContain("Weekly 42%");
-    expect(accounts.textContent).toContain("resets ");
-    expect(accounts.textContent).toContain("read 4 min ago");
-    expect(input("SL 5-hour cap").value).toBe("");
-    clock.mockRestore();
+        ],
+      }),
+    );
+    const row = section("Accounts").querySelector("li")!;
+    expect(row.textContent).toContain("Weekly");
+    expect(row.textContent).toContain("42%");
+    expect(row.textContent).toContain("resets ");
+    expect(row.textContent).toContain("read 14 min ago");
+    expect(named("SL Weekly used").getAttribute("aria-valuenow")).toBe("42");
+    expect(field("SL 5-hour cap").value).toBe("");
   });
-  it("does not offer subscription caps for an API-key account with cached windows", async () => {
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg) => {
-      if (arg.input._tag !== "snapshot") return previous(arg);
-      const host = snapshot.inventories[0]!;
-      return {
-        _tag: "Success",
-        value: {
-          snapshot: {
-            ...snapshot,
-            inventories: [
-              {
-                ...host,
-                accounts: host.accounts.map((account, index) =>
-                  index === 0
-                    ? {
-                        ...account,
-                        available: false,
-                        usageLimitsUnavailableReason: "unsupported" as const,
-                      }
-                    : account,
-                ),
-              },
-            ],
-          },
-        },
-      };
-    });
-    await act(() => button("Reload saved settings").click());
-    const other = [...container.querySelectorAll("details")].find((d) =>
-      d.querySelector("summary")?.textContent?.startsWith("Other accounts (1)"),
-    )!;
-    expect(other.open).toBe(false);
-    expect(other.textContent).toContain("No subscription quota");
-    expect(other.textContent).not.toContain("SL weekly cap");
-    expect(named("SL workers allowed").closest("details")).toBe(other);
+  it("keeps an API-key account with cached windows under Other accounts, without caps", async () => {
+    await read(
+      withAccount({ available: false, usageLimitsUnavailableReason: "unsupported" as const }),
+    );
+    expect(named("SL workers allowed")).toBeNull();
+    await open("Other accounts (1)");
+    const other = section("Other accounts (1)");
+    expect(other.textContent).toContain("No subscription limit");
+    expect(named("SL weekly cap")).toBeNull();
+    expect(other.contains(named("SL workers allowed"))).toBe(true);
   });
   it("lists a quota-less account with the rest once a cap is saved for it, unless its provider is off", async () => {
-    const previous = state.execute.getMockImplementation()!;
-    const host = snapshot.inventories[0]!;
-    const account = {
-      ...host.accounts[0]!,
-      usageLimitsUnavailableReason: "unsupported" as const,
-    };
-    const key = JSON.stringify(["codex", ["account", "identity"]]);
-    const read = (enabled: boolean) =>
-      state.execute.mockImplementation(async (arg) =>
-        arg.input._tag === "snapshot"
-          ? {
-              _tag: "Success",
-              value: {
-                snapshot: {
-                  ...snapshot,
-                  policy: {
-                    ...snapshot.policy,
-                    accountCaps: [
-                      {
-                        key,
-                        weeklyPercent: 80,
-                        fiveHourPercent: null,
-                        stopWorkers: true,
-                        stopMasters: false,
-                      },
-                    ],
-                  },
-                  inventories: [{ ...host, accounts: [{ ...account, enabled }] }],
-                },
+    const capped = (enabled: boolean) =>
+      withAccount(
+        { usageLimitsUnavailableReason: "unsupported" as const, enabled },
+        {
+          ...snapshot,
+          policy: {
+            ...snapshot.policy,
+            accountCaps: [
+              {
+                key: JSON.stringify(["codex", ["account", "identity"]]),
+                weeklyPercent: 80,
+                fiveHourPercent: null,
+                stopWorkers: true,
+                stopMasters: false,
               },
-            }
-          : previous(arg),
+            ],
+          },
+        },
       );
-    read(true);
-    await act(() => button("Reload saved settings").click());
-    expect(named("SL workers allowed").closest("details")).toBeNull();
-    read(false);
-    await act(() => button("Reload saved settings").click());
-    expect(named("SL workers allowed").closest("details")?.textContent).toContain(
-      "Other accounts (1)",
-    );
+    await read(capped(true));
+    expect(section("Accounts").contains(named("SL workers allowed"))).toBe(true);
+    await read(capped(false));
+    expect(named("SL workers allowed")).toBeNull();
+    expect(button("Other accounts (1)")).toBeDefined();
   });
   it("does not offer subscription caps until quota provenance is verified", async () => {
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg) => {
-      if (arg.input._tag !== "snapshot") return previous(arg);
-      const host = snapshot.inventories[0]!;
-      return {
-        _tag: "Success",
-        value: {
-          snapshot: {
-            ...snapshot,
-            inventories: [
-              {
-                ...host,
-                accounts: host.accounts.map((account, index) =>
-                  index === 0
-                    ? { ...account, usageLimitsUnavailableReason: "unverified" as const }
-                    : account,
-                ),
-              },
-            ],
-          },
-        },
-      };
-    });
-    await act(() => button("Reload saved settings").click());
-    const accounts = container.querySelector('[aria-label="Accounts"]')!;
-    expect(accounts.textContent).not.toContain("SL weekly cap");
-    expect(accounts.textContent).toContain("Quota unverified");
+    await read(withAccount({ usageLimitsUnavailableReason: "unverified" as const }));
+    await open("Other accounts (1)");
+    expect(named("SL weekly cap")).toBeNull();
+    expect(section("Other accounts (1)").textContent).toContain("Usage not verified");
   });
   it("keeps cap controls available through a transient probe failure", async () => {
-    const previous = state.execute.getMockImplementation()!;
-    state.execute.mockImplementation(async (arg) => {
-      if (arg.input._tag !== "snapshot") return previous(arg);
-      const host = snapshot.inventories[0]!;
-      return {
-        _tag: "Success",
-        value: {
-          snapshot: {
-            ...snapshot,
-            inventories: [
-              {
-                ...host,
-                accounts: host.accounts.map((account, index) =>
-                  index === 0
-                    ? {
-                        ...account,
-                        available: false,
-                        windows: [],
-                        usageLimitsUnavailableReason: "probeFailed" as const,
-                      }
-                    : account,
-                ),
-              },
-            ],
-          },
-        },
-      };
-    });
-    await act(() => button("Reload saved settings").click());
-    const weekly = input("SL weekly cap") as HTMLInputElement;
-    expect(weekly).not.toBeNull();
-    expect(weekly.disabled).toBe(false);
-    expect(container.textContent).toContain("Quota read failed");
+    await read(
+      withAccount({
+        available: false,
+        windows: [],
+        usageLimitsUnavailableReason: "probeFailed" as const,
+      }),
+    );
+    expect(field("SL weekly cap").disabled).toBe(false);
+    expect(container.textContent).toContain("Usage could not be read");
   });
-  it("rejects empty or out-of-range numbers and retains offline last-known drafts", async () => {
-    await change("Closeness margin", "");
-    expect(button("Save settings").disabled).toBe(true);
-    expect(input("Closeness margin").getAttribute("aria-invalid")).toBe("true");
-    await change("Closeness margin", "51");
-    expect(button("Save settings").disabled).toBe(true);
-    await change("Closeness margin", "12");
+  it("does not send an empty or out-of-range number, and keeps a typed one through a disconnect", async () => {
+    const saved = savePolicies();
+    await change("Close-call margin", "");
+    expect(field("Close-call margin").getAttribute("aria-invalid")).toBe("true");
+    await pass(1000);
+    await change("Close-call margin", "51");
+    await pass(1000);
+    expect(saves()).toEqual([]);
+    expect(alert()?.textContent).toContain("The margin must be a number from 0 to 50");
+    await change("Close-call margin", "12");
     await connect("offline");
-    expect(input("Closeness margin").disabled).toBe(true);
-    expect(input("Closeness margin").value).toBe("12");
-    expect(button("Save settings").disabled).toBe(true);
-    expect(container.textContent).toContain("last-known settings are read-only");
+    expect(field("Close-call margin").disabled).toBe(true);
+    expect(field("Close-call margin").value).toBe("12");
+    expect(container.textContent).toContain("showing the last known settings");
     await connect("connected");
-    expect(input("Closeness margin").value).toBe("12");
-    expect(button("Save settings").disabled).toBe(false);
+    await pass(1000);
+    expect(saved.policy.closeMarginPoints).toBe(12);
+    expect(status()).toBe("Saved");
   });
-  it("chooses a named linked coordinator without exposing IDs and preserves edits when connection fails", async () => {
-    const coordinator = input("Computer") as HTMLSelectElement;
-    expect([...coordinator.options].map((o) => o.textContent)).toEqual([
-      "Workstation (this environment)",
+  it("chooses the settings computer by name and keeps a typed value when connecting fails", async () => {
+    await open("Settings computer");
+    const computer = input("Computer") as HTMLSelectElement;
+    expect([...computer.options].map((o) => o.textContent)).toEqual([
+      "Workstation (this computer)",
       "Build computer",
     ]);
-    expect(container.textContent).toContain("Workstation");
-    await change("Closeness margin", "12");
+    expect(section("Settings computer").textContent).toContain("Workstation keeps these settings");
+    await change("SL weekly cap", "12");
     await change("Computer", "peer");
-    await act(() => button("Connect coordinator").click());
+    await act(() => button("Use this computer").click());
     expect(state.execute.mock.calls.at(-1)?.[0]).toMatchObject({
       environmentId: "host",
       input: { _tag: "connect", coordinatorEnvironmentId: "peer" },
     });
     expect(input("Computer").value).toBe("peer");
-    expect(input("Closeness margin").value).toBe("12");
+    expect(field("SL weekly cap").value).toBe("12");
   });
-  it("retains a disconnected saved coordinator when the settings scope changes", async () => {
+  it("retains a disconnected saved settings computer when the settings scope changes", async () => {
     state.execute.mockImplementation(
       async ({ input: operation }: { input: AllocationOperation }) => {
         if (operation._tag === "connections")
@@ -645,25 +680,15 @@ describe("Provider allocation editor", () => {
     await act(() =>
       root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("other")} />),
     );
+    await open("Settings computer");
     expect(input("Computer").value).toBe("unlinked");
     expect((input("Computer") as HTMLSelectElement).selectedOptions[0]?.textContent).toContain(
       "not linked",
     );
-    expect(container.querySelector('[aria-label="Accounts"]')?.textContent).toContain("Claude");
-    await act(() => button("Reload saved settings").click());
+    expect(section("Accounts").textContent).toContain("Claude");
+    await act(() => button("Refresh").click());
     expect(input("Computer").value).toBe("unlinked");
     expect(state.execute.mock.calls.at(-1)?.[0].environmentId).toBe("other");
-  });
-  it("saves against the draft version and preserves edits on a stale save", async () => {
-    expect(button("Save settings").disabled).toBe(false);
-    await change("Closeness margin", "12");
-    expect(button("Save settings").disabled).toBe(false);
-    await act(() => button("Save settings").click());
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("newer policy");
-    expect(input("Closeness margin").value).toBe("12");
-    const save = state.execute.mock.calls.find(([call]) => call.input._tag === "policy")![0];
-    expect(save.input.input.expectedVersion).toBe(4);
-    expect(save.input.input.policy.closeMarginPoints).toBe(12);
   });
   it("shows the saved settings before the accounts arrive, saying only that they are loading", async () => {
     await act(async () => root.unmount());
@@ -686,20 +711,17 @@ describe("Provider allocation editor", () => {
     await act(() =>
       root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("host")} />),
     );
-    expect(input("Closeness margin").value).toBe("10");
-    expect(input("Closeness margin").disabled).toBe(false);
+    expect(field("Close-call margin").value).toBe("10");
+    expect(field("Close-call margin").disabled).toBe(false);
     expect(container.textContent).toContain("Loading accounts…");
-    for (const claim of ["Connect an environment", "Not connected", "not loaded"])
+    for (const claim of ["Not connected", "not loaded"])
       expect(container.textContent).not.toContain(claim);
     expect(named("SL workers allowed")).toBeNull();
     await act(async () => release());
     expect(container.textContent).not.toContain("Loading accounts…");
     expect(named("SL workers allowed")).not.toBeNull();
     // A computer that could not be read is a plain note beside the accounts.
-    const note = [...container.querySelectorAll('[aria-label="Accounts"] p')].find(
-      (p) => p.textContent === "Laptop: load unavailable for this decision: offline",
-    );
-    expect(note?.closest("details")).toBeNull();
+    expect(container.textContent).toContain("Laptop: load unavailable for this decision: offline");
   });
   it.each(["connecting", "offline"])(
     "while %s, says loading or not connected, never both",
@@ -712,45 +734,35 @@ describe("Provider allocation editor", () => {
       );
       const text = container.textContent!;
       if (phase === "connecting") {
-        expect(text).toContain("Loading saved settings…");
+        expect(status()).toBe("Loading…");
         expect(text).toContain("Loading accounts…");
         expect(text).not.toContain("Not connected");
       } else {
-        expect(text).toContain("Not connected. Connect this environment");
+        expect(status()).toBe("Not connected");
         expect(text).not.toContain("Loading");
       }
     },
   );
-  it("keeps only choosing and connecting the coordinator below the settings", async () => {
-    const sections = [...container.querySelectorAll("details > summary")].map(
-      (summary) => summary.textContent,
-    );
-    expect(sections).toEqual(["Coordinator"]);
+  it("keeps the rest behind closed sections, without draft buttons or internal wording", async () => {
+    expect(
+      [...container.querySelectorAll("button[aria-expanded]")].map((fold) => fold.textContent),
+    ).toEqual(["Learned numbers", "Settings computer"]);
     for (const removed of [
+      "Save settings",
+      "Reset to defaults",
+      "Reload saved settings",
       "Preview account",
-      "Request allocation and start",
       "Decision history",
       "Reservations",
-      "Execution environment ID",
       "diagnostics",
-      "simulator",
     ])
       expect(container.textContent).not.toContain(removed);
-    expect(button("Connect coordinator")).toBeDefined();
+    expect(container.textContent).not.toMatch(/coordinator|policy|authority/i);
   });
 });
 
-it("keeps hard caps read-only when the coordinator cannot persist them", async () => {
-  const previous = state.execute.getMockImplementation()!;
-  state.execute.mockImplementation(async (arg) =>
-    arg.input._tag === "snapshot"
-      ? {
-          _tag: "Success",
-          value: { snapshot: { ...snapshot, accountCapsSupported: undefined } },
-        }
-      : previous(arg),
-  );
-  await act(() => button("Reload saved settings").click());
-  expect(input("SL weekly cap").disabled).toBe(true);
-  expect(container.textContent).toContain("Update the coordinator to edit hard caps.");
+it("keeps hard caps read-only when the settings computer cannot store them", async () => {
+  await read({ ...snapshot, accountCapsSupported: undefined });
+  expect(field("SL weekly cap").disabled).toBe(true);
+  expect(container.textContent).toContain("needs an update before caps can be edited");
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   EnvironmentId,
   defaultAllocationPolicy,
@@ -7,7 +7,11 @@ import {
   type AllocationSnapshot,
   type AllocationResponse,
 } from "@t3tools/contracts";
+import { createAutosave } from "@t3tools/client-runtime/state/autosave";
 import {
+  allocationAutosaveRules,
+  allocationPolicyChanges,
+  allocationSaveFailure,
   createAllocationCommands,
   type AllocationAccountRow,
 } from "@t3tools/client-runtime/state/provider-allocation";
@@ -15,12 +19,17 @@ import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironment } from "../../state/environments";
 import { AllocationControls } from "./AllocationControls";
+import { SaveState } from "./SaveState";
+import { FoldedSettingsSection } from "../settings/FoldedSettingsSection";
+import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { serverEnvironment } from "../../state/server";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const field =
   "block w-full min-w-0 max-w-full rounded border bg-background px-2 py-1 text-sm disabled:opacity-60";
+const none: ReadonlySet<string> = new Set();
 
 export function ProviderAllocationPage({ environmentId }: { environmentId: EnvironmentId }) {
   return <AllocationEditor key={environmentId} environmentId={environmentId} />;
@@ -38,13 +47,41 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const generation = useRef(0);
   const accountsRead = useRef(0);
   const mounted = useRef(true);
-  const hydrated = useRef(false);
+  const chosen = useRef(false);
   // The saved settings, then what every computer reports: the settings never wait for it.
   const [settings, setSettings] = useState<AllocationSnapshot | null>(null);
   const [reported, setReported] = useState<AllocationSnapshot | null>(null);
   const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
+  // Every change is stored as it is made; `saving` is what the page shows and how far it got.
+  const [store] = useState(() =>
+    createAutosave<AllocationPolicy>({
+      ...allocationAutosaveRules,
+      save: async (policy, baseline) => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "policy", input: { expectedVersion: baseline.version, policy } },
+        });
+        if (result._tag !== "Success") return allocationSaveFailure(result.cause);
+        return result.value.policy
+          ? { saved: result.value.policy }
+          : allocationSaveFailure(undefined);
+      },
+      read: async () => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "snapshot", part: "settings" },
+        });
+        return result._tag === "Success" ? (result.value.snapshot?.policy ?? null) : null;
+      },
+    }),
+  );
+  const saving = useSyncExternalStore(store.subscribe, store.getState);
+  // Leaving the page stores an edit that is still waiting.
+  useEffect(() => () => store.flush(), [store]);
+  const policy = saving.policy ?? defaultAllocationPolicy;
   const snapshot = settings && {
     ...settings,
+    policy: saving.saved ?? settings.policy,
     inventories: reported?.inventories ?? [],
     runways: reported?.runways ?? settings.runways,
     notices: reported?.notices ?? [],
@@ -57,10 +94,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     (connection === "connected" &&
       snapshotEpoch !== connectionState.epoch &&
       failedEpoch !== connectionState.epoch);
-  const [policy, setPolicy] = useState<AllocationPolicy>(defaultAllocationPolicy);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [workersNotSaved, setWorkersNotSaved] = useState(none);
   const [coordinator, setCoordinator] = useState<string>(environmentId);
   const [connections, setConnections] = useState<AllocationResponse["connections"]>();
   const call = async (operation: AllocationOperation) => {
@@ -71,9 +107,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       const result = await execute({ environmentId, input: operation });
       if (!mounted.current || epoch !== generation.current) return null;
       if (result._tag !== "Success") {
-        setError(
-          "Request failed. The coordinator may be unavailable, or a newer policy was saved. Reload before retrying.",
-        );
+        setError("The computer that keeps these settings did not answer. Refresh to try again.");
         return null;
       }
       return result.value;
@@ -93,12 +127,16 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       setAccounts("loaded");
     } else setAccounts("failed");
   }, [environmentId, execute]);
-  const receive = useCallback((next: AllocationSnapshot, epoch: number) => {
-    setSettings(next);
-    setReadAt((current) => current || Date.now());
-    setSnapshotEpoch(epoch);
-  }, []);
-  const load = async (replaceDraft = false) => {
+  const receive = useCallback(
+    (next: AllocationSnapshot, epoch: number) => {
+      setSettings(next);
+      setReadAt((current) => current || Date.now());
+      setSnapshotEpoch(epoch);
+      store.receive(next.policy);
+    },
+    [store],
+  );
+  const load = async () => {
     const epoch = ++generation.current;
     const [topology, response] = await Promise.all([
       execute({ environmentId, input: { _tag: "connections" } }),
@@ -108,10 +146,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     void readAccounts();
     if (topology._tag === "Success" && topology.value.connections)
       setConnections(topology.value.connections);
-    if (!response?.snapshot) return;
-    receive(response.snapshot, connectionState.epoch);
-    if (replaceDraft || !hydrated.current) setPolicy(response.snapshot.policy);
-    hydrated.current = true;
+    if (response?.snapshot) receive(response.snapshot, connectionState.epoch);
   };
   useEffect(() => {
     mounted.current = true;
@@ -136,20 +171,15 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       void readAccounts();
       if (topology._tag === "Success" && topology.value.connections) {
         setConnections(topology.value.connections);
-        if (!hydrated.current)
+        // The choice follows the stored one until he changes it.
+        if (!chosen.current)
           setCoordinator(topology.value.connections.coordinatorEnvironmentId ?? environmentId);
       }
-      if (result._tag === "Success" && result.value.snapshot) {
+      if (result._tag === "Success" && result.value.snapshot)
         receive(result.value.snapshot, connectionState.epoch);
-        if (!hydrated.current) {
-          setPolicy((current) =>
-            current === defaultAllocationPolicy ? result.value.snapshot!.policy : current,
-          );
-          hydrated.current = true;
-        }
-      } else {
+      else {
         setFailedEpoch(connectionState.epoch);
-        setError("Allocation coordinator unavailable. Reconnect and refresh.");
+        setError("The computer that keeps these settings did not answer. Reconnect and refresh.");
       }
     });
     return () => {
@@ -158,169 +188,184 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       generation.current++;
     };
   }, [environmentId, execute, connection, connectionState.epoch, readAccounts, receive]);
+  // A daily goal changes each account's budget so far, which the accounts report.
+  const stored = useRef<AllocationPolicy | null>(null);
+  useEffect(() => {
+    const [before, after] = [stored.current, saving.saved];
+    stored.current = after;
+    if (
+      before &&
+      after &&
+      [...allocationPolicyChanges(before, after)].some((part) => part.startsWith("goal:"))
+    )
+      void readAccounts();
+  }, [saving.saved, readAccounts]);
   const coordinatorChoices = connections?.environments ?? [
-    { environmentId, label: "This environment" },
+    { environmentId, label: "This computer" },
   ];
-  const inRange = (value: number | null | undefined, max: number) =>
-    value == null || (Number.isFinite(value) && value >= 0 && value <= max);
-  const canSave =
-    policy.version === snapshot?.policy.version &&
-    inRange(policy.closeMarginPoints, 50) &&
-    inRange(policy.longWaitHours, 168) &&
-    (policy.accountCaps ?? []).every(
-      (cap) => inRange(cap.weeklyPercent, 100) && inRange(cap.fiveHourPercent, 100),
-    );
-  const save = async () => {
-    const response = await call({
-      _tag: "policy",
-      input: { expectedVersion: policy.version, policy },
-    });
-    if (response?.policy) {
-      setNotice("Settings saved.");
-      setPolicy(response.policy);
-      await load();
-    }
-  };
+  const keeper = coordinatorChoices.find(
+    (choice) => choice.environmentId === connections?.coordinatorEnvironmentId,
+  );
   /** Each computer keeps its own list of accounts that workers may not use. */
   const setWorkers = async (row: AllocationAccountRow, enabled: boolean) => {
-    setBusy(true);
-    setError("");
-    try {
-      const results = await Promise.all(
-        [...new Set(row.instances.map((instance) => instance.environmentId))].map((host) =>
-          updateSettings({
-            environmentId: EnvironmentId.make(host),
-            input: {
-              patch: {
-                workerDisabledInstanceIds: (
-                  snapshot?.inventories.find((i) => i.environmentId === host)?.accounts ?? []
+    const failed = (value: boolean) =>
+      setWorkersNotSaved((current) => {
+        const next = new Set(current);
+        if (value) next.add(row.key);
+        else next.delete(row.key);
+        return next;
+      });
+    const results = await Promise.all(
+      [...new Set(row.instances.map((instance) => instance.environmentId))].map((host) =>
+        updateSettings({
+          environmentId: EnvironmentId.make(host),
+          input: {
+            patch: {
+              workerDisabledInstanceIds: (
+                snapshot?.inventories.find((i) => i.environmentId === host)?.accounts ?? []
+              )
+                .filter((account) =>
+                  row.members.includes(account) ? !enabled : account.availableForWorkers === false,
                 )
-                  .filter((account) =>
-                    row.members.includes(account)
-                      ? !enabled
-                      : account.availableForWorkers === false,
-                  )
-                  .map((account) => account.instanceId),
-              },
+                .map((account) => account.instanceId),
             },
-          }),
-        ),
-      );
-      if (results.every((result) => result._tag === "Success")) await load();
-      else setError("Could not save worker availability. Reconnect and retry.");
-    } finally {
-      setBusy(false);
-    }
+          },
+        }),
+      ),
+    );
+    if (!mounted.current) return;
+    failed(!results.every((result) => result._tag === "Success"));
+    // Whatever was stored shows once every computer has reported again.
+    void readAccounts();
   };
+  const editable = ready && snapshot?.authorityAvailable === true;
+  const stuck = saving.phase === "failed" || saving.phase === "conflict";
   return (
-    <div className="flex w-full min-w-0 flex-col gap-6 [overflow-wrap:anywhere] [&>*]:min-w-0 [&_label]:grid [&_label]:min-w-0 [&_label]:grid-cols-1 [&_label]:gap-1 [&_fieldset]:min-w-0">
-      <header>
-        <h1 className="text-xl font-semibold">Provider allocation</h1>
-        <p className="text-sm text-muted-foreground">
-          A worker starts on the account with the most room for its job, accounts within their daily
-          goal first. Only hard caps, real limits and the workers switch block an account.
-        </p>
-      </header>
+    <div className="flex w-full min-w-0 flex-col gap-8 [overflow-wrap:anywhere] [&>*]:min-w-0">
       {error && (
-        <p role="alert" className="text-destructive">
-          {error}
-        </p>
+        <Alert variant="error">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
-      {notice && <p role="status">{notice}</p>}
-      {!ready && (loadingSettings || connection !== "connected") && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {loadingSettings
-            ? snapshot
-              ? "Refreshing saved settings…"
-              : "Loading saved settings…"
-            : snapshot
-              ? "Not connected: last-known settings are read-only. Unsaved changes are retained."
-              : "Not connected. Connect this environment to view and edit its settings."}
+      {snapshot && !loadingSettings && connection !== "connected" && (
+        <p className="text-sm text-muted-foreground">
+          Not connected: showing the last known settings. They can be changed once this computer
+          reconnects.
         </p>
       )}
       {ready && !snapshot?.authorityAvailable && (
-        <p role="status">
-          Settings are read-only until a coordinator is connected. Choose one under Coordinator
-          below.
+        <p className="text-sm text-muted-foreground">
+          These settings cannot be changed until the computer that keeps them is reachable. Choose
+          it under Settings computer below.
         </p>
       )}
-      {snapshot && policy.version !== snapshot.policy.version && (
-        <p role="alert">
-          Newer settings are available. Your draft is retained; reload saved settings before editing
-          the new version.
-        </p>
+      {saving.phase === "failed" && (
+        <Alert variant="error">
+          <AlertTitle>Not saved</AlertTitle>
+          <AlertDescription>
+            {saving.error} The values marked &quot;Not saved&quot; are not in effect.
+          </AlertDescription>
+          <AlertAction>
+            <Button size="xs" variant="outline" onClick={store.retry}>
+              Try again
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
+              Drop my change
+            </Button>
+          </AlertAction>
+        </Alert>
+      )}
+      {saving.phase === "conflict" && (
+        <Alert variant="warning">
+          <AlertTitle>Changed elsewhere while you edited</AlertTitle>
+          <AlertDescription>
+            A value you changed was also changed on another computer or by an agent. Yours is not
+            saved yet.
+          </AlertDescription>
+          <AlertAction>
+            <Button size="xs" onClick={() => store.resolve(true)}>
+              Keep mine
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
+              Use theirs
+            </Button>
+          </AlertAction>
+        </Alert>
       )}
       <AllocationControls
         policy={policy}
         snapshot={snapshot}
         now={readAt}
         accounts={accounts === "loading" && !live ? "offline" : accounts}
-        disabled={busy || !ready || !snapshot?.authorityAvailable}
-        onChange={setPolicy}
+        disabled={!editable}
+        notSaved={
+          stuck && saving.saved && saving.policy
+            ? allocationPolicyChanges(saving.saved, saving.policy)
+            : none
+        }
+        workersNotSaved={workersNotSaved}
+        status={
+          <div className="flex items-center gap-2">
+            <SaveState
+              phase={
+                loadingSettings ? "loading" : connection !== "connected" ? "offline" : saving.phase
+              }
+            />
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy || connection !== "connected"}
+              onClick={() => void load()}
+            >
+              Refresh
+            </Button>
+          </div>
+        }
+        onEdit={store.edit}
+        onFlush={store.flush}
         onWorkersChange={(row, enabled) => void setWorkers(row, enabled)}
       />
-      <div className="flex min-w-0 flex-wrap gap-2">
-        <Button
-          size="sm-multiline"
-          disabled={busy || !ready || !canSave || !snapshot?.authorityAvailable}
-          onClick={() => void save()}
-        >
-          Save settings
-        </Button>
-        <Button
-          size="sm-multiline"
-          variant="outline"
-          disabled={busy || !ready || !snapshot?.authorityAvailable}
-          onClick={() => {
-            setPolicy({
-              ...defaultAllocationPolicy,
-              version: policy.version,
-              coordinatorEnvironmentId: policy.coordinatorEnvironmentId,
-              mode: policy.mode,
-            });
-            setNotice("Defaults restored in your draft. Save settings to apply.");
-          }}
-        >
-          Reset to defaults
-        </Button>
-        <Button
-          size="sm-multiline"
-          variant="outline"
-          disabled={busy || connection !== "connected"}
-          onClick={() => void load(true)}
-        >
-          Reload saved settings
-        </Button>
-      </div>
-      <details className="rounded-lg border p-4">
-        <summary className="cursor-pointer font-medium">Coordinator</summary>
-        <div className="mt-4 grid min-w-0 gap-3">
-          <p className="text-sm text-muted-foreground">
-            One computer keeps these settings for every linked computer and decides each start. It
-            is this computer or a linked one, and must be reachable to connect.
+      <FoldedSettingsSection
+        id="allocation-settings-computer"
+        title="Settings computer"
+        summary={
+          keeper
+            ? `${keeper.label} keeps these settings`
+            : ready
+              ? "No computer keeps these settings yet"
+              : null
+        }
+      >
+        <div className={`${ITEM_ROW_CLASSNAME} grid min-w-0 gap-3`}>
+          <p className="text-xs text-muted-foreground">
+            One computer keeps these settings for every linked computer and picks the account for
+            each start. It must be reachable from this one.
           </p>
           <div className="grid min-w-0 grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <label>
+            <label className="grid min-w-0 gap-1 text-sm">
               Computer
               <select
                 className={field}
                 disabled={busy || !connections}
                 value={coordinator}
-                onChange={(e) => setCoordinator(e.target.value)}
+                onChange={(e) => {
+                  chosen.current = true;
+                  setCoordinator(e.target.value);
+                }}
               >
                 {coordinatorChoices.map((e) => (
                   <option key={e.environmentId} value={e.environmentId}>
                     {e.label}
-                    {e.environmentId === environmentId ? " (this environment)" : ""}
+                    {e.environmentId === environmentId ? " (this computer)" : ""}
                   </option>
                 ))}
                 {!coordinatorChoices.some((e) => e.environmentId === coordinator) && (
-                  <option value={coordinator}>Previously selected environment (not linked)</option>
+                  <option value={coordinator}>Previously chosen computer (not linked)</option>
                 )}
               </select>
             </label>
             <Button
-              size="sm-multiline"
+              size="sm"
               disabled={busy || connection !== "connected" || !coordinator || !connections}
               onClick={async () => {
                 if (await call({ _tag: "connect", coordinatorEnvironmentId: coordinator })) {
@@ -330,18 +375,11 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 }
               }}
             >
-              Connect coordinator
+              Use this computer
             </Button>
           </div>
-          {ready && (
-            <p className="text-sm">
-              {snapshot?.authorityAvailable
-                ? `Connected · settings version ${snapshot.policy.version}`
-                : "No coordinator is connected yet."}
-            </p>
-          )}
         </div>
-      </details>
+      </FoldedSettingsSection>
     </div>
   );
 }
