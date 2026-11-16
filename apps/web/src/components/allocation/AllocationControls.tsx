@@ -36,7 +36,6 @@ import { Checkbox } from "../ui/checkbox";
 import { HINT_MARK, Hinted } from "./Hinted";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 
 /** How long typing may pause before a number that only ranks accounts is stored. */
 const TYPING_PAUSE = 1000;
@@ -520,80 +519,57 @@ function Rule(props: {
   );
 }
 
+/** One learned number: its name, then what was measured, side by side where there is room. */
+const learnedRow =
+  "grid grid-cols-1 gap-x-4 gap-y-0.5 px-3 py-1.5 sm:px-4 @min-[40rem]/learned:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1.5fr)_minmax(0,1.5fr)]";
+
 /** What T3 learned from every computer's history. Nobody edits these. */
 function LearnedNumbers({ learned }: { learned: AllocationLearned }) {
   return (
-    <div className="grid min-w-0 gap-3 px-3 py-3 sm:px-4">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Model</TableHead>
-            <TableHead>Session</TableHead>
-            <TableHead>Per working hour</TableHead>
-            <TableHead>Turns</TableHead>
-            <TableHead>Source</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {learned.costs.map((cost) => (
-            <TableRow key={`${cost.driver}:${cost.model}:${cost.effort}:${cost.kind}`}>
-              <TableCell>
-                {cost.model} / {cost.effort ?? "default"}
-              </TableCell>
-              <TableCell>{cost.kind}</TableCell>
-              <TableCell>
-                {dollars(cost.dollarsPerHour)} at {Math.round(cost.contextTokens / 1000)}k context
-                {cost.perHundredK > 0 && (
-                  <div className="text-muted-foreground">
-                    +{dollars(cost.perHundredK)} per 100k more
-                  </div>
-                )}
-              </TableCell>
-              <TableCell>
-                {cost.samples} over {number(cost.hours)} h
-              </TableCell>
-              <TableCell>
-                {cost.measuredShare === undefined ? cost.source : "thin"}
-                {cost.basis && <div className="text-muted-foreground">{cost.basis}</div>}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Account</TableHead>
-            <TableHead>Limit</TableHead>
-            <TableHead>Holds</TableHead>
-            <TableHead>Outside use</TableHead>
-            <TableHead>Reading pairs</TableHead>
-            <TableHead>Source</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {learned.limits.map((limit) => (
-            <TableRow key={`${limit.key}:${limit.windowId}`}>
-              <TableCell>
-                {limit.label}
-                {limit.plan && <div className="text-muted-foreground">{limit.plan}</div>}
-              </TableCell>
-              <TableCell>{limit.windowLabel}</TableCell>
-              <TableCell>about {dollars(100 / limit.percentPerDollar)}</TableCell>
-              <TableCell>{number(limit.backgroundPercentPerHour)}% an hour</TableCell>
-              <TableCell>
-                {limit.samples} over {number(limit.hours)} h
-              </TableCell>
-              <TableCell>
-                {limit.source}
-                {limit.basis && <div className="text-muted-foreground">{limit.basis}</div>}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+    <div className={cn("@container/learned min-w-0 text-xs", divided)}>
+      {learned.costs.map((cost) => (
+        <div
+          key={`${cost.driver}:${cost.model}:${cost.effort}:${cost.kind}`}
+          className={learnedRow}
+        >
+          <span className="font-medium">
+            {cost.model} / {cost.effort ?? "default"} · {cost.kind}
+          </span>
+          <span>
+            {dollars(cost.dollarsPerHour)} an hour at {Math.round(cost.contextTokens / 1000)}k
+            context
+            {cost.perHundredK > 0 && `, +${dollars(cost.perHundredK)} per 100k more`}
+          </span>
+          <span>
+            {cost.samples} turns over {number(cost.hours)} h
+          </span>
+          <span className="text-muted-foreground">
+            {cost.measuredShare === undefined ? cost.source : "thin"}
+            {cost.basis && ` · ${cost.basis}`}
+          </span>
+        </div>
+      ))}
+      {learned.limits.map((limit) => (
+        <div key={`${limit.key}:${limit.windowId}`} className={learnedRow}>
+          <span className="font-medium">
+            {limit.label}
+            {limit.plan && ` ${limit.plan}`} · {limit.windowLabel}
+          </span>
+          <span>
+            holds about {dollars(100 / limit.percentPerDollar)}, outside use{" "}
+            {number(limit.backgroundPercentPerHour)}% an hour
+          </span>
+          <span>
+            {limit.samples} reading pairs over {number(limit.hours)} h
+          </span>
+          <span className="text-muted-foreground">
+            {limit.source}
+            {limit.basis && ` · ${limit.basis}`}
+          </span>
+        </div>
+      ))}
       {learned.notes.map((note) => (
-        <p key={note} className="text-xs text-muted-foreground">
+        <p key={note} className="px-3 py-1.5 text-muted-foreground sm:px-4">
           {note}
         </p>
       ))}

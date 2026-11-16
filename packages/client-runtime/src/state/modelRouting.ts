@@ -73,6 +73,30 @@ export function modelShortNames(models: readonly string[]) {
   );
 }
 export const effortDisplayName = (effort: string) => (effort === "medium" ? "med" : effort);
+/** One letter per model, or two where a letter is shared: for a table too narrow for names. */
+export function modelShortCodes(models: readonly string[]) {
+  const names = modelShortNames(models);
+  const letters = (slug: string, count: number) => (names.get(slug) ?? slug).slice(0, count);
+  return new Map(
+    models.map((slug) => [
+      slug,
+      letters(
+        slug,
+        models.filter((other) => letters(other, 1) === letters(slug, 1)).length === 1 ? 1 : 2,
+      ),
+    ]),
+  );
+}
+const EFFORT_CODES: Readonly<Record<string, string>> = {
+  minimal: "mn",
+  low: "lo",
+  medium: "md",
+  high: "hi",
+  xhigh: "xh",
+  max: "mx",
+};
+/** An effort in two letters, such as "hi" or "xh". */
+export const effortShortCode = (effort: string) => EFFORT_CODES[effort] ?? effort.slice(0, 2);
 /** "Sol 6.1 · max": the compact form of one table entry. */
 export const modelCellSummary = (cell: RoutingProfile) =>
   `${modelDisplayName(cell.model)} · ${effortDisplayName(cell.effort)}`;

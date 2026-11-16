@@ -397,7 +397,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             <div
               role="tabpanel"
               aria-label={`${modelDriverLabel(driver)} table`}
-              className="grid min-w-0 gap-3"
+              className="@container/matrix grid min-w-0 gap-3"
             >
               <ModelCellEditor
                 driver={driver}

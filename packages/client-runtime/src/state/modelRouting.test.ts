@@ -16,6 +16,8 @@ import {
   modelCellChanges,
   modelDisplayName,
   modelEditorUrl,
+  effortShortCode,
+  modelShortCodes,
   modelShortNames,
   resetModelTable,
   setAllowedModels,
@@ -244,4 +246,24 @@ it("counts ladder, fallback and model list edits as changes and merges model lis
   expect(policy.claudeAgent.allowedModels).toEqual([...rest, "theirs-model", "typed-model"]);
   expect(policy.claudeAgent.allowedModels).not.toContain(first);
   expect(policy.codex).toEqual(saved.codex);
+});
+
+it("codes models and efforts in a letter or two for a table too narrow for names", () => {
+  expect([
+    ...modelShortCodes(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]).values(),
+  ]).toEqual(["H", "S", "O"]);
+  // Two models that start alike take two letters.
+  expect([...modelShortCodes(["gpt-6-astra", "gpt-6-aurora", "gpt-6-luna"]).values()]).toEqual([
+    "As",
+    "Au",
+    "L",
+  ]);
+  expect(["low", "medium", "high", "xhigh", "max", "turbo"].map(effortShortCode)).toEqual([
+    "lo",
+    "md",
+    "hi",
+    "xh",
+    "mx",
+    "tu",
+  ]);
 });

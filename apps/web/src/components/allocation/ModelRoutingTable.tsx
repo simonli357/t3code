@@ -14,11 +14,13 @@ import type {
 import {
   chooseModelForCell,
   effortDisplayName,
+  effortShortCode,
   modelCell,
   modelCellSummary,
   modelDisplayName,
   modelDriverLabel,
   modelProfileLabel,
+  modelShortCodes,
   modelShortNames,
   sameModelCell,
   type ModelCatalog,
@@ -51,6 +53,7 @@ const modelsUsed = (policy: ModelRoutingPolicy, driver: ModelDriver) =>
 /**
  * Difficulty runs across the top and stakes down the side, each as the exact 0-10 score.
  * Every cell is one button naming its model and reasoning; arrow keys move between cells.
+ * The table always fits its `matrix` container: below 42rem the cells show short codes.
  */
 export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
   driver: ModelDriver;
@@ -66,6 +69,7 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
   const active = focus ?? selected ?? { difficulty: 0, stakes: 0 };
   const used = modelsUsed(policy, driver);
   const names = modelShortNames(used);
+  const codes = modelShortCodes(used);
   const move = (event: KeyboardEvent) => {
     const origin = (event.target as HTMLElement).closest<HTMLElement>("[data-cell]")?.dataset.cell;
     const steps: Record<string, readonly [number, number]> = {
@@ -88,39 +92,35 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
       ?.focus();
   };
   return (
-    <div className="max-h-[75vh] min-w-0 max-w-full overflow-auto rounded-md border">
+    <div className="min-w-0 max-w-full rounded-md border">
       <table
         ref={table}
         aria-label={`${modelDriverLabel(driver)} model table`}
-        className="w-full min-w-[44rem] border-separate border-spacing-px text-xs"
+        className="w-full table-fixed border-separate border-spacing-px text-xs @max-[42rem]/matrix:text-3xs"
         onKeyDown={move}
       >
         <thead>
           <tr>
-            <th scope="col" className="sticky top-0 left-0 z-20 h-6 bg-background">
+            <th scope="col" className="h-6 w-14 @max-[42rem]/matrix:w-5">
               <span className="sr-only">Stakes by difficulty</span>
             </th>
             <th
               scope="colgroup"
               colSpan={MODEL_SCORES.length}
-              className="sticky top-0 z-10 h-6 bg-background px-1 text-left font-medium text-muted-foreground"
+              className="h-6 px-1 text-left font-medium text-muted-foreground"
             >
-              <span className="sticky left-14 inline-block">Difficulty →</span>
+              Difficulty →
             </th>
           </tr>
           <tr>
             <th
               scope="col"
-              className="sticky top-6 left-0 z-20 h-6 w-14 min-w-14 bg-background px-1 text-left font-medium text-muted-foreground"
+              className="h-6 px-1 text-left font-medium text-muted-foreground @max-[42rem]/matrix:px-0 @max-[42rem]/matrix:text-center"
             >
-              Stakes ↓
+              <span className="@max-[42rem]/matrix:sr-only">Stakes </span>↓
             </th>
             {MODEL_SCORES.map((difficulty) => (
-              <th
-                key={difficulty}
-                scope="col"
-                className="sticky top-6 z-10 h-6 bg-background px-1 font-medium"
-              >
+              <th key={difficulty} scope="col" className="h-6 font-medium">
                 <span className="sr-only">Difficulty </span>
                 {difficulty}
               </th>
@@ -130,10 +130,7 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
         <tbody>
           {MODEL_SCORES.map((stakes) => (
             <tr key={stakes}>
-              <th
-                scope="row"
-                className="sticky left-0 z-10 bg-background px-1 py-1 text-center font-medium"
-              >
+              <th scope="row" className="py-1 text-center font-medium">
                 <span className="sr-only">Stakes </span>
                 {stakes}
               </th>
@@ -154,18 +151,27 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
                         cell.alternatives?.length ? ", with an alternative" : ""
                       }${edited ? ", not saved yet" : ""}${offered ? "" : ", not offered by connected accounts"}`}
                       className={cn(
-                        "flex min-h-9 w-full cursor-pointer flex-col items-center justify-center rounded px-0.5 py-0.5 leading-tight outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        "flex min-h-9 w-full min-w-0 cursor-pointer flex-col items-center justify-center overflow-hidden rounded px-0.5 py-0.5 leading-tight outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         tints[used.indexOf(cell.model) % tints.length],
                         chosen && "ring-2 ring-primary",
                       )}
                       onClick={() => onSelect({ difficulty, stakes })}
                       onFocus={() => setFocus({ difficulty, stakes })}
                     >
+                      {/* Names where the table is wide enough for them, a letter or two where not. */}
                       <span className="block max-w-full truncate font-medium">
-                        {names.get(cell.model)}
+                        <span className="@max-[42rem]/matrix:hidden">{names.get(cell.model)}</span>
+                        <span className="hidden @max-[42rem]/matrix:inline">
+                          {codes.get(cell.model)}
+                        </span>
                       </span>
                       <span className="block max-w-full truncate">
-                        {effortDisplayName(cell.effort)}
+                        <span className="@max-[42rem]/matrix:hidden">
+                          {effortDisplayName(cell.effort)}
+                        </span>
+                        <span className="hidden @max-[42rem]/matrix:inline">
+                          {effortShortCode(cell.effort)}
+                        </span>
                         <span aria-hidden>
                           {cell.alternatives?.length ? " ↳" : ""}
                           {edited ? " •" : ""}
@@ -186,10 +192,12 @@ export const ModelRoutingMatrix = memo(function ModelRoutingMatrix(props: {
 
 export function ModelRoutingLegend(props: { driver: ModelDriver; policy: ModelRoutingPolicy }) {
   const used = modelsUsed(props.policy, props.driver);
+  const codes = modelShortCodes(used);
   return (
     <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       {used.map((model, i) => (
         <span key={model} className={cn("rounded px-1.5 py-0.5", tints[i % tints.length])}>
+          <span className="hidden font-medium @max-[42rem]/matrix:inline">{codes.get(model)} </span>
           {modelDisplayName(model)} ({model})
         </span>
       ))}

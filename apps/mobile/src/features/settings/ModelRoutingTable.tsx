@@ -1,14 +1,14 @@
-import { Pressable, ScrollView, View } from "react-native";
+import { Pressable, View } from "react-native";
 import { MODEL_SCORES, type ModelRoutingPolicy, type RoutingCell } from "@t3tools/contracts";
 import {
   chooseModelForCell,
-  effortDisplayName,
+  effortShortCode,
   modelCell,
   modelCellSummary,
   modelDisplayName,
   modelDriverLabel,
   modelProfileLabel,
-  modelShortNames,
+  modelShortCodes,
   sameModelCell,
   type ModelCatalog,
   type ModelDriver,
@@ -19,7 +19,7 @@ export interface ModelCellPosition {
   readonly difficulty: number;
   readonly stakes: number;
 }
-// Fills come from adaptive tokens; the model name in each cell carries the meaning.
+// Fills come from adaptive tokens; the model's letter in each cell carries the meaning.
 const tints = ["bg-subtle", "bg-secondary", "bg-subtle-strong", "bg-card-alt"];
 const modelsUsed = (policy: ModelRoutingPolicy, driver: ModelDriver) =>
   [...new Set(policy[driver].cells.flatMap((row) => row.map((cell) => cell.model)))].sort();
@@ -55,8 +55,9 @@ export function Chip(props: {
 }
 
 /**
- * Stakes stay pinned at the left while the 0-10 difficulty columns scroll sideways, so every
- * cell keeps both of its scores visible.
+ * Difficulty runs across and stakes down, each as the exact 0-10 score. The eleven columns share
+ * the screen's width, so a cell names its model and reasoning by a letter or two; the legend and
+ * the editor above spell them out.
  */
 export function ModelRoutingMatrix(props: {
   driver: ModelDriver;
@@ -68,78 +69,68 @@ export function ModelRoutingMatrix(props: {
 }) {
   const { driver, policy, baseline, catalog, selected } = props;
   const used = modelsUsed(policy, driver);
-  const names = modelShortNames(used);
+  const codes = modelShortCodes(used);
   return (
-    <View className="flex-row">
-      <View>
-        <View className="h-10 w-12 justify-center">
-          <Text className="text-xs text-foreground-muted">Stakes ↓</Text>
-          <Text className="text-xs text-foreground-muted">Diff. →</Text>
-        </View>
-        {MODEL_SCORES.map((stakes) => (
-          <View key={stakes} className="h-11 w-12 items-center justify-center">
-            <Text className="font-t3-medium">{stakes}</Text>
+    <View>
+      <Text className="text-xs text-foreground-muted">Difficulty → · Stakes ↓</Text>
+      <View className="h-6 flex-row">
+        <View className="w-5" />
+        {MODEL_SCORES.map((difficulty) => (
+          <View key={difficulty} className="flex-1 items-center justify-center">
+            <Text className="text-xs font-t3-medium">{difficulty}</Text>
           </View>
         ))}
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator>
-        <View>
-          <View className="h-10 flex-row">
-            {MODEL_SCORES.map((difficulty) => (
-              <View key={difficulty} className="w-20 items-center justify-center">
-                <Text className="font-t3-medium">{difficulty}</Text>
-              </View>
-            ))}
+      {MODEL_SCORES.map((stakes) => (
+        <View key={stakes} className="h-10 flex-row">
+          <View className="w-5 items-center justify-center">
+            <Text className="text-xs font-t3-medium">{stakes}</Text>
           </View>
-          {MODEL_SCORES.map((stakes) => (
-            <View key={stakes} className="h-11 flex-row">
-              {MODEL_SCORES.map((difficulty) => {
-                const cell = modelCell(policy, driver, difficulty, stakes);
-                const edited = baseline
-                  ? !sameModelCell(modelCell(baseline, driver, difficulty, stakes), cell)
-                  : false;
-                const offered = !catalog.known || catalog.supports(cell);
-                const chosen = selected?.difficulty === difficulty && selected.stakes === stakes;
-                return (
-                  <Pressable
-                    key={difficulty}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Difficulty ${difficulty}, stakes ${stakes}: ${modelProfileLabel(cell)}${
-                      cell.alternatives?.length ? ", with an alternative" : ""
-                    }${edited ? ", not saved yet" : ""}${offered ? "" : ", not offered by connected accounts"}`}
-                    accessibilityState={{ selected: chosen }}
-                    onPress={() => props.onSelect({ difficulty, stakes })}
-                    className={`w-20 items-center justify-center rounded border ${
-                      chosen ? "border-primary" : "border-transparent"
-                    } ${tints[used.indexOf(cell.model) % tints.length]}`}
-                  >
-                    <Text numberOfLines={1} className="text-xs font-t3-medium">
-                      {names.get(cell.model)}
-                    </Text>
-                    <Text numberOfLines={1} className="text-xs text-foreground-muted">
-                      {effortDisplayName(cell.effort)}
-                      {cell.alternatives?.length ? " ↳" : ""}
-                      {edited ? " •" : ""}
-                      {offered ? "" : " !"}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          ))}
+          {MODEL_SCORES.map((difficulty) => {
+            const cell = modelCell(policy, driver, difficulty, stakes);
+            const edited = baseline
+              ? !sameModelCell(modelCell(baseline, driver, difficulty, stakes), cell)
+              : false;
+            const offered = !catalog.known || catalog.supports(cell);
+            const chosen = selected?.difficulty === difficulty && selected.stakes === stakes;
+            return (
+              <Pressable
+                key={difficulty}
+                accessibilityRole="button"
+                accessibilityLabel={`Difficulty ${difficulty}, stakes ${stakes}: ${modelProfileLabel(cell)}${
+                  cell.alternatives?.length ? ", with an alternative" : ""
+                }${edited ? ", not saved yet" : ""}${offered ? "" : ", not offered by connected accounts"}`}
+                accessibilityState={{ selected: chosen }}
+                onPress={() => props.onSelect({ difficulty, stakes })}
+                className={`flex-1 items-center justify-center rounded border ${
+                  chosen ? "border-primary" : "border-transparent"
+                } ${tints[used.indexOf(cell.model) % tints.length]}`}
+              >
+                <Text numberOfLines={1} className="text-xs font-t3-medium">
+                  {codes.get(cell.model)}
+                  {cell.alternatives?.length ? "↳" : ""}
+                  {edited ? "•" : ""}
+                  {offered ? "" : "!"}
+                </Text>
+                <Text numberOfLines={1} className="text-xs text-foreground-muted">
+                  {effortShortCode(cell.effort)}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
-      </ScrollView>
+      ))}
     </View>
   );
 }
 
 export function ModelRoutingLegend(props: { driver: ModelDriver; policy: ModelRoutingPolicy }) {
+  const used = modelsUsed(props.policy, props.driver);
+  const codes = modelShortCodes(used);
   return (
     <Text className="text-xs text-foreground-muted">
-      {modelsUsed(props.policy, props.driver)
-        .map((m) => `${modelDisplayName(m)} (${m})`)
-        .join(" · ")}{" "}
-      · • not saved yet · ! not offered by a connected account · ↳ has an alternative
+      {used.map((m) => `${codes.get(m)} ${modelDisplayName(m)} (${m})`).join(" · ")} · • not saved
+      yet · ! not offered by a connected account · ↳ has an alternative
     </Text>
   );
 }
