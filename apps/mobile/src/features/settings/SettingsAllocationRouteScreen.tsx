@@ -71,33 +71,30 @@ export function SettingsAllocationRouteScreen() {
 
   const [showOthers, setShowOthers] = useState(false);
 
-  /** Reads the saved settings and, separately, the accounts; `isActive` drops a stale answer. */
+  /**
+   * Reads the saved settings, then the accounts; `isActive` drops a stale answer. The server runs
+   * one database query at a time, so reading the accounts first would hold up the settings.
+   */
   const read = useCallback(
-    (environmentId: EnvironmentId, isActive: () => boolean) => {
-      const accountsRead = execute({
-        environmentId,
-        input: { _tag: "snapshot", part: "accounts" },
-      }).then((result) => {
-        if (!isActive()) return;
-        if (result._tag === "Success" && result.value.snapshot) {
-          setReported(result.value.snapshot);
-          setNow(Date.now());
-          setAccounts("loaded");
-        } else setAccounts("failed");
-      });
-      const settingsRead = execute({
-        environmentId,
-        input: { _tag: "snapshot", part: "settings" },
-      }).then((result) => {
+    (environmentId: EnvironmentId, isActive: () => boolean) =>
+      execute({ environmentId, input: { _tag: "snapshot", part: "settings" } }).then((result) => {
         if (!isActive()) return;
         if (result._tag === "Success" && result.value.snapshot) {
           setSettings(result.value.snapshot);
           setNow((current) => current || Date.now());
           setMessage("");
         } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
-      });
-      return { accountsRead, settingsRead };
-    },
+        void execute({ environmentId, input: { _tag: "snapshot", part: "accounts" } }).then(
+          (accounts) => {
+            if (!isActive()) return;
+            if (accounts._tag === "Success" && accounts.value.snapshot) {
+              setReported(accounts.value.snapshot);
+              setNow(Date.now());
+              setAccounts("loaded");
+            } else setAccounts("failed");
+          },
+        );
+      }),
     [execute],
   );
 
@@ -105,7 +102,7 @@ export function SettingsAllocationRouteScreen() {
     if (!target) return;
     setBusy(true);
     setAccounts("loading");
-    await read(target.environmentId, () => true).settingsRead;
+    await read(target.environmentId, () => true);
     setBusy(false);
   };
 
@@ -113,7 +110,7 @@ export function SettingsAllocationRouteScreen() {
     if (!target) return;
 
     let active = true;
-    read(target.environmentId, () => active);
+    void read(target.environmentId, () => active);
 
     return () => {
       active = false;

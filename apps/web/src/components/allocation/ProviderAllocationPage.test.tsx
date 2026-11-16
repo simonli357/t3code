@@ -221,8 +221,8 @@ describe("Provider allocation editor", () => {
       await connect("connected");
       expect(readCalls("connections")).toHaveLength(1);
       expect(readCalls("snapshot").map(([arg]) => arg.input.part)).toEqual([
-        "accounts",
         "settings",
+        "accounts",
       ]);
       expect(container.textContent).toContain("settings version 4");
       await connect("connected");
@@ -243,7 +243,8 @@ describe("Provider allocation editor", () => {
         : implementation({ input: operation }),
     );
     await connect("connected");
-    expect(readCalls("snapshot")).toHaveLength(4);
+    // The accounts wait for the held settings read.
+    expect(readCalls("snapshot")).toHaveLength(3);
     expect(container.textContent).toContain("Refreshing saved settings…");
     expect(button("Save settings").disabled).toBe(true);
     await connect("offline");
@@ -256,7 +257,7 @@ describe("Provider allocation editor", () => {
         : implementation({ input: operation }),
     );
     await connect("connected");
-    expect(readCalls("snapshot")).toHaveLength(6);
+    expect(readCalls("snapshot")).toHaveLength(5);
     expect(input("Closeness margin").value).toBe("40");
     expect(container.textContent).toContain("settings version 5");
     await act(async () => resolveOld({ _tag: "Success", value: { snapshot } }));

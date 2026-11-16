@@ -212,13 +212,15 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         return;
       }
       setBusy(true);
-      void readAccounts();
       const result = await execute({
         environmentId,
         input: { _tag: "modelSnapshot", part: "settings" },
       });
       if (!active || epoch !== generation.current) return;
       setBusy(false);
+      // Only now: the server runs one database query at a time, and this computer's inventory
+      // would otherwise hold up the saved values.
+      void readAccounts();
       if (result._tag === "Success" && result.value.modelSnapshot) {
         const next = result.value.modelSnapshot;
         setSnapshot(next);
@@ -340,10 +342,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       </Text>
       <Action
         label="Refresh"
-        onPress={() => {
-          void readAccounts();
-          void refresh();
-        }}
+        onPress={() => void refresh().then(readAccounts)}
         disabled={busy || connection !== "connected"}
       />
       {stale && draft.saved && draft.baseline && (

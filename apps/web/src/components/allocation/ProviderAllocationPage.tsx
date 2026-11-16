@@ -100,12 +100,12 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
   }, []);
   const load = async (replaceDraft = false) => {
     const epoch = ++generation.current;
-    void readAccounts();
     const [topology, response] = await Promise.all([
       execute({ environmentId, input: { _tag: "connections" } }),
       call({ _tag: "snapshot", part: "settings" }),
     ]);
     if (!mounted.current || epoch !== generation.current) return;
+    void readAccounts();
     if (topology._tag === "Success" && topology.value.connections)
       setConnections(topology.value.connections);
     if (!response?.snapshot) return;
@@ -125,13 +125,15 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       }
       setBusy(true);
       setError("");
-      void readAccounts();
       const [topology, result] = await Promise.all([
         execute({ environmentId, input: { _tag: "connections" } }),
         execute({ environmentId, input: { _tag: "snapshot", part: "settings" } }),
       ]);
       if (!active || epoch !== generation.current) return;
       setBusy(false);
+      // Only now: the server runs one database query at a time, and this computer's inventory
+      // would otherwise hold up the saved settings.
+      void readAccounts();
       if (topology._tag === "Success" && topology.value.connections) {
         setConnections(topology.value.connections);
         if (!hydrated.current)
