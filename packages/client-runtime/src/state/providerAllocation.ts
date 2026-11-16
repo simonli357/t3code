@@ -1,5 +1,6 @@
 import {
   WS_METHODS,
+  allocationFableMode,
   allocationFamilyGoal,
   allocationPreferenceKey,
   modelLadder,
@@ -214,6 +215,11 @@ export function allocationAccountRows(
       /** False when every computer's own settings keep workers off this login. */
       workersEnabled: workersOffOn.length < group.members.length,
       workersOffOn,
+      /** Workers here run on Fable rungs only; null when the login cannot run Fable. */
+      fableMode:
+        group.driver === "claudeAgent"
+          ? group.members.some((member) => allocationFableMode(policy, member))
+          : null,
       supportsCaps,
       capSource: allocationSubscriptionCapSource(group.members),
       cap: group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean),
@@ -245,6 +251,31 @@ export function withAllocationAccountGoal(
     accountGoals: [
       ...(policy.accountGoals ?? []).filter((goal) => !row.keys.includes(goal.key)),
       ...(percentPerDay === undefined ? [] : row.keys.map((key) => ({ key, percentPerDay }))),
+    ],
+  };
+}
+
+/**
+ * The policy with the login's Fable mode on or off. A policy from before Fable mode was per
+ * account, with it on, starts from every Claude login in the snapshot.
+ */
+export function withAllocationAccountFableMode(
+  policy: AllocationPolicy,
+  snapshot: AllocationSnapshot | null,
+  row: Pick<AllocationAccountRow, "keys">,
+  on: boolean,
+): AllocationPolicy {
+  const { fableOnly: _everyAccount, ...rest } = policy;
+  const current =
+    policy.fableAccounts ??
+    (snapshot?.inventories ?? [])
+      .flatMap((inventory) => inventory.accounts)
+      .filter((account) => allocationFableMode(policy, account))
+      .map(allocationPreferenceKey);
+  return {
+    ...rest,
+    fableAccounts: [
+      ...new Set([...current.filter((key) => !row.keys.includes(key)), ...(on ? row.keys : [])]),
     ],
   };
 }

@@ -20,6 +20,7 @@ import {
   allocationAccountRows,
   allocationSummary,
   allocationAccountLabel,
+  withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
   type AllocationAccountRow,
@@ -306,6 +307,19 @@ export function SettingsAllocationRouteScreen() {
           />
         </View>
       ))}
+      {row.fableMode !== null && policy ? (
+        <View className="flex-row items-center justify-between">
+          <Text>Fable mode</Text>
+          <ThemedSwitch
+            accessibilityLabel={`Fable mode: ${row.label}`}
+            value={row.fableMode}
+            disabled={busy || !goalsEditable}
+            onValueChange={(on) =>
+              setDraft(withAllocationAccountFableMode(policy, snapshot, row, on))
+            }
+          />
+        </View>
+      ) : null}
     </View>
   );
 
@@ -410,20 +424,9 @@ export function SettingsAllocationRouteScreen() {
             )}
             <Text>
               Off: no worker runs on Fable; a table cell or pin naming Fable starts from the nearest
-              rung without it.
+              rung without it. An account in Fable mode runs its workers on Fable low, medium or
+              high only.
             </Text>
-            {policy && (
-              <View className="flex-row items-center justify-between">
-                <Text>Fable mode</Text>
-                <ThemedSwitch
-                  accessibilityLabel="Fable mode"
-                  value={policy.fableOnly === true}
-                  disabled={busy || !goalsEditable}
-                  onValueChange={(fableOnly) => setDraft({ ...policy, fableOnly })}
-                />
-              </View>
-            )}
-            <Text>Workers use only Fable low, medium or high.</Text>
             {snapshot.learned ? (
               <View className="gap-1">
                 <Text className="font-semibold">Learned numbers</Text>
