@@ -228,134 +228,87 @@ export function modelCellChanges(from: ModelRoutingPolicy, to: ModelRoutingPolic
   return changes;
 }
 
-/**
- * The draft is edited on top of `baseline`, the saved table it started from. `saved` is the
- * newest saved table seen; it differs from `baseline` when someone else saved meanwhile.
- */
-export interface ModelDraft {
-  readonly saved: ModelRoutingPolicy | null;
+/** How many of each provider's table entries a page shows that are not stored yet. */
+export function summarizeModelDraft(draft: {
   readonly baseline: ModelRoutingPolicy | null;
   readonly policy: ModelRoutingPolicy | null;
-}
-export const emptyModelDraft: ModelDraft = { saved: null, baseline: null, policy: null };
-export function modelDraftChanges(draft: ModelDraft) {
-  if (!draft.baseline || !draft.policy) return { cells: [], settings: false };
+}) {
+  const cells =
+    draft.baseline && draft.policy ? modelCellChanges(draft.baseline, draft.policy) : [];
   return {
-    cells: modelCellChanges(draft.baseline, draft.policy),
-    settings: modelSettingChanges(draft.baseline, draft.policy).length > 0,
+    editedCells: (driver: ModelDriver) => cells.filter((c) => c.driver === driver).length,
   };
 }
-export function modelDraftDirty(draft: ModelDraft) {
-  const changes = modelDraftChanges(draft);
-  return changes.settings || changes.cells.length > 0;
-}
-/** Everything a screen shows about unsaved work, computed in one pass. */
-export function summarizeModelDraft(draft: ModelDraft) {
-  const changes = modelDraftChanges(draft);
-  const dirty = changes.settings || changes.cells.length > 0;
-  const { saved, baseline } = draft;
-  return {
-    dirty,
-    /**
-     * Unsaved edits sit on a table that is no longer the newest saved one. Equal versions
-     * with different content mean another coordinator's table, which is just as stale.
-     */
-    stale:
-      dirty &&
-      saved !== null &&
-      baseline !== null &&
-      (saved.version !== baseline.version ||
-        modelSettingChanges(saved, baseline).length > 0 ||
-        modelCellChanges(saved, baseline).length > 0),
-    count: changes.cells.length + (changes.settings ? 1 : 0),
-    editedCells: (driver: ModelDriver) => changes.cells.filter((c) => c.driver === driver).length,
-  };
-}
-export const modelDraftStale = (draft: ModelDraft) => summarizeModelDraft(draft).stale;
-/** A first load or an untouched draft follows the saved table; edits are never overwritten. */
-export const receiveSavedModelPolicy = (
-  draft: ModelDraft,
-  saved: ModelRoutingPolicy,
-): ModelDraft =>
-  modelDraftDirty(draft) ? { ...draft, saved } : { saved, baseline: saved, policy: saved };
-/** Replaces everything with a table that was just saved, reverted to, or deliberately reloaded. */
-export const adoptModelPolicy = (saved: ModelRoutingPolicy): ModelDraft => ({
-  saved,
-  baseline: saved,
-  policy: saved,
-});
-export const discardModelDraft = (draft: ModelDraft) =>
-  draft.saved ? adoptModelPolicy(draft.saved) : draft;
-export const editModelDraft = (
-  draft: ModelDraft,
-  update: (policy: ModelRoutingPolicy) => ModelRoutingPolicy,
-): ModelDraft => (draft.policy ? { ...draft, policy: update(draft.policy) } : draft);
-/** Applies only the entries and settings the user edited onto the newer saved table. */
-export function rebaseModelDraft(draft: ModelDraft): ModelDraft {
-  const { saved, baseline, policy } = draft;
-  if (!saved || !baseline || !policy) return draft;
-  let merged = saved;
-  for (const { driver, difficulty, stakes } of modelCellChanges(baseline, policy))
+
+/** The entries and settings `mine` changed in `base`, applied onto the newer stored `theirs`. */
+function rebaseModelPolicy(
+  base: ModelRoutingPolicy,
+  mine: ModelRoutingPolicy,
+  theirs: ModelRoutingPolicy,
+) {
+  let merged = theirs;
+  for (const { driver, difficulty, stakes } of modelCellChanges(base, mine))
     merged = setModelCell(
       merged,
       driver,
       difficulty,
       stakes,
-      modelCell(policy, driver, difficulty, stakes),
+      modelCell(mine, driver, difficulty, stakes),
     );
-  for (const key of modelSettingChanges(baseline, policy))
+  for (const key of modelSettingChanges(base, mine))
     merged =
       key === "codex" || key === "claudeAgent"
         ? setAllowedModels(merged, key, [
-            // The newer list without the models the draft removed, then the ones it added.
+            // The newer list without the models the edit removed, then the ones it added.
             // Models the newer table or an edited entry approved stay approved.
             ...merged[key].allowedModels.filter(
-              (m) =>
-                policy[key].allowedModels.includes(m) || !baseline[key].allowedModels.includes(m),
+              (m) => mine[key].allowedModels.includes(m) || !base[key].allowedModels.includes(m),
             ),
-            ...policy[key].allowedModels.filter((m) => !baseline[key].allowedModels.includes(m)),
+            ...mine[key].allowedModels.filter((m) => !base[key].allowedModels.includes(m)),
           ])
         : key === "ladder"
-          ? { ...merged, ladder: modelLadder(policy) }
+          ? { ...merged, ladder: modelLadder(mine) }
           : key === "fallback"
-            ? { ...merged, fallback: modelFallback(policy) }
-            : { ...merged, maxReassessments: policy.maxReassessments };
-  return { saved, baseline: saved, policy: merged };
+            ? { ...merged, fallback: modelFallback(mine) }
+            : { ...merged, maxReassessments: mine.maxReassessments };
+  return merged;
 }
 
 /**
- * Whether the newer saved table changed an entry or setting the draft edited, to something
- * else. The two model lists never collide: `rebaseModelDraft` merges them.
+ * Whether `theirs` changed an entry or setting that `mine` changed too, to something else.
+ * The two model lists never collide: `rebaseModelPolicy` merges them.
  */
-export function modelDraftCollides({ saved, baseline, policy }: ModelDraft) {
-  if (!saved || !baseline || !policy) return false;
-  const [theirs, base, mine] = [saved, baseline, policy].map(modelSettings);
+function modelEditsCollide(
+  base: ModelRoutingPolicy,
+  mine: ModelRoutingPolicy,
+  theirs: ModelRoutingPolicy,
+) {
+  const [before, edited, newer] = [base, mine, theirs].map(modelSettings);
   return (
-    modelCellChanges(baseline, policy).some(({ driver, difficulty, stakes }) => {
-      const newer = modelCell(saved, driver, difficulty, stakes);
+    modelCellChanges(base, mine).some(({ driver, difficulty, stakes }) => {
+      const cell = modelCell(theirs, driver, difficulty, stakes);
       return (
-        !sameModelCell(newer, modelCell(baseline, driver, difficulty, stakes)) &&
-        !sameModelCell(newer, modelCell(policy, driver, difficulty, stakes))
+        !sameModelCell(cell, modelCell(base, driver, difficulty, stakes)) &&
+        !sameModelCell(cell, modelCell(mine, driver, difficulty, stakes))
       );
     }) ||
-    modelSettingChanges(baseline, policy).some((key) => {
+    modelSettingChanges(base, mine).some((key) => {
       if (key === "codex" || key === "claudeAgent") return false;
-      const newer = JSON.stringify(theirs![key]);
-      return newer !== JSON.stringify(base![key]) && newer !== JSON.stringify(mine![key]);
+      const value = JSON.stringify(newer![key]);
+      return value !== JSON.stringify(before![key]) && value !== JSON.stringify(edited![key]);
     })
   );
 }
 
 /** How the model table is compared, merged and checked when it saves itself. */
 export const modelAutosaveRules = {
-  dirty: (baseline, policy) => modelDraftDirty({ saved: baseline, baseline, policy }),
-  rebase: (base, mine, theirs) => {
-    const draft = { saved: theirs, baseline: base, policy: mine };
-    return {
-      policy: rebaseModelDraft(draft).policy ?? theirs,
-      collides: modelDraftCollides(draft),
-    };
-  },
+  dirty: (baseline, policy) =>
+    modelCellChanges(baseline, policy).length > 0 ||
+    modelSettingChanges(baseline, policy).length > 0,
+  rebase: (base, mine, theirs) => ({
+    policy: rebaseModelPolicy(base, mine, theirs),
+    collides: modelEditsCollide(base, mine, theirs),
+  }),
   invalid: (policy) => {
     const fallback = modelFallback(policy);
     return fallback && !(fallback.model && fallback.effort)
@@ -363,12 +316,3 @@ export const modelAutosaveRules = {
       : null;
   },
 } satisfies Pick<AutosaveOptions<ModelRoutingPolicy>, "dirty" | "rebase" | "invalid">;
-
-/** A save acknowledges the submitted table, not edits made while its receipt was in flight. */
-export function acknowledgeModelSave(
-  draft: ModelDraft,
-  submitted: ModelRoutingPolicy,
-  saved: ModelRoutingPolicy,
-): ModelDraft {
-  return rebaseModelDraft({ saved, baseline: submitted, policy: draft.policy ?? submitted });
-}

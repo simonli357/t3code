@@ -9,52 +9,40 @@ import {
   type ModelRoutingSnapshot,
 } from "@t3tools/contracts";
 import {
-  adoptModelPolicy,
-  acknowledgeModelSave,
   chooseModelForCell,
-  discardModelDraft,
-  editModelDraft,
-  emptyModelDraft,
+  modelAutosaveRules,
   modelCatalog,
   modelCell,
   modelCellChanges,
   modelDisplayName,
-  modelDraftChanges,
-  modelDraftDirty,
-  modelDraftStale,
   modelEditorUrl,
   modelShortNames,
-  rebaseModelDraft,
-  receiveSavedModelPolicy,
   resetModelTable,
   setAllowedModels,
   setModelCell,
   summarizeModelDraft,
 } from "./modelRouting.ts";
+const { dirty, rebase } = modelAutosaveRules;
 
-it("acknowledges only submitted cells and settings, retaining edits made during a save", () => {
+it("keeps edits made while a save was on its way, on top of what the save stored", () => {
   const submitted = setModelCell(defaultModelRoutingPolicy, "codex", 5, 2, {
     model: "gpt-6-astra",
     effort: "high",
   });
-  const current = editModelDraft(adoptModelPolicy(submitted), (p) => ({
-    ...setModelCell(p, "claudeAgent", 1, 2, { model: "claude-opus-5-5", effort: "high" }),
-    maxReassessments: 1,
-  }));
+  const current = {
+    ...setModelCell(submitted, "claudeAgent", 1, 2, { model: "claude-opus-5-5", effort: "high" }),
+    fallback: null,
+  };
   const saved = { ...submitted, version: 4 };
-  const draft = acknowledgeModelSave(current, submitted, saved);
-  expect(draft.baseline).toEqual(saved);
-  expect(draft.policy?.codex).toEqual(saved.codex);
-  expect(draft.policy?.claudeAgent.cells[1]![2]).toEqual({
-    model: "claude-opus-5-5",
-    effort: "high",
-  });
-  expect(draft.policy?.maxReassessments).toBe(1);
-  expect(modelDraftStale(draft)).toBe(false);
-  expect(modelDraftChanges(draft)).toEqual({
-    cells: [{ driver: "claudeAgent", difficulty: 1, stakes: 2 }],
-    settings: true,
-  });
+  const { policy, collides } = rebase(submitted, current, saved);
+  expect(collides).toBe(false);
+  expect(policy).toMatchObject({ version: 4, fallback: null });
+  expect(policy.codex).toEqual(saved.codex);
+  expect(modelCellChanges(saved, policy)).toEqual([
+    { driver: "claudeAgent", difficulty: 1, stakes: 2 },
+  ]);
+  expect(dirty(saved, policy)).toBe(true);
+  expect(dirty(saved, saved)).toBe(false);
 });
 it("opens the selected remote environment editor without retaining pairing tokens or fragments", () => {
   expect(modelEditorUrl(null, "relay")).toBeNull();
@@ -187,101 +175,73 @@ const edit = (policy: ModelRoutingPolicy, difficulty: number, stakes: number, ef
     effort,
   });
 
-it("follows newer saved tables until edits exist, then flags and rebases them", () => {
-  const v3 = { ...defaultModelRoutingPolicy, version: 3 };
-  let draft = receiveSavedModelPolicy(emptyModelDraft, v3);
-  expect(modelDraftDirty(draft)).toBe(false);
-  draft = receiveSavedModelPolicy(draft, { ...v3, version: 4 });
-  expect(draft.baseline?.version).toBe(4);
+it("applies edits onto a newer stored table, and says when it changed the same entry or setting", () => {
+  const v4 = { ...defaultModelRoutingPolicy, version: 4 };
+  const mine = { ...edit(v4, 7, 8, "xhigh"), fallback: null };
+  expect(dirty(v4, mine)).toBe(true);
+  const counted = summarizeModelDraft({ baseline: v4, policy: mine });
+  expect([counted.editedCells("claudeAgent"), counted.editedCells("codex")]).toEqual([1, 0]);
 
-  draft = editModelDraft(draft, (p) => edit(p, 7, 8, "xhigh"));
-  draft = editModelDraft(draft, (p) => ({ ...p, maxReassessments: 3 }));
-  expect(modelDraftChanges(draft)).toEqual({
-    cells: [{ driver: "claudeAgent", difficulty: 7, stakes: 8 }],
-    settings: true,
-  });
-  expect(modelDraftStale(draft)).toBe(false);
-  const summary = summarizeModelDraft(draft);
-  expect([summary.dirty, summary.stale, summary.count]).toEqual([true, false, 2]);
-  expect([summary.editedCells("claudeAgent"), summary.editedCells("codex")]).toEqual([1, 0]);
+  // Stored elsewhere as version 5: a different entry changed.
+  const apart = edit({ ...v4, version: 5 }, 2, 2, "max");
+  const merged = rebase(v4, mine, apart);
+  expect(merged.collides).toBe(false);
+  expect(merged.policy).toMatchObject({ version: 5, fallback: null });
+  expect(modelCell(merged.policy, "claudeAgent", 2, 2).effort).toBe("max");
+  expect(modelCell(merged.policy, "claudeAgent", 7, 8).effort).toBe("xhigh");
+  expect(modelCellChanges(apart, merged.policy)).toEqual([
+    { driver: "claudeAgent", difficulty: 7, stakes: 8 },
+  ]);
 
-  // Another editor saved version 5 changing a different entry and the same one differently.
-  const other = setModelCell(edit({ ...v3, version: 5 }, 2, 2, "max"), "claudeAgent", 7, 8, {
+  // The same entry changed to something else: the edit still wins, and the caller asks.
+  const same = setModelCell(apart, "claudeAgent", 7, 8, {
     model: "claude-opus-5-5",
     effort: "medium",
   });
-  draft = receiveSavedModelPolicy(draft, other);
-  expect(draft.policy).not.toBe(other);
-  expect(draft.baseline?.version).toBe(4);
-  expect(modelDraftStale(draft)).toBe(true);
-
-  const rebased = rebaseModelDraft(draft);
-  expect(rebased.baseline).toBe(other);
-  expect(rebased.policy?.version).toBe(5);
-  expect(rebased.policy?.maxReassessments).toBe(3);
-  expect(modelCell(rebased.policy!, "claudeAgent", 2, 2).effort).toBe("max");
-  expect(modelCell(rebased.policy!, "claudeAgent", 7, 8).effort).toBe("xhigh");
-  expect(modelDraftChanges(rebased).cells).toEqual([
-    { driver: "claudeAgent", difficulty: 7, stakes: 8 },
-  ]);
-  expect(modelDraftStale(rebased)).toBe(false);
-
-  expect(discardModelDraft(draft)).toEqual(adoptModelPolicy(other));
+  expect(rebase(v4, mine, same).collides).toBe(true);
+  expect(modelCell(rebase(v4, mine, same).policy, "claudeAgent", 7, 8).effort).toBe("xhigh");
+  // Changed elsewhere to the very same value, or a setting changed there too.
+  expect(rebase(v4, mine, edit(apart, 7, 8, "xhigh")).collides).toBe(false);
+  expect(rebase(v4, mine, { ...apart, fallback: null }).collides).toBe(false);
+  expect(
+    rebase(v4, mine, { ...apart, fallback: { ...defaultModelFallback, model: "other" } }).collides,
+  ).toBe(true);
 });
 
-it("treats a different table at the same version as newer, since it came from another coordinator", () => {
-  const v3 = { ...defaultModelRoutingPolicy, version: 3 };
-  let draft = editModelDraft(receiveSavedModelPolicy(emptyModelDraft, v3), (p) =>
-    edit(p, 7, 8, "xhigh"),
-  );
-  draft = receiveSavedModelPolicy(draft, { ...v3 });
-  expect(modelDraftStale(draft)).toBe(false);
-  draft = receiveSavedModelPolicy(draft, edit(v3, 2, 2, "max"));
-  expect(modelDraftStale(draft)).toBe(true);
-  const rebased = rebaseModelDraft(draft);
-  expect(modelDraftStale(rebased)).toBe(false);
-  expect(modelCell(rebased.policy!, "claudeAgent", 2, 2).effort).toBe("max");
-  expect(modelDraftChanges(rebased).cells).toEqual([
-    { driver: "claudeAgent", difficulty: 7, stakes: 8 },
-  ]);
-});
-
-it("resets one provider table to the defaults as a draft edit only", () => {
+it("resets one provider table to the built-in one", () => {
   const saved = edit(edit(defaultModelRoutingPolicy, 1, 1, "xhigh"), 9, 9, "medium");
   const codexEdited = setModelCell(saved, "codex", 0, 0, { model: "gpt-6-astra", effort: "high" });
   const reset = resetModelTable(codexEdited, "codex");
   expect(reset.codex).toBe(defaultModelRoutingPolicy.codex);
   expect(reset.claudeAgent).toBe(codexEdited.claudeAgent);
-  const draft = editModelDraft(adoptModelPolicy(codexEdited), (p) => resetModelTable(p, "codex"));
-  expect(modelDraftDirty(draft)).toBe(true);
-  expect(modelDraftChanges(draft).cells.every((c) => c.driver === "codex")).toBe(true);
+  expect(dirty(codexEdited, reset)).toBe(true);
+  expect(modelCellChanges(codexEdited, reset).every((c) => c.driver === "codex")).toBe(true);
 });
 
-it("counts ladder, fallback and model list edits as unsaved work and carries them onto a newer table", () => {
+it("counts ladder, fallback and model list edits as changes and merges model lists both ways", () => {
   const saved = { ...defaultModelRoutingPolicy, version: 3 };
-  let draft = adoptModelPolicy(saved);
-  expect(modelDraftDirty(draft)).toBe(false);
-  draft = editModelDraft(draft, (policy) => ({ ...policy, fallback: null }));
-  draft = editModelDraft(draft, (policy) => ({ ...policy, ladder: defaultModelLadder.slice(1) }));
-  draft = editModelDraft(draft, (policy) =>
-    setAllowedModels(policy, "claudeAgent", [...policy.claudeAgent.allowedModels, "typed-model"]),
+  const [first, ...rest] = saved.claudeAgent.allowedModels;
+  const mine = setAllowedModels(
+    { ...saved, fallback: null, ladder: defaultModelLadder.slice(1) },
+    "claudeAgent",
+    [...rest, "typed-model"],
   );
-  expect(summarizeModelDraft(draft).count).toBe(1);
-  expect(modelDraftDirty(draft)).toBe(true);
+  expect(dirty(saved, mine)).toBe(true);
   // An explicit default is the same as an absent one.
   expect(
-    modelDraftDirty(
-      editModelDraft(adoptModelPolicy(saved), (policy) => ({
-        ...policy,
-        ladder: defaultModelLadder,
-        fallback: defaultModelFallback,
-      })),
-    ),
+    dirty(saved, { ...saved, ladder: defaultModelLadder, fallback: defaultModelFallback }),
   ).toBe(false);
-  const newer = { ...saved, version: 4, maxReassessments: 1 };
-  const rebased = rebaseModelDraft(receiveSavedModelPolicy(draft, newer)).policy!;
-  expect(rebased).toMatchObject({ version: 4, maxReassessments: 1, fallback: null });
-  expect(rebased.ladder).toEqual(defaultModelLadder.slice(1));
-  expect(rebased.claudeAgent.allowedModels).toContain("typed-model");
-  expect(rebased.codex).toEqual(saved.codex);
+  // Stored elsewhere meanwhile: one more model on the same list.
+  const newer = setAllowedModels({ ...saved, version: 4 }, "claudeAgent", [
+    ...saved.claudeAgent.allowedModels,
+    "theirs-model",
+  ]);
+  const { policy, collides } = rebase(saved, mine, newer);
+  expect(collides).toBe(false);
+  expect(policy).toMatchObject({ version: 4, fallback: null });
+  expect(policy.ladder).toEqual(defaultModelLadder.slice(1));
+  // Their addition stays, mine is added, and the one I removed is gone.
+  expect(policy.claudeAgent.allowedModels).toEqual([...rest, "theirs-model", "typed-model"]);
+  expect(policy.claudeAgent.allowedModels).not.toContain(first);
+  expect(policy.codex).toEqual(saved.codex);
 });

@@ -11,13 +11,20 @@ import {
   type AllocationAccount,
   type AllocationPolicy,
   type AllocationSnapshot,
+  AllocationError,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import {
   allocationAccountGroups,
   allocationAccountOrder,
   allocationAccountRows,
   allocationModelChoices,
   allocationMoved,
+  allocationPolicyChanges,
+  allocationPolicyInvalid,
+  allocationResetIn,
+  allocationSaveFailure,
+  rebaseAllocationPolicy,
   withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
@@ -179,7 +186,7 @@ it("gives each login its live numbers: windows from the newest reading, workers 
     ["Pi", false],
   ]);
   const sl = rows.find((row) => row.label === "SL")!;
-  expect(sl.windows).toEqual([
+  expect(sl.windows).toMatchObject([
     {
       id: "seven_day",
       label: "Weekly",
@@ -314,4 +321,200 @@ it("lists the models connected accounts offer with their efforts", () => {
   expect(allocationModelChoices(state.inventories).map((choice) => choice.model)).toEqual([
     "astra",
   ]);
+});
+
+const capOf = (key: string, weeklyPercent: number) => ({
+  key,
+  weeklyPercent,
+  fiveHourPercent: null,
+  stopWorkers: true,
+  stopMasters: false,
+});
+
+it("names what an edit changed, by value and by account", () => {
+  const base: AllocationPolicy = {
+    ...defaultAllocationPolicy,
+    version: 4,
+    accountCaps: [capOf("a", 50), capOf("b", 60)],
+  };
+  const mine = {
+    ...base,
+    closeMarginPoints: 20,
+    accountCaps: [capOf("a", 40)],
+    accountGoals: [{ key: "a", percentPerDay: 12 }],
+  };
+  expect([...allocationPolicyChanges(base, mine)].sort()).toEqual([
+    "cap:a",
+    "cap:b",
+    "closeMarginPoints",
+    "goal:a",
+  ]);
+  // The version is not a value, and the order of an object's keys does not matter.
+  const reordered = base.accountCaps!.map(({ key, ...rest }) => ({ ...rest, key }));
+  expect(allocationPolicyChanges(base, { ...base, version: 9, accountCaps: reordered }).size).toBe(
+    0,
+  );
+});
+
+it("applies an edit onto settings stored elsewhere and says when both changed the same value", () => {
+  const base: AllocationPolicy = {
+    ...defaultAllocationPolicy,
+    version: 4,
+    accountCaps: [capOf("a", 50), capOf("b", 60)],
+  };
+  const mine = {
+    ...base,
+    closeMarginPoints: 20,
+    accountCaps: [capOf("a", 40)],
+    accountGoals: [{ key: "a", percentPerDay: 12 }],
+  };
+  // Stored elsewhere as version 5: another value, and a cap for a third account.
+  const theirs = {
+    ...base,
+    version: 5,
+    longWaitHours: 9,
+    accountCaps: [...base.accountCaps!, capOf("c", 70)],
+  };
+  const merged = rebaseAllocationPolicy(base, mine, theirs);
+  expect(merged.collides).toBe(false);
+  expect(merged.policy).toMatchObject({
+    version: 5,
+    closeMarginPoints: 20,
+    longWaitHours: 9,
+    accountGoals: [{ key: "a", percentPerDay: 12 }],
+  });
+  // My cap for a, theirs for c, and b stays removed.
+  expect(merged.policy.accountCaps).toEqual([capOf("c", 70), capOf("a", 40)]);
+  expect(allocationPolicyChanges(theirs, merged.policy)).toEqual(
+    allocationPolicyChanges(base, mine),
+  );
+
+  const both = (patch: Partial<AllocationPolicy>) =>
+    rebaseAllocationPolicy(base, mine, { ...theirs, ...patch });
+  expect(both({ closeMarginPoints: 30 }).collides).toBe(true);
+  expect(both({ closeMarginPoints: 30 }).policy.closeMarginPoints).toBe(20);
+  // The very same value stored elsewhere is no collision.
+  expect(both({ closeMarginPoints: 20 }).collides).toBe(false);
+  expect(both({ accountCaps: [capOf("a", 45), capOf("b", 60)] }).collides).toBe(true);
+  expect(both({ accountCaps: [capOf("a", 50)] }).collides).toBe(false);
+});
+
+it("refuses a number out of range before it is sent, naming it", () => {
+  const policy: AllocationPolicy = { ...defaultAllocationPolicy, version: 1 };
+  expect(allocationPolicyInvalid(policy)).toBeNull();
+  expect(allocationPolicyInvalid({ ...policy, closeMarginPoints: 51 })).toBe(
+    "The margin must be a number from 0 to 50.",
+  );
+  expect(allocationPolicyInvalid({ ...policy, longWaitHours: Number.NaN })).toBe(
+    "The wait must be a number from 0 to 168.",
+  );
+  expect(allocationPolicyInvalid({ ...policy, sessionReserveGiB: 17 })).toBe(
+    "Session reserve must be a number from 0 to 16.",
+  );
+  expect(allocationPolicyInvalid({ ...policy, memoryKillHoldMinutes: 1441 })).toBe(
+    "Memory kill hold must be a number from 0 to 1440.",
+  );
+  expect(allocationPolicyInvalid({ ...policy, accountCaps: [capOf("a", 101)] })).toBe(
+    "A cap must be a number from 0 to 100.",
+  );
+  expect(
+    allocationPolicyInvalid({ ...policy, accountGoals: [{ key: "a", percentPerDay: -1 }] }),
+  ).toBe("A daily goal must be a number from 0 to 100.");
+});
+
+it("tells a newer stored version from a save that failed", () => {
+  const refused = (code: "conflict" | "unavailable") =>
+    Cause.fail(new AllocationError({ code, detail: "The settings computer is off." }));
+  expect(allocationSaveFailure(refused("conflict"))).toEqual({ conflict: true });
+  expect(allocationSaveFailure(refused("unavailable"))).toEqual({
+    error: "The settings computer is off.",
+  });
+  // Anything else, such as a dropped connection, is not the user's to read.
+  for (const cause of [undefined, Cause.fail(new Error("socket closed"))])
+    expect(allocationSaveFailure(cause)).toEqual({
+      error: "The computer that keeps these settings did not answer.",
+    });
+});
+
+it("says how long until a limit resets in a few characters", () => {
+  const now = Date.parse("2026-11-15T12:00:00.000Z");
+  const resetIn = (at: string | null) => allocationResetIn(at, now);
+  expect(resetIn("2026-11-22T06:00:00.000Z")).toBe("in 6d 18h");
+  expect(resetIn("2026-11-15T14:10:00.000Z")).toBe("in 2h 10m");
+  expect(resetIn("2026-11-15T12:45:00.000Z")).toBe("in 45m");
+  expect(resetIn("2026-11-15T11:00:00.000Z")).toBe("reset");
+  expect(resetIn(null)).toBeNull();
+});
+
+it("gives each limit a short line with the rest behind it, and a notice only when the account is tight", () => {
+  const now = Date.parse("2026-11-15T12:00:00.000Z");
+  const claude = {
+    ...account("sliara", "claude", "XL", "xl", "claudeAgent"),
+    windows: [
+      {
+        id: "seven_day",
+        label: "Weekly",
+        kind: "weekly" as const,
+        usedPoints: 16,
+        checkedAt: "2026-11-15T11:59:00.000Z",
+        resetsAt: "2026-11-22T06:00:00.000Z",
+        cycleStartedAt: "2026-11-15T06:00:00.000Z",
+        durationHours: 168,
+        ratePointsPerHour: null,
+        samples: 0,
+        rateAgeMinutes: null,
+      },
+    ],
+  };
+  const key = allocationPreferenceKey(claude);
+  const policy: AllocationPolicy = { ...defaultAllocationPolicy, accountCaps: [capOf(key, 10)] };
+  const rows = (tight: boolean | undefined, line: string) =>
+    allocationAccountRows(
+      {
+        ...snapshot([claude]),
+        policy,
+        runways: [
+          {
+            key,
+            label: "XL",
+            line,
+            ...(tight === undefined ? {} : { tight }),
+            windows: [
+              {
+                id: "seven_day",
+                label: "Weekly",
+                meterPercent: 16,
+                goalPercent: 5,
+                sizeDollars: 1603.4,
+                source: "estimated",
+              },
+            ],
+          },
+        ],
+      },
+      policy,
+      now,
+    );
+  const stopped = "Weekly reached its 10% hard cap; it resets in about 6d 18h.";
+  const [row] = rows(true, stopped);
+  expect(row!.windows).toMatchObject([
+    {
+      label: "Weekly",
+      usedPercent: 16,
+      resetIn: "in 6d 18h",
+      stale: false,
+      capPercent: 10,
+      detail:
+        "read 1 min ago · holds about $1,603 (estimated) · daily goal allows 5% by now · hard cap 10%",
+    },
+  ]);
+  expect(row!.notice).toBe(stopped);
+  const room = "No limit runs out before its reset at the current load (0 working sessions).";
+  expect(rows(false, room)[0]!.notice).toBeNull();
+  // A settings computer from before the flag: its line is shown as it was.
+  expect(rows(undefined, room)[0]!.notice).toBe(room);
+  // No reading at all is said in its place.
+  expect(
+    allocationAccountRows(snapshot([{ ...claude, windows: [] }]), policy, now)[0]!.notice,
+  ).toBe("No reading");
 });

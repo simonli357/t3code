@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off - a plain store that React and React Native subscribe to; it runs no Effect.
 /**
  * Saves a versioned document as it is edited, so a page needs no Save button.
  *
