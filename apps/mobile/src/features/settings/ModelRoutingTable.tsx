@@ -153,6 +153,8 @@ export function ModelCellEditor(props: {
   catalog: ModelCatalog;
   alternativeOpen: boolean;
   onAlternativeOpen: (open: boolean) => void;
+  /** The accounts that advertise models have not arrived yet. */
+  loadingAccounts: boolean;
   pendingModel: string | null;
   onPendingModel: (model: string | null) => void;
   onChange: (cell: RoutingCell) => void;
@@ -253,8 +255,9 @@ export function ModelCellEditor(props: {
       {edited && saved && <Action label="Undo this cell" onPress={() => props.onChange(saved)} />}
       {!catalog.known && (
         <Text className="text-foreground-muted">
-          No connected {modelDriverLabel(driver)} account has advertised models yet. Reconnect to
-          change this cell.
+          {props.loadingAccounts
+            ? "Loading accounts…"
+            : `No connected ${modelDriverLabel(driver)} account has advertised models yet. Reconnect to change this cell.`}
         </Text>
       )}
     </View>

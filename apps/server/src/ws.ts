@@ -650,7 +650,6 @@ const makeWsRpcLayer = (
       const sessionMoves = yield* SessionMoves;
       const workerControls = yield* WorkerControls;
       const allocationService = yield* ProviderAllocation.ProviderAllocation;
-      const allocationAssignmentService = yield* AllocationAssignments.AllocationAssignments;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -3549,7 +3548,6 @@ const makeWsRpcLayer = (
               .pipe(Effect.mapError((cause) => new AgentTaskStopError({ detail: cause.message }))),
           ),
         [WS_METHODS.providerAllocation]: (input) => allocationService.execute(input),
-        [WS_METHODS.providerAllocationStart]: (input) => allocationAssignmentService.start(input),
         [WS_METHODS.sessionOwnershipRead]: ({ threadId, threadEnvironmentId }) =>
           observeRpcEffect(
             WS_METHODS.sessionOwnershipRead,

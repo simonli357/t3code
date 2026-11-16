@@ -874,8 +874,16 @@ export const AllocationPolicyView = Schema.Struct({
   warnings: Schema.Array(Schema.String),
 });
 export type AllocationPolicyView = typeof AllocationPolicyView.Type;
+/**
+ * Half of a snapshot, so saved values never wait for other computers. `settings` is read from
+ * the coordinator's store alone: the policies, saved versions, learned numbers and recent model
+ * decisions. `accounts` is what every computer reports: accounts, limits and running work.
+ * Reservations and allocation history come only in a whole snapshot.
+ */
+export const AllocationSnapshotPart = Schema.Literals(["settings", "accounts"]);
+export type AllocationSnapshotPart = typeof AllocationSnapshotPart.Type;
 export const AllocationOperation = Schema.TaggedUnion({
-  modelSnapshot: {},
+  modelSnapshot: { part: Schema.optional(AllocationSnapshotPart) },
   modelPolicy: { expectedVersion: NonNegativeInt, policy: ModelRoutingPolicy },
   modelRevert: { expectedVersion: NonNegativeInt, version: NonNegativeInt },
   modelPreview: { request: ModelRoutingRequest, policy: Schema.optional(ModelRoutingPolicy) },
@@ -886,7 +894,7 @@ export const AllocationOperation = Schema.TaggedUnion({
    * `learnedAt`, the answer carries the learned numbers only when they are newer.
    */
   caps: { learnedAt: Schema.optional(Schema.String) },
-  snapshot: {},
+  snapshot: { part: Schema.optional(AllocationSnapshotPart) },
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
   allocate: { request: AllocationRequest },
   policy: { input: AllocationPolicyUpdate },

@@ -3265,3 +3265,128 @@ it.effect("a linked computer reports its just-started sessions over the peer wir
     ]);
   }).pipe(Effect.scoped),
 );
+
+/** A worker start that has begun on `environmentId` and is not yet confirmed running. */
+const startedElsewhere = (environmentId: string, own: AllocationInventory) =>
+  Effect.gen(function* () {
+    const store = yield* Store.AllocationStore;
+    const request = {
+      ...startInput.request,
+      assignmentId: `started-on-${environmentId}`,
+      threadId: ThreadId.make(`worker-on-${environmentId}`),
+      environmentId,
+    };
+    yield* store.allocate({
+      at,
+      request,
+      inventories: [
+        {
+          ...own,
+          environmentId,
+          accounts: own.accounts.map((a) => ({ ...a, environmentId })),
+        },
+      ],
+      authorityAvailable: true,
+      reserve: true,
+    });
+    yield* store.lifecycle(
+      {
+        assignmentId: request.assignmentId,
+        environmentId,
+        threadId: request.threadId,
+        action: "start",
+        startIntent: `intent-${environmentId}`,
+      },
+      at,
+    );
+  });
+
+it.effect("saved settings answer without asking a linked computer that never answers", () => {
+  const f = fixture({ peerCall: () => Effect.never });
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    yield* startedElsewhere("hung", own);
+    f.state.peers = [{ ...own, environmentId: "hung", accounts: [] }];
+    const model = (yield* allocation.execute({ _tag: "modelSnapshot", part: "settings" }))
+      .modelSnapshot!;
+    expect(model.policy.version).toBe(defaultModelRoutingPolicy.version);
+    expect(model.inventories).toEqual([]);
+    const settings = (yield* allocation.execute({ _tag: "snapshot", part: "settings" })).snapshot!;
+    expect(settings.policy.mode).toBe("automatic");
+    expect(settings.inventories).toEqual([]);
+    expect(settings.runways).toEqual([]);
+    expect(settings.notices).toEqual([]);
+    // Neither read probed the start on the silent computer or asked it for its accounts.
+    expect(f.peerCalls).toEqual([]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("an accounts read lists a computer that fails as unread and probes no start", () => {
+  const f = fixture({
+    peerCall: (id) => Effect.fail(new PeerUnavailable({ environmentId: id, message: "offline" })),
+  });
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    yield* startedElsewhere("off", own);
+    f.state.peers = [{ ...own, environmentId: "off" }];
+    for (const read of [
+      (yield* allocation.execute({ _tag: "snapshot", part: "accounts" })).snapshot!.inventories,
+      (yield* allocation.execute({ _tag: "modelSnapshot", part: "accounts" })).modelSnapshot!
+        .inventories,
+    ]) {
+      expect(read.map((i) => [i.environmentId, i.complete])).toEqual([
+        ["local", true],
+        ["off", false],
+      ]);
+      expect(read[1]!.notices[0]).toContain("offline");
+    }
+    const accounts = (yield* allocation.execute({ _tag: "snapshot", part: "accounts" })).snapshot!;
+    expect(accounts.history).toEqual([]);
+    expect(accounts.reservations).toEqual([]);
+    expect(accounts.runways?.length).toBeGreaterThan(0);
+    expect(
+      f.peerCalls.every(
+        (call) =>
+          typeof call === "object" &&
+          call !== null &&
+          "_tag" in call &&
+          call._tag === "allocationInventory",
+      ),
+    ).toBe(true);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a whole snapshot asks every running start's computer at once", () =>
+  Effect.gen(function* () {
+    const bothAsked = yield* Deferred.make<void>();
+    let probes = 0;
+    const f = fixture({
+      peerCall: (id, input) => {
+        if (typeof input === "object" && input !== null && "_tag" in input)
+          if (input._tag === "allocationProbe") {
+            // Each answer waits for the other question: asked one after another, neither returns.
+            if (++probes === 2)
+              return Deferred.succeed(bothAsked, undefined).pipe(Effect.as({ state: "terminal" }));
+            return Deferred.await(bothAsked).pipe(Effect.as({ state: "terminal" }));
+          }
+        return Effect.succeed({ ...f.state.peers.find((p) => p.environmentId === id)! });
+      },
+    });
+    yield* Effect.gen(function* () {
+      const { allocation, store } = yield* f.setup;
+      const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+      yield* startedElsewhere("first", own);
+      yield* startedElsewhere("second", own);
+      f.state.peers = ["first", "second"].map((environmentId) => ({
+        ...own,
+        environmentId,
+        accounts: [],
+      }));
+      yield* allocation.execute({ _tag: "snapshot" });
+      expect(probes).toBe(2);
+      expect((yield* store.reservations).map((r) => r.state)).toEqual(["released", "released"]);
+    }).pipe(Effect.provide(f.layer));
+  }),
+);

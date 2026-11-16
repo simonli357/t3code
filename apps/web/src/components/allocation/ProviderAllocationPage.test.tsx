@@ -10,12 +10,9 @@ import {
   ThreadId,
   type AllocationSnapshot,
   type AllocationOperation,
-  type AllocationRequest,
 } from "@t3tools/contracts";
 const state = vi.hoisted(() => ({
   execute: vi.fn(),
-  start: vi.fn(),
-  navigate: vi.fn(),
   phase: "connected",
   connectionListeners: new Set<() => void>(),
 }));
@@ -41,16 +38,9 @@ vi.mock("../../state/server", () => ({
 }));
 vi.mock("@t3tools/client-runtime/state/provider-allocation", async (original) => ({
   ...(await original<typeof import("@t3tools/client-runtime/state/provider-allocation")>()),
-  createAllocationCommands: () => ({ execute: { label: "execute" }, start: { label: "start" } }),
+  createAllocationCommands: () => ({ execute: { label: "execute" } }),
 }));
-vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: { label: string }) =>
-    command.label === "start" ? state.start : state.execute,
-}));
-vi.mock("../../state/entities", () => ({
-  useProjects: () => [{ id: "project", title: "Project", environmentId: "host" }],
-}));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.execute }));
 import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
@@ -104,17 +94,6 @@ const snapshot: AllocationSnapshot = {
     },
   ],
 };
-const decision = (request: AllocationRequest) => ({
-  at: "2026-10-23T12:00:00.000Z",
-  policyVersion: 4,
-  request,
-  outcome: "selected",
-  selectedInstanceId: "sl",
-  candidates: [],
-  reasons: ["SL has the most room"],
-  confidence: "low",
-  waitUntil: null,
-});
 let container: HTMLDivElement;
 let root: Root;
 const button = (text: string) =>
@@ -146,8 +125,6 @@ beforeEach(async () => {
   state.phase = "connected";
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.execute.mockReset();
-  state.start.mockReset();
-  state.navigate.mockReset();
   state.execute.mockImplementation(async ({ input }: { input: AllocationOperation }) => {
     if (input._tag === "snapshot") return { _tag: "Success", value: { snapshot } };
     if (input._tag === "connections")
@@ -161,13 +138,6 @@ beforeEach(async () => {
               { environmentId: "peer", label: "Build computer" },
             ],
           },
-        },
-      };
-    if (input._tag === "preview")
-      return {
-        _tag: "Success",
-        value: {
-          result: { decision: decision(input.request), reservation: null, mode: "observation" },
         },
       };
     return { _tag: "Failure" };
@@ -247,19 +217,20 @@ describe("Provider allocation editor", () => {
           </StrictMode>,
         ),
       );
-      expect(state.execute).toHaveBeenCalledTimes(phase === "offline" ? 0 : 2);
+      expect(state.execute).toHaveBeenCalledTimes(phase === "offline" ? 0 : 3);
       await connect("connected");
       expect(readCalls("connections")).toHaveLength(1);
-      expect(readCalls("snapshot")).toHaveLength(1);
-      expect(container.textContent).toContain("policy 4");
+      expect(readCalls("snapshot").map(([arg]) => arg.input.part)).toEqual([
+        "settings",
+        "accounts",
+      ]);
+      expect(container.textContent).toContain("settings version 4");
       await connect("connected");
-      expect(state.execute).toHaveBeenCalledTimes(2);
+      expect(state.execute).toHaveBeenCalledTimes(3);
     },
   );
   it("refreshes reconnect snapshots while retaining drafts and rejecting obsolete reads", async () => {
     await change("Closeness margin", "40");
-    await change("Model", "astra");
-    await act(async () => button("Preview account").click());
     expect(button("Save settings").disabled).toBe(false);
     await connect("offline");
     let resolveOld!: (value: unknown) => void;
@@ -272,8 +243,9 @@ describe("Provider allocation editor", () => {
         : implementation({ input: operation }),
     );
     await connect("connected");
-    expect(readCalls("snapshot")).toHaveLength(2);
-    expect(button("Preview account").disabled).toBe(true);
+    // The accounts wait for the held settings read.
+    expect(readCalls("snapshot")).toHaveLength(3);
+    expect(container.textContent).toContain("Refreshing saved settings…");
     expect(button("Save settings").disabled).toBe(true);
     await connect("offline");
     state.execute.mockImplementation(({ input: operation }: { input: AllocationOperation }) =>
@@ -285,13 +257,11 @@ describe("Provider allocation editor", () => {
         : implementation({ input: operation }),
     );
     await connect("connected");
-    expect(readCalls("snapshot")).toHaveLength(3);
+    expect(readCalls("snapshot")).toHaveLength(5);
     expect(input("Closeness margin").value).toBe("40");
-    expect(container.textContent).toContain("policy 5");
+    expect(container.textContent).toContain("settings version 5");
     await act(async () => resolveOld({ _tag: "Success", value: { snapshot } }));
-    expect(container.textContent).toContain("policy 5");
-    expect(button("Save settings").disabled).toBe(true);
-    await act(async () => button("Preview account").click());
+    expect(container.textContent).toContain("settings version 5");
     expect(button("Save settings").disabled).toBe(true);
     await act(async () => button("Reload saved settings").click());
     expect(input("Closeness margin").value).toBe("10");
@@ -300,7 +270,7 @@ describe("Provider allocation editor", () => {
   it("saves the closeness margin and long wait, and resets them, without an assignment preview", async () => {
     const saved = savePolicies();
     expect(container.querySelector("section")?.getAttribute("aria-label")).toBe("Accounts");
-    expect(input("Coordinator").closest("details")?.open).toBe(false);
+    expect(input("Computer").closest("details")?.open).toBe(false);
     expect(input("Closeness margin").value).toBe("10");
     expect(input("Long wait").value).toBe("3");
     await change("Closeness margin", "20");
@@ -316,7 +286,6 @@ describe("Provider allocation editor", () => {
     await act(() => button("Save settings").click());
     expect(saved.policy).toMatchObject({ closeMarginPoints: 10, longWaitHours: 3 });
     expect(saved.policy.mode).toBe("observation");
-    expect(state.start).not.toHaveBeenCalled();
   });
   it("moves an account up the preference order, saves it, and shows workers now", async () => {
     const saved = savePolicies(two);
@@ -346,7 +315,7 @@ describe("Provider allocation editor", () => {
           }
         : previous(arg),
     );
-    await act(() => button("Refresh").click());
+    await act(() => button("Reload saved settings").click());
     expect(container.textContent).toContain("Update the coordinator before the order");
     expect(named("Move SL up").hasAttribute("disabled")).toBe(true);
     expect(input("Closeness margin").disabled).toBe(true);
@@ -365,7 +334,7 @@ describe("Provider allocation editor", () => {
     expect(patches).toEqual([
       { environmentId: "host", input: { patch: { workerDisabledInstanceIds: ["sl"] } } },
     ]);
-    expect(readCalls("snapshot")).toHaveLength(2);
+    expect(readCalls("snapshot")).toHaveLength(4);
     expect(readCalls("policy")).toHaveLength(0);
   });
   it("saves optional hard caps with independent worker and master stop actions", async () => {
@@ -454,7 +423,7 @@ describe("Provider allocation editor", () => {
         },
       };
     });
-    await act(() => button("Refresh").click());
+    await act(() => button("Reload saved settings").click());
     const accounts = container.querySelector('[aria-label="Accounts"]')!;
     expect(accounts.textContent).toContain("Weekly 42%");
     expect(accounts.textContent).toContain("resets ");
@@ -490,7 +459,7 @@ describe("Provider allocation editor", () => {
         },
       };
     });
-    await act(() => button("Refresh").click());
+    await act(() => button("Reload saved settings").click());
     const other = [...container.querySelectorAll("details")].find((d) =>
       d.querySelector("summary")?.textContent?.startsWith("Other accounts (1)"),
     )!;
@@ -566,7 +535,7 @@ describe("Provider allocation editor", () => {
         },
       };
     });
-    await act(() => button("Refresh").click());
+    await act(() => button("Reload saved settings").click());
     const accounts = container.querySelector('[aria-label="Accounts"]')!;
     expect(accounts.textContent).not.toContain("SL weekly cap");
     expect(accounts.textContent).toContain("Quota unverified");
@@ -600,7 +569,7 @@ describe("Provider allocation editor", () => {
         },
       };
     });
-    await act(() => button("Refresh").click());
+    await act(() => button("Reload saved settings").click());
     const weekly = input("SL weekly cap") as HTMLInputElement;
     expect(weekly).not.toBeNull();
     expect(weekly.disabled).toBe(false);
@@ -623,23 +592,23 @@ describe("Provider allocation editor", () => {
     expect(button("Save settings").disabled).toBe(false);
   });
   it("chooses a named linked coordinator without exposing IDs and preserves edits when connection fails", async () => {
-    const coordinator = input("Coordinator") as HTMLSelectElement;
+    const coordinator = input("Computer") as HTMLSelectElement;
     expect([...coordinator.options].map((o) => o.textContent)).toEqual([
       "Workstation (this environment)",
       "Build computer",
     ]);
     expect(container.textContent).toContain("Workstation");
     await change("Closeness margin", "12");
-    await change("Coordinator", "peer");
+    await change("Computer", "peer");
     await act(() => button("Connect coordinator").click());
     expect(state.execute.mock.calls.at(-1)?.[0]).toMatchObject({
       environmentId: "host",
       input: { _tag: "connect", coordinatorEnvironmentId: "peer" },
     });
-    expect(input("Coordinator").value).toBe("peer");
+    expect(input("Computer").value).toBe("peer");
     expect(input("Closeness margin").value).toBe("12");
   });
-  it("retains a disconnected saved coordinator and resets the assignment when settings scope changes", async () => {
+  it("retains a disconnected saved coordinator when the settings scope changes", async () => {
     state.execute.mockImplementation(
       async ({ input: operation }: { input: AllocationOperation }) => {
         if (operation._tag === "connections")
@@ -673,29 +642,22 @@ describe("Provider allocation editor", () => {
         return { _tag: "Failure" };
       },
     );
-    await change("Model", "astra");
-    await change("Effort", "high");
     await act(() =>
       root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("other")} />),
     );
-    expect(input("Coordinator").value).toBe("unlinked");
-    expect((input("Coordinator") as HTMLSelectElement).selectedOptions[0]?.textContent).toContain(
+    expect(input("Computer").value).toBe("unlinked");
+    expect((input("Computer") as HTMLSelectElement).selectedOptions[0]?.textContent).toContain(
       "not linked",
     );
-    expect(input("Model").value).toBe("");
     expect(container.querySelector('[aria-label="Accounts"]')?.textContent).toContain("Claude");
-    await act(() => button("Refresh").click());
-    expect(input("Coordinator").value).toBe("unlinked");
+    await act(() => button("Reload saved settings").click());
+    expect(input("Computer").value).toBe("unlinked");
     expect(state.execute.mock.calls.at(-1)?.[0].environmentId).toBe("other");
   });
   it("saves against the draft version and preserves edits on a stale save", async () => {
     expect(button("Save settings").disabled).toBe(false);
-    await change("Model", "astra");
-    await act(() => button("Preview account").click());
-    expect(button("Save settings").disabled).toBe(false);
     await change("Closeness margin", "12");
     expect(button("Save settings").disabled).toBe(false);
-    await act(() => button("Preview account").click());
     await act(() => button("Save settings").click());
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("newer policy");
     expect(input("Closeness margin").value).toBe("12");
@@ -703,103 +665,79 @@ describe("Provider allocation editor", () => {
     expect(save.input.input.expectedVersion).toBe(4);
     expect(save.input.input.policy.closeMarginPoints).toBe(12);
   });
-  it("submits the exact model and effort and keeps observation from navigating to a fabricated session", async () => {
-    await change("Model", "astra");
-    await change("Effort", "high");
-    await change("Project", "project");
-    await change("Task", "Do this task");
-    state.start.mockImplementation(async ({ input: startInput }) => ({
-      _tag: "Success",
-      value: {
-        state: "observation",
-        threadId: startInput.request.threadId,
-        allocation: {
-          decision: decision(startInput.request),
-          reservation: null,
-          mode: "observation",
+  it("shows the saved settings before the accounts arrive, saying only that they are loading", async () => {
+    await act(async () => root.unmount());
+    const previous = state.execute.getMockImplementation()!;
+    let release!: () => void;
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+      if (arg.input._tag !== "snapshot") return previous(arg);
+      if (arg.input.part === "accounts") await new Promise<void>((resolve) => (release = resolve));
+      return {
+        _tag: "Success",
+        value: {
+          snapshot:
+            arg.input.part === "settings"
+              ? { ...snapshot, inventories: [], runways: [] }
+              : { ...snapshot, notices: ["Laptop: load unavailable for this decision: offline"] },
         },
-      },
-    }));
-    await act(() => button("Request allocation and start").click());
-    expect(state.start).toHaveBeenCalledTimes(1);
-    expect(state.start.mock.calls[0]![0].input.request).toMatchObject({
-      environmentId: "host",
-      model: "astra",
-      options: [{ id: "reasoningEffort", value: "high" }],
+      };
     });
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "No session was started",
+    root = createRoot(container);
+    await act(() =>
+      root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("host")} />),
     );
-    expect(state.navigate).not.toHaveBeenCalled();
+    expect(input("Closeness margin").value).toBe("10");
+    expect(input("Closeness margin").disabled).toBe(false);
+    expect(container.textContent).toContain("Loading accounts…");
+    for (const claim of ["Connect an environment", "Not connected", "not loaded"])
+      expect(container.textContent).not.toContain(claim);
+    expect(named("SL workers allowed")).toBeNull();
+    await act(async () => release());
+    expect(container.textContent).not.toContain("Loading accounts…");
+    expect(named("SL workers allowed")).not.toBeNull();
+    // A computer that could not be read is a plain note beside the accounts.
+    const note = [...container.querySelectorAll('[aria-label="Accounts"] p')].find(
+      (p) => p.textContent === "Laptop: load unavailable for this decision: offline",
+    );
+    expect(note?.closest("details")).toBeNull();
   });
-});
-
-it("shows the choice, its reason and one line per account, and starts the chosen profile", async () => {
-  const previous = state.execute.getMockImplementation()!;
-  const line = "SL: 58 points left, resets in 30 h, 0 workers";
-  state.execute.mockImplementation(async (arg) => {
-    const result = await previous(arg);
-    if (arg.input._tag !== "preview") return result;
-    return {
-      _tag: "Success",
-      value: {
-        result: {
-          mode: "observation",
-          reservation: null,
-          decision: {
-            ...decision(arg.input.request),
-            candidates: [
-              {
-                environmentId: "host",
-                instanceId: "sl",
-                accountKey: "identity",
-                label: "SL",
-                eligible: true,
-                reasons: [],
-                roomPoints: 58,
-                resetInHours: 30,
-                workers: 0,
-                line,
-                behindPoints: 0,
-                confidence: "medium",
-                windows: [],
-              },
-            ],
-          },
-        },
-      },
-    };
-  });
-  await change("Model", "astra");
-  await change("Effort", "high");
-  await change("Explicit account", "sl");
-  await act(() => button("Preview account").click());
-  expect(container.textContent).toContain("SL has the most room");
-  expect(container.textContent).toContain(line);
-  expect(container.textContent).not.toContain("confidence");
-  await change("Project", "project");
-  await change("Task", "Perform the chosen task");
-  state.start.mockImplementation(async ({ input: startInput }) => ({
-    _tag: "Success",
-    value: {
-      state: "submitted",
-      threadId: startInput.request.threadId,
-      allocation: {
-        decision: decision(startInput.request),
-        mode: "observation",
-        reservation: null,
-      },
+  it.each(["connecting", "offline"])(
+    "while %s, says loading or not connected, never both",
+    async (phase) => {
+      await act(async () => root.unmount());
+      state.phase = phase;
+      root = createRoot(container);
+      await act(() =>
+        root.render(<ProviderAllocationPage environmentId={EnvironmentId.make("host")} />),
+      );
+      const text = container.textContent!;
+      if (phase === "connecting") {
+        expect(text).toContain("Loading saved settings…");
+        expect(text).toContain("Loading accounts…");
+        expect(text).not.toContain("Not connected");
+      } else {
+        expect(text).toContain("Not connected. Connect this environment");
+        expect(text).not.toContain("Loading");
+      }
     },
-  }));
-  expect(button("Request allocation and start").disabled).toBe(false);
-  await act(() => button("Request allocation and start").click());
-  expect(state.start.mock.calls[0]![0].input.request).toMatchObject({
-    explicitInstanceId: "sl",
-    environmentId: "host",
-    model: "astra",
-    options: [{ id: "reasoningEffort", value: "high" }],
+  );
+  it("keeps only choosing and connecting the coordinator below the settings", async () => {
+    const sections = [...container.querySelectorAll("details > summary")].map(
+      (summary) => summary.textContent,
+    );
+    expect(sections).toEqual(["Coordinator"]);
+    for (const removed of [
+      "Preview account",
+      "Request allocation and start",
+      "Decision history",
+      "Reservations",
+      "Execution environment ID",
+      "diagnostics",
+      "simulator",
+    ])
+      expect(container.textContent).not.toContain(removed);
+    expect(button("Connect coordinator")).toBeDefined();
   });
-  expect(state.navigate).toHaveBeenCalledTimes(1);
 });
 
 it("keeps hard caps read-only when the coordinator cannot persist them", async () => {
@@ -812,7 +750,7 @@ it("keeps hard caps read-only when the coordinator cannot persist them", async (
         }
       : previous(arg),
   );
-  await act(() => button("Refresh").click());
+  await act(() => button("Reload saved settings").click());
   expect(input("SL weekly cap").disabled).toBe(true);
   expect(container.textContent).toContain("Update the coordinator to edit hard caps.");
 });

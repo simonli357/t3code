@@ -208,6 +208,8 @@ export function ModelCellEditor(props: {
   /** The table's model list: offered next to what connected accounts advertise. */
   allowed: readonly string[];
   online: boolean;
+  /** The accounts that advertise models have not arrived yet. */
+  loadingAccounts: boolean;
   pendingModel: string | null;
   onPendingModel: (model: string | null) => void;
   onChange: (cell: RoutingCell) => void;
@@ -338,8 +340,9 @@ export function ModelCellEditor(props: {
       )}
       {!catalog.known ? (
         <p className="text-sm text-muted-foreground sm:col-span-3">
-          No connected {modelDriverLabel(driver)} account has advertised models yet. Reconnect to
-          change this cell.
+          {props.loadingAccounts
+            ? "Loading accounts…"
+            : `No connected ${modelDriverLabel(driver)} account has advertised models yet. Reconnect to change this cell.`}
         </p>
       ) : (
         !online && (

@@ -10,8 +10,6 @@ import {
   type AllocationInventory,
   type AllocationPolicy,
   type AllocationSnapshot,
-  type AllocationRequest,
-  type AllocationDecision,
   type ModelRoutingPolicy,
   type RoutingProfile,
 } from "@t3tools/contracts";
@@ -27,37 +25,7 @@ export function createAllocationCommands<R, E>(
       label: "provider-allocation",
       tag: WS_METHODS.providerAllocation,
     }),
-    start: createEnvironmentRpcCommand(runtime, {
-      label: "provider-allocation:start",
-      tag: WS_METHODS.providerAllocationStart,
-    }),
   };
-}
-
-/** A preview is tied to the exact editor content and request, not just its version. */
-export function allocationPreviewKey(policy: AllocationPolicy, request: AllocationRequest): string {
-  return JSON.stringify({ policy, request });
-}
-
-export function allocationSummary(decision: AllocationDecision) {
-  return {
-    choice: decision.selectedInstanceId ?? decision.outcome,
-    reason: decision.reasons.join(" "),
-    eligible: decision.candidates.filter((c) => c.eligible).length,
-    excluded: decision.candidates.filter((c) => !c.eligible).length,
-  };
-}
-
-export function allocationAccountLabel(
-  snapshot: AllocationSnapshot | null,
-  environmentId: string,
-  instanceId: string,
-) {
-  return (
-    snapshot?.inventories
-      .find((i) => i.environmentId === environmentId)
-      ?.accounts.find((a) => a.instanceId === instanceId)?.label ?? "Unavailable account"
-  );
 }
 
 export function allocationAccountCap(
