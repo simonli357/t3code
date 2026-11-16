@@ -836,29 +836,13 @@ const make = Effect.gen(function* () {
               ...(refreshOlderThanMinutes === undefined ? {} : { refreshOlderThanMinutes }),
             })
             .pipe(Effect.flatMap(Schema.decodeUnknownEffect(AllocationInventory)));
-        // Inventory on other hosts is advisory. Give it the time spent reading
-        // required hosts, then cancel unfinished reads instead of consuming the
-        // caller's entire peer deadline. Missing load stays explicit, never zero.
-        if (executionEnvironmentId !== undefined) {
-          for (const peer of linked) {
-            if (peer.environmentId === executionEnvironmentId) continue;
-            yield* read(peer.environmentId).pipe(
-              Effect.tap((value) =>
-                Effect.sync(() => {
-                  observed.set(peer.environmentId, value);
-                }),
-              ),
-              Effect.ignore,
-              Effect.forkScoped({ startImmediately: true }),
-            );
-          }
-        }
-        // A placement read has no required computer, so this one's reading and the linked ones'
-        // run together: the caller waits for the slowest of them, not for their sum.
-        if (executionEnvironmentId === undefined && placement !== undefined) {
-          const [own, remote] = yield* Effect.all(
+        const own = inventory(request, placement, refreshOlderThanMinutes);
+        // Every reading starts at once, this computer's too: the caller waits for the slowest of
+        // them, not for their sum.
+        if (executionEnvironmentId === undefined) {
+          const [here, remote] = yield* Effect.all(
             [
-              inventory(request, placement),
+              own,
               Effect.forEach(linked, (peer) => Effect.result(read(peer.environmentId)), {
                 concurrency: "unbounded",
               }),
@@ -866,51 +850,70 @@ const make = Effect.gen(function* () {
             { concurrency: "unbounded" },
           );
           return [
-            own,
+            here,
             ...remote.map((result, index) =>
               result._tag === "Success"
                 ? result.success
-                : unreadInventory(linked[index]!, own.observedAt, result.failure.message),
+                : unreadInventory(linked[index]!, here.observedAt, result.failure.message),
             ),
           ];
         }
-        const own = yield* inventory(request, placement, refreshOlderThanMinutes);
-        const missing = (peer: { environmentId: string; label: string }) =>
-          unreadInventory(peer, own.observedAt);
-        if (executionEnvironmentId === undefined) {
-          const remote = yield* Effect.forEach(
-            linked,
-            (peer) =>
-              read(peer.environmentId).pipe(Effect.catch(() => Effect.succeed(missing(peer)))),
-            { concurrency: "unbounded" },
-          );
-          return [own, ...remote];
-        }
-        if (executionEnvironmentId !== local.environmentId) {
-          const target = yield* read(executionEnvironmentId).pipe(
-            Effect.mapError(
-              (cause) =>
-                new AllocationError({
-                  code: "unavailable",
-                  detail: `Execution environment ${executionEnvironmentId} inventory unavailable: ${cause.message}`,
-                }),
+        // Inventory on other hosts is advisory. Give it the time spent reading
+        // required hosts, then cancel unfinished reads instead of consuming the
+        // caller's entire peer deadline. Missing load stays explicit, never zero.
+        for (const peer of linked) {
+          if (peer.environmentId === executionEnvironmentId) continue;
+          yield* read(peer.environmentId).pipe(
+            Effect.tap((value) =>
+              Effect.sync(() => {
+                observed.set(peer.environmentId, value);
+              }),
             ),
+            Effect.ignore,
+            Effect.forkScoped({ startImmediately: true }),
           );
-          observed.set(executionEnvironmentId, target);
         }
-        return [own, ...linked.map((peer) => observed.get(peer.environmentId) ?? missing(peer))];
+        const [here, target] = yield* Effect.all(
+          [
+            own,
+            executionEnvironmentId === local.environmentId
+              ? Effect.succeed(undefined)
+              : read(executionEnvironmentId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new AllocationError({
+                        code: "unavailable",
+                        detail: `Execution environment ${executionEnvironmentId} inventory unavailable: ${cause.message}`,
+                      }),
+                  ),
+                ),
+          ],
+          { concurrency: "unbounded" },
+        );
+        if (target) observed.set(executionEnvironmentId, target);
+        return [
+          here,
+          ...linked.map(
+            (peer) => observed.get(peer.environmentId) ?? unreadInventory(peer, here.observedAt),
+          ),
+        ];
       }),
     );
   });
   const reconcile = Effect.fn("ProviderAllocation.reconcile")(function* (assignmentId?: string) {
     yield* store.expireUnused(yield* now);
-    for (const r of yield* store.reservations) {
-      // An unrelated uncertain execution must retain its shared-account demand,
-      // not delay a new assignment. Full inspection still reconciles all receipts.
-      if (assignmentId !== undefined && r.assignmentId !== assignmentId) continue;
-      if (r.state !== "starting" && r.state !== "consumed") continue;
-      const stateEffect =
-        r.request.environmentId === local.environmentId
+    // An unrelated uncertain execution must retain its shared-account demand,
+    // not delay a new assignment. Full inspection still reconciles all receipts.
+    const open = (yield* store.reservations).filter(
+      (r) =>
+        (assignmentId === undefined || r.assignmentId === assignmentId) &&
+        (r.state === "starting" || r.state === "consumed"),
+    );
+    // Asked together, so a slow or unreachable computer costs one deadline, not one per start.
+    const states = yield* Effect.forEach(
+      open,
+      (r) =>
+        (r.request.environmentId === local.environmentId
           ? probe(r.request.threadId, r.assignmentId, r.createdAt, r.startIntent ?? undefined)
           : peers
               .call(r.request.environmentId, {
@@ -920,13 +923,12 @@ const make = Effect.gen(function* () {
                 assignmentId: r.assignmentId,
                 since: r.createdAt,
               })
-              .pipe(
-                Effect.flatMap(Schema.decodeUnknownEffect(Probe)),
-                Effect.mapError(unavailable),
-              );
-      const state = yield* stateEffect.pipe(
-        Effect.catch(() => Effect.succeed({ state: "unknown" as const })),
-      );
+              .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Probe)), Effect.mapError(unavailable))
+        ).pipe(Effect.catch(() => Effect.succeed({ state: "unknown" as const }))),
+      { concurrency: 8 },
+    );
+    for (const [index, r] of open.entries()) {
+      const state = states[index]!;
       if (state.state === "terminal" || (state.state === "running" && r.state === "starting")) {
         yield* store.lifecycle(
           {
@@ -980,19 +982,25 @@ const make = Effect.gen(function* () {
     ) {
       const modelPolicy = yield* store.modelPolicy;
       const selecting = operation._tag === "modelPreview" || operation._tag === "modelAllocate";
-      yield* reconcile(selecting ? operation.request.assignmentId : undefined);
-      const inventories = yield* collect(
-        undefined,
-        selecting ? operation.request.environmentId : undefined,
-        undefined,
-        selecting ? policy.maxReadingAgeMinutes : undefined,
-      );
+      // Half a snapshot neither reconciles reservations nor, for settings, asks any computer.
+      const part = operation._tag === "modelSnapshot" ? operation.part : undefined;
+      if (part === undefined)
+        yield* reconcile(selecting ? operation.request.assignmentId : undefined);
+      const inventories =
+        part === "settings"
+          ? []
+          : yield* collect(
+              undefined,
+              selecting ? operation.request.environmentId : undefined,
+              undefined,
+              selecting ? policy.maxReadingAgeMinutes : undefined,
+            );
       if (operation._tag === "modelSnapshot")
         return {
           modelSnapshot: {
             policy: modelPolicy,
-            policies: yield* store.modelPolicies,
-            history: yield* store.modelHistory,
+            policies: part === "accounts" ? [] : yield* store.modelPolicies,
+            history: part === "accounts" ? [] : yield* store.modelHistory,
             inventories,
             authorityAvailable,
           },
@@ -1089,13 +1097,18 @@ const make = Effect.gen(function* () {
         code: "invalid",
         detail: "Connect must run on the requesting environment.",
       });
-    yield* reconcile(operation._tag === "snapshot" ? undefined : operation.request.assignmentId);
-    const inventories = yield* collect(
-      operation._tag === "snapshot" ? undefined : operation.request,
-      undefined,
-      undefined,
-      operation._tag === "snapshot" ? undefined : policy.maxReadingAgeMinutes,
-    );
+    const part = operation._tag === "snapshot" ? operation.part : undefined;
+    if (part === undefined)
+      yield* reconcile(operation._tag === "snapshot" ? undefined : operation.request.assignmentId);
+    const inventories =
+      part === "settings"
+        ? []
+        : yield* collect(
+            operation._tag === "snapshot" ? undefined : operation.request,
+            undefined,
+            undefined,
+            operation._tag === "snapshot" ? undefined : policy.maxReadingAgeMinutes,
+          );
     const coordinated =
       authorityAvailable &&
       inventories.every((i) => i.coordinatorEnvironmentId === local.environmentId);
@@ -1106,10 +1119,10 @@ const make = Effect.gen(function* () {
           accountOrderSupported: true,
           policy,
           inventories,
-          reservations: yield* store.reservations,
-          history: yield* store.history,
+          reservations: part ? [] : yield* store.reservations,
+          history: part ? [] : yield* store.history,
           authorityAvailable,
-          ...(learned ? { learned } : {}),
+          ...(learned && part !== "accounts" ? { learned } : {}),
           runways: accountRunways({
             at: yield* now,
             policy,
@@ -1118,7 +1131,7 @@ const make = Effect.gen(function* () {
           }),
           notices: [
             ...inventories.flatMap((i) => i.notices),
-            ...(!coordinated
+            ...(!coordinated && part !== "settings"
               ? [
                   "Some linked computers could not be read or name another coordinator, so their accounts and workers may be missing here.",
                 ]
