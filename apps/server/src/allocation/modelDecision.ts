@@ -5,6 +5,7 @@ import {
   START_WAIT_MINUTES,
   START_WAIT_MINUTES_HIGH_STAKES,
   accountSupportsRoutingProfile,
+  allocationFableMode,
   modelFallback,
   modelLadder,
   profileLabel,
@@ -207,6 +208,12 @@ const fits = (decision: AllocationDecision) =>
   decision.selectedInstanceId !== null &&
   decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId)?.fits !== false;
 
+/** Whether a worker on this account runs in Fable mode; never while Fable workers are off. */
+export const fableModeAccount = (
+  policy: AllocationPolicy,
+  account: Parameters<typeof allocationFableMode>[1],
+) => policy.fableWorkers !== false && allocationFableMode(policy, account);
+
 /**
  * Picks account, model and effort together. The wanted model on the account with the most
  * spare capacity, when it fits the job somewhere. Otherwise: wait for a limit that resets
@@ -214,9 +221,10 @@ const fits = (decision: AllocationDecision) =>
  * away; else the fallback model below its threshold; else the wanted model on the account
  * that lasts longest. When every candidate is out, the same choice as of a reset within the
  * wait, queued for it; refused only when nothing comes back within the wait. With Fable
- * workers off, no worker gets a Fable model. In Fable mode a worker's table entry starts from
- * the first Fable rung at or above it and only Fable rungs stand in; a pinned model is kept.
- * Codex and a pinned account never change model.
+ * workers off, no worker gets a Fable model. On an account in Fable mode a worker starts from
+ * the first Fable rung at or above the table entry and only Fable rungs stand in, never the
+ * fallback; every account is judged on what it would run. A pinned model is kept. Codex and a
+ * pinned account never change model.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -230,20 +238,28 @@ export function chooseProfile(input: {
 }): ProfileChoice {
   const { modelPolicy, request, inventories, policy } = input;
   const resolved = wantedProfiles(modelPolicy, request, inventories);
-  const decide = (candidate: AllocationRequest, startAt?: string) =>
-    decideAllocation({ ...input, request: startAt ? { ...candidate, startAt } : candidate });
   const label = (r: AllocationRequest) => profileLabel(r.driver, r.model, r.options);
+  const rungLabel = (r: AllocationRequest) => {
+    const { model, effort } = requestProfile(r);
+    return `${model} / ${effort}`;
+  };
   const ladder = modelLadder(modelPolicy);
   const workers = request.kind !== "session";
   const fableOff = workers && policy.fableWorkers === false;
-  const fableOnly = workers && policy.fableOnly === true;
   const fableRungs = ladder.filter((r) => isFable(r.model));
-  const allowed = (r: RoutingProfile) => (isFable(r.model) ? !fableOff : !fableOnly);
+  const allowed = (r: RoutingProfile) => !(fableOff && isFable(r.model));
   /** Fable mode's rung for a profile: the first Fable rung at or above it, else the top one. */
   const fableRung = (profile: RoutingProfile) => {
     const position = ladderPosition(ladder, profile) ?? -1;
     return ladder.find((r, i) => isFable(r.model) && i >= position) ?? fableRungs.at(-1);
   };
+  const here = inventories
+    .flatMap((i) => i.accounts)
+    .filter((a) => a.environmentId === request.environmentId);
+  // Workers on these Claude accounts run in Fable mode.
+  const fableAccounts = workers ? here.filter((a) => fableModeAccount(policy, a)) : [];
+  const fableIds = fableAccounts.map((a) => a.instanceId);
+  const fableNames = [...new Set(fableAccounts.map((a) => a.label))].join(", ");
   const notes: string[] = [];
   const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
   let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
@@ -258,26 +274,7 @@ export function chooseProfile(input: {
   for (const asked of resolved.candidates) {
     let wanted = asked;
     const profile = requestProfile(asked.request);
-    if (fableOnly && request.override) {
-      if (!fableRungs.some((r) => r.model === profile.model && r.effort === profile.effort))
-        notes.push(
-          `Fable mode is on, but ${label(asked.request)} is pinned for this worker and runs as pinned.`,
-        );
-    } else if (fableOnly) {
-      const rung = asked.request.driver === "claudeAgent" ? fableRung(profile) : undefined;
-      if (!rung) {
-        failures.push(
-          `${asked.request.driver}: Fable mode is on and ${asked.request.driver === "claudeAgent" ? "the ladder has no Fable rung" : "only Claude runs Fable"}.`,
-        );
-        continue;
-      }
-      if (rung.model !== profile.model || rung.effort !== profile.effort) {
-        notes.push(
-          `Fable mode: ${label(asked.request)} starts from ${rung.model} / ${rung.effort}, the first Fable rung at or above it.`,
-        );
-        wanted = { request: onRung(asked.request, rung), reason: `${asked.reason} Fable mode.` };
-      }
-    } else if (fableOff && isFable(asked.request.model)) {
+    if (fableOff && isFable(asked.request.model)) {
       const rung = nearestRungs(ladder, profile).find(allowed);
       if (!rung) {
         failures.push(
@@ -293,21 +290,83 @@ export function chooseProfile(input: {
         reason: `${asked.reason} Fable workers are off.`,
       };
     }
-    const first = decide(wanted.request);
+    // What Fable-mode accounts start from: the first Fable rung at or above the table entry, or
+    // a pinned model as pinned. Undefined when there are none; null when no Fable rung exists.
+    let fableWanted: AllocationRequest | null | undefined;
+    if (asked.request.driver === "claudeAgent" && fableIds.length) {
+      const start = request.override ? profile : fableRung(profile);
+      fableWanted = !start
+        ? null
+        : start.model === profile.model && start.effort === profile.effort
+          ? wanted.request
+          : onRung(asked.request, start);
+      if (!start)
+        failures.push(
+          `claudeAgent: Fable mode is on for ${fableNames} and the ladder has no Fable rung.`,
+        );
+    }
+    const split = !!fableWanted && fableWanted !== wanted.request;
+    const wantedText =
+      fableWanted && split
+        ? `${label(wanted.request)} (${label(fableWanted)} in Fable mode)`
+        : label(wanted.request);
+    /** One step: Fable-mode accounts run `fable`, the others `normal`; null leaves them out. */
+    const decide = (
+      normal: AllocationRequest | null,
+      fable: AllocationRequest | null | undefined,
+      startAt?: string,
+    ) => {
+      const when = (r: AllocationRequest) => (startAt ? { ...r, startAt } : r);
+      if (fable === undefined) return decideAllocation({ ...input, request: when(normal!) });
+      // Only Fable-mode accounts take part.
+      const only = normal
+        ? undefined
+        : {
+            ...when(fable!),
+            allowedInstanceIds: fableIds.filter(
+              (id) => !request.allowedInstanceIds || request.allowedInstanceIds.includes(id),
+            ),
+          };
+      return decideAllocation({
+        ...input,
+        request: only ?? when(normal!),
+        fableMode: { instanceIds: fableIds, request: only ?? (fable && when(fable)) },
+      });
+    };
+    const first = decide(wanted.request, fableWanted);
     const chosen = (
       decision: AllocationDecision,
-      candidate: AllocationRequest,
       why: string | undefined,
       extra: Partial<ProfileChoice> = {},
     ): ProfileChoice => {
-      const same =
-        candidate.driver === wanted.request.driver && label(candidate) === label(wanted.request);
-      if (candidate !== wanted.request) tried.push({ ...wanted, chosen: false });
+      const candidate = decision.request;
+      if (
+        candidate.driver !== wanted.request.driver ||
+        label(candidate) !== label(wanted.request) ||
+        candidate.startAt !== wanted.request.startAt
+      )
+        tried.push({ ...wanted, chosen: false });
       tried.push({ request: candidate, reason: why ?? wanted.reason, chosen: true });
+      const account = decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId);
+      if (account && fableWanted && fableIds.includes(account.instanceId)) {
+        if (
+          request.override &&
+          !fableRungs.some((r) => r.model === profile.model && r.effort === profile.effort)
+        )
+          notes.push(
+            `Fable mode is on for ${account.label}, but ${label(asked.request)} is pinned for this worker and runs as pinned.`,
+          );
+        else if (split)
+          notes.push(
+            `Fable mode on ${account.label}: ${label(asked.request)} starts from ${rungLabel(fableWanted)}, the first Fable rung at or above it.`,
+          );
+      }
+      const same =
+        candidate.driver === asked.request.driver && label(candidate) === label(asked.request);
       return {
         decision,
         tried,
-        ...(same && wanted === asked ? {} : { wanted: asked.request }),
+        ...(same ? {} : { wanted: asked.request }),
         rule: resolved.rule,
         reason: why ? `${why} ${decision.reasons[0]}` : decision.reasons[0]!,
         accounts: lines(first),
@@ -315,7 +374,7 @@ export function chooseProfile(input: {
         ...extra,
       };
     };
-    if (fits(first)) return chosen(first, wanted.request, undefined);
+    if (fits(first)) return chosen(first, undefined);
     if (first.outcome === "unavailable") {
       tried.push({ ...wanted, chosen: false });
       failures.push(...first.reasons, ...first.candidates.flatMap((c) => c.reasons));
@@ -333,12 +392,11 @@ export function chooseProfile(input: {
       ),
     ].sort();
     for (const reset of resets) {
-      const later = decide(wanted.request, reset);
+      const later = decide(wanted.request, fableWanted, reset);
       if (fits(later))
         return chosen(
           later,
-          { ...wanted.request, startAt: reset },
-          `${label(wanted.request)} fits on no account now; a limit in its way resets in ${span(
+          `${wantedText} fits on no account now; a limit in its way resets in ${span(
             (Date.parse(reset) - Date.parse(input.at)) / 3_600_000,
           )}, so the start waits for it.`,
           { startAt: reset },
@@ -346,17 +404,37 @@ export function chooseProfile(input: {
     }
     const claude = wanted.request.driver === "claudeAgent" && !request.explicitInstanceId;
     const rungs = claude
-      ? nearestRungs(
-          fableOnly ? fableRungs : ladder,
-          requestProfile(wanted.request),
-          MAX_RUNG_DISTANCE,
-        ).filter(allowed)
+      ? nearestRungs(ladder, requestProfile(wanted.request), MAX_RUNG_DISTANCE).filter(allowed)
       : [];
+    // On a Fable-mode account only another Fable rung stands in.
+    const fableStandIns =
+      claude && fableWanted
+        ? nearestRungs(fableRungs, requestProfile(fableWanted), MAX_RUNG_DISTANCE)
+        : [];
+    // Every account's nearest stand-in, then every account's next one.
+    const steps = Array.from({ length: Math.max(rungs.length, fableStandIns.length) }, (_, i) => {
+      const normal = rungs[i];
+      const fable = fableStandIns[i];
+      return {
+        normal: normal ? onRung(wanted.request, normal) : null,
+        fable:
+          fableWanted === undefined
+            ? undefined
+            : fableWanted && fable
+              ? onRung(fableWanted, fable)
+              : null,
+      };
+    });
     const fallback = modelFallback(modelPolicy);
     const position = ladderPosition(ladder, requestProfile(wanted.request));
     const threshold = fallback ? ladderPosition(ladder, fallback.below) : undefined;
+    // The fallback stands in for the other accounts, never for a Fable-mode one.
+    const normalHere = here.some(
+      (a) => a.driver === wanted.request.driver && !fableIds.includes(a.instanceId),
+    );
     const fallbacks =
       claude &&
+      normalHere &&
       fallback &&
       position !== undefined &&
       threshold !== undefined &&
@@ -364,14 +442,7 @@ export function chooseProfile(input: {
       allowed(fallback)
         ? [
             ...new Set(
-              inventories
-                .flatMap((i) => i.accounts)
-                .filter(
-                  (a) =>
-                    a.environmentId === request.environmentId &&
-                    findCatalogModel(a.models, fallback.model),
-                )
-                .map((a) => a.driver),
+              here.filter((a) => findCatalogModel(a.models, fallback.model)).map((a) => a.driver),
             ),
           ]
             .sort()
@@ -382,66 +453,59 @@ export function chooseProfile(input: {
               options: [{ id: routingEffortOptionId(driver), value: fallback.effort }],
             }))
         : [];
+    const noFable = fableWanted === undefined ? undefined : null;
     /** The nearest rung, the fallback, then the account that lasts longest, as of `startAt`. */
     const standIn = (base: AllocationDecision, startAt?: string) => {
       const why = base.selectedInstanceId
-        ? `${label(wanted.request)} fits on no account for this job;`
-        : `${label(wanted.request)} is drained on every account (earliest reset ${base.waitUntil ?? "unknown"});`;
-      for (const rung of rungs) {
-        const candidate = onRung(wanted.request, rung);
-        const decision = decide(candidate, startAt);
+        ? `${wantedText} fits on no account for this job;`
+        : `${wantedText} is drained on every account (earliest reset ${base.waitUntil ?? "unknown"});`;
+      for (const step of steps) {
+        const decision = decide(step.normal, step.fable, startAt);
         if (fits(decision))
           return {
             decision,
-            candidate,
-            why: `${why} the nearest ladder rung that fits is ${rung.model} / ${rung.effort}.`,
+            why: `${why} the nearest ladder rung that fits is ${rungLabel(decision.request)}.`,
           };
       }
       for (const candidate of fallbacks) {
-        const decision = decide(candidate, startAt);
+        const decision = decide(candidate, noFable, startAt);
         if (fits(decision))
           return {
             decision,
-            candidate,
             why: `${why} no Claude rung within ${MAX_RUNG_DISTANCE} fits, and below ${fallback!.below.model} / ${fallback!.below.effort} the fallback ${fallback!.model} / ${fallback!.effort} applies.`,
           };
       }
       // Nothing fits the whole job: the account that lasts longest, as long as one is not out.
-      if (base.selectedInstanceId)
-        return { decision: base, candidate: wanted.request, why: undefined };
-      for (const rung of rungs) {
-        const candidate = onRung(wanted.request, rung);
-        const decision = decide(candidate, startAt);
+      if (base.selectedInstanceId) return { decision: base, why: undefined };
+      for (const step of steps) {
+        const decision = decide(step.normal, step.fable, startAt);
         if (decision.selectedInstanceId)
           return {
             decision,
-            candidate,
-            why: `${label(wanted.request)} is out on every account; ${rung.model} / ${rung.effort} is the nearest rung that is not.`,
+            why: `${wantedText} is out on every account; ${rungLabel(decision.request)} is the nearest rung that is not.`,
           };
       }
       for (const candidate of fallbacks) {
-        const decision = decide(candidate, startAt);
+        const decision = decide(candidate, noFable, startAt);
         if (decision.selectedInstanceId)
           return {
             decision,
-            candidate,
-            why: `${label(wanted.request)} and its nearest rungs are out on every account; the fallback ${candidate.model} is not.`,
+            why: `${wantedText} and its nearest rungs are out on every account; the fallback ${candidate.model} is not.`,
           };
       }
       return undefined;
     };
     const now = standIn(first);
-    if (now) return chosen(now.decision, now.candidate, now.why);
+    if (now) return chosen(now.decision, now.why);
     // Everything is out now: decide as of a reset within the wait by the same rules, and queue.
     for (const reset of resets) {
-      const then = standIn(decide(wanted.request, reset), reset);
+      const then = standIn(decide(wanted.request, fableWanted, reset), reset);
       if (then)
         return chosen(
           then.decision,
-          { ...then.candidate, startAt: reset },
           `Every account is out now and a limit resets in ${span(
             (Date.parse(reset) - Date.parse(input.at)) / 3_600_000,
-          )}, so the start waits for it. ${then.why ?? `Then ${label(wanted.request)} runs on the account that lasts longest.`}`,
+          )}, so the start waits for it. ${then.why ?? `Then ${label(then.decision.request)} runs on the account that lasts longest.`}`,
           { startAt: reset },
         );
     }
@@ -451,7 +515,7 @@ export function chooseProfile(input: {
       drainedUntil,
       reason: request.explicitInstanceId
         ? first.reasons[0]!
-        : `Drained: ${label(wanted.request)} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.${fableOnly ? " Fable mode is on: only Fable rungs may stand in." : ""}`,
+        : `Drained: ${wantedText} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.${fableWanted === undefined ? "" : ` Fable mode on ${fableNames}: only Fable rungs stand in there.`}`,
       accounts: lines(first),
     };
   }

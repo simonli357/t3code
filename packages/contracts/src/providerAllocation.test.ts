@@ -20,6 +20,8 @@ import {
   WorkerChoice,
   WorkerChoiceInput,
   WorkerStartInput,
+  allocationFableMode,
+  allocationPreferenceKey,
   defaultAllocationPolicy,
   legacyAllocationCandidateFields,
   legacyAllocationPolicyFields,
@@ -177,7 +179,9 @@ describe("allocation policy", () => {
     expect(decoded.closeMarginPoints).toBeUndefined();
     expect(decoded.longWaitHours).toBeUndefined();
     expect(decoded.fableOnly).toBeUndefined();
+    expect(decoded.fableAccounts).toBeUndefined();
     expect(decodePolicy(wire({ ...before, fableOnly: true })).fableOnly).toBe(true);
+    expect(decodePolicy(wire({ ...before, fableAccounts: ["k"] })).fableAccounts).toEqual(["k"]);
     // Even values a later build would never write do not make the policy unreadable.
     expect(() =>
       decodePolicy({ ...before, claude: "gone", accountRules: 3, overrides: null }),
@@ -241,6 +245,27 @@ describe("allocation policy", () => {
       expect(valid(patch), JSON.stringify(patch)).toThrow();
   });
 
+  it("reads Fable mode per Claude account, and the single switch stored before as every one", () => {
+    const xy = { driver: "claudeAgent", accountKey: "xy", environmentId: "e", instanceId: "xy" };
+    const xl = { ...xy, accountKey: "xl", instanceId: "xl" };
+    const codex = { ...xy, driver: "codex" };
+    const onlyXy = { fableAccounts: [allocationPreferenceKey(xy)] };
+    expect([xy, xl, codex].map((a) => allocationFableMode(onlyXy, a))).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect([xy, xl, codex].map((a) => allocationFableMode({ fableOnly: true }, a))).toEqual([
+      true,
+      true,
+      false,
+    ]);
+    // A list replaces the single switch; off or absent is none.
+    expect(allocationFableMode({ fableOnly: true, fableAccounts: [] }, xy)).toBe(false);
+    expect(allocationFableMode({ fableOnly: false }, xy)).toBe(false);
+    expect(allocationFableMode({}, xy)).toBe(false);
+  });
+
   it("accepts an edit that names any model, and one that names nothing", () => {
     const decode = Schema.decodeUnknownSync(AllocationPolicyEdit);
     expect(decode({})).toEqual({});
@@ -259,7 +284,7 @@ describe("allocation policy", () => {
       ],
       clearCaps: ["XL"],
       fableWorkers: true,
-      fableOnly: true,
+      fableAccounts: ["XL", "claude_ara"],
       ladder: [{ model: "a-model-no-code-lists", effort: "ultra" }],
       fallback: null,
       setCells: [
@@ -282,7 +307,8 @@ describe("allocation policy", () => {
       { setCells: [{ table: "cursor", difficulty: 0, stakes: 0, model: "m", effort: "high" }] },
       { fallback: { model: "m", effort: "max" } },
       { closeMarginPoints: 51 },
-      { fableOnly: "yes" },
+      { fableAccounts: "XY" },
+      { fableAccounts: [""] },
     ])
       expect(() => decode(broken), JSON.stringify(broken)).toThrow();
   });

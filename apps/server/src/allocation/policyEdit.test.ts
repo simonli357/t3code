@@ -182,7 +182,7 @@ it("reads both policies with accounts by label", () => {
       { account: "XL", percentPerDay: 17, from: "family" },
     ],
     fableWorkers: true,
-    fableOnly: false,
+    fableAccounts: [],
     ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
     fallback: "deepseek-flash / max when the wanted rung is below claude-sonnet-5-5 / xhigh",
     accounts: [
@@ -227,37 +227,97 @@ it("reads both policies with accounts by label", () => {
   expect(custom.table![10]![10]).toBe("gpt-6-astra / xhigh");
 });
 
-it.effect("keeps the two Fable switches from contradicting each other", () =>
+it.effect("sets Fable mode per account by label or instance ID, and only on Claude accounts", () =>
   Effect.gen(function* () {
-    const switches = (policy: AllocationPolicy) => ({
-      fableWorkers: policy.fableWorkers,
-      fableOnly: policy.fableOnly,
-    });
-    const save = (stored: Partial<AllocationPolicy>, change: AllocationPolicyEdit) =>
-      Effect.map(edit(change, stored), (next) =>
-        switches(withFableSwitches(snapshot(stored).policy, next)),
+    // A Codex login that shares the ES label.
+    const codexEs = {
+      ...account("box", "codex_es", "ES", "es-codex"),
+      driver: ProviderDriverKind.make("codex"),
+    };
+    const stored = snapshot();
+    const withCodex = { ...stored, inventories: [...stored.inventories, host("box", [codexEs])] };
+    const set = (fableAccounts: readonly string[], policy?: Partial<AllocationPolicy>) =>
+      Effect.map(
+        editAllocationPolicy(
+          { ...withCodex, policy: { ...withCodex.policy, ...policy } },
+          { fableAccounts },
+        ),
+        (next) => next.fableAccounts,
       );
-    // Turning Fable mode on turns Fable workers on.
-    expect(yield* save({ fableWorkers: false }, { fableOnly: true })).toEqual({
-      fableWorkers: true,
-      fableOnly: true,
-    });
-    // Turning Fable workers off turns Fable mode off.
-    expect(yield* save({ fableOnly: true }, { fableWorkers: false })).toEqual({
-      fableWorkers: false,
-      fableOnly: false,
-    });
-    // Anything that does not contradict is stored as sent.
-    expect(yield* save({ fableOnly: true }, { fableOnly: false })).toEqual({
-      fableWorkers: undefined,
-      fableOnly: false,
-    });
-    expect(yield* save({}, { fableWorkers: false })).toEqual({
-      fableWorkers: false,
-      fableOnly: undefined,
-    });
+    // "Only XL", then "XL and ES": the whole list each time; ES names the Claude ES logins.
+    expect(yield* set(["XL"])).toEqual([key(xl)]);
+    expect(yield* set(["claude_xinya", "ES"], { fableAccounts: [key(es)] })).toEqual([
+      key(xl),
+      key(es),
+      key(unknownEs),
+    ]);
+    expect(yield* set([], { fableAccounts: [key(xl)] })).toEqual([]);
+    expect((yield* Effect.flip(set(["codex_es"]))).detail).toBe(
+      "codex_es is not a Claude account; only Claude runs Fable.",
+    );
+    // An edit that does not name it keeps what is stored.
+    expect(
+      (yield* edit({ closeMarginPoints: 4 }, { fableAccounts: [key(xl)] })).fableAccounts,
+    ).toEqual([key(xl)]);
+    // The result names the accounts that are on, also for the single switch stored before.
+    const model = defaultModelRoutingPolicy;
+    expect(
+      allocationPolicyView(snapshot({ fableAccounts: [key(xl)] }), model).fableAccounts,
+    ).toEqual(["XL"]);
+    expect(allocationPolicyView(snapshot({ fableOnly: true }), model).fableAccounts).toEqual([
+      "ES",
+      "XL",
+    ]);
   }),
 );
+
+it("keeps Fable mode and Fable workers from contradicting each other", () => {
+  const switches = (stored: Partial<AllocationPolicy>, next: Partial<AllocationPolicy>) => {
+    const saved = withFableSwitches(snapshot(stored).policy, snapshot(next).policy);
+    return {
+      fableWorkers: saved.fableWorkers,
+      fableAccounts: saved.fableAccounts,
+      fableOnly: saved.fableOnly,
+    };
+  };
+  // Turning an account's Fable mode on turns Fable workers on.
+  expect(
+    switches({ fableWorkers: false }, { fableWorkers: false, fableAccounts: [key(xl)] }),
+  ).toEqual({ fableWorkers: true, fableAccounts: [key(xl)], fableOnly: undefined });
+  // Turning Fable workers off turns every account's Fable mode off.
+  const both = [key(xl), key(es)];
+  expect(switches({ fableAccounts: both }, { fableAccounts: both, fableWorkers: false })).toEqual({
+    fableWorkers: false,
+    fableAccounts: [],
+    fableOnly: undefined,
+  });
+  // One save that does both: Fable mode wins.
+  expect(
+    switches({ fableAccounts: [key(xl)] }, { fableAccounts: both, fableWorkers: false }),
+  ).toEqual({ fableWorkers: true, fableAccounts: both, fableOnly: undefined });
+  // The single switch stored before: a list replaces it, and Fable workers off turns it off.
+  expect(switches({ fableOnly: true }, { fableOnly: true, fableAccounts: [key(xl)] })).toEqual({
+    fableWorkers: undefined,
+    fableAccounts: [key(xl)],
+    fableOnly: undefined,
+  });
+  expect(switches({ fableOnly: true }, { fableOnly: true, fableWorkers: false })).toEqual({
+    fableWorkers: false,
+    fableAccounts: [],
+    fableOnly: undefined,
+  });
+  // Anything that does not contradict is stored as sent.
+  expect(switches({ fableOnly: true }, { fableOnly: true })).toEqual({
+    fableWorkers: undefined,
+    fableAccounts: undefined,
+    fableOnly: true,
+  });
+  expect(switches({}, { fableWorkers: false })).toEqual({
+    fableWorkers: false,
+    fableAccounts: undefined,
+    fableOnly: undefined,
+  });
+});
 
 it.effect("lists an account with no known login once and prefers it on every computer", () =>
   Effect.gen(function* () {

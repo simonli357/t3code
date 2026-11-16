@@ -14,6 +14,7 @@ import {
   allocationAccountRows,
   allocationReadingAge,
   allocationSupportsFiveHourCap,
+  withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
   type AllocationAccountRow,
@@ -229,6 +230,20 @@ function AccountsTable({
                 </div>
                 {row.workersEnabled && row.workersOffOn.length > 0 && (
                   <div className="text-muted-foreground">off on {row.workersOffOn.join(", ")}</div>
+                )}
+                {row.fableMode !== null && (
+                  <label className="flex items-center gap-2">
+                    <Switch
+                      size="sm"
+                      aria-label={`${row.name} Fable mode`}
+                      checked={row.fableMode}
+                      disabled={goalsDisabled}
+                      onCheckedChange={(on) =>
+                        onChange(withAllocationAccountFableMode(policy, snapshot, row, on))
+                      }
+                    />
+                    Fable mode
+                  </label>
                 )}
               </TableCell>
               <TableCell>
@@ -573,21 +588,8 @@ export function AllocationControls({
             </label>
             <span className="text-xs text-muted-foreground">
               Off: no worker runs on Fable. A table cell or pin that names Fable starts from the
-              nearest rung without it, and a running worker never moves onto it.
-            </span>
-          </div>
-          <div className="grid min-w-0 content-start gap-1">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch
-                size="sm"
-                checked={policy.fableOnly === true}
-                disabled={disabled || snapshot?.runways === undefined}
-                onCheckedChange={(fableOnly) => onChange({ ...policy, fableOnly })}
-              />
-              Fable mode
-            </label>
-            <span className="text-xs text-muted-foreground">
-              Workers use only Fable low, medium or high.
+              nearest rung without it, and a running worker never moves onto it. An account in Fable
+              mode runs its workers on Fable low, medium or high only.
             </span>
           </div>
         </div>

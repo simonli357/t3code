@@ -1,5 +1,6 @@
 import {
   AllocationError,
+  allocationFableMode,
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
@@ -100,7 +101,14 @@ export function allocationPolicyView(
         }),
     ),
     fableWorkers: policy.fableWorkers !== false,
-    fableOnly: policy.fableOnly === true,
+    fableAccounts: policy.fableAccounts
+      ? once(policy.fableAccounts.map(label))
+      : once(
+          snapshot.inventories
+            .flatMap((i) => i.accounts)
+            .filter((account) => allocationFableMode(policy, account))
+            .map((account) => label(allocationPreferenceKey(account))),
+        ),
     ...(options?.learned ? { learned: learnedLines(options.learned) } : {}),
     ladder: modelLadder(model).map(profile),
     fallback: fallback
@@ -196,12 +204,27 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     for (const account of edit.accountOrder) keys.push(...(yield* resolve(account)));
     accountOrder = [...new Set(keys)];
   }
+  let fableAccounts = policy.fableAccounts;
+  if (edit.fableAccounts) {
+    const keys: string[] = [];
+    for (const account of edit.fableAccounts) {
+      const named = yield* resolve(account);
+      // Only Claude runs Fable: a label shared with a Codex login names the Claude one.
+      const claude = known.filter(
+        (i) => i.driver === "claudeAgent" && named.some((key) => i.keys.has(key)),
+      );
+      if (!claude.length)
+        return yield* invalid(`${account} is not a Claude account; only Claude runs Fable.`);
+      keys.push(...claude.flatMap((i) => [...i.keys]));
+    }
+    fableAccounts = [...new Set(keys)];
+  }
   return {
     ...policy,
     accountCaps: caps,
     ...(policy.accountGoals || edit.setGoals || edit.clearGoals ? { accountGoals: goals } : {}),
     ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
-    ...(edit.fableOnly === undefined ? {} : { fableOnly: edit.fableOnly }),
+    ...(fableAccounts ? { fableAccounts } : {}),
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),
     ...(edit.longWaitHours === undefined ? {} : { longWaitHours: edit.longWaitHours }),
@@ -209,15 +232,25 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
 });
 
 /**
- * The two Fable switches never contradict: turning Fable mode on turns Fable workers on, and
- * turning Fable workers off turns Fable mode off. Every save of the policy, from an agent's edit
- * or a settings page, passes through here.
+ * Fable mode and Fable workers never contradict: turning an account's Fable mode on turns Fable
+ * workers on, and turning Fable workers off turns every account's Fable mode off; a save that
+ * does both keeps Fable mode. A list of accounts replaces the single switch stored before Fable
+ * mode was per account. Every save of the policy, from an agent's edit or a settings page,
+ * passes through here.
  */
-export function withFableSwitches(stored: AllocationPolicy, next: AllocationPolicy) {
-  if (next.fableOnly !== true || next.fableWorkers !== false) return next;
-  return stored.fableOnly === true
-    ? { ...next, fableOnly: false }
-    : { ...next, fableWorkers: true };
+export function withFableSwitches(
+  stored: AllocationPolicy,
+  next: AllocationPolicy,
+): AllocationPolicy {
+  const { fableOnly: _everyAccount, ...listed } = next;
+  const policy = next.fableAccounts ? listed : next;
+  const on = next.fableAccounts ? next.fableAccounts.length > 0 : next.fableOnly === true;
+  if (!on || next.fableWorkers !== false) return policy;
+  const wasOn = (key: string) => stored.fableAccounts?.includes(key) ?? stored.fableOnly === true;
+  const turnedOn = next.fableAccounts
+    ? next.fableAccounts.some((key) => !wasOn(key))
+    : stored.fableAccounts !== undefined || stored.fableOnly !== true;
+  return turnedOn ? { ...policy, fableWorkers: true } : { ...listed, fableAccounts: [] };
 }
 
 /** The model policy after `edit`; a cell's model joins its table's model list. */

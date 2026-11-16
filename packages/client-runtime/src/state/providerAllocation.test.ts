@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   allocationPreferenceKey,
   type AllocationAccount,
+  type AllocationPolicy,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
 import {
@@ -17,6 +18,7 @@ import {
   allocationAccountRows,
   allocationModelChoices,
   allocationMoved,
+  withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
   withModelLadderEdit,
@@ -249,6 +251,33 @@ it("reads each login's daily goal, its own or its provider's, and sets or clears
   });
 });
 
+it("switches Fable mode per Claude login, starting from the single switch stored before", () => {
+  const now = Date.parse("2026-10-24T12:00:00.000Z");
+  const fableMode = (policy: AllocationPolicy) =>
+    Object.fromEntries(
+      allocationAccountRows(snapshot(), policy, now).map((row) => [row.label, row.fableMode]),
+    );
+  // Codex logins have no switch.
+  expect(fableMode(defaultAllocationPolicy)).toEqual({
+    AD: null,
+    ARA: null,
+    SL: null,
+    ES: false,
+    XL: false,
+  });
+  const legacy = { ...defaultAllocationPolicy, fableOnly: true };
+  expect(fableMode(legacy)).toMatchObject({ ES: true, XL: true });
+  // Turning one login off keeps the others on, as a list that replaces the single switch.
+  const es = allocationAccountRows(snapshot(), legacy, now).find((row) => row.label === "ES")!;
+  const next = withAllocationAccountFableMode(legacy, snapshot(), es, false);
+  expect(next.fableOnly).toBeUndefined();
+  expect(next.fableAccounts).toEqual([allocationPreferenceKey(accounts[6]!)]);
+  expect(fableMode(next)).toMatchObject({ ES: false, XL: true });
+  expect(withAllocationAccountFableMode(next, snapshot(), es, true).fableAccounts).toEqual([
+    allocationPreferenceKey(accounts[6]!),
+    allocationPreferenceKey(accounts[5]!),
+  ]);
+});
 it("edits the ladder starting from the default one", () => {
   const rung = { model: "typed-model", effort: "high" };
   const added = withModelLadderEdit(defaultModelRoutingPolicy, { type: "add", rung });
