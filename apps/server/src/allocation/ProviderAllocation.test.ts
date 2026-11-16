@@ -3192,6 +3192,8 @@ it.effect(
         workerMemoryGiB: 3,
         minFreeMemoryGiB: 4,
         startSettleMinutes: 15,
+        sessionReserveGiB: 0.25,
+        memoryKillHoldMinutes: 60,
       });
       // The session on the linked computer is 18 minutes old: it shows its memory by now.
       expect((yield* lines)[1]).toBe(
@@ -3201,11 +3203,15 @@ it.effect(
         workerMemoryGiB: 6,
         minFreeMemoryGiB: 12,
         startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
       });
       expect(view).toMatchObject({
         workerMemoryGiB: 6,
         minFreeMemoryGiB: 12,
         startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
       });
       // The next choice uses them, with no restart.
       expect(yield* lines).toEqual([
@@ -3217,6 +3223,8 @@ it.effect(
         workerMemoryGiB: _memory,
         minFreeMemoryGiB: _minimum,
         startSettleMinutes: _settle,
+        sessionReserveGiB: _reserve,
+        memoryKillHoldMinutes: _hold,
         ...older
       } = yield* store.policy;
       yield* store.savePolicy({ expectedVersion: older.version, policy: older });
@@ -3224,6 +3232,8 @@ it.effect(
         workerMemoryGiB: 6,
         minFreeMemoryGiB: 12,
         startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
       });
       const invalid = yield* Effect.exit(decodePolicyEdit({ startSettleMinutes: 500 }));
       expect(Exit.isFailure(invalid)).toBe(true);
@@ -3231,39 +3241,53 @@ it.effect(
   },
 );
 
-it.effect("a linked computer reports its just-started sessions over the peer wire", () =>
-  Effect.gen(function* () {
-    const peer = fixture({ localId: "remote", label: "Remote" });
-    peer.state.projects = [checkout("remote-project", "scratch-remote", "repo:example")];
-    // One session there started just now.
-    peer.state.threads = [shell()];
-    const peerContext = yield* Layer.build(peer.layer);
-    yield* peer.setup.pipe(Effect.provide(peerContext));
-    const peerAllocation = Context.get(peerContext, Allocation.ProviderAllocation);
-    const f = fixture({
-      peerCall: (_id, input) =>
-        peerAllocation.receive("local", wire(input)).pipe(
-          Effect.map(wire),
-          Effect.mapError(
-            (e) => new PeerUnavailable({ environmentId: "remote", message: e.message }),
+it.effect(
+  "a linked computer reports its just-started sessions and its last memory kill over the peer wire",
+  () =>
+    Effect.gen(function* () {
+      const peer = fixture({ localId: "remote", label: "Remote" });
+      peer.state.projects = [checkout("remote-project", "scratch-remote", "repo:example")];
+      // One session there started just now.
+      peer.state.threads = [shell()];
+      const peerContext = yield* Layer.build(peer.layer);
+      yield* peer.setup.pipe(Effect.provide(peerContext));
+      const peerAllocation = Context.get(peerContext, Allocation.ProviderAllocation);
+      const f = fixture({
+        peerCall: (_id, input) =>
+          peerAllocation.receive("local", wire(input)).pipe(
+            Effect.map(wire),
+            Effect.mapError(
+              (e) => new PeerUnavailable({ environmentId: "remote", message: e.message }),
+            ),
           ),
-        ),
-    });
-    f.state.peers = [linkedInventory("remote")];
-    f.state.projects = [checkout("local-project", "scratch", "repo:example")];
-    const placement = yield* Effect.gen(function* () {
-      const { allocation } = yield* f.setup;
-      return yield* allocation.place({ projectId: ProjectId.make("local-project") });
-    }).pipe(Effect.provide(f.layer));
-    expect(placement.lines).toEqual([
-      "Local: 10 GiB room (10 free of 16), 12 of 16 CPU threads idle, 0 sessions",
-      "Remote: 7 GiB room (10 free of 16, less 1 just started at 3 GiB each), 12 of 16 CPU threads idle, 1 sessions",
-    ]);
-    expect(placement.ranked.map((c) => [c.environmentId, c.projectId])).toEqual([
-      ["local", "local-project"],
-      ["remote", "remote-project"],
-    ]);
-  }).pipe(Effect.scoped),
+      });
+      f.state.peers = [linkedInventory("remote")];
+      f.state.projects = [checkout("local-project", "scratch", "repo:example")];
+      const peerSql = Context.get(peerContext, SqlClient.SqlClient);
+      const failure = (id: string, payload: object) =>
+        peerSql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES (${id}, 'worker', 'error', 'runtime.error', '', ${encodeUnknown(payload)}, ${at})`;
+      // An ordinary failure there says nothing about memory.
+      yield* failure("crash", { message: "The provider stopped." });
+      const [placement, afterKill] = yield* Effect.gen(function* () {
+        const { allocation } = yield* f.setup;
+        const place = allocation.place({ projectId: ProjectId.make("local-project") });
+        const before = yield* place;
+        yield* failure("kill", { message: "Killed: out of memory.", code: "oom_kill" });
+        return [before, yield* place] as const;
+      }).pipe(Effect.provide(f.layer));
+      const local = "Local: 10 GiB room (10 free of 16), 12 of 16 CPU threads idle, 0 sessions";
+      const remote =
+        "Remote: 6.8 GiB room (10 free of 16, less 1 just started at 3 GiB each, less 0.25 GiB for each working session), 12 of 16 CPU threads idle, 1 sessions";
+      expect(placement.lines).toEqual([local, remote]);
+      expect(afterKill.lines).toEqual([
+        local,
+        `${remote}; a session was killed for memory 0 min ago`,
+      ]);
+      expect(placement.ranked.map((c) => [c.environmentId, c.projectId])).toEqual([
+        ["local", "local-project"],
+        ["remote", "remote-project"],
+      ]);
+    }).pipe(Effect.scoped),
 );
 
 /** A worker start that has begun on `environmentId` and is not yet confirmed running. */

@@ -655,6 +655,8 @@ const make = Effect.gen(function* () {
                 | "workerMemoryGiB"
                 | "minFreeMemoryGiB"
                 | "startSettleMinutes"
+                | "sessionReserveGiB"
+                | "memoryKillHoldMinutes"
                 | "fableWorkers"
                 | "fableAccounts"
                 | "fableOnly"
@@ -682,6 +684,8 @@ const make = Effect.gen(function* () {
               ...carried("workerMemoryGiB"),
               ...carried("minFreeMemoryGiB"),
               ...carried("startSettleMinutes"),
+              ...carried("sessionReserveGiB"),
+              ...carried("memoryKillHoldMinutes"),
               ...carried("fableWorkers"),
               ...carried("fableAccounts"),
               ...carried("fableOnly"),

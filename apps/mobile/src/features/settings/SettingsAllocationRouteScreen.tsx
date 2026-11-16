@@ -5,6 +5,8 @@ import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
+  DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+  DEFAULT_SESSION_RESERVE_GIB,
   DEFAULT_MIN_FREE_MEMORY_GIB,
   DEFAULT_START_SETTLE_MINUTES,
   DEFAULT_WORKER_MEMORY_GIB,
@@ -42,7 +44,9 @@ type NumberKey =
   | "longWaitHours"
   | "workerMemoryGiB"
   | "minFreeMemoryGiB"
-  | "startSettleMinutes";
+  | "startSettleMinutes"
+  | "sessionReserveGiB"
+  | "memoryKillHoldMinutes";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
 const points = (value: number) => Number(value.toFixed(2)).toString();
@@ -169,6 +173,18 @@ export function SettingsAllocationRouteScreen() {
       label: "Start settle time (minutes)",
       help: "How long a started session counts as not showing its memory yet.",
       fallback: DEFAULT_START_SETTLE_MINUTES,
+    },
+    {
+      key: "sessionReserveGiB",
+      label: "Session reserve (GiB)",
+      help: "Memory kept back for each session already working on a computer, for the builds and dev servers it starts and stops.",
+      fallback: DEFAULT_SESSION_RESERVE_GIB,
+    },
+    {
+      key: "memoryKillHoldMinutes",
+      label: "Memory kill hold (minutes)",
+      help: "After the system killed a session on a computer for lack of memory, that computer gets a new worker only when every other one is in the same state.",
+      fallback: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
     },
   ] satisfies ReadonlyArray<{ key: NumberKey; label: string; help: string; fallback: number }>;
 

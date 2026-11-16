@@ -206,6 +206,8 @@ const view: AllocationPolicyView = {
   workerMemoryGiB: 3,
   minFreeMemoryGiB: 4,
   startSettleMinutes: 15,
+  sessionReserveGiB: 0.25,
+  memoryKillHoldMinutes: 60,
   caps: [],
   ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
   fallback: null,
@@ -370,6 +372,8 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
       workerMemoryGiB: 4,
       minFreeMemoryGiB: 6,
       startSettleMinutes: 20,
+      sessionReserveGiB: 0.5,
+      memoryKillHoldMinutes: 90,
       fallback: null,
       // A model no code lists is accepted; the view says what could not be confirmed.
       setCells: [{ difficulty: 9, stakes: 9, model: "claude-next-9", effort: "high" }],

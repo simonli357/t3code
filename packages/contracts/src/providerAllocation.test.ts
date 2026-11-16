@@ -201,6 +201,8 @@ describe("allocation policy", () => {
       workerMemoryGiB: 3,
       minFreeMemoryGiB: 4,
       startSettleMinutes: 15,
+      sessionReserveGiB: 0.25,
+      memoryKillHoldMinutes: 60,
     });
     expect([DEFAULT_CLOSE_MARGIN_POINTS, DEFAULT_LONG_WAIT_HOURS]).toEqual([10, 3]);
     // Every field a build from before smart allocation required of a policy.
@@ -247,6 +249,8 @@ describe("allocation policy", () => {
       { workerMemoryGiB: -1 },
       { minFreeMemoryGiB: 257 },
       { startSettleMinutes: 121 },
+      { sessionReserveGiB: -0.1 },
+      { memoryKillHoldMinutes: 1441 },
       { accountOrder: [""] },
     ])
       expect(valid(patch), JSON.stringify(patch)).toThrow();

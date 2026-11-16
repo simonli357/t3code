@@ -48,5 +48,11 @@ next read corrects it. An account choice is previewed on each candidate before o
 a stored decision binds its assignment ID to one computer, so trying a second computer with a
 reserving call would be refused as a conflict. A retry stays on its first computer, from the
 remembered placement or the worker record. A computer on a build without `recentStarts` is not
-chosen automatically, since its starts cannot be counted. Worker memory is a stored value, not
+chosen automatically, since its starts cannot be counted.
+
+**Free memory at one instant is not room.** One reading of free memory does not show what the sessions already on a computer do, and no
+server samples memory between reads (the Computers page keeps a history only while it is open).
+So room also loses a stored reserve per working session, and a computer whose placement read
+finds a recent `runtime.error` activity with code `oom_kill` ranks after every other one. Only
+Linux records those kills (`agentScope`). Worker memory is a stored value, not
 learned: resource telemetry measures T3's own process tree, not memory per session.

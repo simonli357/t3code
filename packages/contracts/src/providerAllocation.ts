@@ -77,6 +77,12 @@ export const DEFAULT_MIN_FREE_MEMORY_GIB = 4;
 export const DEFAULT_START_SETTLE_MINUTES = 15;
 /** The longest a start can count as just started; computers report their starts this far back. */
 export const MAX_START_SETTLE_MINUTES = 120;
+/** Memory kept back for each working session already on a computer: their builds come and go. */
+export const DEFAULT_SESSION_RESERVE_GIB = 0.25;
+/** After the system killed a session there for memory, a computer has no room for this long. */
+export const DEFAULT_MEMORY_KILL_HOLD_MINUTES = 60;
+/** The longest hold; computers report their last memory kill this far back. */
+export const MAX_MEMORY_KILL_HOLD_MINUTES = 1440;
 /**
  * Pacing, forecast and rule settings from before smart allocation. Nothing here reads them, but
  * builds from before it require them, so every saved policy carries these values while the
@@ -152,6 +158,16 @@ export const AllocationPolicy = Schema.Struct({
   startSettleMinutes: Schema.optional(
     Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: MAX_START_SETTLE_MINUTES })),
   ),
+  /**
+   * What the sessions already on a computer do: memory kept back for each working session, and
+   * how long a computer has no room after the system killed a session there for memory.
+   */
+  sessionReserveGiB: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 16 })),
+  ),
+  memoryKillHoldMinutes: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: MAX_MEMORY_KILL_HOLD_MINUTES })),
+  ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
   /**
@@ -212,6 +228,8 @@ export const defaultAllocationPolicy: AllocationPolicy = {
   workerMemoryGiB: DEFAULT_WORKER_MEMORY_GIB,
   minFreeMemoryGiB: DEFAULT_MIN_FREE_MEMORY_GIB,
   startSettleMinutes: DEFAULT_START_SETTLE_MINUTES,
+  sessionReserveGiB: DEFAULT_SESSION_RESERVE_GIB,
+  memoryKillHoldMinutes: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
   ...legacyAllocationPolicyFields,
 };
 
@@ -356,6 +374,11 @@ export const AllocationInventory = Schema.Struct({
   recentStarts: Schema.optional(
     Schema.Array(Schema.Struct({ threadId: ThreadId, at: IsoDateTime })),
   ),
+  /**
+   * Only in a placement read: when the system last killed a session here for lack of memory,
+   * as far back as `MAX_MEMORY_KILL_HOLD_MINUTES`; null when it did not.
+   */
+  lastMemoryKillAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Only when a placement read named a repository: this computer's checkouts of it, possibly none. */
   projects: Schema.optional(
     Schema.Array(Schema.Struct({ id: ProjectId, title: Schema.String })).check(
@@ -790,6 +813,8 @@ export const AllocationPolicyEdit = Schema.Struct({
   workerMemoryGiB: AllocationPolicy.fields.workerMemoryGiB,
   minFreeMemoryGiB: AllocationPolicy.fields.minFreeMemoryGiB,
   startSettleMinutes: AllocationPolicy.fields.startSettleMinutes,
+  sessionReserveGiB: AllocationPolicy.fields.sessionReserveGiB,
+  memoryKillHoldMinutes: AllocationPolicy.fields.memoryKillHoldMinutes,
   setCaps: Schema.optional(
     Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
   ),
@@ -835,6 +860,8 @@ export const AllocationPolicyView = Schema.Struct({
   workerMemoryGiB: Schema.optional(Schema.Number),
   minFreeMemoryGiB: Schema.optional(Schema.Number),
   startSettleMinutes: Schema.optional(Schema.Number),
+  sessionReserveGiB: Schema.optional(Schema.Number),
+  memoryKillHoldMinutes: Schema.optional(Schema.Number),
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
   /** Each account's daily goal in percent of its weekly window, and where it comes from. */
   goals: Schema.optional(

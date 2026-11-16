@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   EnvironmentId,
+  MAX_MEMORY_KILL_HOLD_MINUTES,
   MAX_START_SETTLE_MINUTES,
   defaultAllocationPolicy,
   type AllocationPolicy,
@@ -171,6 +172,8 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     inRange(policy.workerMemoryGiB, 256) &&
     inRange(policy.minFreeMemoryGiB, 256) &&
     inRange(policy.startSettleMinutes, MAX_START_SETTLE_MINUTES) &&
+    inRange(policy.sessionReserveGiB, 16) &&
+    inRange(policy.memoryKillHoldMinutes, MAX_MEMORY_KILL_HOLD_MINUTES) &&
     (policy.accountCaps ?? []).every(
       (cap) => inRange(cap.weeklyPercent, 100) && inRange(cap.fiveHourPercent, 100),
     );

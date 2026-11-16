@@ -77,13 +77,17 @@ the project (the same repository, by Git remote or `projectKey`). The worker get
 ID on the computer that is chosen.
 
 - A computer's **room** is its free memory, less the expected memory of a worker for every
-  session that started there too recently to show its memory. Several starts in a row therefore
-  spread out instead of all seeing the same free number.
+  session that started there too recently to show its memory, less a small reserve for every
+  session already working there. Several starts in a row therefore spread out instead of all
+  seeing the same free number, and a computer with many sessions is not judged by one moment
+  between their builds.
 - Computers with room above the minimum and an idle CPU thread come first, then those with room
   but no idle CPU. Within each group the most room wins, counted in GiB, so a small computer is
   chosen only while it has as much room as a large one.
 - A computer under the minimum is used only when every computer is under it; the start still
   happens and the result says so.
+- A computer where the system killed a session for lack of memory in the last hour comes after
+  all of those: it is used only when every computer is in that state.
 - A computer that does not answer, could not be measured or runs a T3 version from before this
   is never treated as empty: it is not chosen.
 - If no account on the chosen computer can start the worker and one on another computer can,
@@ -93,9 +97,10 @@ Name a computer when the work needs one, such as tooling or data on one machine:
 computer is used as given, whatever its numbers. A session you fork stays on its source's
 computer.
 
-The three numbers behind this are stored with the allocation policy on the coordinator and
+The five numbers behind this are stored with the allocation policy on the coordinator and
 apply to the next start on every computer: the expected memory of a worker (3 GiB at first), the
-minimum room (4 GiB) and how long a start counts as just started (15 minutes). Ask an agent to
+minimum room (4 GiB), how long a start counts as just started (15 minutes), the reserve for each
+working session (0.25 GiB) and how long a memory kill holds a computer back (60 minutes). Ask an agent to
 change them, or use `t3_allocation_policy`.
 
 The start's result names the computer with one reason line and gives one line per computer.

@@ -7,6 +7,7 @@ import {
   AllocationRequest,
   ComputerPlacementProbe,
   DEFAULT_LONG_WAIT_HOURS,
+  MAX_MEMORY_KILL_HOLD_MINUTES,
   MAX_START_SETTLE_MINUTES,
   ModelSelection,
   ThreadId,
@@ -461,9 +462,23 @@ const make = Effect.gen(function* () {
           return Date.parse(at) >= startedSince ? [{ threadId: d.threadId, at }] : [];
         })
       : undefined;
+    // The system killing a session for memory is the plainest sign that this computer is full.
+    // The index is partial: its own kind filter is repeated so SQLite can use it.
+    const lastMemoryKill = placement
+      ? yield* sql<{
+          at: string;
+        }>`SELECT created_at AS at FROM projection_thread_activities INDEXED BY idx_projection_thread_activities_quota_evidence
+          WHERE kind IN ('account.quota-state', 'runtime.error', 'runtime.warning') AND kind = 'runtime.error' AND created_at >= ${DateTime.formatIso(
+            DateTime.makeUnsafe(
+              Date.parse(current.observedAt) - MAX_MEMORY_KILL_HOLD_MINUTES * 60_000,
+            ),
+          )} AND json_extract(payload_json, '$.code') = 'oom_kill'
+          ORDER BY created_at DESC LIMIT 1`
+      : undefined;
     return {
       ...current,
       ...(recentStarts ? { recentStarts } : {}),
+      ...(lastMemoryKill ? { lastMemoryKillAt: lastMemoryKill[0]?.at ?? null } : {}),
       maxActiveAgentSessions: (yield* settings.getSettings).maxActiveAgentSessions,
       environmentLabel: local.label,
       demand: demand.map((d) => ({
@@ -1432,6 +1447,8 @@ const make = Effect.gen(function* () {
       changes.workerMemoryGiB,
       changes.minFreeMemoryGiB,
       changes.startSettleMinutes,
+      changes.sessionReserveGiB,
+      changes.memoryKillHoldMinutes,
       setCaps,
       clearCaps,
       changes.setGoals,

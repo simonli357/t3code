@@ -128,7 +128,13 @@ it.effect("replaces the whole order and changes only what the edit names", () =>
       longWaitHours: 0.5,
     });
     // The values behind the choice of computer are edited the same way, one at a time.
-    const placed = { workerMemoryGiB: 5, minFreeMemoryGiB: 6, startSettleMinutes: 20 };
+    const placed = {
+      workerMemoryGiB: 5,
+      minFreeMemoryGiB: 6,
+      startSettleMinutes: 20,
+      sessionReserveGiB: 0.5,
+      memoryKillHoldMinutes: 90,
+    };
     expect(yield* edit(placed, saved)).toEqual({ ...snapshot(saved).policy, ...placed });
     expect(yield* edit({ minFreeMemoryGiB: 0 }, { ...saved, ...placed })).toEqual({
       ...snapshot(saved).policy,
@@ -186,6 +192,8 @@ it("reads both policies with accounts by label", () => {
     workerMemoryGiB: 3,
     minFreeMemoryGiB: 4,
     startSettleMinutes: 15,
+    sessionReserveGiB: 0.25,
+    memoryKillHoldMinutes: 60,
     caps: [{ account: "ES", ...cap }],
     // Without a goal of its own an account reads its provider family's.
     goals: [
@@ -211,6 +219,8 @@ it("reads both policies with accounts by label", () => {
     workerMemoryGiB: _memory,
     minFreeMemoryGiB: _minimum,
     startSettleMinutes: _settle,
+    sessionReserveGiB: _reserve,
+    memoryKillHoldMinutes: _hold,
     accountCaps: _caps,
     ...old
   } = stored.policy;
@@ -222,6 +232,8 @@ it("reads both policies with accounts by label", () => {
       workerMemoryGiB: 3,
       minFreeMemoryGiB: 4,
       startSettleMinutes: 15,
+      sessionReserveGiB: 0.25,
+      memoryKillHoldMinutes: 60,
       caps: [],
     },
   );

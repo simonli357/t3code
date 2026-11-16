@@ -1,5 +1,7 @@
 import {
+  DEFAULT_MEMORY_KILL_HOLD_MINUTES,
   DEFAULT_MIN_FREE_MEMORY_GIB,
+  DEFAULT_SESSION_RESERVE_GIB,
   DEFAULT_START_SETTLE_MINUTES,
   DEFAULT_WORKER_MEMORY_GIB,
   type AllocationInventory,
@@ -62,16 +64,20 @@ export const placementValues = (policy: AllocationPolicy) => ({
   workerMemoryGiB: policy.workerMemoryGiB ?? DEFAULT_WORKER_MEMORY_GIB,
   minFreeMemoryGiB: policy.minFreeMemoryGiB ?? DEFAULT_MIN_FREE_MEMORY_GIB,
   startSettleMinutes: policy.startSettleMinutes ?? DEFAULT_START_SETTLE_MINUTES,
+  sessionReserveGiB: policy.sessionReserveGiB ?? DEFAULT_SESSION_RESERVE_GIB,
+  memoryKillHoldMinutes: policy.memoryKillHoldMinutes ?? DEFAULT_MEMORY_KILL_HOLD_MINUTES,
 });
 
 /**
  * Ranks the computers a new worker may start on. A computer's room is its free memory less the
- * expected memory of every session that started there too recently to show it. Computers with
- * room above the minimum and an idle CPU thread come first, then those with room but no idle
- * CPU, then those under the minimum; inside each group the most room wins, so a small computer
- * is chosen only while it has as much room as a large one. A computer that did not answer, was
- * not measured or has no checkout of the project is never ranked. A named computer is used as
- * given.
+ * expected memory of every session that started there too recently to show it, less a reserve
+ * for each session already working there: one reading of free memory does not show the builds
+ * and dev servers those sessions start and stop. Computers with room above the minimum and an
+ * idle CPU thread come first, then those with room but no idle CPU, then those under the
+ * minimum, then those where the system killed a session for memory within the hold; inside
+ * each group the most room wins, so a small computer is chosen only while it has as much room
+ * as a large one. A computer that did not answer, was not measured or has no checkout of the
+ * project is never ranked. A named computer is used as given.
  */
 export function placeWorker(input: {
   readonly at: string;
@@ -89,7 +95,13 @@ export function placeWorker(input: {
   /** The worker being placed, so a retry does not count its own first attempt. */
   readonly threadId?: string;
 }): ComputerPlacement {
-  const { workerMemoryGiB, minFreeMemoryGiB, startSettleMinutes } = placementValues(input.policy);
+  const {
+    workerMemoryGiB,
+    minFreeMemoryGiB,
+    startSettleMinutes,
+    sessionReserveGiB,
+    memoryKillHoldMinutes,
+  } = placementValues(input.policy);
   const since = Date.parse(input.at) - startSettleMinutes * 60_000;
   const fresh = (start: { threadId: string; at: string }) =>
     start.threadId !== input.threadId && Date.parse(start.at) >= since;
@@ -110,10 +122,19 @@ export function placeWorker(input: {
               .map((start) => start.threadId),
           ]).size
         : null;
+    const sessions = numbers.sessions ?? 0;
     const room =
       numbers.memoryFreeGiB === null || starts === null
         ? null
-        : tenth(numbers.memoryFreeGiB - starts * workerMemoryGiB);
+        : tenth(numbers.memoryFreeGiB - starts * workerMemoryGiB - sessions * sessionReserveGiB);
+    const killedMinutesAgo =
+      inventory.complete && inventory.lastMemoryKillAt
+        ? Math.max(
+            0,
+            Math.round((Date.parse(input.at) - Date.parse(inventory.lastMemoryKillAt)) / 60_000),
+          )
+        : null;
+    const killed = killedMinutesAgo !== null && killedMinutesAgo < memoryKillHoldMinutes;
     // Each session that just started is expected to keep one thread busy.
     const idle =
       numbers.cpuThreadsIdle === null || starts === null
@@ -124,6 +145,10 @@ export function placeWorker(input: {
         ? null
         : `${room} GiB room (${numbers.memoryFreeGiB} free of ${numbers.memoryTotalGiB}${
             starts ? `, less ${starts} just started at ${workerMemoryGiB} GiB each` : ""
+          }${
+            sessions && sessionReserveGiB
+              ? `, less ${sessionReserveGiB} GiB for each working session`
+              : ""
           })`;
     const cpu =
       numbers.cpuThreadsIdle === null
@@ -140,18 +165,26 @@ export function placeWorker(input: {
           ? "no checkout of the project"
           : null;
     const group =
-      room === null ? 3 : room < minFreeMemoryGiB ? 2 : idle !== null && idle >= 1 ? 0 : 1;
-    return { numbers, projectId, room, idle, measured, skipped, group };
+      room === null || killed
+        ? 3
+        : room < minFreeMemoryGiB
+          ? 2
+          : idle !== null && idle >= 1
+            ? 0
+            : 1;
+    return { numbers, projectId, room, idle, measured, skipped, group, killedMinutesAgo };
   });
   const describe = (c: (typeof computers)[number]) => c.measured ?? c.skipped ?? "not measured";
   const lines = computers.map((c) => {
     const state =
       c.skipped ??
-      (c.group === 2
-        ? `under the ${minFreeMemoryGiB} GiB minimum`
-        : c.group === 1
-          ? "no idle CPU"
-          : null);
+      (c.group === 3
+        ? `a session was killed for memory ${c.killedMinutesAgo} min ago`
+        : c.group === 2
+          ? `under the ${minFreeMemoryGiB} GiB minimum`
+          : c.group === 1
+            ? "no idle CPU"
+            : null);
     return `${c.numbers.label}: ${[c.measured, state].filter((part) => part !== null).join("; ")}`;
   });
   const notes = input.inventories.flatMap((i) => (i.complete ? [] : i.notices));
@@ -212,15 +245,17 @@ export function placeWorker(input: {
   const best = eligible[0]!;
   const others = eligible.length - 1;
   const lead =
-    best.group === 2
-      ? `every computer is under the ${minFreeMemoryGiB} GiB minimum, and this one has the most room`
-      : others === 0
-        ? "the only computer that can run this"
-        : best.group === 1
-          ? `most room of ${eligible.length} computers; none has an idle CPU thread`
-          : eligible.some((c) => c.room! > best.room!)
-            ? `most room of the computers with an idle CPU thread, of ${eligible.length}`
-            : `most room of ${eligible.length} computers`;
+    best.group === 3
+      ? `every computer killed a session for memory within ${memoryKillHoldMinutes} minutes, and this one has the most room`
+      : best.group === 2
+        ? `every computer is under the ${minFreeMemoryGiB} GiB minimum, and this one has the most room`
+        : others === 0
+          ? "the only computer that can run this"
+          : best.group === 1
+            ? `most room of ${eligible.length} computers, with no idle CPU thread`
+            : eligible.some((c) => c.room! > best.room!)
+              ? `most room of the computers with an idle CPU thread, of ${eligible.length}`
+              : `most room of ${eligible.length} computers`;
   return {
     ranked: eligible.map((c, index) =>
       computer(

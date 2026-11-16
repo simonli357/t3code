@@ -3,6 +3,9 @@ import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
+  DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+  DEFAULT_SESSION_RESERVE_GIB,
+  MAX_MEMORY_KILL_HOLD_MINUTES,
   DEFAULT_MIN_FREE_MEMORY_GIB,
   DEFAULT_START_SETTLE_MINUTES,
   DEFAULT_WORKER_MEMORY_GIB,
@@ -628,6 +631,41 @@ export function AllocationControls({
             />
             <span className="text-xs text-muted-foreground">
               How long a started session counts as not showing its memory yet.
+            </span>
+          </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <NumberField
+              name="Session reserve"
+              caption="Session reserve (GiB)"
+              value={policy.sessionReserveGiB ?? DEFAULT_SESSION_RESERVE_GIB}
+              required
+              min={0}
+              max={16}
+              step={0.05}
+              disabled={orderDisabled}
+              onChange={(value = Number.NaN) => onChange({ ...policy, sessionReserveGiB: value })}
+            />
+            <span className="text-xs text-muted-foreground">
+              Memory kept back for each session already working on a computer, for the builds and
+              dev servers it starts and stops.
+            </span>
+          </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <NumberField
+              name="Memory kill hold"
+              caption="Memory kill hold (minutes)"
+              value={policy.memoryKillHoldMinutes ?? DEFAULT_MEMORY_KILL_HOLD_MINUTES}
+              required
+              min={0}
+              max={MAX_MEMORY_KILL_HOLD_MINUTES}
+              disabled={orderDisabled}
+              onChange={(value = Number.NaN) =>
+                onChange({ ...policy, memoryKillHoldMinutes: value })
+              }
+            />
+            <span className="text-xs text-muted-foreground">
+              After the system killed a session on a computer for lack of memory, that computer gets
+              a new worker only when every other one is in the same state.
             </span>
           </div>
           <div className="grid min-w-0 content-start gap-1">

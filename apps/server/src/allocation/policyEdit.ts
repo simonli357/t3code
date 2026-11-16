@@ -235,6 +235,10 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     ...(edit.startSettleMinutes === undefined
       ? {}
       : { startSettleMinutes: edit.startSettleMinutes }),
+    ...(edit.sessionReserveGiB === undefined ? {} : { sessionReserveGiB: edit.sessionReserveGiB }),
+    ...(edit.memoryKillHoldMinutes === undefined
+      ? {}
+      : { memoryKillHoldMinutes: edit.memoryKillHoldMinutes }),
   } satisfies AllocationPolicy;
 });
 

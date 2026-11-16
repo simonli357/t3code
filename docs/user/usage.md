@@ -117,7 +117,7 @@ start on every computer, without a restart. Every computer keeps a copy of the s
 learned numbers the coordinator last sent; while the coordinator cannot be reached, a start is
 decided on the requesting computer from that copy, and the result says how old it is. A decision
 first refreshes usage readings older than the policy allows, for at most a few seconds. The
-computer a worker starts on is chosen by the server too, from three more stored values; see
+computer a worker starts on is chosen by the server too, from five more stored values; see
 [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
 Optional **hard caps** apply per account identity. Weekly caps use the provider's
