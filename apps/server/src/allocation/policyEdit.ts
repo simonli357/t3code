@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { accountGoal } from "./decision.ts";
+import { placementValues } from "./placement.ts";
 import { span } from "./runway.ts";
 
 const invalid = (detail: string) => new AllocationError({ code: "invalid", detail });
@@ -81,6 +82,7 @@ export function allocationPolicyView(
     accountOrder: once((policy.accountOrder ?? []).map(label)),
     closeMarginPoints: policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS,
     longWaitHours: policy.longWaitHours ?? DEFAULT_LONG_WAIT_HOURS,
+    ...placementValues(policy),
     caps: once(
       (policy.accountCaps ?? []).map(({ key, ...cap }) => ({ account: label(key), ...cap })),
     ),
@@ -228,6 +230,15 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),
     ...(edit.longWaitHours === undefined ? {} : { longWaitHours: edit.longWaitHours }),
+    ...(edit.workerMemoryGiB === undefined ? {} : { workerMemoryGiB: edit.workerMemoryGiB }),
+    ...(edit.minFreeMemoryGiB === undefined ? {} : { minFreeMemoryGiB: edit.minFreeMemoryGiB }),
+    ...(edit.startSettleMinutes === undefined
+      ? {}
+      : { startSettleMinutes: edit.startSettleMinutes }),
+    ...(edit.sessionReserveGiB === undefined ? {} : { sessionReserveGiB: edit.sessionReserveGiB }),
+    ...(edit.memoryKillHoldMinutes === undefined
+      ? {}
+      : { memoryKillHoldMinutes: edit.memoryKillHoldMinutes }),
   } satisfies AllocationPolicy;
 });
 

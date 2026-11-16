@@ -1,4 +1,6 @@
 import {
+  MAX_MEMORY_KILL_HOLD_MINUTES,
+  MAX_START_SETTLE_MINUTES,
   WS_METHODS,
   allocationFableMode,
   allocationFamilyGoal,
@@ -374,8 +376,18 @@ export function rebaseAllocationPolicy(
 export function allocationPolicyInvalid(policy: AllocationPolicy): string | null {
   const within = (value: number | null | undefined, max: number) =>
     value == null || (Number.isFinite(value) && value >= 0 && value <= max);
-  if (!within(policy.closeMarginPoints, 50)) return "The margin must be a number from 0 to 50.";
-  if (!within(policy.longWaitHours, 168)) return "The wait must be a number from 0 to 168 hours.";
+  const out = (
+    [
+      [policy.closeMarginPoints, 50, "The margin"],
+      [policy.longWaitHours, 168, "The wait"],
+      [policy.workerMemoryGiB, 256, "Worker memory"],
+      [policy.minFreeMemoryGiB, 256, "Minimum free memory"],
+      [policy.startSettleMinutes, MAX_START_SETTLE_MINUTES, "Start settle time"],
+      [policy.sessionReserveGiB, 16, "Session reserve"],
+      [policy.memoryKillHoldMinutes, MAX_MEMORY_KILL_HOLD_MINUTES, "Memory kill hold"],
+    ] as const
+  ).find(([value, max]) => !within(value, max));
+  if (out) return `${out[2]} must be a number from 0 to ${out[1]}.`;
   if (
     !(policy.accountCaps ?? []).every(
       (cap) => within(cap.weeklyPercent, 100) && within(cap.fiveHourPercent, 100),

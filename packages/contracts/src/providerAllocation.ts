@@ -69,6 +69,20 @@ export type AllocationAccountCap = typeof AllocationAccountCap.Type;
 export const DEFAULT_CLOSE_MARGIN_POINTS = 10;
 /** A limited worker waits for a reset this near before it changes model. */
 export const DEFAULT_LONG_WAIT_HOURS = 3;
+/** The memory a worker is expected to take once it builds, type-checks or runs a dev server. */
+export const DEFAULT_WORKER_MEMORY_GIB = 3;
+/** A computer with less free memory than this is not chosen while another has more. */
+export const DEFAULT_MIN_FREE_MEMORY_GIB = 4;
+/** A session this young has not taken its memory yet, so the choice of computer counts it in. */
+export const DEFAULT_START_SETTLE_MINUTES = 15;
+/** The longest a start can count as just started; computers report their starts this far back. */
+export const MAX_START_SETTLE_MINUTES = 120;
+/** Memory kept back for each working session already on a computer: their builds come and go. */
+export const DEFAULT_SESSION_RESERVE_GIB = 0.25;
+/** After the system killed a session there for memory, a computer has no room for this long. */
+export const DEFAULT_MEMORY_KILL_HOLD_MINUTES = 60;
+/** The longest hold; computers report their last memory kill this far back. */
+export const MAX_MEMORY_KILL_HOLD_MINUTES = 1440;
 /**
  * Pacing, forecast and rule settings from before smart allocation. Nothing here reads them, but
  * builds from before it require them, so every saved policy carries these values while the
@@ -130,6 +144,30 @@ export const AllocationPolicy = Schema.Struct({
   longWaitHours: Schema.optional(
     Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 168 })),
   ),
+  /**
+   * How the server chooses a worker's computer: the memory a worker is expected to take, the
+   * free memory a computer needs to be chosen, and how long a started session counts as not
+   * showing its memory yet.
+   */
+  workerMemoryGiB: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 256 })),
+  ),
+  minFreeMemoryGiB: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 256 })),
+  ),
+  startSettleMinutes: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: MAX_START_SETTLE_MINUTES })),
+  ),
+  /**
+   * What the sessions already on a computer do: memory kept back for each working session, and
+   * how long a computer has no room after the system killed a session there for memory.
+   */
+  sessionReserveGiB: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 16 })),
+  ),
+  memoryKillHoldMinutes: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: MAX_MEMORY_KILL_HOLD_MINUTES })),
+  ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
   /**
@@ -187,6 +225,11 @@ export const defaultAllocationPolicy: AllocationPolicy = {
   accountOrder: [],
   closeMarginPoints: DEFAULT_CLOSE_MARGIN_POINTS,
   longWaitHours: DEFAULT_LONG_WAIT_HOURS,
+  workerMemoryGiB: DEFAULT_WORKER_MEMORY_GIB,
+  minFreeMemoryGiB: DEFAULT_MIN_FREE_MEMORY_GIB,
+  startSettleMinutes: DEFAULT_START_SETTLE_MINUTES,
+  sessionReserveGiB: DEFAULT_SESSION_RESERVE_GIB,
+  memoryKillHoldMinutes: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
   ...legacyAllocationPolicyFields,
 };
 
@@ -324,6 +367,18 @@ export const AllocationInventory = Schema.Struct({
   notices: Schema.Array(Schema.String),
   /** Only in a placement read. Absent from a server that predates it: unknown, never zero. */
   computer: Schema.optional(ComputerCapacity),
+  /**
+   * Only in a placement read: when each working or queued session here was created, as far back
+   * as `MAX_START_SETTLE_MINUTES`. Absent from a server that predates it: unknown, never none.
+   */
+  recentStarts: Schema.optional(
+    Schema.Array(Schema.Struct({ threadId: ThreadId, at: IsoDateTime })),
+  ),
+  /**
+   * Only in a placement read: when the system last killed a session here for lack of memory,
+   * as far back as `MAX_MEMORY_KILL_HOLD_MINUTES`; null when it did not.
+   */
+  lastMemoryKillAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Only when a placement read named a repository: this computer's checkouts of it, possibly none. */
   projects: Schema.optional(
     Schema.Array(Schema.Struct({ id: ProjectId, title: Schema.String })).check(
@@ -591,8 +646,8 @@ export const AllocationStartResult = Schema.Struct({
 });
 export type AllocationStartResult = typeof AllocationStartResult.Type;
 const workerChoiceFields = {
-  /** The computer the worker runs on. */
-  environmentId: TrimmedNonEmptyString,
+  /** Only when the user named a computer or the work needs one; without it the server chooses. */
+  environmentId: Schema.optional(TrimmedNonEmptyString),
   difficulty: AssignmentScore,
   stakes: AssignmentScore,
   /** `codex` only when the start asks for Codex; Claude otherwise. */
@@ -604,8 +659,12 @@ const workerChoiceFields = {
   /** The master's estimate of the job's length in hours. */
   hours: Schema.optional(Hours),
 };
-/** What a master gives to preview a worker's account, model and effort. */
-export const WorkerChoiceInput = Schema.Struct(workerChoiceFields);
+/** What a master gives to preview a worker's computer, account, model and effort. */
+export const WorkerChoiceInput = Schema.Struct({
+  /** The project on the master's computer; only computers with a checkout of it are chosen. */
+  projectId: Schema.optional(ProjectId),
+  ...workerChoiceFields,
+});
 export type WorkerChoiceInput = typeof WorkerChoiceInput.Type;
 /** What a master gives to start a worker. */
 export const WorkerStartInput = Schema.Struct({
@@ -619,7 +678,7 @@ export const WorkerStartInput = Schema.Struct({
 export type WorkerStartInput = typeof WorkerStartInput.Type;
 /** The automatic request a worker choice stands for. */
 export function workerChoiceRequest(
-  input: WorkerChoiceInput & { assignmentId: string; threadId: ThreadId },
+  input: WorkerChoiceInput & { environmentId: string; assignmentId: string; threadId: ThreadId },
 ): ModelRoutingRequest {
   const driver = input.driver ?? ProviderDriverKind.make("claudeAgent");
   return {
@@ -644,6 +703,15 @@ export function workerChoiceRequest(
       : {}),
   };
 }
+/** The computer a worker start or preview settled on. */
+export const WorkerComputer = Schema.Struct({
+  environmentId: Schema.String,
+  label: Schema.String,
+  /** The project's ID on that computer; null when no project was given. */
+  projectId: Schema.NullOr(ProjectId),
+  reason: Schema.String,
+});
+export type WorkerComputer = typeof WorkerComputer.Type;
 /** The result of a worker preview or start: one choice, its reason and a line per account. */
 export const WorkerChoice = Schema.Struct({
   /** `drained`: nothing has room until `drainedUntil`. `unavailable`: no account can run it. */
@@ -665,6 +733,10 @@ export const WorkerChoice = Schema.Struct({
   startAt: Schema.optional(IsoDateTime),
   notes: Schema.optional(Schema.Array(Schema.String)),
   accounts: Schema.Array(Schema.String),
+  /** The computer the worker runs on, the project's ID there, and why: one line with the numbers. */
+  computer: Schema.optional(WorkerComputer),
+  /** One line per computer. */
+  computers: Schema.optional(Schema.Array(Schema.String)),
 });
 export type WorkerChoice = typeof WorkerChoice.Type;
 export const WorkerStartResult = Schema.Struct({
@@ -683,7 +755,15 @@ export const profileLabel = (
   model: string,
   options: ReadonlyArray<ProviderOptionSelection>,
 ) => `${model} / ${effortOf(driver, options) ?? "default"}`;
-export function workerChoice(selection: ModelRoutingDecision): WorkerChoice {
+export function workerChoice(
+  selection: ModelRoutingDecision,
+  placement?: {
+    readonly computer: WorkerComputer;
+    readonly computers: ReadonlyArray<string>;
+    readonly notes: ReadonlyArray<string>;
+  },
+): WorkerChoice {
+  const notes = [...(placement?.notes ?? []), ...(selection.notes ?? [])];
   const decision = selection.allocation?.decision;
   const request = decision?.request;
   const chosen =
@@ -711,10 +791,11 @@ export function workerChoice(selection: ModelRoutingDecision): WorkerChoice {
     reason: selection.reasons[0] ?? decision?.reasons[0] ?? "No reason was recorded.",
     ...(drained ? { drainedUntil: selection.drainedUntil ?? null } : {}),
     ...(chosen && selection.startAt ? { startAt: selection.startAt } : {}),
-    ...(selection.notes?.length ? { notes: selection.notes } : {}),
+    ...(notes.length ? { notes } : {}),
     accounts:
       selection.accounts ??
       (decision?.candidates ?? []).map((candidate) => candidate.line ?? candidate.instanceId),
+    ...(placement ? { computer: placement.computer, computers: [...placement.computers] } : {}),
   };
 }
 /** An account by display label such as `ES`, or by instance ID; both name the shared login. */
@@ -729,6 +810,11 @@ export const AllocationPolicyEdit = Schema.Struct({
   accountOrder: Schema.optional(Schema.Array(AccountRef).check(Schema.isMaxLength(100))),
   closeMarginPoints: AllocationPolicy.fields.closeMarginPoints,
   longWaitHours: AllocationPolicy.fields.longWaitHours,
+  workerMemoryGiB: AllocationPolicy.fields.workerMemoryGiB,
+  minFreeMemoryGiB: AllocationPolicy.fields.minFreeMemoryGiB,
+  startSettleMinutes: AllocationPolicy.fields.startSettleMinutes,
+  sessionReserveGiB: AllocationPolicy.fields.sessionReserveGiB,
+  memoryKillHoldMinutes: AllocationPolicy.fields.memoryKillHoldMinutes,
   setCaps: Schema.optional(
     Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
   ),
@@ -770,6 +856,12 @@ export const AllocationPolicyView = Schema.Struct({
   accountOrder: Schema.Array(Schema.String),
   closeMarginPoints: Schema.Number,
   longWaitHours: Schema.Number,
+  /** How a worker's computer is chosen. Absent from a server that predates it. */
+  workerMemoryGiB: Schema.optional(Schema.Number),
+  minFreeMemoryGiB: Schema.optional(Schema.Number),
+  startSettleMinutes: Schema.optional(Schema.Number),
+  sessionReserveGiB: Schema.optional(Schema.Number),
+  memoryKillHoldMinutes: Schema.optional(Schema.Number),
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
   /** Each account's daily goal in percent of its weekly window, and where it comes from. */
   goals: Schema.optional(

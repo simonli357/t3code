@@ -13,6 +13,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
+  AllocationPolicyEdit,
   defaultAllocationPolicy,
   legacyAllocationPolicyFields,
   defaultModelLadder,
@@ -2987,6 +2988,306 @@ it.effect(
       expect(refreshed).toEqual([provider.instanceId, provider.instanceId]);
     }).pipe(Effect.provide(f.layer), Effect.scoped);
   },
+);
+
+const decodePolicyEdit = Schema.decodeUnknownEffect(AllocationPolicyEdit);
+/** A linked computer that can run the worker: this computer's accounts, with its own numbers. */
+const placementPeer = (
+  own: AllocationInventory,
+  id: string,
+  freeGiB: number,
+  extra: Partial<AllocationInventory> = {},
+): AllocationInventory => ({
+  ...own,
+  environmentId: id,
+  environmentLabel: id,
+  accounts: own.accounts.map((account) => ({ ...account, environmentId: id })),
+  demand: [],
+  computer: {
+    ...capacityAt(0),
+    resources: {
+      ...capacityAt(0).resources,
+      availableMemoryBytes: freeGiB * GIB,
+      totalMemoryBytes: 31 * GIB,
+    },
+  },
+  recentStarts: [],
+  projects: [{ id: ProjectId.make(`${id}-project`), title: "scratch" }],
+  ...extra,
+});
+/** One server whose linked computers answer a placement read from `peers`. */
+const placementFixture = () => {
+  const peers = new Map<string, AllocationInventory>();
+  const f = fixture({
+    peerCall: (id) => {
+      const peer = peers.get(id);
+      return peer
+        ? Effect.succeed(peer)
+        : Effect.fail(new PeerUnavailable({ environmentId: id, message: "offline" }));
+    },
+  });
+  f.state.providers = [{ ...provider, models: tableModels }];
+  f.state.projects = [checkout("local-project", "scratch", "repo:example")];
+  const link = (allocation: Allocation.ProviderAllocation["Service"]) =>
+    Effect.gen(function* () {
+      const own = (yield* allocation.receive("big", {
+        _tag: "allocationInventory",
+      })) as AllocationInventory;
+      return (id: string, freeGiB: number, extra: Partial<AllocationInventory> = {}) => {
+        peers.set(id, placementPeer(own, id, freeGiB, extra));
+        f.state.peers = [...peers.values()];
+      };
+    });
+  return { ...f, link };
+};
+const workerStart = (id: string, extra: { environmentId?: string } = {}) => ({
+  assignmentId: id,
+  threadId: ThreadId.make(id),
+  projectId: ProjectId.make("local-project"),
+  title: "task",
+  prompt: "Do the task",
+  difficulty: 3,
+  stakes: 4,
+  driver: provider.driver,
+  ...extra,
+});
+
+it.effect(
+  "a worker start with no computer goes where the room is, and starts in a row spread out",
+  () => {
+    const f = placementFixture();
+    return Effect.gen(function* () {
+      const { allocation, assignments } = yield* f.setup;
+      yield* roomy;
+      const master = ThreadId.make("master");
+      // This computer has 10 GiB free of 16; the linked one 20 of 31.
+      (yield* f.link(allocation))("big", 20);
+      const preview = yield* assignments.previewWorker(
+        {
+          projectId: ProjectId.make("local-project"),
+          difficulty: 3,
+          stakes: 4,
+          driver: provider.driver,
+        },
+        master,
+      );
+      expect(preview).toMatchObject({
+        state: "chosen",
+        computer: {
+          environmentId: "big",
+          label: "big",
+          projectId: "big-project",
+          reason:
+            "big: most room of 2 computers; 20 GiB room (20 free of 31), 12 of 16 CPU threads idle, 0 sessions.",
+        },
+        computers: [
+          "Local: 10 GiB room (10 free of 16), 12 of 16 CPU threads idle, 0 sessions",
+          "big: 20 GiB room (20 free of 31), 12 of 16 CPU threads idle, 0 sessions",
+        ],
+      });
+      // A preview starts nothing and is not counted as a start.
+      expect(f.calls).toHaveLength(0);
+
+      const first = yield* assignments.startWorker(workerStart("w1"), master);
+      expect(first).toMatchObject({
+        threadId: "w1",
+        started: true,
+        state: "chosen",
+        computer: { environmentId: "big", projectId: "big-project" },
+      });
+      // The worker is created on the chosen computer, in that computer's project.
+      expect(f.calls[0]).toMatchObject({ environment: "big", projectId: "big-project" });
+      // Neither computer's reading changes, yet each start takes 3 GiB off its computer's room:
+      // 20, 17, 14, 11 on the large one, then 10 here against 8 there.
+      for (const id of ["w2", "w3", "w4", "w5", "w6"])
+        expect((yield* assignments.startWorker(workerStart(id), master)).started).toBe(true);
+      expect(f.calls.map((call) => call.environment ?? "local")).toEqual([
+        "big",
+        "big",
+        "big",
+        "big",
+        "local",
+        "big",
+      ]);
+      expect(f.calls[4]).toMatchObject({ projectId: "local-project" });
+      const sixth = yield* assignments.previewWorker(
+        {
+          projectId: ProjectId.make("local-project"),
+          difficulty: 3,
+          stakes: 4,
+          driver: provider.driver,
+        },
+        master,
+      );
+      expect(sixth.computers).toEqual([
+        "Local: 7 GiB room (10 free of 16, less 1 just started at 3 GiB each), 12 of 16 CPU threads idle, 0 sessions",
+        "big: 5 GiB room (20 free of 31, less 5 just started at 3 GiB each), 12 of 16 CPU threads idle, 0 sessions",
+      ]);
+
+      // A retry of the first start stays on its computer, whatever has the most room now.
+      const retry = yield* assignments.startWorker(workerStart("w1"), master);
+      expect(retry.computer).toMatchObject({ environmentId: "big", projectId: "big-project" });
+      expect(retry.computer?.reason).toContain("big: this assignment already started there;");
+      expect(f.calls.at(-1)).toMatchObject({ environment: "big", threadId: "w1" });
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect(
+  "a named computer is used as given, and one that cannot start any account is passed over",
+  () => {
+    const f = placementFixture();
+    return Effect.gen(function* () {
+      const { allocation, assignments } = yield* f.setup;
+      yield* roomy;
+      const master = ThreadId.make("master");
+      const link = yield* f.link(allocation);
+      // The roomiest computer has no account that can run the worker.
+      link("big", 28, { accounts: [] });
+      link("full", 1);
+      const started = yield* assignments.startWorker(workerStart("w1"), master);
+      expect(started).toMatchObject({ started: true, computer: { environmentId: "local" } });
+      expect(started.notes?.[0]).toMatch(
+        /^big has the most room, but no account there can start this worker \(.+\); Local is used instead\.$/,
+      );
+      expect(f.calls[0]?.environment).toBeUndefined();
+      // Named, a computer under the minimum is still the one used.
+      const named = yield* assignments.startWorker(
+        workerStart("w2", { environmentId: "full" }),
+        master,
+      );
+      expect(named).toMatchObject({ started: true, computer: { environmentId: "full" } });
+      expect(named.computer?.reason).toBe(
+        "full: named in the request; 1 GiB room (1 free of 31), 12 of 16 CPU threads idle, 0 sessions.",
+      );
+      expect(named.computers).toHaveLength(3);
+      expect(f.calls[1]).toMatchObject({ environment: "full", projectId: "full-project" });
+      // A project this computer does not know cannot be placed; nothing starts.
+      const unknown = yield* Effect.flip(
+        assignments.startWorker(
+          { ...workerStart("w3"), projectId: ProjectId.make("elsewhere") },
+          master,
+        ),
+      );
+      expect(unknown.detail).toContain("Project elsewhere was not found on this computer.");
+      expect(f.calls).toHaveLength(2);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect(
+  "the values behind the choice of computer are stored policy, edited like the others",
+  () => {
+    const f = placementFixture();
+    return Effect.gen(function* () {
+      const { allocation, store } = yield* f.setup;
+      (yield* f.link(allocation))("big", 20, {
+        recentStarts: [{ threadId: ThreadId.make("young"), at: hoursIn(-0.3) }],
+      });
+      const lines = allocation
+        .place({ projectId: ProjectId.make("local-project") })
+        .pipe(Effect.map((placement) => placement.lines));
+      // Seeded: a worker takes 3 GiB, a computer needs 4 GiB, a start settles in 15 minutes.
+      expect(yield* allocation.editPolicy({})).toMatchObject({
+        workerMemoryGiB: 3,
+        minFreeMemoryGiB: 4,
+        startSettleMinutes: 15,
+        sessionReserveGiB: 0.25,
+        memoryKillHoldMinutes: 60,
+      });
+      // The session on the linked computer is 18 minutes old: it shows its memory by now.
+      expect((yield* lines)[1]).toBe(
+        "big: 20 GiB room (20 free of 31), 12 of 16 CPU threads idle, 0 sessions",
+      );
+      const view = yield* allocation.editPolicy({
+        workerMemoryGiB: 6,
+        minFreeMemoryGiB: 12,
+        startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
+      });
+      expect(view).toMatchObject({
+        workerMemoryGiB: 6,
+        minFreeMemoryGiB: 12,
+        startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
+      });
+      // The next choice uses them, with no restart.
+      expect(yield* lines).toEqual([
+        "Local: 10 GiB room (10 free of 16), 12 of 16 CPU threads idle, 0 sessions; under the 12 GiB minimum",
+        "big: 14 GiB room (20 free of 31, less 1 just started at 6 GiB each), 12 of 16 CPU threads idle, 0 sessions",
+      ]);
+      // A save from a build that does not know the values keeps them.
+      const {
+        workerMemoryGiB: _memory,
+        minFreeMemoryGiB: _minimum,
+        startSettleMinutes: _settle,
+        sessionReserveGiB: _reserve,
+        memoryKillHoldMinutes: _hold,
+        ...older
+      } = yield* store.policy;
+      yield* store.savePolicy({ expectedVersion: older.version, policy: older });
+      expect(yield* store.policy).toMatchObject({
+        workerMemoryGiB: 6,
+        minFreeMemoryGiB: 12,
+        startSettleMinutes: 30,
+        sessionReserveGiB: 0.5,
+        memoryKillHoldMinutes: 90,
+      });
+      const invalid = yield* Effect.exit(decodePolicyEdit({ startSettleMinutes: 500 }));
+      expect(Exit.isFailure(invalid)).toBe(true);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  },
+);
+
+it.effect(
+  "a linked computer reports its just-started sessions and its last memory kill over the peer wire",
+  () =>
+    Effect.gen(function* () {
+      const peer = fixture({ localId: "remote", label: "Remote" });
+      peer.state.projects = [checkout("remote-project", "scratch-remote", "repo:example")];
+      // One session there started just now.
+      peer.state.threads = [shell()];
+      const peerContext = yield* Layer.build(peer.layer);
+      yield* peer.setup.pipe(Effect.provide(peerContext));
+      const peerAllocation = Context.get(peerContext, Allocation.ProviderAllocation);
+      const f = fixture({
+        peerCall: (_id, input) =>
+          peerAllocation.receive("local", wire(input)).pipe(
+            Effect.map(wire),
+            Effect.mapError(
+              (e) => new PeerUnavailable({ environmentId: "remote", message: e.message }),
+            ),
+          ),
+      });
+      f.state.peers = [linkedInventory("remote")];
+      f.state.projects = [checkout("local-project", "scratch", "repo:example")];
+      const peerSql = Context.get(peerContext, SqlClient.SqlClient);
+      const failure = (id: string, payload: object) =>
+        peerSql`INSERT INTO projection_thread_activities (activity_id, thread_id, tone, kind, summary, payload_json, created_at) VALUES (${id}, 'worker', 'error', 'runtime.error', '', ${encodeUnknown(payload)}, ${at})`;
+      // An ordinary failure there says nothing about memory.
+      yield* failure("crash", { message: "The provider stopped." });
+      const [placement, afterKill] = yield* Effect.gen(function* () {
+        const { allocation } = yield* f.setup;
+        const place = allocation.place({ projectId: ProjectId.make("local-project") });
+        const before = yield* place;
+        yield* failure("kill", { message: "Killed: out of memory.", code: "oom_kill" });
+        return [before, yield* place] as const;
+      }).pipe(Effect.provide(f.layer));
+      const local = "Local: 10 GiB room (10 free of 16), 12 of 16 CPU threads idle, 0 sessions";
+      const remote =
+        "Remote: 6.8 GiB room (10 free of 16, less 1 just started at 3 GiB each, less 0.25 GiB for each working session), 12 of 16 CPU threads idle, 1 sessions";
+      expect(placement.lines).toEqual([local, remote]);
+      expect(afterKill.lines).toEqual([
+        local,
+        `${remote}; a session was killed for memory 0 min ago`,
+      ]);
+      expect(placement.ranked.map((c) => [c.environmentId, c.projectId])).toEqual([
+        ["local", "local-project"],
+        ["remote", "remote-project"],
+      ]);
+    }).pipe(Effect.scoped),
 );
 
 /** A worker start that has begun on `environmentId` and is not yet confirmed running. */

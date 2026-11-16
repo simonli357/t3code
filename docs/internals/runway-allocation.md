@@ -37,3 +37,22 @@ carries `learnedAt` only from this build, and the coordinator answers only when 
 **A goal ranks, it never refuses.** Daily goals are measured against the meter's total. Stored
 family values (`claude`, `codex`, `other`) are the defaults and are carried through every save,
 including saves from builds that do not know them.
+
+**The master's computer chooses the worker's computer.** A worker start without `environmentId`
+is placed by the requesting server before any account is chosen (`placement.ts`), because accounts
+are judged per computer. Free memory lags a start by minutes, so each computer reports when its
+working sessions were created (`recentStarts` in a placement read), and the requesting server
+also remembers its own placements in memory until that computer reports them. Two masters on
+different computers that start in the same few seconds can still both see the same room; the
+next read corrects it. An account choice is previewed on each candidate before one is reserved:
+a stored decision binds its assignment ID to one computer, so trying a second computer with a
+reserving call would be refused as a conflict. A retry stays on its first computer, from the
+remembered placement or the worker record. A computer on a build without `recentStarts` is not
+chosen automatically, since its starts cannot be counted.
+
+**Free memory at one instant is not room.** One reading of free memory does not show what the sessions already on a computer do, and no
+server samples memory between reads (the Computers page keeps a history only while it is open).
+So room also loses a stored reserve per working session, and a computer whose placement read
+finds a recent `runtime.error` activity with code `oom_kill` ranks after every other one. Only
+Linux records those kills (`agentScope`). Worker memory is a stored value, not
+learned: resource telemetry measures T3's own process tree, not memory per session.

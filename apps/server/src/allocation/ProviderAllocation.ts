@@ -7,6 +7,8 @@ import {
   AllocationRequest,
   ComputerPlacementProbe,
   DEFAULT_LONG_WAIT_HOURS,
+  MAX_MEMORY_KILL_HOLD_MINUTES,
+  MAX_START_SETTLE_MINUTES,
   ModelSelection,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
@@ -22,6 +24,7 @@ import {
   type ComputersRequest,
   type ModelRoutingPolicy,
   type ModelRoutingRequest,
+  type ProjectId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
@@ -47,7 +50,12 @@ import { learnAllocation } from "./learning.ts";
 import { span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
 import { chooseProfile, fableModeAccount, isFable } from "./modelDecision.ts";
-import { computerNumbers } from "./placement.ts";
+import {
+  computerNumbers,
+  placeWorker,
+  type ComputerPlacement,
+  type PlacedStart,
+} from "./placement.ts";
 
 const PeerInput = Schema.TaggedUnion({
   allocation: { operation: AllocationOperation },
@@ -145,6 +153,17 @@ const withLegacyReasons = (request: ModelRoutingRequest): ModelRoutingRequest =>
     : {}),
 });
 
+export interface PlaceInput {
+  readonly projectId?: ProjectId | undefined;
+  readonly environmentId?: string | undefined;
+  /** Said instead of "named in the request". */
+  readonly namedBecause?: string | undefined;
+  /** The worker being placed, so a retry does not count its own first attempt. */
+  readonly threadId?: string | undefined;
+  /** Starts the caller placed that their computers may not report yet. */
+  readonly placed?: ReadonlyArray<PlacedStart> | undefined;
+}
+
 export class ProviderAllocation extends Context.Service<
   ProviderAllocation,
   {
@@ -179,6 +198,12 @@ export class ProviderAllocation extends Context.Service<
     readonly computers: (
       request: ComputersRequest,
     ) => Effect.Effect<ComputersReport, AllocationError>;
+    /**
+     * The computers a new worker may start on, best first by room, from a fresh reading of every
+     * linked computer and the coordinator's stored values. `environmentId` names one instead.
+     * `projectId` is this computer's; each ranked computer carries its own ID for the project.
+     */
+    readonly place: (input: PlaceInput) => Effect.Effect<ComputerPlacement, AllocationError>;
   }
 >()("t3/allocation/ProviderAllocation") {}
 
@@ -429,8 +454,31 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
+    // A session this young may not have taken its memory yet; one still queued has no thread.
+    const startedSince = Date.parse(current.observedAt) - MAX_START_SETTLE_MINUTES * 60_000;
+    const recentStarts = placement
+      ? demand.flatMap((d) => {
+          const at = byThread.get(d.threadId)?.createdAt ?? current.observedAt;
+          return Date.parse(at) >= startedSince ? [{ threadId: d.threadId, at }] : [];
+        })
+      : undefined;
+    // The system killing a session for memory is the plainest sign that this computer is full.
+    // The index is partial: its own kind filter is repeated so SQLite can use it.
+    const lastMemoryKill = placement
+      ? yield* sql<{
+          at: string;
+        }>`SELECT created_at AS at FROM projection_thread_activities INDEXED BY idx_projection_thread_activities_quota_evidence
+          WHERE kind IN ('account.quota-state', 'runtime.error', 'runtime.warning') AND kind = 'runtime.error' AND created_at >= ${DateTime.formatIso(
+            DateTime.makeUnsafe(
+              Date.parse(current.observedAt) - MAX_MEMORY_KILL_HOLD_MINUTES * 60_000,
+            ),
+          )} AND json_extract(payload_json, '$.code') = 'oom_kill'
+          ORDER BY created_at DESC LIMIT 1`
+      : undefined;
     return {
       ...current,
+      ...(recentStarts ? { recentStarts } : {}),
+      ...(lastMemoryKill ? { lastMemoryKillAt: lastMemoryKill[0]?.at ?? null } : {}),
       maxActiveAgentSessions: (yield* settings.getSettings).maxActiveAgentSessions,
       environmentLabel: local.label,
       demand: demand.map((d) => ({
@@ -1164,14 +1212,14 @@ const make = Effect.gen(function* () {
     };
   });
   // Only this computer knows its project IDs; checkouts elsewhere match by repository.
-  const computersReport = Effect.fn("ProviderAllocation.computers")(function* (
-    request: ComputersRequest,
+  const placementRead = Effect.fn("ProviderAllocation.placementRead")(function* (
+    projectId: ProjectId | undefined,
   ) {
     const project =
-      request.projectId === undefined
+      projectId === undefined
         ? undefined
         : (yield* projection.getShellSnapshot().pipe(Effect.mapError(unavailable))).projects.find(
-            ({ id }) => id === request.projectId,
+            ({ id }) => id === projectId,
           );
     const repositoryKey = project?.repositoryIdentity?.canonicalKey;
     const inventories = yield* collect(
@@ -1180,20 +1228,50 @@ const make = Effect.gen(function* () {
       repositoryKey === undefined ? {} : { repositoryKey },
     );
     return {
-      at: yield* now,
-      computers: inventories.map(computerNumbers),
-      notes: [
-        ...(request.projectId !== undefined && !project
-          ? [
-              `Project ${request.projectId} was not found on this computer, so no checkout was matched.`,
-            ]
+      found: project !== undefined,
+      inventories,
+      notes:
+        projectId !== undefined && !project
+          ? [`Project ${projectId} was not found on this computer, so no checkout was matched.`]
           : project && repositoryKey === undefined
             ? [
                 "The project has no repository identity (a Git remote or a projectKey in t3.json), so no checkout was matched.",
               ]
-            : []),
-        ...inventories.flatMap((i) => (i.complete ? [] : i.notices)),
-      ],
+            : [],
+    };
+  });
+  const computersReport = Effect.fn("ProviderAllocation.computers")(function* (
+    request: ComputersRequest,
+  ) {
+    const { inventories, notes } = yield* placementRead(request.projectId);
+    return {
+      at: yield* now,
+      computers: inventories.map(computerNumbers),
+      notes: [...notes, ...inventories.flatMap((i) => (i.complete ? [] : i.notices))],
+    };
+  });
+  const place = Effect.fn("ProviderAllocation.place")(function* (input: PlaceInput) {
+    const [read, { policy }] = yield* Effect.all(
+      [placementRead(input.projectId), policies.pipe(Effect.mapError(unavailable))],
+      { concurrency: "unbounded" },
+    );
+    const placement = placeWorker({
+      at: yield* now,
+      policy,
+      inventories: read.inventories,
+      localEnvironmentId: local.environmentId,
+      ...(input.placed ? { placed: input.placed } : {}),
+      ...(input.projectId === undefined
+        ? {}
+        : { project: { id: input.projectId, found: read.found } }),
+      ...(input.environmentId === undefined ? {} : { named: input.environmentId }),
+      ...(input.namedBecause === undefined ? {} : { namedBecause: input.namedBecause }),
+      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+    });
+    // When the missing project is the refusal, it is not also a note.
+    return {
+      ...placement,
+      notes: [...(placement.refusal && !read.found ? [] : read.notes), ...placement.notes],
     };
   });
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
@@ -1366,6 +1444,11 @@ const make = Effect.gen(function* () {
       accountOrder,
       closeMarginPoints,
       longWaitHours,
+      changes.workerMemoryGiB,
+      changes.minFreeMemoryGiB,
+      changes.startSettleMinutes,
+      changes.sessionReserveGiB,
+      changes.memoryKillHoldMinutes,
       setCaps,
       clearCaps,
       changes.setGoals,
@@ -1420,6 +1503,7 @@ const make = Effect.gen(function* () {
     execute,
     editPolicy,
     computers: computersReport,
+    place,
     receive: Effect.fn("ProviderAllocation.receive")(function* (from, raw) {
       if (Option.isNone(yield* peers.resolve(from)))
         return yield* new AllocationError({

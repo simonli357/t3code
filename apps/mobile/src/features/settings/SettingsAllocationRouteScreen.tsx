@@ -5,6 +5,11 @@ import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
+  DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+  DEFAULT_SESSION_RESERVE_GIB,
+  DEFAULT_MIN_FREE_MEMORY_GIB,
+  DEFAULT_START_SETTLE_MINUTES,
+  DEFAULT_WORKER_MEMORY_GIB,
   EnvironmentId,
   PROVIDER_DISPLAY_NAMES,
   type AllocationPolicy,
@@ -33,6 +38,16 @@ import { SettingsScreen } from "./components/SettingsScreen";
 import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { serverEnvironment } from "../../state/server";
 
+/** The policy's plain numbers, each edited as typed text. */
+type NumberKey =
+  | "closeMarginPoints"
+  | "longWaitHours"
+  | "workerMemoryGiB"
+  | "minFreeMemoryGiB"
+  | "startSettleMinutes"
+  | "sessionReserveGiB"
+  | "memoryKillHoldMinutes";
+
 const commands = createAllocationCommands(connectionAtomRuntime);
 const points = (value: number) => Number(value.toFixed(2)).toString();
 const dollars = (value: number) => `$${Math.round(value).toLocaleString()}`;
@@ -58,11 +73,9 @@ export function SettingsAllocationRouteScreen() {
   // When the accounts were read: reading ages and end times are judged against it.
   const [now, setNow] = useState(0);
 
-  // Unsaved edits: the preference order, and the two numbers as typed.
+  // Unsaved edits: the preference order, and the numbers as typed.
   const [draft, setDraft] = useState<AllocationPolicy | null>(null);
-  const [numbers, setNumbers] = useState<{ closeMarginPoints?: string; longWaitHours?: string }>(
-    {},
-  );
+  const [numbers, setNumbers] = useState<Partial<Record<NumberKey, string>>>({});
   // Daily goals as typed, by account row; blank uses the provider's default.
   const [goals, setGoals] = useState<Record<string, string>>({});
 
@@ -143,23 +156,48 @@ export function SettingsAllocationRouteScreen() {
       help: "A worker that hits a limit waits for a reset within this time; a longer wait changes its model.",
       fallback: DEFAULT_LONG_WAIT_HOURS,
     },
-  ] as const;
+    {
+      key: "workerMemoryGiB",
+      label: "Worker memory (GiB)",
+      help: "What a worker is expected to take once it builds or runs a dev server. Each session that just started takes this much off its computer's free memory when the next worker's computer is chosen.",
+      fallback: DEFAULT_WORKER_MEMORY_GIB,
+    },
+    {
+      key: "minFreeMemoryGiB",
+      label: "Minimum free memory (GiB)",
+      help: "A computer with less room than this gets a new worker only when every computer has less.",
+      fallback: DEFAULT_MIN_FREE_MEMORY_GIB,
+    },
+    {
+      key: "startSettleMinutes",
+      label: "Start settle time (minutes)",
+      help: "How long a started session counts as not showing its memory yet.",
+      fallback: DEFAULT_START_SETTLE_MINUTES,
+    },
+    {
+      key: "sessionReserveGiB",
+      label: "Session reserve (GiB)",
+      help: "Memory kept back for each session already working on a computer, for the builds and dev servers it starts and stops.",
+      fallback: DEFAULT_SESSION_RESERVE_GIB,
+    },
+    {
+      key: "memoryKillHoldMinutes",
+      label: "Memory kill hold (minutes)",
+      help: "After the system killed a session on a computer for lack of memory, that computer gets a new worker only when every other one is in the same state.",
+      fallback: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+    },
+  ] satisfies ReadonlyArray<{ key: NumberKey; label: string; help: string; fallback: number }>;
 
   const save = async () => {
     if (!target || !policy) return;
     const values = numberFields.map((f) => Number(numbers[f.key] ?? policy[f.key] ?? f.fallback));
-    if (
-      numbers.closeMarginPoints === "" ||
-      numbers.longWaitHours === "" ||
-      values.some(Number.isNaN)
-    ) {
-      setMessage("Enter a number for the margin and the long wait.");
+    if (numberFields.some((f) => numbers[f.key] === "") || values.some(Number.isNaN)) {
+      setMessage("Enter a number in every field.");
       return;
     }
     let next: AllocationPolicy = {
       ...policy,
-      closeMarginPoints: values[0]!,
-      longWaitHours: values[1]!,
+      ...Object.fromEntries(numberFields.map((f, index) => [f.key, values[index]!])),
     };
     for (const row of rows) {
       const typed = goals[row.key];

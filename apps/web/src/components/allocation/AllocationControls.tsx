@@ -3,6 +3,13 @@ import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
+  DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+  DEFAULT_SESSION_RESERVE_GIB,
+  MAX_MEMORY_KILL_HOLD_MINUTES,
+  DEFAULT_MIN_FREE_MEMORY_GIB,
+  DEFAULT_START_SETTLE_MINUTES,
+  DEFAULT_WORKER_MEMORY_GIB,
+  MAX_START_SETTLE_MINUTES,
   PROVIDER_DISPLAY_NAMES,
   type AllocationAccountCap,
   type AllocationLearned,
@@ -431,6 +438,58 @@ function AccountRow({
   );
 }
 
+/** The five numbers behind which linked computer a new worker starts on. */
+const COMPUTER_RULES = [
+  {
+    value: "workerMemoryGiB",
+    title: "Worker memory",
+    description:
+      "What a worker is expected to need once it builds or runs. A worker that just started counts this much against its computer.",
+    unit: "GiB",
+    initial: DEFAULT_WORKER_MEMORY_GIB,
+    max: 256,
+    step: 0.5,
+  },
+  {
+    value: "startSettleMinutes",
+    title: "Start settle time",
+    description: "How long a worker that just started counts that way.",
+    unit: "minutes",
+    initial: DEFAULT_START_SETTLE_MINUTES,
+    max: MAX_START_SETTLE_MINUTES,
+    step: 1,
+  },
+  {
+    value: "sessionReserveGiB",
+    title: "Session reserve",
+    description: "Memory kept back for each session already working on a computer.",
+    unit: "GiB",
+    initial: DEFAULT_SESSION_RESERVE_GIB,
+    max: 16,
+    step: 0.05,
+  },
+  {
+    value: "minFreeMemoryGiB",
+    title: "Minimum free memory",
+    description:
+      "A computer with less room than this gets a new worker only when every computer has less.",
+    unit: "GiB",
+    initial: DEFAULT_MIN_FREE_MEMORY_GIB,
+    max: 256,
+    step: 0.5,
+  },
+  {
+    value: "memoryKillHoldMinutes",
+    title: "Memory kill hold",
+    description:
+      "After the system stops a session for lack of memory, that computer comes last for this long.",
+    unit: "minutes",
+    initial: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+    max: MAX_MEMORY_KILL_HOLD_MINUTES,
+    step: 1,
+  },
+] as const;
+
 /** One setting of the rules: its name, one line on what it does, and its control. */
 function Rule(props: { title: string; description: string; failed: boolean; children: ReactNode }) {
   return (
@@ -712,6 +771,31 @@ export function AllocationControls({
             onCheckedChange={(fableWorkers) => onEdit((current) => ({ ...current, fableWorkers }))}
           />
         </Rule>
+      </SettingsSection>
+      <SettingsSection title="Computer for a new worker">
+        {COMPUTER_RULES.map((rule) => (
+          <Rule
+            key={rule.value}
+            title={rule.title}
+            description={rule.description}
+            failed={notSaved.has(rule.value)}
+          >
+            <NumberField
+              name={rule.title}
+              unit={rule.unit}
+              value={policy[rule.value] ?? rule.initial}
+              required
+              min={0}
+              max={rule.max}
+              step={rule.step}
+              disabled={rulesDisabled}
+              onChange={(value = Number.NaN) =>
+                onEdit((current) => ({ ...current, [rule.value]: value }), TYPING_PAUSE)
+              }
+              onCommit={onFlush}
+            />
+          </Rule>
+        ))}
       </SettingsSection>
       <FoldedSettingsSection
         id="allocation-learned"

@@ -321,6 +321,35 @@ describe("Provider allocation editor", () => {
     await pass();
     expect(saved.policy.longWaitHours).toBe(5.5);
   });
+  it("stores the five numbers behind the choice of computer, and never one out of range", async () => {
+    const saved = savePolicies();
+    const values = {
+      "Worker memory": ["workerMemoryGiB", "4.5"],
+      "Start settle time": ["startSettleMinutes", "20"],
+      "Session reserve": ["sessionReserveGiB", "0.5"],
+      "Minimum free memory": ["minFreeMemoryGiB", "6"],
+      "Memory kill hold": ["memoryKillHoldMinutes", "90"],
+    } as const;
+    expect(
+      [...section("Computer for a new worker").querySelectorAll("h3")].map((h) => h.textContent),
+    ).toEqual(Object.keys(values));
+    for (const [name, [, value]] of Object.entries(values)) await change(name, value);
+    await pass(1000);
+    expect(saves()).toHaveLength(1);
+    expect(saved.policy).toMatchObject({
+      version: 5,
+      workerMemoryGiB: 4.5,
+      startSettleMinutes: 20,
+      sessionReserveGiB: 0.5,
+      minFreeMemoryGiB: 6,
+      memoryKillHoldMinutes: 90,
+    });
+    await change("Session reserve", "17");
+    await pass(1000);
+    expect(alert()?.textContent).toContain("Session reserve must be a number from 0 to 16.");
+    expect(section("Computer for a new worker").textContent).toContain("Not saved");
+    expect(saved.policy).toMatchObject({ version: 5, sessionReserveGiB: 0.5 });
+  });
   it("stores a move in the order at once and lists the accounts in that order", async () => {
     const saved = savePolicies(two);
     await act(() => button("Refresh").click());
