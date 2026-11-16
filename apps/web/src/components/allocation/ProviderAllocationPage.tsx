@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   EnvironmentId,
+  MAX_START_SETTLE_MINUTES,
   ProjectId,
   ProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
@@ -183,6 +184,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
     policy.version === snapshot?.policy.version &&
     inRange(policy.closeMarginPoints, 50) &&
     inRange(policy.longWaitHours, 168) &&
+    inRange(policy.workerMemoryGiB, 256) &&
+    inRange(policy.minFreeMemoryGiB, 256) &&
+    inRange(policy.startSettleMinutes, MAX_START_SETTLE_MINUTES) &&
     (policy.accountCaps ?? []).every(
       (cap) => inRange(cap.weeklyPercent, 100) && inRange(cap.fiveHourPercent, 100),
     );

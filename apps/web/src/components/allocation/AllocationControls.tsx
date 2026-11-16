@@ -3,6 +3,10 @@ import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
+  DEFAULT_MIN_FREE_MEMORY_GIB,
+  DEFAULT_START_SETTLE_MINUTES,
+  DEFAULT_WORKER_MEMORY_GIB,
+  MAX_START_SETTLE_MINUTES,
   PROVIDER_DISPLAY_NAMES,
   type AllocationAccountCap,
   type AllocationLearned,
@@ -558,6 +562,56 @@ export function AllocationControls({
             <span className="text-xs text-muted-foreground">
               A running worker that hits a limit waits for a reset this near; later than this, it
               moves to the closest model.
+            </span>
+          </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <NumberField
+              name="Worker memory"
+              caption="Worker memory (GiB)"
+              value={policy.workerMemoryGiB ?? DEFAULT_WORKER_MEMORY_GIB}
+              required
+              min={0}
+              max={256}
+              step={0.5}
+              disabled={orderDisabled}
+              onChange={(value = Number.NaN) => onChange({ ...policy, workerMemoryGiB: value })}
+            />
+            <span className="text-xs text-muted-foreground">
+              What a worker is expected to take once it builds or runs a dev server. Each session
+              that just started takes this much off its computer&apos;s free memory when the next
+              worker&apos;s computer is chosen.
+            </span>
+          </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <NumberField
+              name="Minimum free memory"
+              caption="Minimum free memory (GiB)"
+              value={policy.minFreeMemoryGiB ?? DEFAULT_MIN_FREE_MEMORY_GIB}
+              required
+              min={0}
+              max={256}
+              step={0.5}
+              disabled={orderDisabled}
+              onChange={(value = Number.NaN) => onChange({ ...policy, minFreeMemoryGiB: value })}
+            />
+            <span className="text-xs text-muted-foreground">
+              A computer with less room than this gets a new worker only when every computer has
+              less.
+            </span>
+          </div>
+          <div className="grid min-w-0 content-start gap-1">
+            <NumberField
+              name="Start settle time"
+              caption="Start settle time (minutes)"
+              value={policy.startSettleMinutes ?? DEFAULT_START_SETTLE_MINUTES}
+              required
+              min={0}
+              max={MAX_START_SETTLE_MINUTES}
+              disabled={orderDisabled}
+              onChange={(value = Number.NaN) => onChange({ ...policy, startSettleMinutes: value })}
+            />
+            <span className="text-xs text-muted-foreground">
+              How long a started session counts as not showing its memory yet.
             </span>
           </div>
           <div className="grid min-w-0 content-start gap-1">
