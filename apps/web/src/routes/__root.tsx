@@ -83,6 +83,12 @@ import {
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
+import {
+  hasUnsavedInput,
+  readReloadedForServerVersion,
+  reloadForServerVersion,
+  resolveStaleClient,
+} from "../lib/staleClientReload";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -176,6 +182,7 @@ function RootRouteView() {
       <ToastProvider>
         <AnchoredToastProvider>
           <DocumentTitleSync />
+          <StaleClientReload />
           <ContrastAppearanceSync />
           <EnvironmentThemeSync />
           <GlassAppearanceSync />
@@ -219,6 +226,7 @@ function RootRouteView() {
     <ToastProvider>
       <AnchoredToastProvider>
         <DocumentTitleSync />
+        <StaleClientReload />
         <ContrastAppearanceSync />
         <EnvironmentThemeSync />
         <GlassAppearanceSync />
@@ -350,6 +358,58 @@ function DocumentTitleSync() {
   useEffect(() => {
     document.title = title;
   }, [title]);
+
+  return null;
+}
+
+/**
+ * Loads the new client once the server this window was loaded from runs a
+ * different build. Reloads at once when nothing is lost; otherwise shows one
+ * prompt and reloads as soon as the dialog or focused field is gone.
+ */
+function StaleClientReload() {
+  const ownServerVersion =
+    useAtomValue(primaryServerConfigAtom)?.environment.serverVersion ?? null;
+
+  useEffect(() => {
+    const decide = (unsavedInput: boolean) =>
+      resolveStaleClient({
+        clientVersion: APP_VERSION,
+        ownServerVersion,
+        servedByOwnServer: !import.meta.env.DEV && !isElectron,
+        reloadedForServerVersion: readReloadedForServerVersion(),
+        unsavedInput,
+      });
+    if (ownServerVersion === null || decide(false) === "current") return;
+
+    const reload = () => {
+      if (!reloadForServerVersion(ownServerVersion)) window.location.reload();
+    };
+    let promptToastId: ReturnType<typeof toastManager.add> | null = null;
+    const check = () => {
+      const decision = decide(hasUnsavedInput());
+      if (decision === "current") return;
+      if (decision === "reload" && reloadForServerVersion(ownServerVersion)) return;
+      promptToastId ??= toastManager.add({
+        type: "info",
+        title: "New version available",
+        timeout: 0,
+        actionProps: { children: "Reload", onClick: reload },
+      });
+    };
+    // Focus has not settled on the next element while focusout is dispatched.
+    const checkAfterFocusSettles = () => window.setTimeout(check, 0);
+    check();
+    document.addEventListener("focusin", check);
+    document.addEventListener("focusout", checkAfterFocusSettles);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      document.removeEventListener("focusin", check);
+      document.removeEventListener("focusout", checkAfterFocusSettles);
+      document.removeEventListener("visibilitychange", check);
+      if (promptToastId !== null) toastManager.close(promptToastId);
+    };
+  }, [ownServerVersion]);
 
   return null;
 }
