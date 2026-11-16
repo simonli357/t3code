@@ -51,7 +51,7 @@ const dollars = (value: number) =>
   `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
 /** One row of columns for the heading and every account, once the list is wide enough. */
 const columns =
-  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,1.4fr)_6rem_4.75rem_4.75rem_13rem] @min-[64rem]/accounts:gap-x-4";
+  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,2fr)_6rem_4.5rem_4.5rem_12rem] @min-[64rem]/accounts:gap-x-3";
 /** A control's name, where the heading row is not shown. */
 const caption = "text-xs text-muted-foreground @min-[64rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
@@ -206,7 +206,7 @@ function AccountRow({
         columns,
       )}
     >
-      <div className="flex w-64 max-w-full flex-none items-center gap-3 @min-[64rem]/accounts:contents">
+      <div className="flex max-w-80 min-w-0 flex-1 basis-56 items-center gap-3 @min-[64rem]/accounts:contents">
         <div
           className={cn(
             "h-7 shrink-0 items-center gap-1",
@@ -253,7 +253,7 @@ function AccountRow({
           {place && notSaved.has("accountOrder") && unsaved}
         </div>
       </div>
-      <div className="grid min-w-0 flex-1 basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
+      <div className="grid min-w-0 flex-[2] basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
         {row.windows.map((window) => (
           <Hinted
             key={window.id}
@@ -673,6 +673,13 @@ export function AllocationControls({
       />
     </Rule>
   );
+  // A settings computer that has measured nothing yet still sends its learned numbers, empty.
+  const learned =
+    snapshot?.learned &&
+    snapshot.learned.costs.length + snapshot.learned.limits.length + snapshot.learned.notes.length >
+      0
+      ? snapshot.learned
+      : null;
   return (
     <>
       <div className="@container/accounts grid min-w-0 grid-cols-1 gap-2.5">
@@ -802,13 +809,13 @@ export function AllocationControls({
         id="allocation-learned"
         title="Learned numbers"
         summary={
-          snapshot?.learned
-            ? `measured ${allocationReadingAge(snapshot.learned.learnedAt, now)} ago`
+          learned
+            ? `measured ${allocationReadingAge(learned.learnedAt, now)} ago`
             : "nothing measured yet"
         }
       >
-        {snapshot?.learned ? (
-          <LearnedNumbers learned={snapshot.learned} />
+        {learned ? (
+          <LearnedNumbers learned={learned} />
         ) : (
           <p className={cn(ITEM_ROW_CLASSNAME, "text-sm text-muted-foreground")}>
             Nothing measured yet.

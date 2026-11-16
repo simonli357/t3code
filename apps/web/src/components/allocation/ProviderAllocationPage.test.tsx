@@ -845,6 +845,47 @@ describe("Provider allocation editor", () => {
       }
     },
   );
+  it("lists what was measured under Learned numbers, and says so when nothing was", async () => {
+    const learned = {
+      learnedAt: "2026-10-23T11:00:00.000Z",
+      costs: [],
+      limits: [],
+      workerHours: null,
+      notes: [],
+    };
+    // A settings computer that has measured nothing still sends the numbers, empty.
+    await read({ ...snapshot, learned });
+    expect(section("Learned numbers").textContent).toContain("nothing measured yet");
+    await open("Learned numbers");
+    expect(section("Learned numbers").textContent).toContain("Nothing measured yet.");
+    await read({
+      ...snapshot,
+      learned: {
+        ...learned,
+        limits: [
+          {
+            key: "claude:max",
+            label: "Max",
+            driver: ProviderDriverKind.make("claudeAgent"),
+            windowId: "weekly",
+            windowLabel: "Weekly",
+            plan: "20x",
+            percentPerDollar: 0.1,
+            backgroundPercentPerHour: 0.5,
+            samples: 12,
+            hours: 30,
+            source: "measured" as const,
+          },
+        ],
+      },
+    });
+    const text = section("Learned numbers").textContent;
+    expect(text).toContain("measured");
+    expect(text).not.toContain("othing measured yet");
+    expect(text).toContain("Max 20x · Weekly");
+    expect(text).toContain("holds about $1,000, outside use 0.5% an hour");
+    expect(text).toContain("12 reading pairs over 30 h");
+  });
   it("keeps the rest behind closed sections, without draft buttons or internal wording", async () => {
     expect(
       [...container.querySelectorAll("button[aria-expanded]")].map((fold) => fold.textContent),
