@@ -9,7 +9,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { beforeEach, afterEach, expect, it, vi } from "vite-plus/test";
+import { beforeAll, beforeEach, afterEach, expect, it, vi } from "vite-plus/test";
 import {
   defaultAllocationPolicy,
   defaultModelRoutingPolicy,
@@ -80,9 +80,20 @@ vi.mock("../WorkspacePageHeader", () => ({
 vi.mock("../sidebar/mainAppLocation", () => ({ useNavigateToMainApp: () => vi.fn() }));
 vi.mock("../../hooks/useNavigateBack", () => ({ useEscapeToGoBack: vi.fn() }));
 vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("./settingsLayout", async (original) => ({
-  ...(await original<typeof import("./settingsLayout")>()),
+vi.mock("../../state/server", () => ({
+  serverEnvironment: { updateSettings: { label: "updateSettings" } },
+}));
+vi.mock("./settingsLayout", () => ({
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <section>{children}</section>,
+  SettingsSection: (props: { title: string; headerAction?: ReactNode; children: ReactNode }) => (
+    <section aria-label={props.title}>
+      {props.headerAction}
+      {props.children}
+    </section>
+  ),
+}));
+vi.mock("./FoldedSettingsSection", () => ({
+  FoldedSettingsSection: (props: { title: string }) => <section aria-label={props.title} />,
 }));
 
 import { Route as Settings } from "../../routes/settings";
@@ -207,8 +218,16 @@ function holdRead() {
   });
   return () => release();
 }
+// Each route's component is its own lazily loaded chunk. Loading them here keeps that out of a
+// case's time: on a busy computer the first load alone can take longer than a case may.
+beforeAll(
+  () =>
+    Promise.all(
+      [Settings, Allocation, Models].map((route) => route.options.component?.preload?.()),
+    ),
+  180_000,
+);
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("scrollTo", vi.fn());
   state.environments = ["host", "peer"].map((environmentId) => ({
@@ -308,14 +327,20 @@ async function mount(page: "allocation" | "model-selection") {
     history: createMemoryHistory({ initialEntries: [`${path}?machine=host`] }),
     defaultPendingMinMs: 0,
   });
+  // The router loads on real timers; only the pages' own pauses are stepped through.
+  const pauses = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   await act(async () => {
     await router.load();
     root.render(<RouterProvider router={router} />);
   });
-  return (machine: string) =>
-    act(async () => {
+  pauses();
+  return async (machine: string) => {
+    vi.useRealTimers();
+    await act(async () => {
       await router.navigate({ to: path, search: { machine } });
     });
+    pauses();
+  };
 }
 
 it("allocation: a typed number and a switch survive a disconnect and reconnect, and stay with their computer", async () => {
