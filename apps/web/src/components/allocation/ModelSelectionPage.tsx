@@ -264,7 +264,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         receive(response.value.modelSnapshot, connectionState.epoch);
       else {
         setFailedEpoch(connectionState.epoch);
-        setMessage("The saved table could not be read. Reconnect and refresh.");
+        setMessage("The saved table could not be read. Refresh to try again.");
       }
     });
     return () => {
@@ -303,7 +303,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       {!loadingTable && connection !== "connected" && (
         <p role="status" className="text-sm text-muted-foreground">
           {policy
-            ? "Not connected: showing the last known table. It can be changed once this computer reconnects."
+            ? "Not connected: showing the last known table."
             : "Not connected. The table appears once this computer connects."}
         </p>
       )}
@@ -360,7 +360,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         title="Model by difficulty and stakes"
         headerAction={
           <div className="flex items-center gap-2">
-            <SaveState phase={loadingTable ? "loading" : draft.phase} />
+            <SaveState
+              phase={
+                loadingTable ? "loading" : connection !== "connected" ? "offline" : draft.phase
+              }
+            />
             <Button
               size="xs"
               variant="outline"
@@ -395,7 +399,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               </Button>
             ))}
           </div>
-          {policy ? (
+          {policy && (
             <div
               role="tabpanel"
               aria-label={`${modelDriverLabel(driver)} table`}
@@ -430,14 +434,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               />
               <ModelRoutingLegend driver={driver} policy={policy} />
             </div>
-          ) : (
-            !loadingTable && (
-              <p className="text-sm text-muted-foreground">
-                {connection === "connected"
-                  ? "The saved table could not be read. Refresh to try again."
-                  : "The saved table has not loaded."}
-              </p>
-            )
           )}
         </div>
       </SettingsSection>

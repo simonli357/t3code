@@ -350,9 +350,7 @@ function AccountRow({
           }
           onCommit={onFlush}
         />
-        {row.goal && !row.goal.own && (
-          <div className="text-xs text-muted-foreground">provider default</div>
-        )}
+        {row.goal && !row.goal.own && <div className="text-xs text-muted-foreground">default</div>}
         {failed("goal") && unsaved}
       </div>
       <div className="grid min-w-0 content-start gap-1 text-xs">
@@ -393,7 +391,8 @@ function AccountRow({
               )}
             </div>
             {capEnabled && (
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-muted-foreground">Stops</span>
                 {(
                   [
                     { key: "stopWorkers", who: "workers" },
@@ -566,6 +565,12 @@ export function AllocationControls({
   const others = rows.filter((row) => row.other);
   const ordered = allocationAccountOrder(usable, policy);
   const rulesDisabled = disabled || snapshot?.accountOrderSupported !== true;
+  // Every computer that answered sends the same standing notes on how limits are read; what
+  // is worth a line here is what could not be read.
+  const standing = new Set(
+    snapshot?.inventories.flatMap((inventory) => (inventory.complete ? inventory.notices : [])),
+  );
+  const unread = [...new Set(snapshot?.notices)].filter((note) => !standing.has(note));
   const account = (row: AllocationAccountRow, index?: number) => (
     <AccountRow
       key={row.key}
@@ -637,8 +642,10 @@ export function AllocationControls({
               be edited.
             </p>
           )}
-          {[...new Set(snapshot?.notices)].map((note) => (
-            <p key={note}>{note}</p>
+          {unread.map((note) => (
+            <p key={note} className="text-warning-foreground">
+              {note}
+            </p>
           ))}
         </div>
         {others.length > 0 && (
