@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Linking,
   Pressable,
@@ -23,6 +23,7 @@ import {
   type ModelRoutingDecision,
   type ModelRoutingPolicy,
   workerChoice,
+  workerChoiceRequest,
 } from "@t3tools/contracts";
 import {
   MODEL_DRIVERS,
@@ -100,18 +101,24 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
   const [snapshot, setSnapshot] = useState<ModelRoutingSnapshot | null>(null);
   const [snapshotEpoch, setSnapshotEpoch] = useState<number | null>(null);
+  const [failedEpoch, setFailedEpoch] = useState<number | null>(null);
+  // What every computer reports arrives after the saved table; the last known list stays offline.
+  const [inventories, setInventories] = useState<ModelRoutingSnapshot["inventories"]>([]);
+  const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
+  const accountsRead = useRef(0);
   const [draft, setDraft] = useState<ModelDraft>(emptyModelDraft);
-  const [driver, setDriver] = useState<ModelDriver>("codex");
+  const [driver, setDriver] = useState<ModelDriver>("claudeAgent");
   const [selected, setSelected] = useState<ModelCellPosition | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [alternativeOpen, setAlternativeOpen] = useState(false);
-  const [testOpen, setTestOpen] = useState(false);
+  const [taskOpen, setTaskOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [warnings, setWarnings] = useState<readonly string[]>([]);
   const [rung, setRung] = useState({ model: "", effort: "" });
-  const [assessment, setAssessment] = useState({ difficulty: NaN, stakes: NaN });
+  // Blank is NaN. The task is tried as an agent's start would be, on the table shown.
+  const [task, setTask] = useState({ difficulty: NaN, stakes: NaN, hours: NaN });
   const [preview, setPreview] = useState<{ key: string; decision: ModelRoutingDecision } | null>(
     null,
   );
@@ -131,15 +138,15 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     return () => cancelAnimationFrame(frame);
   }, [selected]);
   const policy = draft.policy;
-  const request: ModelRoutingRequest = {
-    selection: "automatic",
+  const request = workerChoiceRequest({
+    difficulty: task.difficulty,
+    stakes: task.stakes,
+    ...(Number.isFinite(task.hours) ? { hours: task.hours } : {}),
+    environmentId,
+    driver: ProviderDriverKind.make(driver),
     assignmentId: "mobile-model-preview",
     threadId: ThreadId.make("mobile-model-preview"),
-    environmentId,
-    allowedDrivers: [ProviderDriverKind.make(driver)],
-    assessment,
-    ...(snapshot ? { policyVersion: snapshot.policy.version } : {}),
-  };
+  });
   const key = modelPreviewKey(
     policy ?? defaultModelRoutingPolicy,
     request,
@@ -155,10 +162,22 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     snapshot?.authorityAvailable &&
     connection === "connected" &&
     snapshotEpoch === connectionState.epoch;
+  // Only a real disconnection or a failed read is reported as one; until then it is loading.
+  const loadingTable =
+    connection === "connecting" ||
+    (connection === "connected" &&
+      snapshotEpoch !== connectionState.epoch &&
+      failedEpoch !== connectionState.epoch);
+  const loadingAccounts =
+    accounts === "loading" && (connection === "connected" || connection === "connecting");
+  const accountLabel = (host: string, instanceId: string) =>
+    inventories
+      .find((i) => i.environmentId === host)
+      ?.accounts.find((a) => a.instanceId === instanceId)?.label ?? instanceId;
   const editorUrl = modelEditorUrl(target?.displayUrl ?? null, environmentId);
   const catalog = useMemo(
-    () => modelCatalog(snapshot?.inventories ?? [], environmentId, driver),
-    [snapshot, environmentId, driver],
+    () => modelCatalog(inventories, environmentId, driver),
+    [inventories, environmentId, driver],
   );
   const {
     dirty,
@@ -168,6 +187,20 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   } = useMemo(() => summarizeModelDraft(draft), [draft]);
   const at = (p: ModelDraft["policy"]) =>
     p && selected ? modelCell(p, driver, selected.difficulty, selected.stakes) : null;
+  /** The accounts every computer reports; a slow computer delays only these. */
+  const readAccounts = useCallback(async () => {
+    const read = ++accountsRead.current;
+    setAccounts("loading");
+    const result = await execute({
+      environmentId,
+      input: { _tag: "modelSnapshot", part: "accounts" },
+    });
+    if (read !== accountsRead.current) return;
+    if (result._tag === "Success" && result.value.modelSnapshot) {
+      setInventories(result.value.modelSnapshot.inventories);
+      setAccounts("loaded");
+    } else setAccounts("failed");
+  }, [environmentId, execute]);
   useEffect(() => {
     let active = true;
     const epoch = ++generation.current;
@@ -179,7 +212,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         return;
       }
       setBusy(true);
-      const result = await execute({ environmentId, input: { _tag: "modelSnapshot" } });
+      void readAccounts();
+      const result = await execute({
+        environmentId,
+        input: { _tag: "modelSnapshot", part: "settings" },
+      });
       if (!active || epoch !== generation.current) return;
       setBusy(false);
       if (result._tag === "Success" && result.value.modelSnapshot) {
@@ -188,13 +225,16 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         setSnapshotEpoch(connectionState.epoch);
         setDraft((current) => receiveSavedModelPolicy(current, next.policy));
         setMessage("");
-      } else setMessage("Coordinator unavailable. Reconnect and refresh; your changes are kept.");
+      } else {
+        setFailedEpoch(connectionState.epoch);
+        setMessage("Coordinator unavailable. Reconnect and refresh; your changes are kept.");
+      }
     });
     return () => {
       active = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch]);
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts]);
   const call = async (input: AllocationOperation, keepMessage = false) => {
     const epoch = generation.current;
     setBusy(true);
@@ -217,7 +257,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const refresh = async (keepMessage = false) => {
     const epoch = ++generation.current;
     setPreview(null);
-    const result = await call({ _tag: "modelSnapshot" }, keepMessage);
+    const result = await call({ _tag: "modelSnapshot", part: "settings" }, keepMessage);
     if (epoch !== generation.current || !result?.modelSnapshot) return;
     const next = result.modelSnapshot;
     setSnapshot(next);
@@ -271,15 +311,41 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         </Text>
       ))}
       <Text className="text-foreground-muted">
-        {draft.saved ? `Saved version ${draft.saved.version}` : "Saved table not loaded"} ·{" "}
-        {ready
-          ? "Coordinator connected"
-          : "Coordinator not connected: showing the last known table"}{" "}
-        ·{" "}
-        {dirty
-          ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
-          : "No unsaved changes"}
+        {[
+          draft.saved
+            ? `Saved version ${draft.saved.version}`
+            : loadingTable
+              ? "Loading the saved table…"
+              : "Saved table not loaded",
+          ready
+            ? "Coordinator connected"
+            : loadingTable
+              ? null
+              : connection !== "connected"
+                ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
+                : `Coordinator unavailable${draft.saved ? ": showing the last known table" : ""}`,
+          draft.saved
+            ? dirty
+              ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
+              : "No unsaved changes"
+            : null,
+          loadingAccounts
+            ? "Loading accounts…"
+            : accounts === "failed"
+              ? "Accounts not read"
+              : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
       </Text>
+      <Action
+        label="Refresh"
+        onPress={() => {
+          void readAccounts();
+          void refresh();
+        }}
+        disabled={busy || connection !== "connected"}
+      />
       {stale && draft.saved && draft.baseline && (
         <View className="gap-2 rounded border border-warning-border p-3">
           <Text className="text-warning-foreground">
@@ -331,6 +397,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               catalog={catalog}
               alternativeOpen={alternativeOpen}
               onAlternativeOpen={setAlternativeOpen}
+              loadingAccounts={loadingAccounts}
               pendingModel={pendingModel}
               onPendingModel={setPendingModel}
               onChange={(cell) => {
@@ -508,40 +575,48 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             </>
           )}
         </>
-      ) : (
+      ) : loadingTable ? null : (
         <Text className="text-foreground-muted">
-          The saved table has not loaded. Connect to this environment to view and edit it.
+          {connection === "connected"
+            ? "The saved table could not be read. Refresh to try again."
+            : "The saved table has not loaded. Connect to this environment to view and edit it."}
         </Text>
       )}
       <Action
-        label={testOpen ? "Hide: Test an assignment" : "Test an assignment"}
-        onPress={() => setTestOpen(!testOpen)}
+        label={taskOpen ? "Hide: Try a task" : "Try a task"}
+        onPress={() => setTaskOpen(!taskOpen)}
       />
-      {testOpen && (
+      {taskOpen && (
         <View className="gap-3">
-          <Text>{MODEL_SCORING_RUBRIC}</Text>
-          {(["difficulty", "stakes"] as const).map((axis) => (
-            <View key={axis} className="gap-2">
-              <Text>{axis}</Text>
+          <Text className="text-foreground-muted">{MODEL_SCORING_RUBRIC}</Text>
+          {(
+            [
+              ["difficulty", "Difficulty (0–10)"],
+              ["stakes", "Stakes (0–10)"],
+              ["hours", "Job length (hours)"],
+            ] as const
+          ).map(([name, caption]) => (
+            <View key={name} className="gap-2">
+              <Text>{caption}</Text>
               <TextInput
-                accessibilityLabel={`${axis} score`}
+                accessibilityLabel={caption}
                 className={field}
-                keyboardType="number-pad"
-                value={Number.isFinite(assessment[axis]) ? String(assessment[axis]) : ""}
-                onChangeText={(value) =>
-                  setAssessment({ ...assessment, [axis]: value ? Number(value) : NaN })
-                }
+                keyboardType={name === "hours" ? "decimal-pad" : "number-pad"}
+                value={Number.isFinite(task[name]) ? String(task[name]) : ""}
+                onChangeText={(value) => setTask({ ...task, [name]: value ? Number(value) : NaN })}
               />
             </View>
           ))}
           <Action
-            label="Preview exact selection"
+            label="Try"
             onPress={() => {
               if (!policy) return;
               try {
                 decodeRequest(request);
               } catch {
-                setMessage("Use integer scores 0–10.");
+                setMessage(
+                  "Give difficulty and stakes as whole numbers from 0 to 10, and a job length of up to 168 hours.",
+                );
                 return;
               }
               const captured = key;
@@ -551,26 +626,17 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             }}
             disabled={busy || !ready}
           />
-          {choice ? (
+          {choice && (
             <View className="gap-2">
               <Text>
                 {choice.chosen
-                  ? `${choice.chosen.model} / ${choice.chosen.effort ?? "default"}${
-                      choice.wanted ? ` (wanted ${choice.wanted})` : ""
-                    }`
+                  ? `${accountLabel(environmentId, choice.chosen.instanceId)} · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
                   : choice.state === "drained"
                     ? `Used up until ${choice.drainedUntil ? new Date(choice.drainedUntil).toLocaleString() : "an unknown reset"}`
                     : "No account can run it"}
               </Text>
               <Text>{choice.reason}</Text>
-              {choice.accounts.map((line) => (
-                <Text key={line} className="text-foreground-muted">
-                  {line}
-                </Text>
-              ))}
             </View>
-          ) : (
-            <Text>Preview again after table, assessment or connection changes.</Text>
           )}
         </View>
       )}
@@ -579,21 +645,35 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         onPress={() => setHistoryOpen(!historyOpen)}
       />
       {historyOpen &&
-        snapshot?.history.slice(0, 10).map((d) => (
-          <View key={d.request.assignmentId} className="gap-2">
-            <Text>
-              Version {d.policyVersion}; {d.allocation?.decision.request.model ?? "unavailable"}
-            </Text>
-            <Text>
-              Difficulty {d.request.assessment.difficulty} · stakes {d.request.assessment.stakes}
-            </Text>
-          </View>
+        (snapshot?.history.length ? (
+          snapshot.history.slice(0, 10).map((d) => {
+            const decided = workerChoice(d);
+            return (
+              <View key={`${d.at}:${d.request.assignmentId}`} className="gap-1">
+                <Text className="font-t3-medium">
+                  {new Date(d.at).toLocaleString()} · difficulty {d.request.assessment.difficulty} ·
+                  stakes {d.request.assessment.stakes}
+                </Text>
+                <Text>
+                  {decided.chosen
+                    ? `${accountLabel(d.request.environmentId, decided.chosen.instanceId)} · ${decided.chosen.model} / ${decided.chosen.effort ?? "default"}`
+                    : decided.state === "drained"
+                      ? "Drained: nothing started"
+                      : "No account: nothing started"}
+                </Text>
+                {d.reasons.map((reason) => (
+                  <Text key={reason} className="text-foreground-muted">
+                    {reason}
+                  </Text>
+                ))}
+              </View>
+            );
+          })
+        ) : (
+          <Text className="text-foreground-muted">No decisions recorded yet.</Text>
         ))}
-      <Action label="Refresh saved version" onPress={() => void refresh()} disabled={busy} />
       <Text className="text-foreground-muted">
-        Table edits and tests use the same coordinator as web and desktop. New human-session
-        startup, reassessments, version reverts and the raw policy are in the web editor. Agents use
-        the shared managed startup service and read the same saved table.
+        Earlier saved versions can be restored in the web editor.
       </Text>
       {editorUrl ? (
         <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(editorUrl)}>
