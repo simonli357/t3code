@@ -19,20 +19,15 @@ import {
 import { modelCell, setModelCell } from "@t3tools/client-runtime/state/model-routing";
 const state = vi.hoisted(() => ({
   execute: vi.fn(),
-  start: vi.fn(),
-  navigate: vi.fn(),
   phase: "connected",
   connectionListeners: new Set<() => void>(),
 }));
 vi.mock("../../connection/runtime", () => ({ connectionAtomRuntime: {} }));
 vi.mock("@t3tools/client-runtime/state/provider-allocation", async (original) => ({
   ...(await original<typeof import("@t3tools/client-runtime/state/provider-allocation")>()),
-  createAllocationCommands: () => ({ execute: { label: "execute" }, start: { label: "start" } }),
+  createAllocationCommands: () => ({ execute: { label: "execute" } }),
 }));
-vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: { label: string }) =>
-    command.label === "start" ? state.start : state.execute,
-}));
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.execute }));
 vi.mock("../../state/environments", async () => {
   const { useSyncExternalStore } = await import("react");
   return {
@@ -49,10 +44,6 @@ vi.mock("../../state/environments", async () => {
     }),
   };
 });
-vi.mock("../../state/entities", () => ({
-  useProjects: () => [{ id: "project", title: "Project", environmentId: "host" }],
-}));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 import { ModelSelectionPage } from "./ModelSelectionPage";
 
 let snapshot: ModelRoutingSnapshot;
@@ -148,7 +139,6 @@ beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   state.phase = "connected";
   state.execute.mockReset();
-  state.start.mockReset();
   snapshot = {
     policy: { ...defaultModelRoutingPolicy, version: 3 },
     policies: [{ ...defaultModelRoutingPolicy, version: 2 }],
@@ -176,8 +166,21 @@ beforeEach(async () => {
     ],
   };
   state.execute.mockImplementation(async ({ input }: { input: AllocationOperation }) => {
-    if (input._tag === "modelSnapshot")
-      return { _tag: "Success", value: { modelSnapshot: structuredClone(snapshot) } };
+    if (input._tag === "modelSnapshot") {
+      // Each half carries only its own fields, as the server sends them.
+      const whole = structuredClone(snapshot);
+      return {
+        _tag: "Success",
+        value: {
+          modelSnapshot:
+            input.part === "settings"
+              ? { ...whole, inventories: [] }
+              : input.part === "accounts"
+                ? { ...whole, policies: [], history: [] }
+                : whole,
+        },
+      };
+    }
     if (input._tag === "modelPreview")
       return {
         _tag: "Success",
@@ -211,6 +214,8 @@ beforeEach(async () => {
   document.body.append(container);
   root = createRoot(container);
   await render();
+  // The page opens on Claude; most cases below edit the Codex table.
+  await click("Codex");
 });
 afterEach(async () => {
   await act(async () => root.unmount());
@@ -218,17 +223,33 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 async function assess() {
-  await open("Test an assignment");
-  await change("Difficulty score", "0");
-  await change("Stakes score", "0");
+  await open("Try a task");
+  await change("Difficulty", "0");
+  await change("Stakes", "0");
 }
 const connect = (phase: string) =>
   act(async () => {
     state.phase = phase;
     state.connectionListeners.forEach((notify) => notify());
   });
+/** Reads of the saved table; each comes with its own read of the accounts. */
 const snapshotCalls = () =>
-  state.execute.mock.calls.filter(([arg]) => arg.input._tag === "modelSnapshot");
+  state.execute.mock.calls.filter(
+    ([arg]) => arg.input._tag === "modelSnapshot" && arg.input.part === "settings",
+  );
+/** Holds the next read of one half of the snapshot until the returned function is called. */
+function hold(part: "settings" | "accounts") {
+  const previous = state.execute.getMockImplementation()!;
+  let release!: (value?: unknown) => void;
+  let held = false;
+  state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+    if (held || arg.input._tag !== "modelSnapshot" || arg.input.part !== part) return previous(arg);
+    held = true;
+    const result = await new Promise((resolve) => (release = resolve));
+    return result ?? previous(arg);
+  });
+  return (value?: unknown) => release(value);
+}
 const saves = () => state.execute.mock.calls.filter(([arg]) => arg.input._tag === "modelPolicy");
 const policyOf = (call: [{ input: { policy: ModelRoutingPolicy } }]) => call[0].input.policy;
 
@@ -283,13 +304,7 @@ it("keeps edits across reconnects, ignores obsolete snapshots and flags a newer 
   await change("Reasoning", "xhigh");
   expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6-astra / xhigh, edited");
   await connect("offline");
-  let resolveOld!: (value: unknown) => void;
-  state.execute.mockImplementationOnce(
-    () =>
-      new Promise((resolve) => {
-        resolveOld = resolve;
-      }),
-  );
+  const resolveOld = hold("settings");
   await connect("connected");
   expect(snapshotCalls()).toHaveLength(2);
   expect(button("Save changes").disabled).toBe(true);
@@ -459,6 +474,7 @@ it("flags what the connected catalog cannot offer and keeps editing from the las
     })),
   };
   await remount();
+  await click("Codex");
   expect(label(7, 8)).toBe(
     "Difficulty 7, stakes 8: gpt-6-astra / high, not offered by connected accounts",
   );
@@ -518,86 +534,35 @@ it("moves between cells with the arrow keys and keeps one tab stop", async () =>
   expect(container.querySelectorAll("table button[tabindex='0']")).toHaveLength(1);
   expect(cell(0, 1).getAttribute("aria-pressed")).toBe("false");
 });
-it.each(["codex", "claudeAgent"])(
-  "edits only the %s override effort and exposes retained exact options",
-  async (driver) => {
-    const effortId = driver === "codex" ? "reasoningEffort" : "effort";
-    const options = [
-      { id: "serviceTier", value: "priority" },
-      { id: effortId, value: "high" },
-      { id: "speed", value: "fast" },
-    ];
-    snapshot = {
-      ...snapshot,
-      history: [
-        {
-          at: "2026-10-23T12:00:00.000Z",
-          policyVersion: 3,
-          revision: 0,
-          selectedProfile: null,
-          rule: "Exact user override",
-          profiles: [],
-          reasons: [],
-          allocation: null,
-          request: {
-            selection: "automatic",
-            assignmentId: "prior",
-            environmentId: "host",
-            threadId: ThreadId.make("prior"),
-            allowedDrivers: [ProviderDriverKind.make(driver)],
-            assessment: {
-              difficulty: 7,
-              stakes: 7,
-              difficultyReason: "Interactions",
-              stakesReason: "Consequential",
-            },
-            override: {
-              driver: ProviderDriverKind.make(driver),
-              model: driver === "codex" ? "gpt-6-astra" : "claude-opus-5-5",
-              options,
-              reason: "Preserve priority and speed",
-            },
-          },
-        },
-      ],
-    };
-    await remount();
-    await open("Recent decisions (up to 50)");
-    await click("Reassess as a new assignment");
-    expect(control("Override effort").value).toBe("high");
-    expect(container.textContent).toContain("serviceTier: priority");
-    expect(container.textContent).toContain("speed: fast");
-    await change("Override effort", "max");
-    await change("Reassessment reason", "Substantive scope change requires more reasoning");
-    await click("Preview choice");
-    const call = state.execute.mock.calls.findLast(
-      ([arg]) => arg.input._tag === "modelPreview",
-    )![0];
-    expect(call.input.request.override.options).toEqual(
-      options.map((o) => (o.id === effortId ? { ...o, value: "max" } : o)),
-    );
-    expect(call.input.request.override.reason).toBe("Preserve priority and speed");
-  },
-);
-it("tests an assignment against the edited table, and starts only from a saved one", async () => {
+it("tries a task against the edited table as an agent's start would, on the table shown", async () => {
   await pick(0, 0);
   await change("Reasoning", "high");
   await assess();
-  await change("Project", "project");
-  await change("Assignment", "Scoped assignment");
-  await click("Preview choice");
-  const preview = state.execute.mock.calls.findLast(
-    ([arg]) => arg.input._tag === "modelPreview",
-  )![0];
-  expect(modelCell(preview.input.policy, "codex", 0, 0).effort).toBe("high");
-  expect(preview.input.request.policyVersion).toBe(3);
-  expect(container.querySelector('[aria-label="Selection preview"]')).not.toBeNull();
-  expect(button("Start assignment").disabled).toBe(true);
-  await click("Save changes");
-  await click("Preview choice");
-  expect(button("Start assignment").disabled).toBe(false);
+  await change("Job length", "3");
+  await click("Try");
+  const tried = state.execute.mock.calls.findLast(([arg]) => arg.input._tag === "modelPreview")![0];
+  expect(modelCell(tried.input.policy, "codex", 0, 0).effort).toBe("high");
+  expect(tried.input.request).toMatchObject({
+    selection: "automatic",
+    environmentId: "host",
+    allowedDrivers: ["codex"],
+    assessment: { difficulty: 0, stakes: 0 },
+    expectedHours: 3,
+  });
+  expect(tried.input.request.override).toBeUndefined();
+  expect(tried.input.request.explicitInstanceId).toBeUndefined();
+  expect(container.querySelector('[aria-label="Task result"]')).not.toBeNull();
+  // Nothing on the page starts a session.
+  expect(button("Start assignment")).toBeUndefined();
+  await click("Claude");
+  expect(container.querySelector('[aria-label="Task result"]')).toBeNull();
+  await click("Try");
+  expect(
+    state.execute.mock.calls.findLast(([arg]) => arg.input._tag === "modelPreview")![0].input
+      .request.allowedDrivers,
+  ).toEqual(["claudeAgent"]);
 });
-it("previews the compact choice: account, model and effort, what was wanted, the reason and each account", async () => {
+it("shows the task's account, model and effort with its one reason line", async () => {
   await assess();
   const reason = "claude-opus-5-5 is drained on every account; using the closest model with room.";
   const line = "SL: 40 points left, resets in 2.0 h, 0 workers";
@@ -644,16 +609,11 @@ it("previews the compact choice: account, model and effort, what was wanted, the
       },
     },
   }));
-  await click("Preview choice");
-  const lines = [...container.querySelectorAll('[aria-label="Selection preview"] p')].map(
+  await click("Try");
+  const lines = [...container.querySelectorAll('[aria-label="Task result"] p')].map(
     (p) => p.textContent,
   );
-  expect(lines).toEqual([
-    "SL · claude-sonnet-5-5 / max",
-    "Wanted claude-opus-5-5 / high",
-    reason,
-    line,
-  ]);
+  expect(lines).toEqual(["SL · claude-sonnet-5-5 / max", reason]);
 });
 it("says until when everything is drained", async () => {
   await assess();
@@ -675,8 +635,8 @@ it("says until when everything is drained", async () => {
       },
     },
   }));
-  await click("Preview choice");
-  const text = container.querySelector('[aria-label="Selection preview"]')!.textContent!;
+  await click("Try");
+  const text = container.querySelector('[aria-label="Task result"]')!.textContent!;
   expect(text).toContain(`Drained until ${new Date("2026-10-23T15:00:00.000Z").toLocaleString()}`);
   expect(text).toContain("Every Claude model is drained.");
 });
@@ -752,71 +712,128 @@ it("accepts any typed model ID, marks one no account offers, and shows the save'
   await act(async () => named("Remove typed-model").click());
   expect(list.textContent).not.toContain("typed-model");
 });
-it("refuses a missing assessment, and reverts a saved version as a new version", async () => {
-  await open("Test an assignment");
-  await click("Preview choice");
-  expect(container.textContent).toContain("Supply integer scores");
+it("refuses a missing score, and reverts to an earlier version once edits are saved", async () => {
+  await open("Try a task");
+  await click("Try");
+  expect(container.textContent).toContain("Give difficulty and stakes as whole numbers");
+  expect(state.execute.mock.calls.some(([arg]) => arg.input._tag === "modelPreview")).toBe(false);
   await click("Claude");
   expect(label(0, 0)).toContain("claude-sonnet-5-5 / medium");
-  await open("Policy settings, versions and raw JSON");
-  await click("Revert version 2 as a new version");
+  await open("Earlier versions");
+  expect(container.textContent).not.toContain("Revert to version 3");
+  await pick(1, 1);
+  await change("Reasoning", "max");
+  // Reverting would silently drop unsaved edits, so it waits for a save or discard.
+  expect(button("Revert to version 2").disabled).toBe(true);
+  expect(container.textContent).toContain("save or discard your changes first");
+  await click("Discard changes");
+  await click("Revert to version 2");
   expect(snapshot.policy.version).toBe(4);
   expect(container.textContent).toContain("Saved version 4");
-});
-it("keeps the raw policy and reassessment limit in the advanced area, retaining edits", async () => {
   expect(container.querySelector("pre")).toBeNull();
-  await open("Policy settings, versions and raw JSON");
-  await change("Maximum explicit reassessments", "3");
-  expect(container.textContent).toContain("1 unsaved change");
-  expect(container.querySelector("pre")!.textContent).toContain('"maxReassessments": 3');
-  // Reverting would silently drop unsaved edits, so it waits for a save or discard.
-  expect(button("Revert version 2 as a new version").disabled).toBe(true);
-  expect(container.textContent).toContain("save or discard your changes first");
-  await click("Save changes");
-  expect(saves()[0]![0].input.policy.maxReassessments).toBe(3);
-  expect(button("Revert version 2 as a new version").disabled).toBe(false);
+  expect(container.textContent).not.toContain("reassessments");
 });
-it("retries an uncertain startup with its original table version and intent after refresh", async () => {
-  await assess();
-  await change("Project", "project");
-  await change("Assignment", "Scoped assignment");
-  await click("Preview choice");
-  state.start.mockResolvedValue({ _tag: "Failure" });
-  await click("Start assignment");
-  const first = state.start.mock.calls[0]![0];
-  expect(first.input.request.policyVersion).toBe(3);
-  snapshot = { ...snapshot, policy: { ...snapshot.policy, version: 4 } };
-  await open("Connection");
-  await click("Refresh saved version");
-  expect(button("Retry identical assignment").disabled).toBe(false);
-  await click("Retry identical assignment");
-  expect(state.start.mock.calls[1]![0]).toEqual(first);
-  await change("Assignment", "Changed intent");
-  expect(button("Retry identical assignment").disabled).toBe(true);
-  await click("New assignment identity");
-  expect(button("Start assignment").disabled).toBe(true);
+it("opens on the Claude table", async () => {
+  await remount();
+  expect(named("Claude table")).not.toBeNull();
+  expect(button("Claude").getAttribute("aria-selected")).toBe("true");
+  expect(button("Codex").getAttribute("aria-selected")).toBe("false");
 });
-it.each(["unavailable", "observation"])(
-  "allows same-ID account choice after a confirmed %s response without a reservation",
-  async (startupState) => {
-    await assess();
-    await change("Project", "project");
-    await change("Assignment", "Scoped assignment");
-    await click("Preview choice");
-    state.start.mockImplementation(async ({ input }) => ({
-      _tag: "Success",
-      value: { state: startupState, allocation: null, threadId: input.request.threadId },
-    }));
-    await click("Start assignment");
-    const first = state.start.mock.calls[0]![0];
-    expect(button("Retry identical assignment")).toBeUndefined();
-    await change("Account constraint", "ad");
-    await click("Preview choice");
-    expect(button("Start assignment").disabled).toBe(false);
-    await click("Start assignment");
-    expect(state.start.mock.calls[1]![0].input.request).toEqual({
-      ...first.input.request,
-      explicitInstanceId: "ad",
-    });
+it("shows the saved table before the accounts arrive, saying only that they are loading", async () => {
+  await act(async () => root.unmount());
+  const release = hold("accounts");
+  root = createRoot(container);
+  await render();
+  expect(container.textContent).toContain("Saved version 3");
+  expect(container.textContent).toContain("Coordinator connected");
+  expect(container.textContent).toContain("Loading accounts…");
+  expect(container.querySelectorAll("table button")).toHaveLength(121);
+  await pick(7, 8);
+  expect(named("Claude table").textContent).toContain("Loading accounts…");
+  for (const claim of ["not connected", "Not connected", "Connect to", "not loaded", "Reconnect"])
+    expect(container.textContent).not.toContain(claim);
+  // Nothing is flagged as unoffered before the accounts are known.
+  const ladder = () => named("Model ladder").textContent!;
+  expect(ladder()).not.toContain("not offered");
+  await act(async () => release());
+  expect(container.textContent).not.toContain("Loading accounts…");
+  expect(ladder()).toContain("not offered by a connected account");
+});
+it.each(["connecting", "offline"])(
+  "while %s, says loading or not connected, never both",
+  async (phase) => {
+    await act(async () => root.unmount());
+    state.phase = phase;
+    root = createRoot(container);
+    await render();
+    const text = container.textContent!;
+    if (phase === "connecting") {
+      expect(text).toContain("Loading the saved table…");
+      expect(text).not.toContain("Not connected");
+      expect(text).not.toContain("Connect to this environment");
+    } else {
+      expect(text).toContain("Not connected");
+      expect(text).toContain("Connect to this environment to view and edit it.");
+      expect(text).not.toContain("Loading");
+    }
   },
 );
+it("lists recent starts read-only: time, scores, the chosen account, model and effort, and reasons", async () => {
+  const at = "2026-10-23T12:00:00.000Z";
+  snapshot = {
+    ...snapshot,
+    history: [
+      {
+        at,
+        policyVersion: 3,
+        revision: 0,
+        selectedProfile: null,
+        rule: "Difficulty 6, stakes 4",
+        profiles: [],
+        reasons: ["Table choice for difficulty 6, stakes 4.", "SL has the most room."],
+        request: {
+          selection: "automatic",
+          assignmentId: "started",
+          environmentId: "host",
+          threadId: ThreadId.make("started"),
+          allowedDrivers: [ProviderDriverKind.make("claudeAgent")],
+          assessment: { difficulty: 6, stakes: 4 },
+        },
+        allocation: {
+          mode: "automatic",
+          reservation: null,
+          decision: {
+            at,
+            policyVersion: 3,
+            request: {
+              assignmentId: "started",
+              environmentId: "host",
+              threadId: ThreadId.make("started"),
+              driver: ProviderDriverKind.make("claudeAgent"),
+              model: "claude-opus-5-5",
+              options: [{ id: "effort", value: "high" }],
+            },
+            outcome: "selected",
+            selectedInstanceId: ProviderInstanceId.make("sl"),
+            candidates: [],
+            reasons: [],
+            confidence: "medium",
+            waitUntil: null,
+          },
+        },
+      },
+    ],
+  };
+  await remount();
+  await open("Recent decisions");
+  const item = [...container.querySelectorAll("details")]
+    .find((d) => d.querySelector("summary")!.textContent === "Recent decisions")!
+    .querySelector("li")!;
+  expect([...item.querySelectorAll("p")].map((p) => p.textContent)).toEqual([
+    `${new Date(at).toLocaleString()} · difficulty 6 · stakes 4`,
+    "SL · claude-opus-5-5 / high",
+    "Table choice for difficulty 6, stakes 4.",
+    "SL has the most room.",
+  ]);
+  expect(item.querySelector("button,details")).toBeNull();
+});
