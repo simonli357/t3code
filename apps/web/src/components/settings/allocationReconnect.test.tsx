@@ -302,6 +302,8 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
+/** A case renders the whole Settings shell and router three times: slow on a busy computer. */
+const WHOLE_SHELL_MS = 90_000;
 /** The page inside the real Settings scope boundary; returns how to change the computer in scope. */
 async function mount(page: "allocation" | "model-selection") {
   const path = `/settings/${page}` as const;
@@ -343,116 +345,127 @@ async function mount(page: "allocation" | "model-selection") {
   };
 }
 
-it("allocation: a typed number and a switch survive a disconnect and reconnect, and stay with their computer", async () => {
-  const scope = await mount("allocation");
-  const margin = () => named("Close-call margin") as HTMLInputElement;
-  const fable = () => toggle("Fable workers").getAttribute("aria-checked");
-  const marked = () =>
-    [...container.querySelectorAll("h3")]
-      .filter((title) => title.parentElement!.textContent!.includes("Not saved"))
-      .map((title) => title.textContent);
-  const original = margin();
-  expect([original.value, fable()]).toEqual(["10", "true"]);
-  await type(original, "40");
-  await click(toggle("Fable workers"));
-  expect(status()).toBe("Not saved yet");
-  await connect("host", false);
-  await pass(1000);
-  // The save could not reach the computer: both values stay as typed, marked as not stored.
-  expect(margin()).toBe(original);
-  expect([margin().value, fable()]).toEqual(["40", "false"]);
-  expect(status()).toBe("Not connected");
-  expect(alert()?.textContent).toContain("Not saved");
-  expect(marked()).toEqual(["Close-call margin", "Fable workers"]);
-  expect(stored.host!.allocation.version).toBe(1);
+it(
+  "allocation: a typed number and a switch survive a disconnect and reconnect, and stay with their computer",
+  async () => {
+    const scope = await mount("allocation");
+    const margin = () => named("Close-call margin") as HTMLInputElement;
+    const fable = () => toggle("Fable workers").getAttribute("aria-checked");
+    const marked = () =>
+      [...container.querySelectorAll("h3")]
+        .filter((title) => title.parentElement!.parentElement!.textContent!.includes("Not saved"))
+        .map((title) => title.textContent);
+    const original = margin();
+    expect([original.value, fable()]).toEqual(["10", "true"]);
+    await type(original, "40");
+    await click(toggle("Fable workers"));
+    expect(status()).toBe("Not saved yet");
+    await connect("host", false);
+    await pass(1000);
+    // The save could not reach the computer: both values stay as typed, marked as not stored.
+    expect(margin()).toBe(original);
+    expect([margin().value, fable()]).toEqual(["40", "false"]);
+    expect(status()).toBe("Not connected");
+    expect(alert()?.textContent).toContain("Not saved");
+    expect(marked()).toEqual(["Close-call margin", "Fable workers"]);
+    expect(stored.host!.allocation.version).toBe(1);
 
-  const release = holdRead();
-  await connect("host", true);
-  expect(margin()).toBe(original);
-  expect([margin().value, fable()]).toEqual(["40", "false"]);
-  expect(status()).toBe("Loading…");
-  expect(marked()).toEqual(["Close-call margin", "Fable workers"]);
-  await act(async () => release());
-  await pass();
-  expect(stored.host!.allocation).toMatchObject({
-    version: 2,
-    closeMarginPoints: 40,
-    fableWorkers: false,
-  });
-  expect([margin().value, fable()]).toEqual(["40", "false"]);
-  expect(status()).toBe("Saved");
-  expect(alert()).toBeNull();
-  expect(marked()).toEqual([]);
+    const release = holdRead();
+    await connect("host", true);
+    expect(margin()).toBe(original);
+    expect([margin().value, fable()]).toEqual(["40", "false"]);
+    expect(status()).toBe("Loading…");
+    expect(marked()).toEqual(["Close-call margin", "Fable workers"]);
+    await act(async () => release());
+    await pass();
+    expect(stored.host!.allocation).toMatchObject({
+      version: 2,
+      closeMarginPoints: 40,
+      fableWorkers: false,
+    });
+    expect([margin().value, fable()]).toEqual(["40", "false"]);
+    expect(status()).toBe("Saved");
+    expect(alert()).toBeNull();
+    expect(marked()).toEqual([]);
 
-  // Another computer shows its own stored values; a change still waiting here goes to this one.
-  await type(margin(), "45");
-  await scope("peer");
-  expect(margin()).not.toBe(original);
-  expect([margin().value, fable()]).toEqual(["25", "true"]);
-  await pass(1000);
-  expect(stored.host!.allocation).toMatchObject({ version: 3, closeMarginPoints: 45 });
-  expect(stored.peer!.allocation).toMatchObject({ version: 8, closeMarginPoints: 25 });
-  expect(saves().every((save) => save.environmentId === "host")).toBe(true);
-  expect(status()).toBe("Changes save automatically");
-  await scope("missing");
-  expect(named("Close-call margin")).toBeNull();
-  expect(container.textContent).toContain("This environment is no longer available.");
-});
+    // Another computer shows its own stored values; a change still waiting here goes to this one.
+    await type(margin(), "45");
+    await scope("peer");
+    expect(margin()).not.toBe(original);
+    expect([margin().value, fable()]).toEqual(["25", "true"]);
+    await pass(1000);
+    expect(stored.host!.allocation).toMatchObject({ version: 3, closeMarginPoints: 45 });
+    expect(stored.peer!.allocation).toMatchObject({ version: 8, closeMarginPoints: 25 });
+    expect(saves().every((save) => save.environmentId === "host")).toBe(true);
+    expect(status()).toBe("Changes save automatically");
+    await scope("missing");
+    expect(named("Close-call margin")).toBeNull();
+    expect(container.textContent).toContain("This environment is no longer available.");
+  },
+  WHOLE_SHELL_MS,
+);
 
-it("model selection: a changed cell and a switch survive a disconnect and reconnect, and stay with their computer", async () => {
-  const scope = await mount("model-selection");
-  const cell = (difficulty: number, stakes: number) =>
-    container.querySelector<HTMLButtonElement>(`[data-cell="${difficulty}-${stakes}"]`)!;
-  const label = (difficulty: number, stakes: number) =>
-    cell(difficulty, stakes).getAttribute("aria-label");
-  const fallback = () => toggle("Fallback model").getAttribute("aria-checked");
-  await click(button("Codex"));
-  expect([label(7, 8), fallback()]).toEqual(["Difficulty 7, stakes 8: gpt-6-astra / high", "true"]);
-  await click(cell(7, 8));
-  await type(control("Reasoning"), "xhigh");
-  await click(toggle("Fallback model"));
-  const edited = ["Difficulty 7, stakes 8: gpt-6-astra / xhigh, not saved yet", "false"];
-  expect(status()).toBe("Not saved yet");
-  await connect("host", false);
-  await pass(1200);
-  // The save could not reach the computer: the cell stays changed, marked as not stored.
-  expect([label(7, 8), fallback()]).toEqual(edited);
-  expect(status()).toBe("Not connected");
-  expect(alert()?.textContent).toContain("Not saved");
-  expect(stored.host!.model.version).toBe(1);
+it(
+  "model selection: a changed cell and a switch survive a disconnect and reconnect, and stay with their computer",
+  async () => {
+    const scope = await mount("model-selection");
+    const cell = (difficulty: number, stakes: number) =>
+      container.querySelector<HTMLButtonElement>(`[data-cell="${difficulty}-${stakes}"]`)!;
+    const label = (difficulty: number, stakes: number) =>
+      cell(difficulty, stakes).getAttribute("aria-label");
+    const fallback = () => toggle("Fallback model").getAttribute("aria-checked");
+    await click(button("Codex"));
+    expect([label(7, 8), fallback()]).toEqual([
+      "Difficulty 7, stakes 8: gpt-6-astra / high",
+      "true",
+    ]);
+    await click(cell(7, 8));
+    await type(control("Reasoning"), "xhigh");
+    await click(toggle("Fallback model"));
+    const edited = ["Difficulty 7, stakes 8: gpt-6-astra / xhigh, not saved yet", "false"];
+    expect(status()).toBe("Not saved yet");
+    await connect("host", false);
+    await pass(1200);
+    // The save could not reach the computer: the cell stays changed, marked as not stored.
+    expect([label(7, 8), fallback()]).toEqual(edited);
+    expect(status()).toBe("Not connected");
+    expect(alert()?.textContent).toContain("Not saved");
+    expect(stored.host!.model.version).toBe(1);
 
-  const release = holdRead();
-  await connect("host", true);
-  expect([label(7, 8), fallback()]).toEqual(edited);
-  expect(status()).toBe("Loading…");
-  await act(async () => release());
-  await pass();
-  expect(stored.host!.model).toMatchObject({ version: 2, fallback: null });
-  expect(modelCell(stored.host!.model, "codex", 7, 8).effort).toBe("xhigh");
-  expect([label(7, 8), fallback()]).toEqual([
-    "Difficulty 7, stakes 8: gpt-6-astra / xhigh",
-    "false",
-  ]);
-  expect(status()).toBe("Saved");
-  expect(alert()).toBeNull();
+    const release = holdRead();
+    await connect("host", true);
+    expect([label(7, 8), fallback()]).toEqual(edited);
+    expect(status()).toBe("Loading…");
+    await act(async () => release());
+    await pass();
+    expect(stored.host!.model).toMatchObject({ version: 2, fallback: null });
+    expect(modelCell(stored.host!.model, "codex", 7, 8).effort).toBe("xhigh");
+    expect([label(7, 8), fallback()]).toEqual([
+      "Difficulty 7, stakes 8: gpt-6-astra / xhigh",
+      "false",
+    ]);
+    expect(status()).toBe("Saved");
+    expect(alert()).toBeNull();
 
-  // Another computer shows its own stored table; a change still waiting here goes to this one.
-  await click(cell(0, 0));
-  await type(control("Reasoning"), "high");
-  await scope("peer");
-  await click(button("Codex"));
-  expect([label(7, 8), label(0, 0), fallback()]).toEqual([
-    "Difficulty 7, stakes 8: gpt-6.1-sol / max",
-    "Difficulty 0, stakes 0: gpt-6.1-sol / medium",
-    "true",
-  ]);
-  await pass(1200);
-  expect(stored.host!.model.version).toBe(3);
-  expect(modelCell(stored.host!.model, "codex", 0, 0).effort).toBe("high");
-  expect(stored.peer!.model.version).toBe(8);
-  expect(saves().every((save) => save.environmentId === "host")).toBe(true);
-  expect(status()).toBe("Changes save automatically");
-  await scope("missing");
-  expect(container.querySelector("table")).toBeNull();
-  expect(container.textContent).toContain("This environment is no longer available.");
-});
+    // Another computer shows its own stored table; a change still waiting here goes to this one.
+    await click(cell(0, 0));
+    await type(control("Reasoning"), "high");
+    await scope("peer");
+    await click(button("Codex"));
+    expect([label(7, 8), label(0, 0), fallback()]).toEqual([
+      "Difficulty 7, stakes 8: gpt-6.1-sol / max",
+      "Difficulty 0, stakes 0: gpt-6.1-sol / medium",
+      "true",
+    ]);
+    await pass(1200);
+    expect(stored.host!.model.version).toBe(3);
+    expect(modelCell(stored.host!.model, "codex", 0, 0).effort).toBe("high");
+    expect(stored.peer!.model.version).toBe(8);
+    expect(saves().every((save) => save.environmentId === "host")).toBe(true);
+    expect(status()).toBe("Changes save automatically");
+    await scope("missing");
+    expect(container.querySelector("table")).toBeNull();
+    expect(container.textContent).toContain("This environment is no longer available.");
+  },
+  WHOLE_SHELL_MS,
+);
