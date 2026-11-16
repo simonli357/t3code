@@ -132,7 +132,12 @@ export const AllocationPolicy = Schema.Struct({
   ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
-  /** Fable mode. True: every worker runs on a Fable rung of the ladder unless its model is pinned. */
+  /**
+   * Fable mode, by `allocationPreferenceKey`: a worker on one of these Claude accounts runs on a
+   * Fable rung of the ladder unless its model is pinned.
+   */
+  fableAccounts: Schema.optional(Names),
+  /** Fable mode for every Claude account, as stored before it was per account. */
   fableOnly: Schema.optional(Schema.Boolean),
   /**
    * Daily goals by `allocationPreferenceKey`: the percentage of the account's weekly (or
@@ -198,6 +203,20 @@ export function allocationPreferenceKey(account: {
       ? ["instance", account.environmentId, account.instanceId]
       : ["account", account.accountKey],
   ]);
+}
+
+/**
+ * Whether workers on this account run in Fable mode. Only Claude runs Fable. A policy stored
+ * before Fable mode was per account has it on for every Claude account or none.
+ */
+export function allocationFableMode(
+  policy: Pick<AllocationPolicy, "fableAccounts" | "fableOnly">,
+  account: Parameters<typeof allocationPreferenceKey>[0],
+): boolean {
+  return (
+    account.driver === "claudeAgent" &&
+    (policy.fableAccounts?.includes(allocationPreferenceKey(account)) ?? policy.fableOnly === true)
+  );
 }
 
 export const AllocationWindow = Schema.Struct({
@@ -721,7 +740,8 @@ export const AllocationPolicyEdit = Schema.Struct({
   /** Back to the family's goal. */
   clearGoals: Schema.optional(Schema.Array(AccountRef)),
   fableWorkers: AllocationPolicy.fields.fableWorkers,
-  fableOnly: AllocationPolicy.fields.fableOnly,
+  /** Every account in Fable mode; the rest are not. Only Claude accounts can be. */
+  fableAccounts: Schema.optional(Schema.Array(AccountRef).check(Schema.isMaxLength(100))),
   /** The whole Claude ladder, weakest first. */
   ladder: ModelRoutingPolicy.fields.ladder,
   /** Null turns the fallback off. */
@@ -762,7 +782,8 @@ export const AllocationPolicyView = Schema.Struct({
     ),
   ),
   fableWorkers: Schema.optional(Schema.Boolean),
-  fableOnly: Schema.optional(Schema.Boolean),
+  /** The accounts in Fable mode. */
+  fableAccounts: Schema.optional(Schema.Array(Schema.String)),
   /** The learned numbers, one line each, and when they were learned. */
   learned: Schema.optional(
     Schema.Struct({

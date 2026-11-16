@@ -1034,7 +1034,10 @@ describe("a pinned account's refusal", () => {
 });
 
 describe("Fable mode", () => {
-  const on = { policy: { fableOnly: true } };
+  /** Fable mode on these Claude accounts only. */
+  const fableFor = (...labels: string[]) => ({
+    policy: { fableAccounts: labels.map((label) => allocationPreferenceKey(claude(label))) },
+  });
   /** A Claude account whose Fable model offers only `efforts`. */
   const fableAt = (label: string, efforts: readonly string[]) =>
     claude("B", [weekly(20)], {
@@ -1057,12 +1060,13 @@ describe("Fable mode", () => {
           : m,
       ),
     });
+  const opusHigh = { model: OPUS, effort: "high" };
 
-  it("starts every table entry from the first Fable rung at or above it, and says so", () => {
+  it("starts a worker on a Fable-mode account from the first Fable rung at or above its entry", () => {
     // The default ladder, weakest first, and the Fable rung each entry starts from.
     const expected = ["low", "low", "low", "low", "low", "low", "medium", "medium", "high"];
     defaultModelLadder.forEach((entry, i) => {
-      const choice = choose([claude("A")], entry, on);
+      const choice = choose([claude("A")], entry, fableFor("A"));
       expect(picked(choice), `${entry.model} / ${entry.effort}`).toBe(
         `A ${FABLE} / ${expected[i]}`,
       );
@@ -1072,15 +1076,65 @@ describe("Fable mode", () => {
       } else {
         expect(wantedLabel(choice)).toBe(`${entry.model} / ${entry.effort}`);
         expect(choice.notes).toEqual([
-          `Fable mode: ${entry.model} / ${entry.effort} starts from ${FABLE} / ${expected[i]}, the first Fable rung at or above it.`,
+          `Fable mode on A: ${entry.model} / ${entry.effort} starts from ${FABLE} / ${expected[i]}, the first Fable rung at or above it.`,
         ]);
       }
+      // An account that is not in Fable mode runs the table's entry.
+      expect(picked(choose([claude("B")], entry, fableFor("A")))).toBe(
+        `B ${entry.model} / ${entry.effort}`,
+      );
     });
-    // Off, the table's entry stands.
-    expect(picked(choose([claude("A")], { model: OPUS, effort: "high" }))).toBe(`A ${OPUS} / high`);
   });
 
-  it("stands in only another Fable rung, on any account", () => {
+  it("judges each account on the model it would run there", () => {
+    // A runs Fable, which has little room there; B runs Opus with more.
+    const fableTight = [claude("A", [weekly(20), only(FABLE, 80)]), claude("B", [weekly(50)])];
+    const normal = choose(fableTight, opusHigh, fableFor("A"));
+    expect(picked(normal)).toBe(`B ${OPUS} / high`);
+    expect(normal.wanted).toBeUndefined();
+    expect(normal.notes).toEqual([]);
+    expect(normal.accounts[0]).toMatch(
+      new RegExp(`^A \\(Fable mode\\): room for .* ${FABLE} / low workers`),
+    );
+    expect(normal.accounts[1]).toMatch(new RegExp(`^B: room for .* ${OPUS} / high workers`));
+    // Admission chooses among the accounts that run the chosen model only.
+    expect(normal.decision!.request.allowedInstanceIds).toEqual(["B"]);
+    // With more room for Fable on A than for Opus on B, A runs Fable.
+    const fableRoomy = [claude("A", [weekly(20), only(FABLE, 10)]), claude("B", [weekly(50)])];
+    const fable = choose(fableRoomy, opusHigh, fableFor("A"));
+    expect(picked(fable)).toBe(`A ${FABLE} / low`);
+    expect(wantedLabel(fable)).toBe(`${OPUS} / high`);
+    expect(fable.notes).toEqual([
+      `Fable mode on A: ${OPUS} / high starts from ${FABLE} / low, the first Fable rung at or above it.`,
+    ]);
+    expect(fable.decision!.request.allowedInstanceIds).toEqual(["A"]);
+    // Without Fable mode both run Opus, and A has the most room.
+    expect(picked(choose(fableRoomy, opusHigh))).toBe(`A ${OPUS} / high`);
+  });
+
+  it("keeps a Fable-mode account out while its Fable limit is used up", () => {
+    const aDrained = claude("A", [weekly(20), only(FABLE, 100, { resetsAt: inHours(30) })]);
+    // A has more room for Opus than B, but in Fable mode it runs only Fable.
+    const choice = choose([aDrained, claude("B", [weekly(60)])], opusHigh, fableFor("A"));
+    expect(picked(choice)).toBe(`B ${OPUS} / high`);
+    expect(choice.accounts[0]).toBe(
+      `A (Fable mode): drained until ${inHours(30)} (Weekly · ${FABLE} 100% used), 0 workers`,
+    );
+    // When B is out too, the start is refused: A never falls back to its normal models.
+    const refused = choose([aDrained, claude("B", [weekly(100)])], opusHigh, fableFor("A"));
+    expect(picked(refused)).toBeNull();
+    expect(refused.drainedUntil).toBe(inHours(30));
+    expect(refused.reason).toBe(
+      `Drained: ${OPUS} / high (${FABLE} / low in Fable mode) and every model that may stand in for it are out; earliest reset ${inHours(30)}. Fable mode on A: only Fable rungs stand in there.`,
+    );
+    // A Fable limit that resets within the wait: the start waits for it, as without the mode.
+    const soon = [claude("A", [weekly(20), only(FABLE, 100, { resetsAt: inHours(0.4) })])];
+    const waiting = choose(soon, { model: SONNET, effort: "high" }, fableFor("A"));
+    expect(picked(waiting)).toBe(`A ${FABLE} / low`);
+    expect(waiting.startAt).toBe(inHours(0.4));
+  });
+
+  it("stands in only another Fable rung on a Fable-mode account", () => {
     // A's Fable is drained; B offers Fable at medium and high only.
     const accounts = [
       claude("A", [weekly(20), only(FABLE, 100)]),
@@ -1088,85 +1142,83 @@ describe("Fable mode", () => {
     ];
     const fableLow = { model: FABLE, effort: "low" };
     expect(picked(choose(accounts, fableLow))).toBe(`A ${OPUS} / high`);
-    const choice = choose(accounts, fableLow, on);
+    const choice = choose(accounts, fableLow, fableFor("A", "B"));
     expect(picked(choice)).toBe(`B ${FABLE} / medium`);
     expect(choice.reason).toContain(`the nearest ladder rung that fits is ${FABLE} / medium.`);
     // Fable high is three rungs above Fable low on the ladder but two Fable rungs: still in reach.
-    expect(picked(choose([...accounts.slice(0, 1), fableAt("B", ["high"])], fableLow, on))).toBe(
-      `B ${FABLE} / high`,
-    );
+    expect(
+      picked(choose([accounts[0]!, fableAt("B", ["high"])], fableLow, fableFor("A", "B"))),
+    ).toBe(`B ${FABLE} / high`);
   });
 
-  it("is drained, never on another model or the fallback, when Fable is out everywhere", () => {
-    const accounts = [
+  it("stands the fallback in for the other accounts only", () => {
+    const fableOut = [
       claude("A", [weekly(20), only(FABLE, 100)]),
       claude("B", [weekly(20), only(FABLE, 100, { resetsAt: inHours(7) })]),
       deepseek,
     ];
     // The fallback would apply to anything below Fable high.
     const modelPolicy = {
-      fallback: {
-        model: "deepseek-flash",
-        effort: "max",
-        below: { model: FABLE, effort: "high" },
-      },
+      fallback: { model: "deepseek-flash", effort: "max", below: { model: FABLE, effort: "high" } },
     };
     const sonnetHigh = { model: SONNET, effort: "high" };
-    expect(picked(choose(accounts, sonnetHigh, { modelPolicy }))).toBe(`A ${SONNET} / high`);
-    const choice = choose(accounts, sonnetHigh, { ...on, modelPolicy });
-    expect(picked(choice)).toBeNull();
-    expect(choice.drainedUntil).toBe(inHours(7));
-    expect(choice.reason).toBe(
-      `Drained: ${FABLE} / low and every model that may stand in for it are out; earliest reset ${inHours(7)}. Fable mode is on: only Fable rungs may stand in.`,
+    const refused = choose(fableOut, sonnetHigh, { ...fableFor("A", "B"), modelPolicy });
+    expect(picked(refused)).toBeNull();
+    expect(refused.drainedUntil).toBe(inHours(7));
+    expect(new Set(refused.tried.map((t) => t.request.model))).toEqual(new Set([SONNET]));
+    // A normal Claude account that is out takes the fallback by the usual rule.
+    const withC = [...fableOut, claude("C", [weekly(100)])];
+    expect(picked(choose(withC, sonnetHigh, { ...fableFor("A", "B"), modelPolicy }))).toBe(
+      "DS deepseek-flash / max",
     );
-    expect(new Set(choice.tried.map((t) => t.request.model))).toEqual(new Set([FABLE]));
-    // A Fable limit that resets within the wait: the start waits for it, as without the mode.
-    const soon = [claude("A", [weekly(20), only(FABLE, 100, { resetsAt: inHours(0.4) })])];
-    const waiting = choose(soon, sonnetHigh, on);
-    expect(picked(waiting)).toBe(`A ${FABLE} / low`);
-    expect(waiting.startAt).toBe(inHours(0.4));
   });
 
-  it("keeps a pinned model and notes it, and leaves masters and Codex choices alone", () => {
+  it("carries the single switch stored before over as every Claude account", () => {
+    const accounts = [claude("A", [weekly(30)]), claude("B", [weekly(20)])];
+    const every = choose(accounts, opusHigh, { policy: { fableOnly: true } });
+    expect(picked(every)).toBe(`B ${FABLE} / low`);
+    expect(every.accounts.every((line) => line.includes("(Fable mode)"))).toBe(true);
+    // A list, once saved, replaces it; off or absent is none.
+    expect(
+      picked(choose(accounts, opusHigh, { policy: { fableOnly: true, ...fableFor("A").policy } })),
+    ).toBe(`B ${OPUS} / high`);
+    expect(picked(choose(accounts, opusHigh, { policy: { fableOnly: false } }))).toBe(
+      `B ${OPUS} / high`,
+    );
+    // Codex has no Fable mode.
+    const viaCodex = choose([gpt("G")], opusHigh, {
+      policy: { fableOnly: true },
+      request: { allowedDrivers: [codex] },
+    });
+    expect(picked(viaCodex)).not.toBeNull();
+    expect(viaCodex.notes).toEqual([]);
+  });
+
+  it("keeps a pinned model with a note, runs a pinned Fable-mode account on Fable, leaves masters", () => {
+    const accounts = [claude("A"), claude("B", [weekly(60)])];
     const pin = (model: string, effort: string) => ({
-      ...on,
+      ...fableFor("A"),
       request: {
         override: { driver: claudeAgent, model, options: [{ id: "effort", value: effort }] },
       },
     });
-    const opus = choose([claude("A")], { model: SONNET, effort: "high" }, pin(OPUS, "high"));
+    const opus = choose(accounts, { model: SONNET, effort: "high" }, pin(OPUS, "high"));
     expect(picked(opus)).toBe(`A ${OPUS} / high`);
     expect(opus.notes).toEqual([
-      `Fable mode is on, but ${OPUS} / high is pinned for this worker and runs as pinned.`,
+      `Fable mode is on for A, but ${OPUS} / high is pinned for this worker and runs as pinned.`,
     ]);
-    // A pinned model that does not fit never moves to another model outside Fable.
-    const opusOut = [claude("A", [weekly(20), only(OPUS, 100)]), deepseek];
-    expect(picked(choose(opusOut, { model: SONNET, effort: "high" }, pin(OPUS, "high")))).toBe(
-      null,
-    );
-    const fable = choose([claude("A")], { model: SONNET, effort: "high" }, pin(FABLE, "high"));
+    const fable = choose(accounts, { model: SONNET, effort: "high" }, pin(FABLE, "high"));
     expect(picked(fable)).toBe(`A ${FABLE} / high`);
     expect(fable.notes).toEqual([]);
-    const master = choose(
-      [claude("A")],
-      { model: OPUS, effort: "high" },
-      {
-        ...on,
-        request: { kind: "session" },
-      },
-    );
+    const account = (id: string) => ({
+      ...fableFor("A"),
+      request: { explicitInstanceId: ProviderInstanceId.make(id) },
+    });
+    expect(picked(choose(accounts, opusHigh, account("A")))).toBe(`A ${FABLE} / low`);
+    expect(picked(choose(accounts, opusHigh, account("B")))).toBe(`B ${OPUS} / high`);
+    const master = choose(accounts, opusHigh, { ...fableFor("A"), request: { kind: "session" } });
     expect(picked(master)).toBe(`A ${OPUS} / high`);
     expect(master.notes).toEqual([]);
-    // A worker cannot run Fable on Codex: refused, never another Codex model.
-    const viaCodex = choose(
-      [gpt("G")],
-      { model: OPUS, effort: "high" },
-      {
-        ...on,
-        request: { allowedDrivers: [codex] },
-      },
-    );
-    expect(picked(viaCodex)).toBeNull();
-    expect(viaCodex.reason).toBe("codex: Fable mode is on and only Claude runs Fable.");
+    expect(master.accounts.some((line) => line.includes("Fable mode"))).toBe(false);
   });
 });

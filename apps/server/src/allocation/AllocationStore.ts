@@ -653,6 +653,7 @@ const make = Effect.gen(function* () {
                 | "closeMarginPoints"
                 | "longWaitHours"
                 | "fableWorkers"
+                | "fableAccounts"
                 | "fableOnly"
                 | "accountGoals",
             ) =>
@@ -676,6 +677,7 @@ const make = Effect.gen(function* () {
               ...carried("closeMarginPoints"),
               ...carried("longWaitHours"),
               ...carried("fableWorkers"),
+              ...carried("fableAccounts"),
               ...carried("fableOnly"),
               ...carried("accountGoals"),
               ...legacy,

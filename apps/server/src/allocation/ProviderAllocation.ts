@@ -46,7 +46,7 @@ import { accountCap, accountRoom, accountRunways, decideAllocation } from "./dec
 import { learnAllocation } from "./learning.ts";
 import { span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
-import { chooseProfile } from "./modelDecision.ts";
+import { chooseProfile, fableModeAccount, isFable } from "./modelDecision.ts";
 import { computerNumbers } from "./placement.ts";
 
 const PeerInput = Schema.TaggedUnion({
@@ -693,11 +693,18 @@ const make = Effect.gen(function* () {
       (policy.longWaitHours ?? DEFAULT_LONG_WAIT_HOURS) * 3_600_000;
     const wait = { _tag: "wait", until, observed: reset !== undefined, long } as const;
     if (options?.switchAccount === false || !account) return wait;
+    // A worker that is not on Fable never moves onto an account in Fable mode.
+    const reachable = {
+      ...localInventory,
+      accounts: localInventory.accounts.filter(
+        (a) => isFable(current.model) || !fableModeAccount(policy, a),
+      ),
+    };
     // The account that is drained or just refused the turn is out, whatever its readings say.
     const inventories = [
       {
-        ...localInventory,
-        accounts: localInventory.accounts.filter(
+        ...reachable,
+        accounts: reachable.accounts.filter(
           (a) =>
             a.instanceId !== current.instanceId &&
             (!account.accountKey || a.accountKey !== account.accountKey),
@@ -743,12 +750,12 @@ const make = Effect.gen(function* () {
       } as const;
     // Another model continues from the same conversation with other abilities: only when the
     // reset is far, and then the master is told. It moves at most two rungs, never onto Fable
-    // when Fable workers are off, and only between Fable rungs in Fable mode.
+    // when Fable workers are off, and only between Fable rungs on an account in Fable mode.
     if (!long) return wait;
     // A reading that shows the drain is scoped to the model, so this account may offer another.
     const choice = chooseProfile({
       ...context,
-      ...(reset !== undefined ? { inventories: [localInventory] } : {}),
+      ...(reset !== undefined ? { inventories: [reachable] } : {}),
       modelPolicy,
       request: {
         ...base,
@@ -1351,7 +1358,7 @@ const make = Effect.gen(function* () {
       changes.setGoals,
       changes.clearGoals,
       changes.fableWorkers,
-      changes.fableOnly,
+      changes.fableAccounts,
     ];
     const modelEdit = [changes.ladder, changes.fallback, changes.setCells];
     const edits = (values: readonly unknown[]) => values.some((value) => value !== undefined);

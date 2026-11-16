@@ -2693,41 +2693,56 @@ it.effect(
   },
 );
 
-it.effect("in Fable mode a limited worker changes model only between Fable rungs", () => {
+it.effect("a limited worker on a Fable-mode account changes model only between Fable rungs", () => {
   const f = fixture();
   return Effect.gen(function* () {
     const { allocation } = yield* f.setup;
-    const current = {
-      instanceId: ProviderInstanceId.make("a"),
-      model: FABLE,
-      options: [{ id: "effort", value: "high" }],
-    };
+    const worker = (instanceId: string, model: string, effort: string) => ({
+      instanceId: ProviderInstanceId.make(instanceId),
+      model,
+      options: [{ id: "effort", value: effort }],
+    });
+    const route = (current: ReturnType<typeof worker>) =>
+      allocation.reroute(ThreadId.make("worker"), current);
+    const fableHigh = worker("a", FABLE, "high");
     // Fable is drained everywhere and resets far away; Opus has room.
     f.state.providers = [
       claudeAccount("a", { fable: 100, fableResetHours: 10 }),
       claudeAccount("b", { fable: 100, fableResetHours: 50 }),
     ];
-    // Turning Fable mode on turns Fable workers on.
+    // Turning an account's Fable mode on turns Fable workers on.
     yield* allocation.editPolicy({ fableWorkers: false });
-    expect(yield* allocation.editPolicy({ fableOnly: true })).toMatchObject({
-      fableWorkers: true,
-      fableOnly: true,
-    });
-    expect(yield* allocation.reroute(ThreadId.make("worker"), current)).toEqual({
+    const both = yield* allocation.editPolicy({ fableAccounts: ["a", "b"] });
+    expect(both.fableWorkers).toBe(true);
+    expect(both.fableAccounts).toHaveLength(2);
+    expect(yield* route(fableHigh)).toEqual({
       _tag: "wait",
       until: hoursIn(10),
       observed: true,
       long: true,
     });
-    // Turning Fable workers off turns Fable mode off: the worker leaves Fable.
+    // With Fable mode on a only, b runs the closest model that has room.
+    yield* allocation.editPolicy({ fableAccounts: ["a"] });
+    expect(yield* route(fableHigh)).toMatchObject({
+      _tag: "switch",
+      selection: { instanceId: "b", model: OPUS },
+      modelChanged: true,
+    });
+    // A worker that is not on Fable never moves onto an account in Fable mode.
+    const opus = worker("b", OPUS, "xhigh");
+    f.state.providers = [claudeAccount("a"), claudeAccount("b", { weekly: 100 })];
+    expect(yield* route(opus)).toMatchObject({ _tag: "wait", until: hoursIn(100) });
+    yield* allocation.editPolicy({ fableAccounts: [] });
+    expect(yield* route(opus)).toEqual({
+      _tag: "switch",
+      selection: { ...opus, instanceId: "a" },
+      modelChanged: false,
+    });
+    // Turning Fable workers off turns every account's Fable mode off.
+    yield* allocation.editPolicy({ fableAccounts: ["a", "b"] });
     expect(yield* allocation.editPolicy({ fableWorkers: false })).toMatchObject({
       fableWorkers: false,
-      fableOnly: false,
-    });
-    expect(yield* allocation.reroute(ThreadId.make("worker"), current)).toMatchObject({
-      _tag: "switch",
-      selection: { model: OPUS },
-      modelChanged: true,
+      fableAccounts: [],
     });
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });

@@ -295,11 +295,25 @@ const effortOf = (request: AllocationRequest) => {
   return typeof value === "string" ? value : null;
 };
 
+/** The same model and options. */
+const sameProfile = (a: AllocationRequest, b: AllocationRequest) =>
+  a.driver === b.driver &&
+  a.model === b.model &&
+  JSON.stringify(a.options) === JSON.stringify(b.options);
+
 /** Pure replay boundary. Callers persist the exact policy, inventories and timestamp. */
 export function decideAllocation(input: {
   at: string;
   policy: AllocationPolicy;
   request: AllocationRequest;
+  /**
+   * Accounts in Fable mode and what they run in place of `request`, or null when they are out.
+   * Each account is judged on what it would run. The decision's request is then the selected
+   * account's, kept to the accounts that run it, so admission chooses among the same accounts.
+   */
+  fableMode?:
+    | { readonly instanceIds: readonly string[]; readonly request: AllocationRequest | null }
+    | undefined;
   inventories: readonly AllocationInventory[];
   reservations: readonly AllocationReservation[];
   authorityAvailable: boolean;
@@ -322,13 +336,19 @@ export function decideAllocation(input: {
   const everyAccount = inventories.flatMap((i) => i.accounts);
   const kind = request.kind === "session" ? ("master" as const) : ("worker" as const);
   const hours = request.expectedHours ?? input.learned?.workerHours ?? SEED_JOB_HOURS;
-  const profile = profileLabel(request.driver, request.model, request.options);
   const projections = new Map<string, AccountProjection>();
+  /** What each account runs; null when it is out. */
+  const runs = new Map<string, AllocationRequest | null>();
   const candidates = everyAccount
     .filter((a) => a.environmentId === request.environmentId && a.driver === request.driver)
     .map((local) => {
       const account = { ...local, ...sharedReadings(local, everyAccount) };
       const reasons: string[] = [];
+      const fable = input.fableMode?.instanceIds.includes(account.instanceId) === true;
+      const own = fable ? input.fableMode!.request : request;
+      if (own === null) reasons.push("Fable mode: no Fable rung takes this place.");
+      const run = own ?? request;
+      runs.set(account.instanceId, own);
       if (account.enabled === false) reasons.push("Provider is turned off in settings.");
       if (request.kind !== "session" && account.availableForWorkers === false)
         reasons.push(WORKER_ACCOUNT_DISABLED_REASON);
@@ -338,9 +358,9 @@ export function decideAllocation(input: {
         reasons.push("Native session is bound to another account.");
       if (request.allowedInstanceIds && !request.allowedInstanceIds.includes(account.instanceId))
         reasons.push("Outside allowed accounts.");
-      if (!compatible(account, request)) reasons.push("Exact model/options are not supported.");
+      if (!compatible(account, run)) reasons.push("Exact model/options are not supported.");
       const cap = accountCap(policy, account, request.kind);
-      const room = accountRoom({ account, model: request.model, cap, at });
+      const room = accountRoom({ account, model: run.model, cap, at });
       const others = accountDemand(account, demand, request);
       const workers = others.filter((d) => d.worker).length;
       const goal = accountGoal(policy, account);
@@ -351,8 +371,8 @@ export function decideAllocation(input: {
         hours,
         session: {
           driver: request.driver,
-          model: request.model,
-          effort: effortOf(request),
+          model: run.model,
+          effort: effortOf(run),
           kind,
           contextTokens: request.contextTokens,
         },
@@ -385,12 +405,17 @@ export function decideAllocation(input: {
             }
           : {}),
         overGoal: projection.overGoal,
-        line: `${account.label}: ${
+        line: `${account.label}${fable ? " (Fable mode)" : ""}: ${
           reasons.length
             ? `not usable (${reasons.join(" ")})`
             : room.drainedUntil !== undefined
               ? room.text
-              : runwayText(projection, profile, kind, Date.parse(at))
+              : runwayText(
+                  projection,
+                  profileLabel(run.driver, run.model, run.options),
+                  kind,
+                  Date.parse(at),
+                )
         }, ${workers} worker${workers === 1 ? "" : "s"}`,
         ...legacyAllocationCandidateFields,
       };
@@ -398,6 +423,28 @@ export function decideAllocation(input: {
     .sort((a, b) => compare(a.label, b.label) || compare(a.instanceId, b.instanceId));
   const ranked = rankCandidates(candidates, policy, request.driver);
   const selected = ranked[0];
+  const chosen = selected ? runs.get(selected.instanceId)! : request;
+  const runsChosen = (c: AllocationCandidate) => {
+    const run = runs.get(c.instanceId);
+    return !!run && sameProfile(run, chosen);
+  };
+  // Accounts that run something else are no part of the chosen request.
+  const decided = !selected
+    ? request
+    : candidates.every(runsChosen)
+      ? sameProfile(chosen, request)
+        ? request
+        : chosen
+      : {
+          ...chosen,
+          allowedInstanceIds: candidates
+            .filter(
+              (c) =>
+                runsChosen(c) &&
+                (!request.allowedInstanceIds || request.allowedInstanceIds.includes(c.instanceId)),
+            )
+            .map((c) => c.instanceId),
+        };
   const best =
     ranked[0] && group(ranked[0]) === 0
       ? ranked
@@ -434,7 +481,7 @@ export function decideAllocation(input: {
   return {
     at: input.at,
     policyVersion: policy.version,
-    request,
+    request: decided,
     outcome: selected ? "selected" : reason ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
     candidates: candidates.map(({ overGoal: _overGoal, ...candidate }) => candidate),

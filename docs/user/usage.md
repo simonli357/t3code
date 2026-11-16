@@ -80,10 +80,15 @@ normally. Only a hard cap or a real limit stops work.
 pin that names Fable starts from the nearest ladder model without it, and a running worker never
 moves onto it. The result says so.
 
-**Fable mode** keeps every worker on Fable low, medium or high: a table entry starts from the
-first of those at or above it, and when it has no room only another of them stands in, never
-another model or the fallback. A model you pin for one worker is kept, with a note. Turning Fable
-mode on turns Fable workers on; turning Fable workers off turns Fable mode off.
+**Fable mode** is a switch on each Claude account. A worker on an account in Fable mode runs
+Fable low, medium or high: its table entry starts from the first of those at or above it, and
+when it has no room only another of them stands in, never another model or the fallback. When
+that account's Fable limit is used up, it takes no workers until the limit resets. A worker on any
+other account gets the table's choice as usual. Each account is judged on the model it would run
+there, so the account with the most room still wins; the result shows the table's choice when it
+differs and names the account's Fable mode. A model you pin for one worker is kept, with a note.
+Turning an account's Fable mode on turns Fable workers on; turning Fable workers off turns every
+account's Fable mode off.
 
 A running worker that hits a limit moves to another account with the same model that lasts the
 rest of its job. If there is none, it waits when the reset is within the **long wait** time
@@ -101,7 +106,7 @@ as estimated, until its own readings replace it.
 
 Open **Settings > Provider allocation** for the accounts: each one's usage windows with their
 resets, what each limit holds, how long the account lasts at the current load, its workers now,
-whether workers may use it, its daily goal and its hard cap; then the preference order, the
+whether workers may use it, its Fable mode, its daily goal and its hard cap; then the preference order, the
 closeness margin, the long wait, the Fable switch, and the learned numbers with their sample
 counts. Choose one shared coordinator and keep it reachable: it holds the settings and decides
 every start. Every value is stored there, so a change made on any computer applies to the next
