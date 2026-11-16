@@ -40,7 +40,10 @@ const TEXT_ENTRY_SELECTOR =
  * other focused field do.
  */
 export function hasUnsavedInput(doc: Document = document): boolean {
-  if (doc.querySelector('[role="dialog"], [role="alertdialog"]')) return true;
+  // Toasts carry role="dialog" too and hold no input.
+  for (const dialog of doc.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+    if (!dialog.closest('[data-slot^="toast-viewport"]')) return true;
+  }
   const focused = doc.activeElement;
   if (!(focused instanceof HTMLElement) || focused.closest("[data-composer-rich-text]")) {
     return false;

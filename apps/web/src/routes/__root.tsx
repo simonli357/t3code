@@ -368,8 +368,10 @@ function DocumentTitleSync() {
  * prompt and reloads as soon as the dialog or focused field is gone.
  */
 function StaleClientReload() {
+  // The welcome belongs to the live connection. The server config is restored
+  // from a cache first, so right after a reload it still names the old build.
   const ownServerVersion =
-    useAtomValue(primaryServerConfigAtom)?.environment.serverVersion ?? null;
+    useAtomValue(primaryServerWelcomeAtom)?.environment.serverVersion ?? null;
 
   useEffect(() => {
     const decide = (unsavedInput: boolean) =>

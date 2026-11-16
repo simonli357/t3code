@@ -48,7 +48,11 @@ describe("resolveStaleClient", () => {
   it("reloads when the own server runs a different build, newer or rolled back", () => {
     expect(resolveStaleClient({ ...loadedFromBuildA, ownServerVersion: BUILD_B })).toBe("reload");
     expect(
-      resolveStaleClient({ ...loadedFromBuildA, clientVersion: BUILD_B, ownServerVersion: BUILD_A }),
+      resolveStaleClient({
+        ...loadedFromBuildA,
+        clientVersion: BUILD_B,
+        ownServerVersion: BUILD_A,
+      }),
     ).toBe("reload");
   });
 
