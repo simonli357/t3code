@@ -1251,6 +1251,11 @@ export const ServerSettings = Schema.Struct({
   globalInstructions: GlobalInstructions.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(GlobalInstructions)({}))),
   ),
+  /**
+   * Instructions every install shares, sent ahead of the user's own. Written by the workflow
+   * tooling from the repository, so Settings shows them but never edits them.
+   */
+  sharedInstructions: GlobalInstructionText.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** User-configured environment-local guide path; separate from instruction text. */
   globalInstructionsGuidePath: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Host-local, opt-in placement for newly created sessions. */

@@ -143,3 +143,21 @@ describe("global instruction delivery records", () => {
     ).toBe(false);
   });
 });
+
+it("sends shared instructions ahead of the user's own, whether or not those are enabled", () => {
+  const settings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    sharedInstructions: "Shared rule.",
+    globalInstructions: { enabled: true, text: "Own rule." },
+  };
+  const both = buildGlobalInstructionContext(settings, undefined)!;
+  expect(both.context.instructions).toContain("Shared rule.\n\nOwn rule.");
+  const sharedOnly = buildGlobalInstructionContext(
+    { ...settings, globalInstructions: { enabled: false, text: "Own rule." } },
+    undefined,
+  )!;
+  expect(sharedOnly.active).toBe(true);
+  expect(sharedOnly.context.instructions).toContain("Shared rule.");
+  expect(sharedOnly.context.instructions).not.toContain("Own rule.");
+  expect(sharedOnly.revision).not.toBe(both.revision);
+});

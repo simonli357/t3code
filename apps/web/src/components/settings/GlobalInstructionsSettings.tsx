@@ -34,6 +34,19 @@ export function GlobalInstructionsSettings() {
               ? "Enabled"
               : "Disabled"}
         </p>
+        {settings.sharedInstructions.trim() && (
+          <>
+            <p className="text-sm text-muted-foreground">
+              Shared instructions, always sent first. They come from the workflow repository and are
+              replaced when its tooling is updated.
+            </p>
+            <Textarea
+              aria-label="Shared instruction text"
+              value={settings.sharedInstructions}
+              readOnly
+            />
+          </>
+        )}
         <Textarea
           aria-label="Global instruction text"
           maxLength={8000}

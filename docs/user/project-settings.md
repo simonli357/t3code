@@ -46,6 +46,11 @@ sessions on the selected environments, including workers and mobile sessions. Ch
 next turn without interrupting agents. Disable retains the text; Clear removes it. Restore
 previous text to roll back. Saves reach connected environments only, not offline hosts.
 
+Shared instructions, when present, are shown above your own text and sent ahead of it even when
+your own are disabled. They are the same for everyone using this fork: they come from
+`shared-settings.json` in the workflow repository and are rewritten by `t3w update`, so change
+them there.
+
 T3 supplies the actual hostname and known workspace separately. A guide path is included only
 if you configure one for that environment. Provider system and developer instructions still
 apply: Codex receives keyed application context as developer messages identifying user

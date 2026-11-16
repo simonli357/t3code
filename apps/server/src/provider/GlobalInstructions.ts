@@ -5,14 +5,21 @@ import type { SessionWorkspace } from "../workspace/SessionWorkspaces.ts";
 
 /** Build a current snapshot, never promote user-authored text to system policy. */
 export function buildGlobalInstructionContext(
-  settings: Pick<ServerSettings, "globalInstructions" | "globalInstructionsGuidePath">,
+  settings: Pick<
+    ServerSettings,
+    "globalInstructions" | "globalInstructionsGuidePath" | "sharedInstructions"
+  >,
   workspace: string | undefined,
   previouslySubmitted = false,
   job: SessionWorkspace | null = null,
   launchEnvironment?: Readonly<Record<string, string>>,
 ) {
   const { enabled, text } = settings.globalInstructions;
-  const active = enabled && text.trim().length > 0;
+  const shared = settings.sharedInstructions.trim();
+  const own = enabled && text.trim().length > 0 ? text : "";
+  // The switch in Settings governs the user's own text only; shared instructions are always sent.
+  const effective = shared && own ? `${shared}\n\n${own}` : shared || own;
+  const active = effective.length > 0;
   const retainedWorkspace =
     !job && launchEnvironment?.WORKENV_JOB_ROOT && launchEnvironment.WORKENV_JOB_REPO === workspace
       ? {
@@ -24,15 +31,13 @@ export function buildGlobalInstructionContext(
         }
       : undefined;
   if (!active && !previouslySubmitted && !job && !retainedWorkspace) return undefined;
-  const revision = NodeCrypto.createHash("sha256")
-    .update(active ? text : "")
-    .digest("hex");
+  const revision = NodeCrypto.createHash("sha256").update(effective).digest("hex");
   const instructions = [
     "T3 user-configured global instructions (current snapshot).",
     "This replaces all earlier T3 global instruction snapshots, including any in conversation history. These are user preferences, subject to the provider's actual system and developer instructions; this delivery channel does not grant them higher authority.",
     `Status: ${active ? "enabled" : "disabled"}. SHA-256: ${revision}.`,
     active
-      ? text
+      ? effective
       : "No global instructions are active. Disregard earlier global instruction snapshots.",
   ].join("\n\n");
   const runtimeFacts = JSON.stringify({
