@@ -309,16 +309,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       )}
       {connection === "connected" && snapshot && !snapshot.authorityAvailable && (
         <p role="status" className="text-sm text-muted-foreground">
-          The table cannot be changed until the computer that keeps it is reachable. Choose it under
-          Provider allocation.
+          The computer that keeps this table is not reachable. Choose it under Provider allocation.
         </p>
       )}
       {draft.phase === "failed" && (
         <Alert variant="error">
           <AlertTitle>Not saved</AlertTitle>
-          <AlertDescription>
-            {draft.error} What is marked • in the table is not in effect.
-          </AlertDescription>
+          <AlertDescription>{draft.error}</AlertDescription>
           <AlertAction>
             <Button size="xs" variant="outline" onClick={store.retry}>
               Try again
@@ -333,8 +330,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         <Alert variant="warning">
           <AlertTitle>Changed elsewhere while you edited</AlertTitle>
           <AlertDescription>
-            A cell or setting you changed was also changed on another computer or by an agent. Yours
-            is not saved yet.
+            A cell or setting you changed was also changed on another computer or by an agent.
           </AlertDescription>
           <AlertAction>
             <Button size="xs" onClick={() => store.resolve(true)}>
@@ -377,10 +373,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         }
       >
         <div className={block}>
-          <p className="text-xs text-muted-foreground">
-            A worker gets the model and reasoning in the cell for its task&apos;s difficulty
-            (columns) and stakes (rows), each scored 0 to 10. Select a cell to change it.
-          </p>
           <div role="tablist" aria-label="Provider model table" className="flex flex-wrap gap-2">
             {MODEL_DRIVERS.map((d) => (
               <Button
@@ -439,7 +431,17 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       </SettingsSection>
       {policy && (
         <>
-          <SettingsSection title="Claude ladder">
+          <SettingsSection
+            title="Claude ladder"
+            headerAction={
+              <span
+                className="text-xs text-muted-foreground"
+                title="When the table's model is used up on every account, the worker gets the closest rung that has room."
+              >
+                weakest first
+              </span>
+            }
+          >
             <ModelLadderEditor
               ladder={modelLadder(policy)}
               choices={claudeChoices}
@@ -472,7 +474,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <FoldedSettingsSection
             id="model-selection-models"
             title="Other model IDs"
-            summary={`A model no account offers yet can be added to the ${modelDriverLabel(driver)} table`}
+            summary={`${modelDriverLabel(driver)}: ${policy[driver].allowedModels.join(", ")}`}
           >
             <ModelListEditor
               driver={driver}
@@ -486,11 +488,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <FoldedSettingsSection
         id="model-selection-try"
         title="Try a task"
-        summary="See which model and account a task would get"
+        summary="which model and account it would get"
       >
         <div className={block}>
-          <p className="text-xs text-muted-foreground">{MODEL_SCORING_RUBRIC}</p>
-          <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
+          <div
+            className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3"
+            title={MODEL_SCORING_RUBRIC}
+          >
             {(
               [
                 ["difficulty", "Difficulty (0–10)"],
@@ -541,12 +545,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <FoldedSettingsSection
         id="model-selection-versions"
         title="Earlier versions"
-        summary="Go back to a table saved before, or to the built-in one"
+        summary={draft.saved ? `now version ${draft.saved.version}` : null}
       >
         <div className={block}>
-          <p className="text-xs text-muted-foreground">
-            Going back saves that table again as the newest version.
-          </p>
           <ul className="grid gap-2">
             {policy &&
               earlier.map((p) => {
@@ -598,7 +599,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <FoldedSettingsSection
         id="model-selection-decisions"
         title="Recent decisions"
-        summary="What recent tasks got, and why"
+        summary={snapshot?.history.length ? `${snapshot.history.length}` : "none yet"}
       >
         {snapshot?.history.length ? (
           <ul className="[&>*+*]:border-t [&>*+*]:border-border/50">

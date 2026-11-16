@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import {
   DEFAULT_CLOSE_MARGIN_POINTS,
@@ -29,7 +29,7 @@ import {
 } from "@t3tools/client-runtime/state/provider-allocation";
 import { cn } from "~/lib/utils";
 import { FoldedSettingsSection } from "../settings/FoldedSettingsSection";
-import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "../settings/itemRows";
+import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
 import { SettingsSection } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -49,19 +49,21 @@ const number = (value: number) =>
   Number.isFinite(value) ? Number(value.toFixed(2)).toString() : "";
 const dollars = (value: number) =>
   `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
-/** "Sun 3:00 PM" within a week, else "Dec 10". */
-function resetTime(resetsAt: string, now: number) {
-  const at = new Date(resetsAt);
-  return at.getTime() - now < 7 * 86_400_000
-    ? at.toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })
-    : at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-/** One column layout for the heading row and every account, once the list is wide enough. */
+/** One row of columns for the heading and every account, once the list is wide enough. */
 const columns =
-  "@min-[60rem]/accounts:grid @min-[60rem]/accounts:grid-cols-[4.75rem_minmax(7rem,1fr)_minmax(19rem,2.6fr)_8.5rem_5.5rem_9.5rem] @min-[60rem]/accounts:gap-x-4";
+  "@min-[60rem]/accounts:grid @min-[60rem]/accounts:grid-cols-[4.5rem_minmax(6rem,0.8fr)_minmax(14.5rem,2fr)_6rem_4.75rem_4.75rem_11rem] @min-[60rem]/accounts:gap-x-4";
+/** A control's name, where the heading row is not shown. */
 const caption = "text-xs text-muted-foreground @min-[60rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
 const unsaved = <p className="text-xs text-destructive">Not saved</p>;
+/** The pages carry no explanatory sentences: a name that needs one shows it on hover. */
+const hinted = "cursor-help underline decoration-dotted underline-offset-2";
+const HINTS = {
+  order: "Between accounts with similar room left, the higher one is used.",
+  fable: "Workers on this account run on Fable only.",
+  goal: "Share of the weekly limit to use each day. It only ranks accounts.",
+  cap: "Usage where the account takes no more work.",
+};
 
 /** Blank is `undefined`: unset for an optional value, invalid for a required one. */
 function NumberField({
@@ -94,7 +96,7 @@ function NumberField({
   const blank = value === undefined || !Number.isFinite(value);
   return (
     <span className="flex items-center gap-1 text-xs text-muted-foreground">
-      <span className="w-16">
+      <span className="w-14">
         <Input
           type="number"
           size="compact"
@@ -131,7 +133,7 @@ function UsageMeter(props: { name: string; used: number; stale: boolean; full: b
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(props.used)}
-      className="block h-1.5 min-w-10 overflow-hidden rounded-full bg-muted"
+      className="block h-1.5 min-w-6 overflow-hidden rounded-full bg-muted"
     >
       <span
         className={cn(
@@ -147,9 +149,7 @@ function UsageMeter(props: { name: string; used: number; stale: boolean; full: b
 function AccountRow({
   row,
   place,
-  policy,
   snapshot,
-  now,
   disabled,
   notSaved,
   workersNotSaved,
@@ -160,9 +160,7 @@ function AccountRow({
   row: AllocationAccountRow;
   /** Where the account stands in the preference order; absent for accounts that take no order. */
   place?: { index: number; count: number; move: (delta: -1 | 1) => void };
-  policy: AllocationPolicy;
   snapshot: AllocationSnapshot | null;
-  now: number;
   disabled: boolean;
   notSaved: ReadonlySet<string>;
   workersNotSaved: ReadonlySet<string>;
@@ -200,17 +198,24 @@ function AccountRow({
         ],
       };
     }, pause);
+  const about = `${PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver}${row.plan ? ` ${row.plan}` : ""} · ${row.hosts.join(", ")}`;
   return (
-    <li className={cn(ITEM_ROW_CLASSNAME, "grid min-w-0 gap-y-3", columns)}>
-      <div className="flex min-w-0 items-start gap-3 @min-[60rem]/accounts:contents">
+    <li
+      className={cn(
+        ITEM_ROW_CLASSNAME,
+        "flex min-w-0 flex-wrap items-start gap-x-4 gap-y-2 py-2",
+        columns,
+      )}
+    >
+      <div className="flex min-w-44 flex-1 items-center gap-3 @min-[60rem]/accounts:contents">
         <div
           className={cn(
-            "shrink-0 content-start gap-1",
-            place ? "grid" : "hidden @min-[60rem]/accounts:block",
+            "h-7 shrink-0 items-center gap-1",
+            place ? "flex" : "hidden @min-[60rem]/accounts:block",
           )}
         >
           {place && (
-            <div className="flex items-center gap-1">
+            <>
               <Button
                 size="icon-xs"
                 variant="outline"
@@ -232,207 +237,198 @@ function AccountRow({
               <span className="w-4 text-center text-xs text-muted-foreground tabular-nums">
                 {place.index + 1}
               </span>
-            </div>
+            </>
           )}
-          {place && notSaved.has("accountOrder") && unsaved}
         </div>
         <div className="min-w-0">
-          <div className="text-sm font-medium">{row.label}</div>
-          <div className="text-xs text-muted-foreground">
-            {PROVIDER_DISPLAY_NAMES[row.driver] ?? row.driver}
-            {row.plan && ` ${row.plan}`} · {row.hosts.join(", ")}
+          <div className="truncate text-sm font-medium">{row.label}</div>
+          <div className="truncate text-xs text-muted-foreground" title={about}>
+            {about}
+            {row.login === null && " · login unknown"}
           </div>
-          {row.login === null && (
-            <div className="text-xs text-muted-foreground">login unknown; matched by label</div>
-          )}
+          {place && notSaved.has("accountOrder") && unsaved}
         </div>
       </div>
-      <div className="grid min-w-0 content-start gap-1 text-xs">
-        {row.windows.length > 0 && (
-          <div className="grid grid-cols-[auto_auto_minmax(2.5rem,1fr)] items-center gap-x-3 gap-y-1 @min-[30rem]/accounts:grid-cols-[auto_auto_minmax(2.5rem,1fr)_auto]">
-            {row.windows.map((window) => {
-              const goal = row.runway?.windows.find((w) => w.id === window.id)?.goalPercent;
-              const stale =
-                now - Date.parse(window.checkedAt) > policy.maxReadingAgeMinutes * 60_000;
-              const cap =
-                window.models.length > 0
-                  ? null
-                  : window.kind === "weekly"
-                    ? row.cap?.weeklyPercent
-                    : window.kind === "session"
-                      ? row.cap?.fiveHourPercent
-                      : null;
-              return (
-                <Fragment key={window.id}>
-                  <span>{window.label}</span>
-                  <span className="tabular-nums">
-                    <span className="font-medium">{number(window.usedPercent)}%</span>
-                    {goal != null && (
-                      <span className="text-muted-foreground"> / {Math.round(goal)}% goal</span>
-                    )}
-                  </span>
-                  <UsageMeter
-                    name={`${row.name} ${window.label} used`}
-                    used={window.usedPercent}
-                    stale={stale}
-                    full={window.usedPercent >= (cap ?? 90)}
-                  />
-                  <span className="col-span-full text-muted-foreground @min-[30rem]/accounts:col-span-1">
-                    {window.resetsAt === null
-                      ? "reset unknown"
-                      : Date.parse(window.resetsAt) <= now
-                        ? "reset"
-                        : `resets ${resetTime(window.resetsAt, now)}`}
-                    {stale && (
-                      <span className="text-warning-foreground"> · read {window.age} ago</span>
-                    )}
-                  </span>
-                </Fragment>
-              );
-            })}
+      <div className="grid min-w-0 flex-[2] basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
+        {row.windows.map((window) => (
+          <div
+            key={window.id}
+            title={window.detail}
+            className="col-span-full grid grid-cols-subgrid items-center"
+          >
+            <span className="truncate">{window.label}</span>
+            <span className="text-right font-medium tabular-nums">
+              {Math.round(window.usedPercent * 10) / 10}%
+            </span>
+            <UsageMeter
+              name={`${row.name} ${window.label} used`}
+              used={window.usedPercent}
+              stale={window.stale}
+              full={window.usedPercent >= (window.capPercent ?? 90)}
+            />
+            <span className="whitespace-nowrap text-muted-foreground tabular-nums">
+              {window.resetIn ?? "no reset time"}
+              {window.stale && <span className="text-warning-foreground"> · old</span>}
+            </span>
           </div>
-        )}
-        {row.runway && row.windows.length > 0 && (
-          <div className="text-muted-foreground">{row.runway.line}</div>
-        )}
-        {!row.windows.length && (
-          <div className="text-muted-foreground">
-            {row.capSource === "unsupported"
-              ? "No subscription limit"
-              : row.capSource === "probeFailed"
-                ? "Usage could not be read"
-                : row.capSource === "unverified"
-                  ? "Usage not verified"
-                  : "No reading"}
-          </div>
+        ))}
+        {row.notice && (
+          <p
+            className={cn(
+              "col-span-full",
+              row.windows.length > 0 ? "text-warning-foreground" : "text-muted-foreground",
+            )}
+          >
+            {row.notice}
+          </p>
         )}
       </div>
-      <div className="grid min-w-0 content-start gap-1.5 text-xs">
-        <label className="flex items-center gap-2">
-          <Switch
-            size="sm"
-            aria-label={`${row.name} workers allowed`}
-            checked={row.workersEnabled}
-            disabled={disabled}
-            onCheckedChange={(enabled) => onWorkersChange(row, enabled)}
-          />
-          <span className={caption}>Workers</span>
-          <span className="text-muted-foreground">{row.workers} running</span>
-        </label>
-        {row.workersEnabled && row.workersOffOn.length > 0 && (
-          <div className="text-muted-foreground">off on {row.workersOffOn.join(", ")}</div>
-        )}
-        {workersNotSaved.has(row.key) && unsaved}
-        {row.fableMode !== null && (
-          <label className="flex items-center gap-2">
+      <div className="flex min-w-0 basis-full flex-wrap items-start gap-x-5 gap-y-2 @min-[60rem]/accounts:contents">
+        <div className="grid min-w-0 content-start gap-0.5 text-xs">
+          <label className="flex h-7 items-center gap-2">
+            <span className={caption}>Workers</span>
             <Switch
               size="sm"
-              aria-label={`${row.name} Fable mode`}
-              checked={row.fableMode}
-              disabled={goalsDisabled}
-              onCheckedChange={(on) =>
-                onEdit((current) => withAllocationAccountFableMode(current, snapshot, row, on))
-              }
+              aria-label={`${row.name} workers allowed`}
+              checked={row.workersEnabled}
+              disabled={disabled}
+              onCheckedChange={(enabled) => onWorkersChange(row, enabled)}
             />
-            Fable mode
+            {row.workers > 0 && (
+              <span className="whitespace-nowrap text-muted-foreground tabular-nums">
+                {row.workers} running
+              </span>
+            )}
           </label>
-        )}
-        {row.fableMode !== null &&
-          (notSaved.has("fableAccounts") || notSaved.has("fableOnly")) &&
-          unsaved}
-      </div>
-      <div className="grid min-w-0 content-start gap-1">
-        <span className={caption}>Daily goal</span>
-        <NumberField
-          name={`${row.name} daily goal`}
-          unit="%"
-          value={row.goal?.own ? row.goal.percentPerDay : undefined}
-          min={0}
-          max={100}
-          step={0.5}
-          placeholder={row.goal ? number(row.goal.percentPerDay) : "Off"}
-          disabled={goalsDisabled}
-          onChange={(value) =>
-            onEdit((current) => withAllocationAccountGoal(current, row, value), TYPING_PAUSE)
-          }
-          onCommit={onFlush}
-        />
-        {row.goal && !row.goal.own && <div className="text-xs text-muted-foreground">default</div>}
-        {failed("goal") && unsaved}
-      </div>
-      <div className="grid min-w-0 content-start gap-1 text-xs">
-        <span className={caption}>Stop at</span>
-        {row.supportsCaps ? (
-          <>
-            <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {row.workersEnabled && row.workersOffOn.length > 0 && (
+            <div className="text-muted-foreground">off on {row.workersOffOn.join(", ")}</div>
+          )}
+          {workersNotSaved.has(row.key) && unsaved}
+        </div>
+        <div
+          className={cn(
+            "min-w-0 content-start gap-0.5 text-xs",
+            row.fableMode === null ? "hidden @min-[60rem]/accounts:grid" : "grid",
+          )}
+        >
+          {row.fableMode !== null && (
+            <label className="flex h-7 items-center gap-2">
+              <span title={HINTS.fable} className={cn(caption, hinted)}>
+                Fable mode
+              </span>
+              <Switch
+                size="sm"
+                aria-label={`${row.name} Fable mode`}
+                checked={row.fableMode}
+                disabled={goalsDisabled}
+                onCheckedChange={(on) =>
+                  onEdit((current) => withAllocationAccountFableMode(current, snapshot, row, on))
+                }
+              />
+            </label>
+          )}
+          {row.fableMode !== null &&
+            (notSaved.has("fableAccounts") || notSaved.has("fableOnly")) &&
+            unsaved}
+        </div>
+        <div className="grid min-w-0 content-start gap-0.5">
+          <div className="flex h-7 items-center gap-2">
+            <span title={HINTS.goal} className={cn(caption, hinted)}>
+              Daily goal
+            </span>
+            <NumberField
+              name={`${row.name} daily goal`}
+              unit="%"
+              value={row.goal?.own ? row.goal.percentPerDay : undefined}
+              min={0}
+              max={100}
+              step={0.5}
+              placeholder={row.goal ? number(row.goal.percentPerDay) : "Off"}
+              disabled={goalsDisabled}
+              onChange={(value) =>
+                onEdit((current) => withAllocationAccountGoal(current, row, value), TYPING_PAUSE)
+              }
+              onCommit={onFlush}
+            />
+          </div>
+          {failed("goal") && unsaved}
+        </div>
+        <div className="grid min-w-0 content-start gap-0.5 text-xs">
+          {row.supportsCaps ? (
+            <>
               {/* A cap can stop running work, so a half-typed one is never stored. */}
-              <label className="grid gap-0.5 text-muted-foreground">
-                Week
-                <NumberField
-                  name={`${row.name} weekly cap`}
-                  value={row.cap?.weeklyPercent ?? undefined}
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  placeholder="Off"
-                  disabled={capsDisabled}
-                  onChange={(value) => setCap({ weeklyPercent: value ?? null }, null)}
-                  onCommit={onFlush}
-                />
-              </label>
-              {fiveHour && (
-                <label className="grid gap-0.5 text-muted-foreground">
-                  5h
+              <div className="flex h-7 items-center gap-2 text-muted-foreground">
+                <span title={HINTS.cap} className={cn(caption, hinted)}>
+                  Hard cap
+                </span>
+                <label className="flex items-center gap-1">
+                  Wk
                   <NumberField
-                    name={`${row.name} 5-hour cap`}
-                    value={row.cap?.fiveHourPercent ?? undefined}
+                    name={`${row.name} weekly cap`}
+                    value={row.cap?.weeklyPercent ?? undefined}
                     min={0}
                     max={100}
                     step={0.1}
                     placeholder="Off"
                     disabled={capsDisabled}
-                    onChange={(value) => setCap({ fiveHourPercent: value ?? null }, null)}
+                    onChange={(value) => setCap({ weeklyPercent: value ?? null }, null)}
                     onCommit={onFlush}
                   />
                 </label>
-              )}
-            </div>
-            {capEnabled && (
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="text-muted-foreground">Stops</span>
-                {(
-                  [
-                    { key: "stopWorkers", who: "workers" },
-                    { key: "stopMasters", who: "masters" },
-                  ] as const
-                ).map(({ key, who }) => (
-                  <label key={key} className="flex items-center gap-1.5">
-                    <Checkbox
-                      aria-label={`${row.name} cap stops ${who}`}
-                      checked={row.cap?.[key] ?? false}
+                {fiveHour && (
+                  <label className="flex items-center gap-1">
+                    5h
+                    <NumberField
+                      name={`${row.name} 5-hour cap`}
+                      value={row.cap?.fiveHourPercent ?? undefined}
+                      min={0}
+                      max={100}
+                      step={0.1}
+                      placeholder="Off"
                       disabled={capsDisabled}
-                      onCheckedChange={(checked) =>
-                        setCap(
-                          key === "stopWorkers"
-                            ? { stopWorkers: checked }
-                            : { stopMasters: checked },
-                          0,
-                        )
-                      }
+                      onChange={(value) => setCap({ fiveHourPercent: value ?? null }, null)}
+                      onCommit={onFlush}
                     />
-                    {who}
                   </label>
-                ))}
+                )}
               </div>
-            )}
-            {capEnabled && !row.cap?.stopWorkers && !row.cap?.stopMasters && (
-              <div className="text-muted-foreground">stops nobody: no effect</div>
-            )}
-            {failed("cap") && unsaved}
-          </>
-        ) : (
-          <div className="text-muted-foreground">No usage reading</div>
-        )}
+              {capEnabled && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-muted-foreground">stops</span>
+                  {(
+                    [
+                      { key: "stopWorkers", who: "workers" },
+                      { key: "stopMasters", who: "masters" },
+                    ] as const
+                  ).map(({ key, who }) => (
+                    <label key={key} className="flex items-center gap-1.5">
+                      <Checkbox
+                        aria-label={`${row.name} cap stops ${who}`}
+                        checked={row.cap?.[key] ?? false}
+                        disabled={capsDisabled}
+                        onCheckedChange={(checked) =>
+                          setCap(
+                            key === "stopWorkers"
+                              ? { stopWorkers: checked }
+                              : { stopMasters: checked },
+                            0,
+                          )
+                        }
+                      />
+                      {who}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {capEnabled && !row.cap?.stopWorkers && !row.cap?.stopMasters && (
+                <div className="text-warning-foreground">stops nobody</div>
+              )}
+              {failed("cap") && unsaved}
+            </>
+          ) : (
+            <span className="flex h-7 items-center text-muted-foreground">no cap</span>
+          )}
+        </div>
       </div>
     </li>
   );
@@ -443,7 +439,8 @@ const COMPUTER_RULES = [
   {
     value: "workerMemoryGiB",
     title: "Worker memory",
-    description:
+    hint: "expected for each worker",
+    detail:
       "What a worker is expected to need once it builds or runs. A worker that just started counts this much against its computer.",
     unit: "GiB",
     initial: DEFAULT_WORKER_MEMORY_GIB,
@@ -453,7 +450,8 @@ const COMPUTER_RULES = [
   {
     value: "startSettleMinutes",
     title: "Start settle time",
-    description: "How long a worker that just started counts that way.",
+    hint: "how long a start counts as new",
+    detail: "How long a worker that just started counts as not showing its memory yet.",
     unit: "minutes",
     initial: DEFAULT_START_SETTLE_MINUTES,
     max: MAX_START_SETTLE_MINUTES,
@@ -462,7 +460,8 @@ const COMPUTER_RULES = [
   {
     value: "sessionReserveGiB",
     title: "Session reserve",
-    description: "Memory kept back for each session already working on a computer.",
+    hint: "kept back per working session",
+    detail: "Memory kept back for each session already working on a computer.",
     unit: "GiB",
     initial: DEFAULT_SESSION_RESERVE_GIB,
     max: 16,
@@ -471,7 +470,8 @@ const COMPUTER_RULES = [
   {
     value: "minFreeMemoryGiB",
     title: "Minimum free memory",
-    description:
+    hint: "below this, a computer comes last",
+    detail:
       "A computer with less room than this gets a new worker only when every computer has less.",
     unit: "GiB",
     initial: DEFAULT_MIN_FREE_MEMORY_GIB,
@@ -481,8 +481,9 @@ const COMPUTER_RULES = [
   {
     value: "memoryKillHoldMinutes",
     title: "Memory kill hold",
-    description:
-      "After the system stops a session for lack of memory, that computer comes last for this long.",
+    hint: "comes last after a memory kill",
+    detail:
+      "After the system stops a session for lack of memory, that computer gets a new worker only when every other one is in the same state, for this long.",
     unit: "minutes",
     initial: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
     max: MAX_MEMORY_KILL_HOLD_MINUTES,
@@ -490,18 +491,25 @@ const COMPUTER_RULES = [
   },
 ] as const;
 
-/** One setting of the rules: its name, one line on what it does, and its control. */
-function Rule(props: { title: string; description: string; failed: boolean; children: ReactNode }) {
+/** One stored value on one line: its name, a few words where the name is not enough, its control. */
+function Rule(props: {
+  title: string;
+  hint: string;
+  /** The whole explanation, on hover. */
+  detail: string;
+  failed: boolean;
+  children: ReactNode;
+}) {
   return (
-    <div className={ITEM_ROW_CLASSNAME}>
-      <div className={ITEM_ROW_INNER_CLASSNAME}>
-        <div className="min-w-0 space-y-1">
+    <div className={cn(ITEM_ROW_CLASSNAME, "flex min-w-0 items-center justify-between gap-3 py-2")}>
+      <div className="min-w-0" title={props.detail}>
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
           <h3 className="text-sm font-medium">{props.title}</h3>
-          <p className="max-w-xl text-xs text-muted-foreground/80">{props.description}</p>
-          {props.failed && unsaved}
+          <span className="text-xs text-muted-foreground">{props.hint}</span>
         </div>
-        <div className="flex shrink-0 items-center">{props.children}</div>
+        {props.failed && unsaved}
       </div>
+      <div className="flex shrink-0 items-center">{props.children}</div>
     </div>
   );
 }
@@ -630,6 +638,10 @@ export function AllocationControls({
     snapshot?.inventories.flatMap((inventory) => (inventory.complete ? inventory.notices : [])),
   );
   const unread = [...new Set(snapshot?.notices)].filter((note) => !standing.has(note));
+  const outdated = [
+    ...(snapshot && snapshot.accountCapsSupported !== true ? ["caps"] : []),
+    ...(snapshot && snapshot.accountOrderSupported !== true ? ["the order and rules"] : []),
+  ];
   const account = (row: AllocationAccountRow, index?: number) => (
     <AccountRow
       key={row.key}
@@ -644,9 +656,7 @@ export function AllocationControls({
                 onEdit((current) => withAllocationAccountMoved(current, usable, row.key, delta)),
             },
           })}
-      policy={policy}
       snapshot={snapshot}
-      now={now}
       disabled={disabled}
       notSaved={notSaved}
       workersNotSaved={workersNotSaved}
@@ -655,20 +665,53 @@ export function AllocationControls({
       onWorkersChange={onWorkersChange}
     />
   );
+  const numberRule = (rule: (typeof COMPUTER_RULES)[number]) => (
+    <Rule
+      key={rule.value}
+      title={rule.title}
+      hint={rule.hint}
+      detail={rule.detail}
+      failed={notSaved.has(rule.value)}
+    >
+      <NumberField
+        name={rule.title}
+        unit={rule.unit}
+        value={policy[rule.value] ?? rule.initial}
+        required
+        min={0}
+        max={rule.max}
+        step={rule.step}
+        disabled={rulesDisabled}
+        onChange={(value = Number.NaN) =>
+          onEdit((current) => ({ ...current, [rule.value]: value }), TYPING_PAUSE)
+        }
+        onCommit={onFlush}
+      />
+    </Rule>
+  );
   return (
     <>
       <div className="@container/accounts grid min-w-0 gap-2.5">
         <SettingsSection title="Accounts" headerAction={status}>
           <div
             aria-hidden
-            className={cn("hidden px-3 py-2 text-xs text-muted-foreground sm:px-4", columns)}
+            className={cn("hidden px-3 py-1.5 text-xs text-muted-foreground sm:px-4", columns)}
           >
-            <span>Order</span>
+            <span title={HINTS.order} className={hinted}>
+              Order
+            </span>
             <span>Account</span>
             <span>Usage</span>
             <span>Workers</span>
-            <span>Daily goal</span>
-            <span>Stop at</span>
+            <span title={HINTS.fable} className={hinted}>
+              Fable mode
+            </span>
+            <span title={HINTS.goal} className={hinted}>
+              Daily goal
+            </span>
+            <span title={HINTS.cap} className={hinted}>
+              Hard cap
+            </span>
           </div>
           {ordered.length > 0 ? (
             <ul aria-label="Accounts, most preferred first" className={divided}>
@@ -679,39 +722,31 @@ export function AllocationControls({
               {accounts === "loading"
                 ? "Loading accounts…"
                 : accounts === "failed"
-                  ? "Accounts could not be read. Refresh to try again."
+                  ? "Accounts could not be read."
                   : accounts === "offline"
-                    ? "Not connected: accounts appear once this computer connects."
+                    ? "Not connected."
                     : "No accounts reported."}
             </p>
           )}
         </SettingsSection>
-        <div className="grid gap-1 px-3 text-xs text-muted-foreground sm:px-4">
-          <p>
-            Order: between accounts with similar room left, the higher one is used. Daily goal: the
-            share of the weekly limit to use each day; it only ranks accounts. Stop at: the usage
-            where the account takes no more work. Fable mode: its workers run on Fable only.
-          </p>
-          {snapshot && snapshot.accountCapsSupported !== true && (
-            <p>The computer that keeps these settings needs an update before caps can be edited.</p>
-          )}
-          {snapshot && snapshot.accountOrderSupported !== true && (
-            <p>
-              The computer that keeps these settings needs an update before the order and rules can
-              be edited.
-            </p>
-          )}
-          {unread.map((note) => (
-            <p key={note} className="text-warning-foreground">
-              {note}
-            </p>
-          ))}
-        </div>
+        {(outdated.length > 0 || unread.length > 0) && (
+          <div className="grid gap-1 px-3 text-xs text-warning-foreground sm:px-4">
+            {outdated.length > 0 && (
+              <p>
+                The computer that keeps these settings needs an update before {outdated.join(", ")}{" "}
+                can be edited.
+              </p>
+            )}
+            {unread.map((note) => (
+              <p key={note}>{note}</p>
+            ))}
+          </div>
+        )}
         {others.length > 0 && (
           <FoldedSettingsSection
             id="allocation-other-accounts"
             title={`Other accounts (${others.length})`}
-            summary="Turned off, or no usage reading and no cap"
+            summary={others.map((row) => row.label).join(", ")}
           >
             <ul aria-label="Other accounts" className={divided}>
               {others.map((row) => account(row))}
@@ -722,7 +757,8 @@ export function AllocationControls({
       <SettingsSection title="Rules">
         <Rule
           title="Close-call margin"
-          description="Accounts within this much of the roomiest one count as equal; the order decides between them."
+          hint="accounts this close count as equal"
+          detail="Accounts within this much of the roomiest one count as equal; the order decides between them."
           failed={notSaved.has("closeMarginPoints")}
         >
           <NumberField
@@ -741,7 +777,8 @@ export function AllocationControls({
         </Rule>
         <Rule
           title="Wait for a reset"
-          description="A running worker that hits a limit waits this long for the reset; if it is further away, the worker moves to the closest model."
+          hint="longer, and the worker changes model"
+          detail="A running worker that hits a limit waits this long for the reset. If the reset is further away, it moves to the closest model."
           failed={notSaved.has("longWaitHours")}
         >
           <NumberField
@@ -761,7 +798,8 @@ export function AllocationControls({
         </Rule>
         <Rule
           title="Fable workers"
-          description="Off: no worker runs on Fable. One that would starts on the nearest other model."
+          hint="off: no worker runs on Fable"
+          detail="Off: no worker runs on Fable. One that would starts on the nearest other model."
           failed={notSaved.has("fableWorkers")}
         >
           <Switch
@@ -772,45 +810,29 @@ export function AllocationControls({
           />
         </Rule>
       </SettingsSection>
-      <SettingsSection title="Computer for a new worker">
-        {COMPUTER_RULES.map((rule) => (
-          <Rule
-            key={rule.value}
-            title={rule.title}
-            description={rule.description}
-            failed={notSaved.has(rule.value)}
-          >
-            <NumberField
-              name={rule.title}
-              unit={rule.unit}
-              value={policy[rule.value] ?? rule.initial}
-              required
-              min={0}
-              max={rule.max}
-              step={rule.step}
-              disabled={rulesDisabled}
-              onChange={(value = Number.NaN) =>
-                onEdit((current) => ({ ...current, [rule.value]: value }), TYPING_PAUSE)
-              }
-              onCommit={onFlush}
-            />
-          </Rule>
-        ))}
-      </SettingsSection>
+      <FoldedSettingsSection
+        id="allocation-computer"
+        title="Computer for a new worker"
+        summary={COMPUTER_RULES.map(
+          (rule) => `${number(policy[rule.value] ?? rule.initial)} ${rule.unit}`,
+        ).join(" · ")}
+      >
+        {COMPUTER_RULES.map(numberRule)}
+      </FoldedSettingsSection>
       <FoldedSettingsSection
         id="allocation-learned"
         title="Learned numbers"
         summary={
           snapshot?.learned
-            ? `What models cost and limits hold, measured ${allocationReadingAge(snapshot.learned.learnedAt, now)} ago`
-            : "Nothing measured yet: starting estimates are used"
+            ? `measured ${allocationReadingAge(snapshot.learned.learnedAt, now)} ago`
+            : "nothing measured yet"
         }
       >
         {snapshot?.learned ? (
           <LearnedNumbers learned={snapshot.learned} />
         ) : (
           <p className={cn(ITEM_ROW_CLASSNAME, "text-sm text-muted-foreground")}>
-            Costs and limit sizes appear once turns and limit readings are recorded.
+            Nothing measured yet.
           </p>
         )}
       </FoldedSettingsSection>

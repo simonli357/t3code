@@ -221,7 +221,7 @@ export function ModelCellEditor(props: {
   if (!position || !cell)
     return (
       <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-        Select a cell to change its model or reasoning.
+        Select a cell to change it.
       </p>
     );
   const model = pendingModel ?? cell.model;
@@ -373,9 +373,6 @@ export function ModelListEditor(props: {
   };
   return (
     <section aria-label={`${label} models`} className={block}>
-      <p className="text-xs text-muted-foreground">
-        Models the {label} table may use. A model picked in a cell is added by itself.
-      </p>
       <ul className="flex min-w-0 flex-wrap gap-2 text-sm">
         {models.map((model) => (
           <li key={model} className="flex min-w-0 items-center gap-1 rounded border px-1.5 py-0.5">
@@ -437,10 +434,6 @@ export function ModelLadderEditor(props: {
   const keys = rungKeys(ladder);
   return (
     <section aria-label="Model ladder" className={block}>
-      <p className="text-xs text-muted-foreground">
-        Weakest first. When the table&apos;s model is used up on every account, the worker gets the
-        closest rung that has room.
-      </p>
       <ol className="grid min-w-0 gap-1">
         {ladder.map((item, index) => {
           const name = modelProfileLabel(item);
@@ -549,11 +542,7 @@ export function ModelFallbackEditor(props: {
   };
   return (
     <section aria-label="Fallback" className={block}>
-      <p className="text-xs text-muted-foreground">
-        When no ladder rung has room, a worker that wanted a rung below the one chosen here starts
-        on the fallback model. From that rung up, it waits for a reset instead.
-      </p>
-      {fallback && (
+      {fallback ? (
         <div className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-3">
           <label className={captioned}>
             Fallback model ID
@@ -579,7 +568,10 @@ export function ModelFallbackEditor(props: {
               {...typed}
             />
           </label>
-          <label className={captioned}>
+          <label
+            className={captioned}
+            title="When no ladder rung has room, a worker that wanted a rung below this one starts on the fallback model. From this rung up, it waits for a reset."
+          >
             Used below rung
             <select
               className={field}
@@ -602,6 +594,8 @@ export function ModelFallbackEditor(props: {
             </select>
           </label>
         </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">Off</p>
       )}
     </section>
   );

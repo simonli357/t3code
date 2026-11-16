@@ -249,22 +249,19 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       )}
       {snapshot && !loadingSettings && connection !== "connected" && (
         <p className="text-sm text-muted-foreground">
-          Not connected: showing the last known settings. They can be changed once this computer
-          reconnects.
+          Not connected: showing the last known settings.
         </p>
       )}
       {ready && !snapshot?.authorityAvailable && (
         <p className="text-sm text-muted-foreground">
-          These settings cannot be changed until the computer that keeps them is reachable. Choose
-          it under Settings computer below.
+          The computer that keeps these settings is not reachable. Choose it under Settings
+          computer.
         </p>
       )}
       {saving.phase === "failed" && (
         <Alert variant="error">
           <AlertTitle>Not saved</AlertTitle>
-          <AlertDescription>
-            {saving.error} The values marked &quot;Not saved&quot; are not in effect.
-          </AlertDescription>
+          <AlertDescription>{saving.error}</AlertDescription>
           <AlertAction>
             <Button size="xs" variant="outline" onClick={store.retry}>
               Try again
@@ -279,8 +276,7 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
         <Alert variant="warning">
           <AlertTitle>Changed elsewhere while you edited</AlertTitle>
           <AlertDescription>
-            A value you changed was also changed on another computer or by an agent. Yours is not
-            saved yet.
+            A value you changed was also changed on another computer or by an agent.
           </AlertDescription>
           <AlertAction>
             <Button size="xs" onClick={() => store.resolve(true)}>
@@ -328,19 +324,9 @@ function AllocationEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <FoldedSettingsSection
         id="allocation-settings-computer"
         title="Settings computer"
-        summary={
-          keeper
-            ? `${keeper.label} keeps these settings`
-            : ready
-              ? "No computer keeps these settings yet"
-              : null
-        }
+        summary={keeper ? keeper.label : ready ? "none chosen" : null}
       >
         <div className={`${ITEM_ROW_CLASSNAME} grid min-w-0 gap-3`}>
-          <p className="text-xs text-muted-foreground">
-            One computer keeps these settings for every linked computer and picks the account for
-            each start. It must be reachable from this one.
-          </p>
           <div className="grid min-w-0 grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
             <label className="grid min-w-0 gap-1 text-sm">
               Computer

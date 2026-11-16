@@ -330,6 +330,7 @@ describe("Provider allocation editor", () => {
       "Minimum free memory": ["minFreeMemoryGiB", "6"],
       "Memory kill hold": ["memoryKillHoldMinutes", "90"],
     } as const;
+    await open("Computer for a new worker");
     expect(
       [...section("Computer for a new worker").querySelectorAll("h3")].map((h) => h.textContent),
     ).toEqual(Object.keys(values));
@@ -369,7 +370,7 @@ describe("Provider allocation editor", () => {
       [...section("Accounts").querySelectorAll("li")].map(
         (row) => row.textContent?.match(/\d+ running/)?.[0],
       ),
-    ).toEqual(["1 running", "0 running"]);
+    ).toEqual(["1 running", undefined]);
   });
   it("stores a daily goal after a pause and an account's Fable mode at once", async () => {
     const claude = withAccount(
@@ -415,7 +416,7 @@ describe("Provider allocation editor", () => {
     await act(() => named("SL cap stops workers").click());
     await pass();
     expect(saved.policy.accountCaps?.[0]).toMatchObject({ stopWorkers: false, stopMasters: false });
-    expect(container.textContent).toContain("stops nobody: no effect");
+    expect(container.textContent).toContain("stops nobody");
     await act(() => named("SL cap stops masters").click());
     await pass();
     expect(saved.policy.accountCaps?.[0]).toMatchObject({ stopWorkers: false, stopMasters: true });
@@ -574,12 +575,72 @@ describe("Provider allocation editor", () => {
       }),
     );
     const row = section("Accounts").querySelector("li")!;
-    expect(row.textContent).toContain("Weekly");
-    expect(row.textContent).toContain("42%");
-    expect(row.textContent).toContain("resets ");
-    expect(row.textContent).toContain("read 14 min ago");
+    // The line a glance needs: the limit, how much is used, and how long until it resets.
+    const line = named("SL Weekly used").parentElement!;
+    expect(line.textContent).toMatch(/^Weekly42%in \d+d \d+h · old$/);
+    expect(line.title).toBe("read 14 min ago");
     expect(named("SL Weekly used").getAttribute("aria-valuenow")).toBe("42");
     expect(field("SL 5-hour cap").value).toBe("");
+    expect(row.querySelector("p")).toBeNull();
+  });
+  it("says why an account takes no more work, naming its hard cap, and nothing while it has room", async () => {
+    const claude = withAccount({
+      driver: ProviderDriverKind.make("claudeAgent"),
+      windows: [
+        {
+          id: "seven_day",
+          label: "Weekly",
+          kind: "weekly" as const,
+          usedPoints: 16,
+          checkedAt: "2026-10-23T12:03:00.000Z",
+          resetsAt: "2026-10-30T06:04:00.000Z",
+          cycleStartedAt: "2026-10-23T12:00:00.000Z",
+          durationHours: 168,
+          ratePointsPerHour: null,
+          samples: 0,
+          rateAgeMinutes: null,
+        },
+      ],
+    });
+    const runway = (tight: boolean, line: string) => ({
+      key: JSON.stringify(["claudeAgent", ["account", "identity"]]),
+      label: "SL",
+      line,
+      tight,
+      windows: [
+        {
+          id: "seven_day",
+          label: "Weekly",
+          meterPercent: 16,
+          goalPercent: 5,
+          sizeDollars: 1603,
+          source: "estimated" as const,
+        },
+      ],
+    });
+    const row = () => section("Accounts").querySelector("li")!;
+    await read({
+      ...claude,
+      runways: [
+        runway(
+          false,
+          "No limit runs out before its reset at the current load (0 working sessions).",
+        ),
+      ],
+    });
+    const line = named("SL Weekly used").parentElement!;
+    expect(line.textContent).toBe("Weekly16%in 6d 18h");
+    expect(line.title).toBe(
+      "read 1 min ago · holds about $1,603 (estimated) · daily goal allows 5% by now",
+    );
+    expect(row().querySelector("p")).toBeNull();
+    await read({
+      ...claude,
+      runways: [runway(true, "Weekly reached its 10% hard cap; it resets in about 6d 18h.")],
+    });
+    expect(row().querySelector("p")?.textContent).toBe(
+      "Weekly reached its 10% hard cap; it resets in about 6d 18h.",
+    );
   });
   it("keeps an API-key account with cached windows under Other accounts, without caps", async () => {
     await read(
@@ -661,7 +722,7 @@ describe("Provider allocation editor", () => {
       "Workstation (this computer)",
       "Build computer",
     ]);
-    expect(section("Settings computer").textContent).toContain("Workstation keeps these settings");
+    expect(section("Settings computer").textContent).toContain("Workstation");
     await change("SL weekly cap", "12");
     await change("Computer", "peer");
     await act(() => button("Use this computer").click());
@@ -775,7 +836,18 @@ describe("Provider allocation editor", () => {
   it("keeps the rest behind closed sections, without draft buttons or internal wording", async () => {
     expect(
       [...container.querySelectorAll("button[aria-expanded]")].map((fold) => fold.textContent),
-    ).toEqual(["Learned numbers", "Settings computer"]);
+    ).toEqual(["Computer for a new worker", "Learned numbers", "Settings computer"]);
+    // Names, values and controls only: what a name does not say is one hover away.
+    expect(container.querySelectorAll("p")).toHaveLength(1);
+    expect(container.querySelector("p")?.textContent).toBe("No reading");
+    expect(named("Close-call margin").closest("[title]")).toBeNull();
+    expect(
+      [...section("Rules").querySelectorAll("[title]")].map((hint) => hint.textContent),
+    ).toEqual([
+      "Close-call marginaccounts this close count as equal",
+      "Wait for a resetlonger, and the worker changes model",
+      "Fable workersoff: no worker runs on Fable",
+    ]);
     for (const removed of [
       "Save settings",
       "Reset to defaults",

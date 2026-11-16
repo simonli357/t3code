@@ -121,6 +121,16 @@ export function allocationReadingAge(checkedAt: string, now: number): string {
       : `${Math.round(minutes / 1440)} d`;
 }
 
+/** "in 6d 18h", "in 2h 10m" or "in 45m" until a limit resets; "reset" once it has, null when unknown. */
+export function allocationResetIn(resetsAt: string | null, now: number): string | null {
+  const minutes =
+    resetsAt === null ? Number.NaN : Math.round((Date.parse(resetsAt) - now) / 60_000);
+  if (!Number.isFinite(minutes)) return null;
+  if (minutes <= 0) return "reset";
+  const [days, hours] = [Math.floor(minutes / 1440), Math.floor((minutes % 1440) / 60)];
+  return `in ${days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`}`;
+}
+
 /**
  * One row per login: what it reads now and the policy values that apply to it. `other` logins
  * cannot usefully take a setting: their provider is turned off, or it reports no subscription
@@ -150,6 +160,9 @@ export function allocationAccountRows(
     const workersOffOn = group.members.flatMap((member) =>
       member.availableForWorkers === false ? [computer(member.environmentId)] : [],
     );
+    const cap = group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean);
+    const runway = snapshot?.runways?.find((item) => group.keys.includes(item.key)) ?? null;
+    const capSource = allocationSubscriptionCapSource(group.members);
     return {
       ...group,
       login,
@@ -164,16 +177,49 @@ export function allocationAccountRows(
         workersEnabled: member.availableForWorkers !== false,
       })),
       /** Each usage window once, from the computer that read it last. */
-      windows: [...newest.values()].map((window) => ({
-        id: window.id,
-        label: window.label,
-        kind: window.kind,
-        models: window.models ?? [],
-        usedPercent: window.usedPoints,
-        resetsAt: window.resetsAt,
-        checkedAt: window.checkedAt,
-        age: allocationReadingAge(window.checkedAt, now),
-      })),
+      windows: [...newest.values()].map((window) => {
+        const measured = runway?.windows.find((item) => item.id === window.id);
+        const age = allocationReadingAge(window.checkedAt, now);
+        // A model's own limit takes no account-wide cap.
+        const capPercent = window.models?.length
+          ? null
+          : window.kind === "weekly"
+            ? (cap?.weeklyPercent ?? null)
+            : window.kind === "session"
+              ? (cap?.fiveHourPercent ?? null)
+              : null;
+        return {
+          id: window.id,
+          label: window.label,
+          kind: window.kind,
+          models: window.models ?? [],
+          usedPercent: window.usedPoints,
+          resetsAt: window.resetsAt,
+          /** Short, such as "in 6d 18h"; null when the reset is unknown. */
+          resetIn: allocationResetIn(window.resetsAt, now),
+          checkedAt: window.checkedAt,
+          age,
+          /** Older than a decision may use without reading again. */
+          stale: now - Date.parse(window.checkedAt) > policy.maxReadingAgeMinutes * 60_000,
+          /** The account's hard cap on this limit; null when none applies. */
+          capPercent,
+          /** Behind the main line: the reading's age, what the limit holds, the goal by now. */
+          detail: [
+            `read ${age} ago`,
+            ...(measured?.sizeDollars == null
+              ? []
+              : [
+                  `holds about $${Math.round(measured.sizeDollars).toLocaleString()}${
+                    measured.source === "estimated" ? " (estimated)" : ""
+                  }`,
+                ]),
+            ...(measured?.goalPercent == null
+              ? []
+              : [`daily goal allows ${Math.round(measured.goalPercent)}% by now`]),
+            ...(capPercent === null ? [] : [`hard cap ${capPercent}%`]),
+          ].join(" · "),
+        };
+      }),
       /** Managed workers running or starting on this login, on every computer. */
       workers: demand.filter(
         (d) =>
@@ -193,8 +239,24 @@ export function allocationAccountRows(
           ? group.members.some((member) => allocationFableMode(policy, member))
           : null,
       supportsCaps,
-      capSource: allocationSubscriptionCapSource(group.members),
-      cap: group.keys.map((key) => allocationAccountCap(policy, key)).find(Boolean),
+      capSource,
+      cap,
+      /**
+       * What the row must say besides its numbers: why there is no reading, or the limit or
+       * hard cap that is reached or about to be. Null when the account simply has room.
+       */
+      notice:
+        newest.size === 0
+          ? capSource === "unsupported"
+            ? "No subscription limit"
+            : capSource === "probeFailed"
+              ? "Usage could not be read"
+              : capSource === "unverified"
+                ? "Usage not verified"
+                : "No reading"
+          : runway && runway.tight !== false
+            ? runway.line
+            : null,
       /** Percent of the weekly limit a day; the provider family's unless the account has its own. */
       goal: ownGoal
         ? { percentPerDay: ownGoal.percentPerDay, own: true }
@@ -202,7 +264,7 @@ export function allocationAccountRows(
           ? null
           : { percentPerDay: familyGoal, own: false },
       /** How long the account lasts and what each limit holds, from the coordinator. */
-      runway: snapshot?.runways?.find((runway) => group.keys.includes(runway.key)) ?? null,
+      runway,
       // Decided from the saved policy, so a row does not move while it is being edited.
       other:
         group.members.every((member) => member.enabled === false) ||
