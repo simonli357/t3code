@@ -564,22 +564,29 @@ export function accountRunways(input: {
     const usedUp = projection.windows
       .filter((w) => w.used >= w.limit)
       .toSorted((a, b) => Number(!!a.window.models?.length) - Number(!!b.window.models?.length))[0];
+    const runsOut = projection.lastsHours === null ? undefined : first;
     return {
       key,
       label: account.label,
+      // A hard cap below the provider's limit is what stops the account: say so.
       line: !account.windows.length
         ? "No usage reading."
         : usedUp
-          ? `${usedUp.window.label} is used up${
+          ? `${usedUp.window.label} ${
+              usedUp.limit < 100 ? `reached its ${usedUp.limit}% hard cap` : "is used up"
+            }${
               usedUp.resetsAt === null
                 ? ""
                 : `; it resets in about ${span((usedUp.resetsAt - now) / 3_600_000)}`
             }.`
           : `${
-              projection.lastsHours === null || !first
+              projection.lastsHours === null || !runsOut
                 ? "No limit runs out before its reset"
-                : `${first.window.label} runs out in about ${span(projection.lastsHours)}`
+                : `${runsOut.window.label} ${
+                    runsOut.limit < 100 ? `reaches its ${runsOut.limit}% hard cap` : "runs out"
+                  } in about ${span(projection.lastsHours)}`
             } at the current load (${sessions} working session${sessions === 1 ? "" : "s"}).`,
+      tight: account.windows.length > 0 && (usedUp !== undefined || runsOut !== undefined),
       windows,
     };
   });

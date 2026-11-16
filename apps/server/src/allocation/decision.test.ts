@@ -399,6 +399,52 @@ describe("runway", () => {
     ).toEqual(["Weekly runs out in about 10h 0m at the current load (1 working session)."]);
   });
 
+  it("names the hard cap when it, not the provider's limit, is why an account stops", () => {
+    const runways = (weeklyUsed: number, demand: AllocationDemand[] = []) =>
+      accountRunways({
+        at,
+        policy: {
+          ...defaultAllocationPolicy,
+          ...noGoals,
+          accountCaps: [
+            {
+              key: key("a"),
+              weeklyPercent: 10,
+              fiveHourPercent: null,
+              stopWorkers: true,
+              stopMasters: false,
+            },
+          ],
+        },
+        inventories: [
+          inventory([account("a", 10, { windows: [weekly(weeklyUsed), fiveHour(40)] })], {
+            demand,
+          }),
+        ],
+        learned: learned(),
+      }).map(({ line, tight }) => ({ line, tight }));
+    // 16% used is over the 10% cap, far from used up.
+    expect(runways(16)).toEqual([
+      {
+        line: expect.stringMatching(/^Weekly reached its 10% hard cap; it resets in about /),
+        tight: true,
+      },
+    ]);
+    // 0.1% of the week an hour: the 1% left below the cap lasts 10 hours.
+    expect(runways(9, [worker("a", "one")])).toEqual([
+      {
+        line: "Weekly reaches its 10% hard cap in about 10h 0m at the current load (1 working session).",
+        tight: true,
+      },
+    ]);
+    expect(runways(1)).toEqual([
+      {
+        line: "No limit runs out before its reset at the current load (0 working sessions).",
+        tight: false,
+      },
+    ]);
+  });
+
   it("does not fit when a limit runs out before the job ends, and says when it would", () => {
     // $10 an hour is 0.1 points an hour: 99.5% used runs out in 5 hours, before an 8-hour job ends.
     const decision = decide([account("a", 99.5)], { request: { expectedHours: 8 } });

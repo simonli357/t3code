@@ -569,8 +569,13 @@ export type ModelRoutingSnapshot = typeof ModelRoutingSnapshot.Type;
 export const AccountRunway = Schema.Struct({
   key: Schema.String,
   label: Schema.String,
-  /** How long it lasts at the current load, and its size, in words. */
+  /** How long it lasts at the current load, in words; a hard cap that is the reason is named. */
   line: Schema.String,
+  /**
+   * A limit or hard cap is reached, or runs out before its reset at the current load: what a
+   * page shows beside the account. Absent from a server that predates it.
+   */
+  tight: Schema.optional(Schema.Boolean),
   windows: Schema.Array(
     Schema.Struct({
       id: Schema.String,
