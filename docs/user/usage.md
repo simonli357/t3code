@@ -106,14 +106,26 @@ history is marked thin and leans on that estimate until it has enough turns and 
 account without history is sized from a measured one by plan tier (Pro, Max 5x, Max 20x), marked
 as estimated, until its own readings replace it.
 
-Open **Settings > Provider allocation** for the accounts: each one's usage windows with their
-resets, what each limit holds, how long the account lasts at the current load, its workers now,
-whether workers may use it, its Fable mode, its daily goal and its hard cap; then the preference order, the
-closeness margin, the long wait, the Fable switch, and the learned numbers with their sample
-counts. Choose one shared coordinator under **Coordinator** at the bottom of the page and keep it
-reachable: it holds the settings and decides every start. The saved settings show at once;
-accounts and usage fill in as each computer answers. Every value is stored there, so a change made on any computer applies to the next
-start on every computer, without a restart. Every computer keeps a copy of the settings and
+Open **Settings > Provider allocation** for the accounts, most preferred first. Each account is
+one line: its limits with the percent used and the time to the reset, whether workers may use it
+and how many run, its Fable mode, its daily goal and its hard cap. Hover a limit for when it was
+read, what it holds and what the daily goal allows by now. A line under the limits appears only
+when the account takes no more work or soon will not, and names the limit or the hard cap that
+is the reason. The arrows change the preference order. Below are the close-call margin, the wait
+for a reset and the Fable workers switch, and, folded, the five values behind the choice of
+computer, the learned numbers with their sample counts, and the **Settings computer**.
+
+The page has no Save button. A switch or a move in the order is stored at once, a typed number
+when you pause or leave its field, and a hard cap only when you leave its field, since a
+half-typed cap could stop running work. The page says Saved, or Not saved with the reason and
+a mark beside the value, and offers to try again or drop the change. A change made meanwhile on
+another computer or by an agent is kept: yours is applied on top of it, and when both changed
+the same value the page asks which one to keep.
+
+Choose one shared coordinator under **Settings computer** and keep it reachable: it holds the
+settings and decides every start. The saved settings show at once; accounts and usage fill in as
+each computer answers. Every value is stored there, so a change made on any computer applies to
+the next start on every computer, without a restart. Every computer keeps a copy of the settings and
 learned numbers the coordinator last sent; while the coordinator cannot be reached, a start is
 decided on the requesting computer from that copy, and the result says how old it is. A decision
 first refreshes usage readings older than the policy allows, for at most a few seconds. The
@@ -162,9 +174,13 @@ that stand in for a drained model, and the **fallback**: the model and effort us
 ladder model has room, and the ladder entry below which it applies. Turn the fallback off to
 refuse such starts instead.
 
-Edits are marked until you save, which creates a new policy version used by the next start on
-every computer. If another editor saves while you are editing, keep your edits on top of the
-newer version or discard them. Existing sessions and assignment retries retain their selections.
+Every change is stored as you make it, as a new version used by the next start on every
+computer; quick changes to the table are stored together. A cell that is not stored yet is
+marked, and a save that fails says why and offers to try again or drop the change. A change
+saved meanwhile by another editor is kept: yours goes on top of it, and when both changed the
+same cell or setting the page asks which one to keep. Existing sessions and assignment retries
+retain their selections. In a narrow window a cell shows a letter for its model and two for its
+reasoning; the legend and the editor above the table spell them out.
 
 Score the scoped assignment on two integer axes from 0 to 10. Difficulty measures reasoning,
 uncertainty and interactions. Stakes measures failure impact, reversibility and detectability.
@@ -172,8 +188,9 @@ Use 0–3 for routine/low, 4–6 for moderate, 7 for demanding/high, 8 for very 
 high, 9 for extreme, and 10 only for exceptional assignments.
 
 **Try a task** shows what an agent's start would get for a difficulty, stakes and job length in
-hours, using your unsaved table on the tab you are viewing: the account, model and effort, and
-the reason. **Earlier versions** reverts the table to a saved version, as a new version.
+hours, using the table shown on the tab you are viewing: the account, model and effort, and
+the reason. **Earlier versions** is the undo for the table: it goes back to a stored version or
+to the built-in table, saved again as the newest version.
 **Recent decisions** lists the starts agents made: when, their scores, the account, model and
 effort chosen, and why.
 
