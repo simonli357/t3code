@@ -476,7 +476,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <FoldedSettingsSection
             id="model-selection-models"
             title="Other model IDs"
-            summary={`${modelDriverLabel(driver)}: ${policy[driver].allowedModels.join(", ")}`}
+            summary={`${modelDriverLabel(driver)}: ${policy[driver].allowedModels.length}`}
           >
             <ModelListEditor
               driver={driver}

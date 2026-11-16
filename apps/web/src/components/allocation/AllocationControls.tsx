@@ -51,9 +51,9 @@ const dollars = (value: number) =>
   `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
 /** One row of columns for the heading and every account, once the list is wide enough. */
 const columns =
-  "@min-[60rem]/accounts:grid @min-[60rem]/accounts:grid-cols-[4.5rem_minmax(6rem,0.8fr)_minmax(14.5rem,2fr)_6rem_4.75rem_4.75rem_11rem] @min-[60rem]/accounts:gap-x-4";
+  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,1.4fr)_6rem_4.75rem_4.75rem_13rem] @min-[64rem]/accounts:gap-x-4";
 /** A control's name, where the heading row is not shown. */
-const caption = "text-xs text-muted-foreground @min-[60rem]/accounts:hidden";
+const caption = "text-xs text-muted-foreground @min-[64rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
 const unsaved = <p className="text-xs text-destructive">Not saved</p>;
 /** What a name does not say by itself, shown on hover. */
@@ -206,11 +206,11 @@ function AccountRow({
         columns,
       )}
     >
-      <div className="flex min-w-44 flex-1 items-center gap-3 @min-[60rem]/accounts:contents">
+      <div className="flex w-64 max-w-full flex-none items-center gap-3 @min-[64rem]/accounts:contents">
         <div
           className={cn(
             "h-7 shrink-0 items-center gap-1",
-            place ? "flex" : "hidden @min-[60rem]/accounts:block",
+            place ? "flex" : "hidden @min-[64rem]/accounts:block",
           )}
         >
           {place && (
@@ -240,25 +240,27 @@ function AccountRow({
           )}
         </div>
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium">{row.label}</div>
-          <Hinted
-            hint={`${about}${row.login === null ? " · login unknown, matched by label" : ""}`}
-            render={<div className="truncate text-xs text-muted-foreground" />}
-          >
+          <div className="text-sm font-medium">{row.label}</div>
+          <div className="text-xs text-muted-foreground">
             {about}
-            {row.login === null && " · login unknown"}
-          </Hinted>
+            {row.login === null && (
+              <>
+                {" · "}
+                <Hinted hint="matched by its label">login unknown</Hinted>
+              </>
+            )}
+          </div>
           {place && notSaved.has("accountOrder") && unsaved}
         </div>
       </div>
-      <div className="grid min-w-0 flex-[2] basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
+      <div className="grid min-w-0 flex-1 basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
         {row.windows.map((window) => (
           <Hinted
             key={window.id}
             hint={window.detail}
             render={<div className="col-span-full grid grid-cols-subgrid items-center" />}
           >
-            <span className="truncate">{window.label}</span>
+            <span>{window.label}</span>
             <span className="text-right font-medium tabular-nums">
               {Math.round(window.usedPercent * 10) / 10}%
             </span>
@@ -285,7 +287,7 @@ function AccountRow({
           </p>
         )}
       </div>
-      <div className="flex min-w-0 basis-full flex-wrap items-start gap-x-5 gap-y-2 @min-[60rem]/accounts:contents">
+      <div className="flex min-w-0 basis-full flex-wrap items-start gap-x-5 gap-y-2 @min-[64rem]/accounts:contents">
         <div className="grid min-w-0 content-start gap-0.5 text-xs">
           <label className="flex h-7 items-center gap-2">
             <span className={caption}>Workers</span>
@@ -310,7 +312,7 @@ function AccountRow({
         <div
           className={cn(
             "min-w-0 content-start gap-0.5 text-xs",
-            row.fableMode === null ? "hidden @min-[60rem]/accounts:grid" : "grid",
+            row.fableMode === null ? "hidden @min-[64rem]/accounts:grid" : "grid",
           )}
         >
           {row.fableMode !== null && (
@@ -673,7 +675,7 @@ export function AllocationControls({
   );
   return (
     <>
-      <div className="@container/accounts grid min-w-0 gap-2.5">
+      <div className="@container/accounts grid min-w-0 grid-cols-1 gap-2.5">
         <SettingsSection title="Accounts" headerAction={status}>
           <div
             aria-hidden
@@ -726,7 +728,6 @@ export function AllocationControls({
           <FoldedSettingsSection
             id="allocation-other-accounts"
             title={`Other accounts (${others.length})`}
-            summary={others.map((row) => row.label).join(", ")}
           >
             <ul aria-label="Other accounts" className={divided}>
               {others.map((row) => account(row))}
@@ -793,9 +794,7 @@ export function AllocationControls({
       <FoldedSettingsSection
         id="allocation-computer"
         title="Computer for a new worker"
-        summary={COMPUTER_RULES.map(
-          (rule) => `${number(policy[rule.value] ?? rule.initial)} ${rule.unit}`,
-        ).join(" · ")}
+        summary={`${number(policy.workerMemoryGiB ?? DEFAULT_WORKER_MEMORY_GIB)} GiB per worker`}
       >
         {COMPUTER_RULES.map(numberRule)}
       </FoldedSettingsSection>
