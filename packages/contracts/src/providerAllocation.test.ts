@@ -2,7 +2,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { ThreadId } from "./baseSchemas.ts";
+import { ProjectId, ThreadId } from "./baseSchemas.ts";
 import { COMPUTER_CAPACITY_MAX_DISKS, type ComputerCapacity } from "./computers.ts";
 import { ModelRoutingRequest } from "./modelRouting.ts";
 import {
@@ -197,6 +197,10 @@ describe("allocation policy", () => {
       accountOrder: [],
       closeMarginPoints: DEFAULT_CLOSE_MARGIN_POINTS,
       longWaitHours: DEFAULT_LONG_WAIT_HOURS,
+      // What the choice of a worker's computer starts from.
+      workerMemoryGiB: 3,
+      minFreeMemoryGiB: 4,
+      startSettleMinutes: 15,
     });
     expect([DEFAULT_CLOSE_MARGIN_POINTS, DEFAULT_LONG_WAIT_HOURS]).toEqual([10, 3]);
     // Every field a build from before smart allocation required of a policy.
@@ -240,6 +244,9 @@ describe("allocation policy", () => {
       { closeMarginPoints: 51 },
       { longWaitHours: -1 },
       { longWaitHours: 169 },
+      { workerMemoryGiB: -1 },
+      { minFreeMemoryGiB: 257 },
+      { startSettleMinutes: 121 },
       { accountOrder: [""] },
     ])
       expect(valid(patch), JSON.stringify(patch)).toThrow();
@@ -428,12 +435,19 @@ describe("worker choice", () => {
   const input = { environmentId: "desk", difficulty: 6, stakes: 3 };
   const identity = { assignmentId: "job", threadId: ThreadId.make("thread") };
 
-  it("asks for difficulty, stakes and the computer, and nothing else", () => {
+  it("asks for difficulty and stakes; the computer is given only to name one", () => {
     const decode = Schema.decodeUnknownSync(WorkerChoiceInput);
     expect(decode(input)).toEqual(input);
+    // Without a computer the server chooses it, among those with the project when one is given.
+    expect(decode({ difficulty: 6, stakes: 3 })).toEqual({ difficulty: 6, stakes: 3 });
+    expect(decode({ difficulty: 6, stakes: 3, projectId: "project" })).toEqual({
+      difficulty: 6,
+      stakes: 3,
+      projectId: "project",
+    });
     for (const broken of [
       { environmentId: "desk", difficulty: 6 },
-      { difficulty: 6, stakes: 3 },
+      { environmentId: "", difficulty: 6, stakes: 3 },
       { ...input, difficulty: 6.5 },
       { ...input, stakes: 11 },
       { ...input, model: "" },
@@ -442,6 +456,8 @@ describe("worker choice", () => {
     const start = Schema.decodeUnknownSync(WorkerStartInput);
     const full = { ...input, ...identity, projectId: "project", title: "Title", prompt: "Task" };
     expect(start(full)).toEqual(full);
+    const { environmentId: _computer, ...unplaced } = full;
+    expect(start(unplaced)).toEqual(unplaced);
     expect(() => start(input)).toThrow();
   });
 
@@ -560,6 +576,8 @@ describe("worker choice", () => {
     expect(Object.keys(WorkerChoice.fields).sort()).toEqual([
       "accounts",
       "chosen",
+      "computer",
+      "computers",
       "drainedUntil",
       "notes",
       "reason",
@@ -567,6 +585,24 @@ describe("worker choice", () => {
       "state",
       "wanted",
     ]);
+    // With the server's choice of computer: its reason line, a line per computer, its notes first.
+    const computer = {
+      environmentId: "desk",
+      label: "Desk",
+      projectId: ProjectId.make("desk-project"),
+      reason: "Desk: most room of 2 computers; 20 GiB room.",
+    };
+    const placed = workerChoice(selection({ notes: ["A Fable note."] }), {
+      computer,
+      computers: ["Desk: 20 GiB room", "Laptop: did not answer"],
+      notes: ["Laptop: load unavailable for this decision."],
+    });
+    expect(placed).toMatchObject({
+      computer,
+      computers: ["Desk: 20 GiB room", "Laptop: did not answer"],
+      notes: ["Laptop: load unavailable for this decision.", "A Fable note."],
+    });
+    expect(decodeChoice(wire(placed))).toEqual(placed);
   });
 
   it("names the wanted profile only when the chosen one differs", () => {

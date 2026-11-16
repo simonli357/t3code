@@ -652,6 +652,9 @@ const make = Effect.gen(function* () {
                 | "accountOrder"
                 | "closeMarginPoints"
                 | "longWaitHours"
+                | "workerMemoryGiB"
+                | "minFreeMemoryGiB"
+                | "startSettleMinutes"
                 | "fableWorkers"
                 | "fableAccounts"
                 | "fableOnly"
@@ -676,6 +679,9 @@ const make = Effect.gen(function* () {
               ...carried("accountOrder"),
               ...carried("closeMarginPoints"),
               ...carried("longWaitHours"),
+              ...carried("workerMemoryGiB"),
+              ...carried("minFreeMemoryGiB"),
+              ...carried("startSettleMinutes"),
               ...carried("fableWorkers"),
               ...carried("fableAccounts"),
               ...carried("fableOnly"),

@@ -43,8 +43,10 @@ update model pricing.
 
 ## Allocate accounts for new work
 
-A master that starts a worker gives two scores, difficulty and stakes, the computer, and its
-estimate of the job's length in hours. T3 then picks the account, model and effort together:
+A master that starts a worker gives two scores, difficulty and stakes, and its estimate of the
+job's length in hours. T3 picks the computer (see
+[Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work)) unless
+the master names one, and then the account, model and effort together:
 
 1. The table on the [Model selection](#model-selection) page gives the wanted model and effort.
 2. Every usage limit of each account (5-hour, weekly, or a model's own weekly window such as
@@ -113,8 +115,8 @@ every start. Every value is stored there, so a change made on any computer appli
 start on every computer, without a restart. Every computer keeps a copy of the settings and
 learned numbers the coordinator last sent; while the coordinator cannot be reached, a start is
 decided on the requesting computer from that copy, and the result says how old it is. A decision
-first refreshes usage readings older than the policy allows, for at most a few seconds. Agents
-that were not told which computer to use read each computer's numbers first; see
+first refreshes usage readings older than the policy allows, for at most a few seconds. The
+computer a worker starts on is chosen by the server too, from three more stored values; see
 [Choosing a computer for agent work](computers.md#choosing-a-computer-for-agent-work).
 
 Optional **hard caps** apply per account identity. Weekly caps use the provider's

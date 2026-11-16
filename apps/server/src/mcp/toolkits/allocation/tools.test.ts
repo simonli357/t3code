@@ -5,20 +5,23 @@ import {
   defaultModelLadder,
   defaultModelRoutingPolicy,
   EnvironmentId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  workerChoice,
+  workerChoiceRequest,
   type AllocationAccount,
   type AllocationInventory,
-  type AllocationOperation,
   type AllocationPolicyEdit,
   type AllocationPolicyView,
-  type AllocationStart,
   type AllocationWindow,
   type ComputersReport,
   type ComputersRequest,
   type ModelRoutingDecision,
   type ModelRoutingRequest,
+  type WorkerChoiceInput,
+  type WorkerStartInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -169,12 +172,40 @@ const select = (request: ModelRoutingRequest): ModelRoutingDecision => {
     accounts: [...choice.accounts],
   };
 };
+/** The computer the server settles on for every start here. */
+const placement = {
+  computer: {
+    environmentId: "laptop",
+    label: "Laptop",
+    projectId: ProjectId.make("laptop-project"),
+    reason:
+      "Laptop: most room of 2 computers; 20 GiB room (20 free of 31), 12 of 16 CPU threads idle, 1 sessions.",
+  },
+  computers: [
+    "Desk: 2 GiB room (8 free of 16, less 2 just started at 3 GiB each), 6.4 of 8 CPU threads idle, 3 sessions; under the 4 GiB minimum",
+    "Laptop: 20 GiB room (20 free of 31), 12 of 16 CPU threads idle, 1 sessions",
+  ],
+  notes: [],
+};
+/** The choice the server makes for a master's worker on that computer. */
+const choose = (input: WorkerChoiceInput, ids: { assignmentId: string; threadId: string }) =>
+  select(
+    workerChoiceRequest({
+      ...input,
+      environmentId: "local",
+      assignmentId: ids.assignmentId,
+      threadId: ThreadId.make(ids.threadId),
+    }),
+  );
 const view: AllocationPolicyView = {
   version: 4,
   modelVersion: 2,
   accountOrder: ["ES", "XL"],
   closeMarginPoints: 10,
   longWaitHours: 2,
+  workerMemoryGiB: 3,
+  minFreeMemoryGiB: 4,
+  startSettleMinutes: 15,
   caps: [],
   ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
   fallback: null,
@@ -216,8 +247,8 @@ const report: ComputersReport = {
 
 it.effect("agents preview, start, read numbers and edit the policy with compact results", () => {
   const edits: AllocationPolicyEdit[] = [];
-  const operations: AllocationOperation[] = [];
-  const starts: { input: AllocationStart; owner: string | undefined }[] = [];
+  const previews: { input: WorkerChoiceInput; owner: string }[] = [];
+  const starts: { input: WorkerStartInput; owner: string }[] = [];
   const asked: ComputersRequest[] = [];
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
@@ -248,23 +279,11 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
         ),
       );
 
-    // A preview needs the two scores and the computer, nothing else.
-    const scores = { environmentId: "local", difficulty: 9, stakes: 9 };
+    // A preview needs the two scores, nothing else: the server chooses the computer.
+    const scores = { difficulty: 9, stakes: 9 };
     const preview = yield* call("t3_allocate_account", scores);
     expect(preview.isError).not.toBe(true);
-    expect(operations).toEqual([
-      {
-        _tag: "modelPreview",
-        request: {
-          selection: "automatic",
-          assignmentId: "preview:master",
-          environmentId: "local",
-          threadId: "preview:master",
-          assessment: { difficulty: 9, stakes: 9 },
-          allowedDrivers: ["claudeAgent"],
-        },
-      },
-    ]);
+    expect(previews).toEqual([{ input: scores, owner: "master" }]);
     // Nothing learned yet: at the starting estimates no account lasts the whole job.
     const chosen = {
       instanceId: "claude_eol",
@@ -275,7 +294,20 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
     const choice = preview.structuredContent as Record<string, unknown>;
     expect(choice).toMatchObject({ state: "chosen", chosen, wanted: `${FABLE} / high` });
     // Exactly the compact shape: no candidates, windows, forecasts or history.
-    expect(Object.keys(choice).sort()).toEqual(["accounts", "chosen", "reason", "state", "wanted"]);
+    expect(Object.keys(choice).sort()).toEqual([
+      "accounts",
+      "chosen",
+      "computer",
+      "computers",
+      "reason",
+      "state",
+      "wanted",
+    ]);
+    // The computer comes with one reason line, and every computer with one line.
+    expect(choice).toMatchObject({
+      computer: placement.computer,
+      computers: placement.computers,
+    });
     expect(choice.reason).toContain(
       `${FABLE} / high is out on every account; ${OPUS} / xhigh is the nearest rung that is not.`,
     );
@@ -287,7 +319,7 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
       `XL: drained until ${inHours(60)} (Weekly · Fable 100% used), 0 workers`,
       `XY: drained until ${inHours(100)} (Weekly · Fable 100% used), 0 workers`,
     ]);
-    expect(encode(choice).length).toBeLessThan(2048);
+    expect(encode(choice).length).toBeLessThan(2560);
     yield* Effect.flip(call("t3_allocate_account", { environmentId: "local", tier: "hard" }));
 
     const start = {
@@ -301,34 +333,19 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
     const started = yield* call("t3_start_allocated_assignment", start);
     expect(started.isError).not.toBe(true);
     expect(started.structuredContent).toEqual({ threadId: "worker", started: true, ...choice });
-    expect(starts).toEqual([
-      {
-        owner: "master",
-        input: {
-          kind: "worker",
-          projectId: "project",
-          title: "task",
-          prompt: "Do the task",
-          request: {
-            selection: "automatic",
-            assignmentId: "assignment",
-            environmentId: "local",
-            threadId: "worker",
-            assessment: { difficulty: 9, stakes: 9 },
-            allowedDrivers: ["claudeAgent"],
-          },
-        },
-      },
-    ]);
-    // A pinned account that is drained for the pinned model: nothing starts.
-    const refused = yield* call("t3_start_allocated_assignment", {
+    // The whole input reaches the service, with no computer in it.
+    expect(starts).toEqual([{ owner: "master", input: start }]);
+    // A pinned account that is drained for the pinned model, on a named computer: nothing starts.
+    const pinned = {
       ...start,
+      environmentId: "laptop",
       assignmentId: "pinned",
       threadId: "pinned",
       account: "claude_antoine",
       model: FABLE,
       effort: "high",
-    });
+    };
+    const refused = yield* call("t3_start_allocated_assignment", pinned);
     expect(refused.isError).not.toBe(true);
     expect(refused.structuredContent).toMatchObject({
       threadId: "pinned",
@@ -338,10 +355,7 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
       drainedUntil: inHours(26),
       accounts: [`AC: drained until ${inHours(26)} (Weekly · Fable 100% used), 0 workers`],
     });
-    expect(starts[1]!.input.request).toMatchObject({
-      explicitInstanceId: "claude_antoine",
-      override: { driver: "claudeAgent", model: FABLE, options: [{ id: "effort", value: "high" }] },
-    });
+    expect(starts[1]!.input).toEqual(pinned);
 
     const computers = yield* call("t3_recommend_computer", { projectId: "project" });
     expect(computers.structuredContent).toEqual(report);
@@ -353,6 +367,9 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
     const edit = {
       accountOrder: ["ES", "XL"],
       longWaitHours: 2,
+      workerMemoryGiB: 4,
+      minFreeMemoryGiB: 6,
+      startSettleMinutes: 20,
       fallback: null,
       // A model no code lists is accepted; the view says what could not be confirmed.
       setCells: [{ difficulty: 9, stakes: 9, model: "claude-next-9", effort: "high" }],
@@ -373,13 +390,6 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
                 edits.push(edit);
                 return view;
               }),
-            execute: (operation) =>
-              Effect.sync(() => {
-                operations.push(operation);
-                return operation._tag === "modelPreview"
-                  ? { selection: select(operation.request) }
-                  : {};
-              }),
             computers: (request) =>
               Effect.sync(() => {
                 asked.push(request);
@@ -389,21 +399,22 @@ it.effect("agents preview, start, read numbers and edit the policy with compact 
         ),
         Layer.provide(
           Layer.mock(Assignments.AllocationAssignments)({
-            start: (input, owner) =>
+            previewWorker: (input, owner) =>
+              Effect.sync(() => {
+                previews.push({ input, owner });
+                return workerChoice(
+                  choose(input, { assignmentId: "preview", threadId: "preview" }),
+                  placement,
+                );
+              }),
+            startWorker: (input, owner) =>
               Effect.sync(() => {
                 starts.push({ input, owner });
-                if (input.request.selection !== "automatic")
-                  return {
-                    allocation: null,
-                    threadId: input.request.threadId,
-                    state: "unavailable",
-                  };
-                const selection = select(input.request);
+                const selection = choose(input, input);
                 return {
-                  allocation: selection.allocation,
-                  selection,
-                  threadId: input.request.threadId,
-                  state: selection.allocation ? "submitted" : "unavailable",
+                  threadId: input.threadId,
+                  started: selection.allocation !== null,
+                  ...workerChoice(selection, placement),
                 };
               }),
           }),
