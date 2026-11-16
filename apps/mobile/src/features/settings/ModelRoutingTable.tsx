@@ -106,7 +106,7 @@ export function ModelRoutingMatrix(props: {
                     accessibilityRole="button"
                     accessibilityLabel={`Difficulty ${difficulty}, stakes ${stakes}: ${modelProfileLabel(cell)}${
                       cell.alternatives?.length ? ", with an alternative" : ""
-                    }${edited ? ", edited" : ""}${offered ? "" : ", not offered by connected accounts"}`}
+                    }${edited ? ", not saved yet" : ""}${offered ? "" : ", not offered by connected accounts"}`}
                     accessibilityState={{ selected: chosen }}
                     onPress={() => props.onSelect({ difficulty, stakes })}
                     className={`w-20 items-center justify-center rounded border ${
@@ -139,7 +139,7 @@ export function ModelRoutingLegend(props: { driver: ModelDriver; policy: ModelRo
       {modelsUsed(props.policy, props.driver)
         .map((m) => `${modelDisplayName(m)} (${m})`)
         .join(" · ")}{" "}
-      · • edited · ! not offered by a connected account · ↳ has an alternative
+      · • not saved yet · ! not offered by a connected account · ↳ has an alternative
     </Text>
   );
 }
@@ -149,7 +149,6 @@ export function ModelCellEditor(props: {
   driver: ModelDriver;
   position: ModelCellPosition | null;
   cell: RoutingCell | null;
-  saved: RoutingCell | null;
   catalog: ModelCatalog;
   alternativeOpen: boolean;
   onAlternativeOpen: (open: boolean) => void;
@@ -159,18 +158,15 @@ export function ModelCellEditor(props: {
   onPendingModel: (model: string | null) => void;
   onChange: (cell: RoutingCell) => void;
 }) {
-  const { driver, position, cell, saved, catalog, pendingModel } = props;
+  const { driver, position, cell, catalog, pendingModel } = props;
   if (!position || !cell)
-    return (
-      <Text className="text-foreground-muted">Select a cell to change its model or reasoning.</Text>
-    );
+    return <Text className="text-foreground-muted">Select a cell to change it.</Text>;
   const model = pendingModel ?? cell.model;
   const efforts = catalog.efforts(model);
   const pairs = catalog.models
     .flatMap((m) => catalog.efforts(m).map((effort) => ({ model: m, effort })))
     .filter((p) => p.model !== cell.model || p.effort !== cell.effort);
   const fallback = cell.alternatives?.[0];
-  const edited = saved !== null && !sameModelCell(saved, cell);
   return (
     <View className="gap-3 rounded border border-border p-3">
       <Text className="font-t3-medium">
@@ -252,7 +248,6 @@ export function ModelCellEditor(props: {
           alternative replaces this list.
         </Text>
       )}
-      {edited && saved && <Action label="Undo this cell" onPress={() => props.onChange(saved)} />}
       {!catalog.known && (
         <Text className="text-foreground-muted">
           {props.loadingAccounts

@@ -1005,6 +1005,11 @@ it("keeps the rest behind closed sections, without draft buttons or internal wor
     "Start assignment",
     "Draft",
     "reassessments",
+    // Names, values and controls only: no sentence explains a section.
+    "A worker gets the model",
+    "Weakest first.",
+    "When no ladder rung",
+    "Models the",
   ])
     expect(container.textContent).not.toContain(removed);
   expect(container.querySelector("pre")).toBeNull();

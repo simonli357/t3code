@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   Linking,
   Pressable,
@@ -11,7 +11,6 @@ import * as Schema from "effect/Schema";
 import {
   defaultModelFallback,
   defaultModelRoutingPolicy,
-  MODEL_SCORING_RUBRIC,
   modelFallback,
   modelLadder,
   ModelRoutingRequest,
@@ -25,30 +24,23 @@ import {
   workerChoice,
   workerChoiceRequest,
 } from "@t3tools/contracts";
+import { createAutosave, type AutosaveState } from "@t3tools/client-runtime/state/autosave";
 import {
   MODEL_DRIVERS,
-  acknowledgeModelSave,
-  discardModelDraft,
-  editModelDraft,
-  emptyModelDraft,
+  modelAutosaveRules,
   modelCatalog,
   modelCell,
-  modelCellChanges,
-  modelCellSummary,
   modelDriverLabel,
   modelEditorUrl,
   modelFailureMessage,
   modelPreviewKey,
   modelProfileLabel,
-  rebaseModelDraft,
-  receiveSavedModelPolicy,
-  resetModelTable,
   setModelCell,
   summarizeModelDraft,
-  type ModelDraft,
   type ModelDriver,
 } from "@t3tools/client-runtime/state/model-routing";
 import {
+  allocationSaveFailure,
   createAllocationCommands,
   withModelLadderEdit,
 } from "@t3tools/client-runtime/state/provider-allocation";
@@ -70,6 +62,16 @@ import {
 const commands = createAllocationCommands(connectionAtomRuntime);
 const decodeRequest = Schema.decodeUnknownSync(ModelRoutingRequest);
 const field = "rounded border border-border bg-background p-2 text-foreground";
+/** Quick changes to the table are stored together, as one version. */
+const TABLE_PAUSE = 1200;
+const SAVE_STATE = {
+  idle: "Changes save automatically",
+  editing: "Not saved yet",
+  saving: "Saving…",
+  saved: "Saved",
+  failed: "Not saved",
+  conflict: "Not saved",
+} satisfies Record<AutosaveState<unknown>["phase"], string>;
 
 export function SettingsModelSelectionRouteScreen() {
   const { selectedTargets, selectedIds } = useSettingsEnvironmentFilter();
@@ -106,7 +108,33 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [inventories, setInventories] = useState<ModelRoutingSnapshot["inventories"]>([]);
   const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
   const accountsRead = useRef(0);
-  const [draft, setDraft] = useState<ModelDraft>(emptyModelDraft);
+  const [warnings, setWarnings] = useState<readonly string[]>([]);
+  // Every change is stored as it is made; `draft` is what the screen shows and how far it got.
+  const [store] = useState(() =>
+    createAutosave<ModelRoutingPolicy>({
+      ...modelAutosaveRules,
+      save: async (policy, baseline) => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "modelPolicy", expectedVersion: baseline.version, policy },
+        });
+        if (result._tag !== "Success") return allocationSaveFailure(result.cause);
+        if (!result.value.modelPolicy) return allocationSaveFailure(undefined);
+        setWarnings(result.value.warnings ?? []);
+        return { saved: result.value.modelPolicy };
+      },
+      read: async () => {
+        const result = await execute({
+          environmentId,
+          input: { _tag: "modelSnapshot", part: "settings" },
+        });
+        return result._tag === "Success" ? (result.value.modelSnapshot?.policy ?? null) : null;
+      },
+    }),
+  );
+  const draft = useSyncExternalStore(store.subscribe, store.getState);
+  // Leaving the screen stores an edit that is still waiting.
+  useEffect(() => () => store.flush(), [store]);
   const [driver, setDriver] = useState<ModelDriver>("claudeAgent");
   const [selected, setSelected] = useState<ModelCellPosition | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
@@ -115,7 +143,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const [warnings, setWarnings] = useState<readonly string[]>([]);
   const [rung, setRung] = useState({ model: "", effort: "" });
   // Blank is NaN. The task is tried as an agent's start would be, on the table shown.
   const [task, setTask] = useState({ difficulty: NaN, stakes: NaN, hours: NaN });
@@ -156,8 +183,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     preview?.key === key && connection === "connected" ? workerChoice(preview.decision) : null;
   const ladder = policy ? modelLadder(policy) : [];
   const fallback = policy ? modelFallback(policy) : null;
-  const edit = (update: (policy: ModelRoutingPolicy) => ModelRoutingPolicy) =>
-    setDraft((current) => editModelDraft(current, update));
+  const edit = store.edit;
+  const stuck = draft.phase === "failed" || draft.phase === "conflict";
   const ready =
     snapshot?.authorityAvailable &&
     connection === "connected" &&
@@ -179,14 +206,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     () => modelCatalog(inventories, environmentId, driver),
     [inventories, environmentId, driver],
   );
-  const {
-    dirty,
-    stale,
-    count: changeCount,
-    editedCells,
-  } = useMemo(() => summarizeModelDraft(draft), [draft]);
-  const at = (p: ModelDraft["policy"]) =>
-    p && selected ? modelCell(p, driver, selected.difficulty, selected.stakes) : null;
+  const { editedCells } = useMemo(() => summarizeModelDraft(draft), [draft]);
   /** The accounts every computer reports; a slow computer delays only these. */
   const readAccounts = useCallback(async () => {
     const read = ++accountsRead.current;
@@ -225,30 +245,28 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         const next = result.value.modelSnapshot;
         setSnapshot(next);
         setSnapshotEpoch(connectionState.epoch);
-        setDraft((current) => receiveSavedModelPolicy(current, next.policy));
+        store.receive(next.policy);
         setMessage("");
       } else {
         setFailedEpoch(connectionState.epoch);
-        setMessage("Coordinator unavailable. Reconnect and refresh; your changes are kept.");
+        setMessage("The saved table could not be read. Refresh to try again.");
       }
     });
     return () => {
       active = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch, readAccounts]);
-  const call = async (input: AllocationOperation, keepMessage = false) => {
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, store]);
+  const call = async (input: AllocationOperation) => {
     const epoch = generation.current;
     setBusy(true);
-    if (!keepMessage) setMessage("");
+    setMessage("");
     try {
       const result = await execute({ environmentId, input });
       if (epoch !== generation.current) return null;
       if (result._tag !== "Success") {
         setPreview(null);
-        setMessage(
-          `${modelFailureMessage(result.cause)} Your changes are kept; reconnect, refresh the saved version and try again.`,
-        );
+        setMessage(modelFailureMessage(result.cause));
         return null;
       }
       return result.value;
@@ -256,38 +274,16 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       if (epoch === generation.current) setBusy(false);
     }
   };
-  const refresh = async (keepMessage = false) => {
+  const refresh = async () => {
     const epoch = ++generation.current;
     setPreview(null);
-    const result = await call({ _tag: "modelSnapshot", part: "settings" }, keepMessage);
+    const result = await call({ _tag: "modelSnapshot", part: "settings" });
     if (epoch !== generation.current || !result?.modelSnapshot) return;
     const next = result.modelSnapshot;
     setSnapshot(next);
     setSnapshotEpoch(connectionState.epoch);
-    setDraft((current) => receiveSavedModelPolicy(current, next.policy));
+    store.receive(next.policy);
   };
-  const save = async () => {
-    if (!policy || !draft.baseline) return;
-    const epoch = generation.current;
-    setWarnings([]);
-    const result = await call({
-      _tag: "modelPolicy",
-      expectedVersion: draft.baseline.version,
-      policy,
-    });
-    if (epoch !== generation.current) return;
-    if (!result?.modelPolicy) {
-      // A conflict means a newer version exists: reload it so the page can offer the merge.
-      if (result === null) await refresh(true);
-      return;
-    }
-    setDraft((current) => acknowledgeModelSave(current, policy, result.modelPolicy!));
-    setPendingModel(null);
-    await refresh();
-    setMessage(`Saved as version ${result.modelPolicy.version}.`);
-    setWarnings(result.warnings ?? []);
-  };
-  const example = policy ? modelCellSummary(modelCell(policy, driver, 7, 8)) : "";
   return (
     <ScrollView
       ref={scroller}
@@ -300,65 +296,52 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         viewport.current.height = event.nativeEvent.layout.height;
       }}
     >
-      <Text>{target?.label ?? "Selected environment"}</Text>
-      <Text>
-        Columns are an assignment&apos;s difficulty and rows its stakes, each scored 0–10; a cell is
-        the model and reasoning it gets. Example: difficulty 7 with stakes 8 gets{" "}
-        {example || "the choice shown in that cell"}.
-      </Text>
-      <Text>{message}</Text>
+      <View className="flex-row items-center justify-between gap-3">
+        <Text
+          accessibilityRole="summary"
+          className={stuck ? "text-danger-foreground" : "text-foreground-muted"}
+        >
+          {loadingTable
+            ? "Loading…"
+            : connection !== "connected"
+              ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
+              : SAVE_STATE[draft.phase]}
+          {accounts === "failed" ? " · accounts not read" : ""}
+        </Text>
+        <Action
+          label="Refresh"
+          onPress={() => void refresh().then(readAccounts)}
+          disabled={busy || connection !== "connected"}
+        />
+      </View>
+      {message ? <Text accessibilityRole="alert">{message}</Text> : null}
+      {connection === "connected" && snapshot && !snapshot.authorityAvailable ? (
+        <Text accessibilityRole="alert">The computer that keeps this table is not reachable.</Text>
+      ) : null}
+      {draft.phase === "failed" && (
+        <View accessibilityRole="alert" className="gap-2 rounded border border-border p-3">
+          <Text className="text-danger-foreground">Not saved</Text>
+          <Text>{draft.error}</Text>
+          <View className="flex-row gap-4">
+            <Action label="Try again" onPress={store.retry} />
+            <Action label="Drop my change" onPress={() => store.resolve(false)} />
+          </View>
+        </View>
+      )}
+      {draft.phase === "conflict" && (
+        <View accessibilityRole="alert" className="gap-2 rounded border border-warning-border p-3">
+          <Text className="text-warning-foreground">Changed elsewhere while you edited</Text>
+          <View className="flex-row gap-4">
+            <Action label="Keep mine" onPress={() => store.resolve(true)} />
+            <Action label="Use theirs" onPress={() => store.resolve(false)} />
+          </View>
+        </View>
+      )}
       {warnings.map((warning) => (
         <Text key={warning} className="text-warning-foreground">
           {warning}
         </Text>
       ))}
-      <Text className="text-foreground-muted">
-        {[
-          draft.saved
-            ? `Saved version ${draft.saved.version}`
-            : loadingTable
-              ? "Loading the saved table…"
-              : "Saved table not loaded",
-          ready
-            ? "Coordinator connected"
-            : loadingTable
-              ? null
-              : connection !== "connected"
-                ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
-                : `Coordinator unavailable${draft.saved ? ": showing the last known table" : ""}`,
-          draft.saved
-            ? dirty
-              ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
-              : "No unsaved changes"
-            : null,
-          loadingAccounts
-            ? "Loading accounts…"
-            : accounts === "failed"
-              ? "Accounts not read"
-              : null,
-        ]
-          .filter(Boolean)
-          .join(" · ")}
-      </Text>
-      <Action
-        label="Refresh"
-        onPress={() => void refresh().then(readAccounts)}
-        disabled={busy || connection !== "connected"}
-      />
-      {stale && draft.saved && draft.baseline && (
-        <View className="gap-2 rounded border border-warning-border p-3">
-          <Text className="text-warning-foreground">
-            Version {draft.saved.version} was saved while you were editing. Your edits are based on
-            version {draft.baseline.version}.
-          </Text>
-          <Action
-            label={`Keep my edits on version ${draft.saved.version}`}
-            onPress={() => setDraft(rebaseModelDraft)}
-            disabled={busy}
-          />
-          <Action label="Discard my edits" onPress={() => setDraft(discardModelDraft)} />
-        </View>
-      )}
       <View className="flex-row flex-wrap gap-2" accessibilityRole="tablist">
         {MODEL_DRIVERS.map((d) => (
           <Pressable
@@ -373,7 +356,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           >
             <Text className={driver === d ? "text-primary-foreground" : "text-foreground"}>
               {modelDriverLabel(d)}
-              {editedCells(d) > 0 ? ` (${editedCells(d)} edited)` : ""}
+              {stuck && editedCells(d) > 0 ? ` (${editedCells(d)} not saved)` : ""}
             </Text>
           </Pressable>
         ))}
@@ -391,8 +374,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             <ModelCellEditor
               driver={driver}
               position={selected}
-              cell={at(policy)}
-              saved={at(draft.baseline)}
+              cell={
+                selected ? modelCell(policy, driver, selected.difficulty, selected.stakes) : null
+              }
               catalog={catalog}
               alternativeOpen={alternativeOpen}
               onAlternativeOpen={setAlternativeOpen}
@@ -402,46 +386,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               onChange={(cell) => {
                 if (!selected) return;
                 setPendingModel(null);
-                setDraft((current) =>
-                  editModelDraft(current, (p) =>
-                    setModelCell(p, driver, selected.difficulty, selected.stakes, cell),
-                  ),
+                edit(
+                  (p) => setModelCell(p, driver, selected.difficulty, selected.stakes, cell),
+                  TABLE_PAUSE,
                 );
               }}
-            />
-          </View>
-          <View className="flex-row flex-wrap gap-4">
-            <Action
-              label="Save table"
-              onPress={() => void save()}
-              disabled={
-                busy ||
-                !ready ||
-                !dirty ||
-                stale ||
-                (fallback !== null && !(fallback.model && fallback.effort))
-              }
-            />
-            <Action
-              label="Discard changes"
-              onPress={() => {
-                setDraft(discardModelDraft);
-                setPendingModel(null);
-              }}
-              disabled={busy || !dirty}
-            />
-            <Action
-              label={`Reset ${modelDriverLabel(driver)} to defaults`}
-              onPress={() => {
-                setDraft((current) => editModelDraft(current, (p) => resetModelTable(p, driver)));
-                setPendingModel(null);
-              }}
-              disabled={
-                busy ||
-                !modelCellChanges(defaultModelRoutingPolicy, policy).some(
-                  (c) => c.driver === driver,
-                )
-              }
             />
           </View>
           <ModelRoutingMatrix
@@ -456,10 +405,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             }}
           />
           <ModelRoutingLegend driver={driver} policy={policy} />
-          <Text className="font-t3-medium">Claude ladder</Text>
-          <Text className="text-foreground-muted">
-            Weakest first. When the wanted model is used up on every account, a worker gets the
-            closest rung that has room.
+          <Text className="font-t3-medium">
+            Claude ladder <Text className="text-foreground-muted">weakest first</Text>
           </Text>
           {ladder.map((r, index) => (
             <View key={modelProfileLabel(r)} className="flex-row flex-wrap gap-4">
@@ -517,9 +464,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             }}
           />
           <View className="flex-row items-center justify-between gap-4">
-            <Text className="flex-1 font-t3-medium">Fallback when no Claude rung has room</Text>
+            <Text className="flex-1 font-t3-medium">Fallback model</Text>
             <ThemedSwitch
-              accessibilityLabel="Fallback when no Claude rung has room"
+              accessibilityLabel="Fallback model"
               value={fallback !== null}
               onValueChange={(on) =>
                 edit((p) => ({ ...p, fallback: on ? defaultModelFallback : null }))
@@ -528,16 +475,18 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           </View>
           {fallback && (
             <>
+              {/* A half-typed model ID must not become the fallback: it waits for its field. */}
               <TextInput
-                accessibilityLabel="Fallback model"
+                accessibilityLabel="Fallback model ID"
                 placeholder="Model ID"
                 autoCapitalize="none"
                 autoCorrect={false}
                 className={field}
                 value={fallback.model}
                 onChangeText={(model) =>
-                  edit((p) => ({ ...p, fallback: { ...fallback, model: model.trim() } }))
+                  edit((p) => ({ ...p, fallback: { ...fallback, model: model.trim() } }), null)
                 }
+                onEndEditing={store.flush}
               />
               <TextInput
                 accessibilityLabel="Fallback effort"
@@ -547,12 +496,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 className={field}
                 value={fallback.effort}
                 onChangeText={(effort) =>
-                  edit((p) => ({ ...p, fallback: { ...fallback, effort: effort.trim() } }))
+                  edit((p) => ({ ...p, fallback: { ...fallback, effort: effort.trim() } }), null)
                 }
+                onEndEditing={store.flush}
               />
-              <Text className="text-foreground-muted">
-                Used only when the wanted rung is below:
-              </Text>
+              <Text className="text-foreground-muted">Used below rung</Text>
               <View className="flex-row flex-wrap gap-2">
                 {(ladder.some((r) => modelProfileLabel(r) === modelProfileLabel(fallback.below))
                   ? ladder
@@ -574,20 +522,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             </>
           )}
         </>
-      ) : loadingTable ? null : (
-        <Text className="text-foreground-muted">
-          {connection === "connected"
-            ? "The saved table could not be read. Refresh to try again."
-            : "The saved table has not loaded. Connect to this environment to view and edit it."}
-        </Text>
-      )}
+      ) : null}
       <Action
         label={taskOpen ? "Hide: Try a task" : "Try a task"}
         onPress={() => setTaskOpen(!taskOpen)}
       />
       {taskOpen && (
         <View className="gap-3">
-          <Text className="text-foreground-muted">{MODEL_SCORING_RUBRIC}</Text>
           {(
             [
               ["difficulty", "Difficulty (0–10)"],
@@ -657,7 +598,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                   {decided.chosen
                     ? `${accountLabel(d.request.environmentId, decided.chosen.instanceId)} · ${decided.chosen.model} / ${decided.chosen.effort ?? "default"}`
                     : decided.state === "drained"
-                      ? "Drained: nothing started"
+                      ? "Used up: nothing started"
                       : "No account: nothing started"}
                 </Text>
                 {d.reasons.map((reason) => (
@@ -671,18 +612,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         ) : (
           <Text className="text-foreground-muted">No decisions recorded yet.</Text>
         ))}
-      <Text className="text-foreground-muted">
-        Earlier saved versions can be restored in the web editor.
-      </Text>
       {editorUrl ? (
         <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(editorUrl)}>
-          <Text className="text-primary">Open Model selection web editor</Text>
+          <Text className="text-primary">Earlier versions: open the web editor</Text>
         </Pressable>
       ) : (
-        <Text>
-          This relay or SSH connection has no direct web address. Open this custom build&apos;s web
-          client, connect the same environment, then choose Settings → Model selection.
-        </Text>
+        <Text className="text-foreground-muted">Earlier versions are in the web client.</Text>
       )}
     </ScrollView>
   );
