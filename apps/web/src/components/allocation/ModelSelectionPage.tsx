@@ -59,6 +59,7 @@ import {
   ModelRoutingMatrix,
   type ModelCellPosition,
 } from "./ModelRoutingTable";
+import { Hinted } from "./Hinted";
 import { SaveState } from "./SaveState";
 
 const commands = createAllocationCommands(connectionAtomRuntime);
@@ -221,15 +222,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       setAccounts("loaded");
     } else setAccounts("failed");
   }, [environmentId, execute]);
-  const receive = useCallback(
-    (next: ModelRoutingSnapshot, epoch: number) => {
-      setSnapshot(next);
-      setVersions(next.policies);
-      setSnapshotEpoch(epoch);
-      store.receive(next.policy);
-    },
-    [store],
-  );
+  const receive = (next: ModelRoutingSnapshot, epoch: number) => {
+    setSnapshot(next);
+    setVersions(next.policies);
+    setSnapshotEpoch(epoch);
+    store.receive(next.policy);
+  };
   const refresh = async () => {
     const epoch = ++generation.current;
     setPreview(null);
@@ -260,9 +258,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       // Only now: the server runs one database query at a time, and this computer's inventory
       // would otherwise hold up the saved values.
       void readAccounts();
-      if (response._tag === "Success" && response.value.modelSnapshot)
-        receive(response.value.modelSnapshot, connectionState.epoch);
-      else {
+      if (response._tag === "Success" && response.value.modelSnapshot) {
+        const next = response.value.modelSnapshot;
+        setSnapshot(next);
+        setVersions(next.policies);
+        setSnapshotEpoch(connectionState.epoch);
+        store.receive(next.policy);
+      } else {
         setFailedEpoch(connectionState.epoch);
         setMessage("The saved table could not be read. Refresh to try again.");
       }
@@ -272,7 +274,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       mounted.current = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, receive]);
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, store]);
   const tryTask = async () => {
     if (!policy) return;
     try {
@@ -434,12 +436,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <SettingsSection
             title="Claude ladder"
             headerAction={
-              <span
-                className="text-xs text-muted-foreground"
-                title="When the table's model is used up on every account, the worker gets the closest rung that has room."
+              <Hinted
+                hint="When the table's model is used up on every account, the worker gets the closest rung that has room."
+                render={<span className="text-xs text-muted-foreground" />}
               >
                 weakest first
-              </span>
+              </Hinted>
             }
           >
             <ModelLadderEditor
@@ -491,10 +493,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         summary="which model and account it would get"
       >
         <div className={block}>
-          <div
-            className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3"
-            title={MODEL_SCORING_RUBRIC}
-          >
+          <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
             {(
               [
                 ["difficulty", "Difficulty (0–10)"],
@@ -503,7 +502,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               ] as const
             ).map(([name, caption]) => (
               <label key={name} className="grid min-w-0 gap-1 text-sm">
-                {caption}
+                {name === "hours" ? (
+                  caption
+                ) : (
+                  <Hinted hint={MODEL_SCORING_RUBRIC}>{caption}</Hinted>
+                )}
                 <input
                   className={field}
                   type="number"

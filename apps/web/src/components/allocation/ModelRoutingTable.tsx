@@ -27,6 +27,7 @@ import {
 import { cn } from "~/lib/utils";
 import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
 import { Button } from "../ui/button";
+import { Hinted } from "./Hinted";
 import { Input } from "../ui/input";
 
 export interface ModelCellPosition {
@@ -568,11 +569,10 @@ export function ModelFallbackEditor(props: {
               {...typed}
             />
           </label>
-          <label
-            className={captioned}
-            title="When no ladder rung has room, a worker that wanted a rung below this one starts on the fallback model. From this rung up, it waits for a reset."
-          >
-            Used below rung
+          <label className={captioned}>
+            <Hinted hint="When no ladder rung has room, a worker that wanted a rung below this one starts on the fallback model. From this rung up, it waits for a reset.">
+              Used below rung
+            </Hinted>
             <select
               className={field}
               value={pairKey(fallback.below)}

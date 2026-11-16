@@ -69,6 +69,18 @@ vi.mock("../settings/FoldedSettingsSection", async () => {
     },
   };
 });
+// The hover hints come from the tooltip primitive; here each keeps its text beside its name.
+vi.mock("./Hinted", async () => {
+  const { cloneElement } = await import("react");
+  return {
+    HINT_MARK: "",
+    Hinted: (props: {
+      hint: string;
+      render?: React.ReactElement<{ "data-hint"?: string; children?: ReactNode }>;
+      children: ReactNode;
+    }) => cloneElement(props.render ?? <span />, { "data-hint": props.hint }, props.children),
+  };
+});
 import { ProviderAllocationPage } from "./ProviderAllocationPage";
 
 const snapshot: AllocationSnapshot = {
@@ -578,7 +590,7 @@ describe("Provider allocation editor", () => {
     // The line a glance needs: the limit, how much is used, and how long until it resets.
     const line = named("SL Weekly used").parentElement!;
     expect(line.textContent).toMatch(/^Weekly42%in \d+d \d+h · old$/);
-    expect(line.title).toBe("read 14 min ago");
+    expect(line.dataset.hint).toBe("read 14 min ago");
     expect(named("SL Weekly used").getAttribute("aria-valuenow")).toBe("42");
     expect(field("SL 5-hour cap").value).toBe("");
     expect(row.querySelector("p")).toBeNull();
@@ -630,7 +642,7 @@ describe("Provider allocation editor", () => {
     });
     const line = named("SL Weekly used").parentElement!;
     expect(line.textContent).toBe("Weekly16%in 6d 18h");
-    expect(line.title).toBe(
+    expect(line.dataset.hint).toBe(
       "read 1 min ago · holds about $1,603 (estimated) · daily goal allows 5% by now",
     );
     expect(row().querySelector("p")).toBeNull();
@@ -840,9 +852,8 @@ describe("Provider allocation editor", () => {
     // Names, values and controls only: what a name does not say is one hover away.
     expect(container.querySelectorAll("p")).toHaveLength(1);
     expect(container.querySelector("p")?.textContent).toBe("No reading");
-    expect(named("Close-call margin").closest("[title]")).toBeNull();
     expect(
-      [...section("Rules").querySelectorAll("[title]")].map((hint) => hint.textContent),
+      [...section("Rules").querySelectorAll("[data-hint]")].map((hint) => hint.textContent),
     ).toEqual([
       "Close-call marginaccounts this close count as equal",
       "Wait for a resetlonger, and the worker changes model",

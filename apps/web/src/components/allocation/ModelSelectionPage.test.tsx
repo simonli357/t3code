@@ -71,6 +71,18 @@ vi.mock("../settings/FoldedSettingsSection", async () => {
     },
   };
 });
+// The hover hints come from the tooltip primitive; here each keeps its text beside its name.
+vi.mock("./Hinted", async () => {
+  const { cloneElement } = await import("react");
+  return {
+    HINT_MARK: "",
+    Hinted: (props: {
+      hint: string;
+      render?: React.ReactElement<{ "data-hint"?: string; children?: ReactNode }>;
+      children: ReactNode;
+    }) => cloneElement(props.render ?? <span />, { "data-hint": props.hint }, props.children),
+  };
+});
 import { ModelSelectionPage } from "./ModelSelectionPage";
 
 let snapshot: ModelRoutingSnapshot;

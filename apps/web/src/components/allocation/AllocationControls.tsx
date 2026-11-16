@@ -33,6 +33,7 @@ import { ITEM_ROW_CLASSNAME } from "../settings/itemRows";
 import { SettingsSection } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
+import { HINT_MARK, Hinted } from "./Hinted";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -56,8 +57,7 @@ const columns =
 const caption = "text-xs text-muted-foreground @min-[60rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
 const unsaved = <p className="text-xs text-destructive">Not saved</p>;
-/** The pages carry no explanatory sentences: a name that needs one shows it on hover. */
-const hinted = "cursor-help underline decoration-dotted underline-offset-2";
+/** What a name does not say by itself, shown on hover. */
 const HINTS = {
   order: "Between accounts with similar room left, the higher one is used.",
   fable: "Workers on this account run on Fable only.",
@@ -242,19 +242,22 @@ function AccountRow({
         </div>
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{row.label}</div>
-          <div className="truncate text-xs text-muted-foreground" title={about}>
+          <Hinted
+            hint={`${about}${row.login === null ? " · login unknown, matched by label" : ""}`}
+            render={<div className="truncate text-xs text-muted-foreground" />}
+          >
             {about}
             {row.login === null && " · login unknown"}
-          </div>
+          </Hinted>
           {place && notSaved.has("accountOrder") && unsaved}
         </div>
       </div>
       <div className="grid min-w-0 flex-[2] basis-60 grid-cols-[minmax(0,5.5rem)_2.75rem_minmax(1.5rem,1fr)_auto] content-start items-center gap-x-2 gap-y-0.5 text-xs">
         {row.windows.map((window) => (
-          <div
+          <Hinted
             key={window.id}
-            title={window.detail}
-            className="col-span-full grid grid-cols-subgrid items-center"
+            hint={window.detail}
+            render={<div className="col-span-full grid grid-cols-subgrid items-center" />}
           >
             <span className="truncate">{window.label}</span>
             <span className="text-right font-medium tabular-nums">
@@ -270,7 +273,7 @@ function AccountRow({
               {window.resetIn ?? "no reset time"}
               {window.stale && <span className="text-warning-foreground"> · old</span>}
             </span>
-          </div>
+          </Hinted>
         ))}
         {row.notice && (
           <p
@@ -313,9 +316,9 @@ function AccountRow({
         >
           {row.fableMode !== null && (
             <label className="flex h-7 items-center gap-2">
-              <span title={HINTS.fable} className={cn(caption, hinted)}>
+              <Hinted hint={HINTS.fable} render={<span className={cn(caption, HINT_MARK)} />}>
                 Fable mode
-              </span>
+              </Hinted>
               <Switch
                 size="sm"
                 aria-label={`${row.name} Fable mode`}
@@ -333,9 +336,9 @@ function AccountRow({
         </div>
         <div className="grid min-w-0 content-start gap-0.5">
           <div className="flex h-7 items-center gap-2">
-            <span title={HINTS.goal} className={cn(caption, hinted)}>
+            <Hinted hint={HINTS.goal} render={<span className={cn(caption, HINT_MARK)} />}>
               Daily goal
-            </span>
+            </Hinted>
             <NumberField
               name={`${row.name} daily goal`}
               unit="%"
@@ -358,9 +361,9 @@ function AccountRow({
             <>
               {/* A cap can stop running work, so a half-typed one is never stored. */}
               <div className="flex h-7 items-center gap-2 text-muted-foreground">
-                <span title={HINTS.cap} className={cn(caption, hinted)}>
+                <Hinted hint={HINTS.cap} render={<span className={cn(caption, HINT_MARK)} />}>
                   Hard cap
-                </span>
+                </Hinted>
                 <label className="flex items-center gap-1">
                   Wk
                   <NumberField
@@ -502,11 +505,14 @@ function Rule(props: {
 }) {
   return (
     <div className={cn(ITEM_ROW_CLASSNAME, "flex min-w-0 items-center justify-between gap-3 py-2")}>
-      <div className="min-w-0" title={props.detail}>
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+      <div className="min-w-0">
+        <Hinted
+          hint={props.detail}
+          render={<div className="flex min-w-0 flex-wrap items-baseline gap-x-2" />}
+        >
           <h3 className="text-sm font-medium">{props.title}</h3>
           <span className="text-xs text-muted-foreground">{props.hint}</span>
-        </div>
+        </Hinted>
         {props.failed && unsaved}
       </div>
       <div className="flex shrink-0 items-center">{props.children}</div>
@@ -697,21 +703,19 @@ export function AllocationControls({
             aria-hidden
             className={cn("hidden px-3 py-1.5 text-xs text-muted-foreground sm:px-4", columns)}
           >
-            <span title={HINTS.order} className={hinted}>
-              Order
-            </span>
-            <span>Account</span>
-            <span>Usage</span>
-            <span>Workers</span>
-            <span title={HINTS.fable} className={hinted}>
-              Fable mode
-            </span>
-            <span title={HINTS.goal} className={hinted}>
-              Daily goal
-            </span>
-            <span title={HINTS.cap} className={hinted}>
-              Hard cap
-            </span>
+            {(
+              [
+                ["Order", HINTS.order],
+                ["Account"],
+                ["Usage"],
+                ["Workers"],
+                ["Fable mode", HINTS.fable],
+                ["Daily goal", HINTS.goal],
+                ["Hard cap", HINTS.cap],
+              ] as const
+            ).map(([name, hint]) => (
+              <span key={name}>{hint ? <Hinted hint={hint}>{name}</Hinted> : name}</span>
+            ))}
           </div>
           {ordered.length > 0 ? (
             <ul aria-label="Accounts, most preferred first" className={divided}>
