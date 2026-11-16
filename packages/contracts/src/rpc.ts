@@ -4,13 +4,7 @@ import {
   BaseSessionConfiguration,
   BaseSessionCreateInput,
 } from "./baseSessions.ts";
-import {
-  AllocationOperation,
-  AllocationResponse,
-  AllocationError,
-  AllocationStart,
-  AllocationStartResult,
-} from "./providerAllocation.ts";
+import { AllocationOperation, AllocationResponse, AllocationError } from "./providerAllocation.ts";
 import {
   SessionOwnershipReadInput,
   SessionOwnershipInput,
@@ -325,7 +319,6 @@ import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
   providerAllocation: "providerAllocation.execute",
-  providerAllocationStart: "providerAllocation.start",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -1117,11 +1110,6 @@ const WsProviderAllocationRpc = Rpc.make(WS_METHODS.providerAllocation, {
   success: AllocationResponse,
   error: AllocationError,
 });
-const WsProviderAllocationStartRpc = Rpc.make(WS_METHODS.providerAllocationStart, {
-  payload: AllocationStart,
-  success: AllocationStartResult,
-  error: AllocationError,
-});
 const WsSessionOwnershipReadRpc = Rpc.make(WS_METHODS.sessionOwnershipRead, {
   payload: SessionOwnershipReadInput,
   success: SessionOwnershipResult,
@@ -1657,7 +1645,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsBaseSessionsCreateRpc,
   WsSessionOwnershipReadRpc,
   WsProviderAllocationRpc,
-  WsProviderAllocationStartRpc,
   WsSessionOwnershipChangeRpc,
   WsSessionMovesRequestRpc,
   WsSessionMovesStatusRpc,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Linking, Pressable, ScrollView, View, TextInput } from "react-native";
 
@@ -6,20 +6,15 @@ import {
   DEFAULT_CLOSE_MARGIN_POINTS,
   DEFAULT_LONG_WAIT_HOURS,
   EnvironmentId,
-  ProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
-  ThreadId,
   type AllocationPolicy,
   type AllocationSnapshot,
-  type AllocationDecision,
 } from "@t3tools/contracts";
 
 import {
   createAllocationCommands,
   allocationAccountOrder,
   allocationAccountRows,
-  allocationSummary,
-  allocationAccountLabel,
   withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
@@ -51,11 +46,17 @@ export function SettingsAllocationRouteScreen() {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
 
-  const [snapshot, setSnapshot] = useState<AllocationSnapshot | null>(null);
-  // When the snapshot was read: reading ages and end times are judged against it.
+  // The saved settings, then what every computer reports: the settings never wait for it.
+  const [settings, setSettings] = useState<AllocationSnapshot | null>(null);
+  const [reported, setReported] = useState<AllocationSnapshot | null>(null);
+  const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
+  const snapshot = settings && {
+    ...settings,
+    inventories: reported?.inventories ?? [],
+    runways: reported?.runways ?? settings.runways,
+  };
+  // When the accounts were read: reading ages and end times are judged against it.
   const [now, setNow] = useState(0);
-
-  const [decision, setDecision] = useState<AllocationDecision | null>(null);
 
   // Unsaved edits: the preference order, and the two numbers as typed.
   const [draft, setDraft] = useState<AllocationPolicy | null>(null);
@@ -65,38 +66,44 @@ export function SettingsAllocationRouteScreen() {
   // Daily goals as typed, by account row; blank uses the provider's default.
   const [goals, setGoals] = useState<Record<string, string>>({});
 
-  const [model, setModel] = useState("");
-
-  const [driver, setDriver] = useState("codex");
-
-  const [effort, setEffort] = useState("");
-
   const [message, setMessage] = useState("");
 
   const [busy, setBusy] = useState(false);
 
-  const [advanced, setAdvanced] = useState(false);
-
   const [showOthers, setShowOthers] = useState(false);
+
+  /**
+   * Reads the saved settings, then the accounts; `isActive` drops a stale answer. The server runs
+   * one database query at a time, so reading the accounts first would hold up the settings.
+   */
+  const read = useCallback(
+    (environmentId: EnvironmentId, isActive: () => boolean) =>
+      execute({ environmentId, input: { _tag: "snapshot", part: "settings" } }).then((result) => {
+        if (!isActive()) return;
+        if (result._tag === "Success" && result.value.snapshot) {
+          setSettings(result.value.snapshot);
+          setNow((current) => current || Date.now());
+          setMessage("");
+        } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
+        void execute({ environmentId, input: { _tag: "snapshot", part: "accounts" } }).then(
+          (accounts) => {
+            if (!isActive()) return;
+            if (accounts._tag === "Success" && accounts.value.snapshot) {
+              setReported(accounts.value.snapshot);
+              setNow(Date.now());
+              setAccounts("loaded");
+            } else setAccounts("failed");
+          },
+        );
+      }),
+    [execute],
+  );
 
   const refresh = async () => {
     if (!target) return;
-
     setBusy(true);
-
-    const result = await execute({
-      environmentId: target.environmentId,
-
-      input: { _tag: "snapshot" },
-    });
-
-    if (result._tag === "Success" && result.value.snapshot) {
-      setSnapshot(result.value.snapshot);
-      setNow(Date.now());
-
-      setMessage("");
-    } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
-
+    setAccounts("loading");
+    await read(target.environmentId, () => true);
     setBusy(false);
   };
 
@@ -104,24 +111,12 @@ export function SettingsAllocationRouteScreen() {
     if (!target) return;
 
     let active = true;
-
-    void execute({ environmentId: target.environmentId, input: { _tag: "snapshot" } }).then(
-      (result) => {
-        if (!active) return;
-
-        if (result._tag === "Success" && result.value.snapshot) {
-          setSnapshot(result.value.snapshot);
-          setNow(Date.now());
-
-          setMessage("");
-        } else setMessage("Allocation coordinator unavailable. Reconnect to refresh.");
-      },
-    );
+    void read(target.environmentId, () => active);
 
     return () => {
       active = false;
     };
-  }, [target, execute]);
+  }, [target, read]);
 
   const policy = draft ?? snapshot?.policy;
   const rows = snapshot && policy ? allocationAccountRows(snapshot, policy, now) : [];
@@ -323,41 +318,6 @@ export function SettingsAllocationRouteScreen() {
     </View>
   );
 
-  const preview = async () => {
-    if (!target) return;
-
-    setBusy(true);
-
-    const result = await execute({
-      environmentId: target.environmentId,
-
-      input: {
-        _tag: "preview",
-
-        request: {
-          assignmentId: "mobile-preview",
-
-          environmentId: target.environmentId,
-
-          threadId: ThreadId.make("mobile-preview"),
-
-          driver: ProviderDriverKind.make(driver),
-
-          model,
-
-          options: effort
-            ? [{ id: driver === "codex" ? "reasoningEffort" : "effort", value: effort }]
-            : [],
-        },
-      },
-    });
-
-    if (result._tag === "Success" && result.value.result) setDecision(result.value.result.decision);
-    else setMessage("Could not preview this assignment.");
-
-    setBusy(false);
-  };
-
   return (
     <SettingsScreen title="Provider allocation">
       <ScrollView contentContainerClassName="gap-4 p-4">
@@ -371,7 +331,9 @@ export function SettingsAllocationRouteScreen() {
         <Text>
           {snapshot
             ? `Policy ${snapshot.policy.version} · ${snapshot.authorityAvailable ? "coordinator ready" : "coordinator unavailable"}`
-            : "No snapshot"}
+            : target && !message
+              ? "Loading saved settings…"
+              : "Saved settings not loaded"}
         </Text>
         <Pressable disabled={busy} accessibilityRole="button" onPress={() => void refresh()}>
           <Text className="text-primary">Refresh allocation</Text>
@@ -385,6 +347,15 @@ export function SettingsAllocationRouteScreen() {
                 ? "The order decides only between accounts whose room is close. Hard caps are edited in the web settings page."
                 : "This coordinator cannot save the order, margin or long wait yet."}
             </Text>
+            {rows.length === 0 && (
+              <Text className="text-foreground-muted">
+                {accounts === "loading"
+                  ? "Loading accounts…"
+                  : accounts === "failed"
+                    ? "Accounts could not be read. Refresh to try again."
+                    : "No accounts reported."}
+              </Text>
+            )}
             {ordered.map(accountRow)}
             {others.length > 0 && (
               <Pressable
@@ -465,104 +436,6 @@ export function SettingsAllocationRouteScreen() {
                 </Pressable>
               </View>
             )}
-          </View>
-        )}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityState={{ expanded: advanced }}
-          onPress={() => setAdvanced(!advanced)}
-        >
-          <Text className="text-primary">Advanced assignment simulator</Text>
-        </Pressable>
-        {advanced && (
-          <View className="gap-3">
-            <Text className="font-semibold">Try an assignment</Text>
-            <View accessibilityLabel="Provider" className="flex-row flex-wrap gap-3">
-              {[
-                ...new Set(
-                  snapshot?.inventories
-
-                    .find((i) => i.environmentId === target?.environmentId)
-
-                    ?.accounts.map((a) => a.driver) ?? [],
-                ),
-              ].map((kind) => (
-                <Pressable
-                  key={kind}
-
-                  accessibilityRole="radio"
-
-                  accessibilityState={{ selected: driver === kind }}
-
-                  onPress={() => {
-                    setDriver(kind);
-
-                    setModel("");
-
-                    setEffort("");
-
-                    setDecision(null);
-                  }}
-                >
-                  <Text className="text-primary">
-                    {PROVIDER_DISPLAY_NAMES[kind] ?? "Other provider"}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-            <TextInput
-              accessibilityLabel="Exact model"
-
-              placeholder="Exact model"
-
-              value={model}
-
-              onChangeText={setModel}
-
-              className={field}
-            />
-            <TextInput
-              accessibilityLabel="Reasoning effort"
-
-              placeholder="Reasoning effort (optional)"
-
-              value={effort}
-
-              onChangeText={setEffort}
-
-              className={field}
-            />
-            <Pressable
-              disabled={busy || !model || !target}
-
-              accessibilityRole="button"
-
-              onPress={() => void preview()}
-            >
-              <Text className="text-primary">Preview account</Text>
-            </Pressable>
-            {decision ? (
-              <View>
-                <Text>
-                  {decision.selectedInstanceId
-                    ? allocationAccountLabel(
-                        snapshot,
-                        decision.request.environmentId,
-                        decision.selectedInstanceId,
-                      )
-                    : allocationSummary(decision).choice}
-                </Text>
-                <Text>{decision.reasons[0]}</Text>
-                {decision.candidates.map((c) => (
-                  <Text key={`${c.environmentId}:${c.instanceId}`}>
-                    {c.line ??
-                      `${allocationAccountLabel(snapshot, c.environmentId, c.instanceId)}: ${
-                        c.eligible ? "Compatible" : c.reasons.join(" ")
-                      }`}
-                  </Text>
-                ))}
-              </View>
-            ) : null}
           </View>
         )}
         <Text>Open the web page to edit hard caps.</Text>

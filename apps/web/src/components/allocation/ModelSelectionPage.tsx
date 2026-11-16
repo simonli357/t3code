@@ -1,23 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import {
   defaultModelRoutingPolicy,
   modelFallback,
   modelLadder,
   workerChoice,
+  workerChoiceRequest,
   MODEL_SCORING_RUBRIC,
   ModelRoutingRequest,
   ProviderDriverKind,
-  ProviderInstanceId,
   ThreadId,
-  ProjectId,
-  routingEffortOptionId,
   type EnvironmentId,
   type ModelRoutingSnapshot,
   type ModelRoutingDecision,
   type AllocationOperation,
-  type AllocationStart,
   type RoutingCell,
 } from "@t3tools/contracts";
 import {
@@ -51,7 +47,6 @@ import {
 import { connectionAtomRuntime } from "../../connection/runtime";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironment } from "../../state/environments";
-import { useProjects } from "../../state/entities";
 import { randomUUID } from "../../lib/utils";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -69,8 +64,7 @@ const commands = createAllocationCommands(connectionAtomRuntime);
 const decodeRequest = Schema.decodeUnknownSync(ModelRoutingRequest);
 const field =
   "block w-full min-w-0 max-w-full rounded border bg-background px-2 py-1 text-sm disabled:opacity-60";
-const group = "grid min-w-0 grid-cols-1 gap-3 rounded border p-3";
-type Section = "test" | "policy" | "history" | "connection";
+type Section = "task" | "versions" | "history";
 
 /** A collapsed section keeps its contents unmounted until opened; state lives in the page. */
 function Disclosure(props: {
@@ -100,21 +94,20 @@ export function ModelSelectionPage({ environmentId }: { environmentId: Environme
 }
 function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
-  const start = useAtomCommand(commands.start, { reportFailure: false });
   const environment = useEnvironment(environmentId);
   const connection = environment?.connection.phase ?? "offline";
-  const navigate = useNavigate();
-  const projects = useProjects().filter((p) => p.environmentId === environmentId);
   const [snapshot, setSnapshot] = useState<ModelRoutingSnapshot | null>(null);
+  // What every computer reports arrives after the saved table; the last known list stays offline.
+  const [inventories, setInventories] = useState<ModelRoutingSnapshot["inventories"]>([]);
+  const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
   const [draft, setDraft] = useState<ModelDraft>(emptyModelDraft);
-  const [driver, setDriver] = useState<ModelDriver>("codex");
+  const [driver, setDriver] = useState<ModelDriver>("claudeAgent");
   const [selected, setSelected] = useState<ModelCellPosition | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<Section, boolean>>({
-    test: false,
-    policy: false,
+    task: false,
+    versions: false,
     history: false,
-    connection: false,
   });
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState("");
@@ -122,27 +115,24 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [preview, setPreview] = useState<{ key: string; decision: ModelRoutingDecision } | null>(
     null,
   );
-  const [request, setRequest] = useState<ModelRoutingRequest>(() => ({
-    selection: "automatic",
-    assignmentId: randomUUID(),
-    threadId: ThreadId.make(randomUUID()),
+  // Blank is NaN. The task is tried as an agent's start would be, on the table shown.
+  const [task, setTask] = useState({ difficulty: NaN, stakes: NaN, hours: NaN });
+  const [ids] = useState(() => ({ assignmentId: randomUUID(), threadId: randomUUID() }));
+  const request = workerChoiceRequest({
+    difficulty: task.difficulty,
+    stakes: task.stakes,
+    ...(Number.isFinite(task.hours) ? { hours: task.hours } : {}),
     environmentId,
-    allowedDrivers: [ProviderDriverKind.make("codex")],
-    assessment: { difficulty: NaN, stakes: NaN },
-  }));
-  const [project, setProject] = useState("");
-  const [title, setTitle] = useState("Automatically selected assignment");
-  const [prompt, setPrompt] = useState("");
-  const [startAttempt, setStartAttempt] = useState<AllocationStart | null>(null);
-  const startInput: AllocationStart | null = project
-    ? { request, kind: "session", projectId: ProjectId.make(project), title, prompt }
-    : null;
-  const changedStart =
-    startAttempt !== null && JSON.stringify(startAttempt) !== JSON.stringify(startInput);
+    driver: ProviderDriverKind.make(driver),
+    assignmentId: ids.assignmentId,
+    threadId: ThreadId.make(ids.threadId),
+  });
   const mounted = useRef(true);
   const generation = useRef(0);
+  const accountsRead = useRef(0);
   const [connectionState, setConnectionState] = useState({ phase: connection, epoch: 0 });
   const [snapshotEpoch, setSnapshotEpoch] = useState<number | null>(null);
+  const [failedEpoch, setFailedEpoch] = useState<number | null>(null);
   if (connectionState.phase !== connection)
     setConnectionState({ phase: connection, epoch: connectionState.epoch + 1 });
   const policy = draft.policy;
@@ -156,15 +146,21 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     snapshot?.authorityAvailable &&
     connection === "connected" &&
     snapshotEpoch === connectionState.epoch;
-  const overrideEffortId = routingEffortOptionId(request.override?.driver ?? "codex");
-  const overrideOptions = request.override?.options ?? [];
-  const accounts =
-    snapshot?.inventories
-      .flatMap((i) => i.accounts)
-      .filter((a) => a.environmentId === environmentId) ?? [];
+  // Only a real disconnection or a failed read is reported as one; until then it is loading.
+  const loadingTable =
+    connection === "connecting" ||
+    (connection === "connected" &&
+      snapshotEpoch !== connectionState.epoch &&
+      failedEpoch !== connectionState.epoch);
+  const loadingAccounts =
+    accounts === "loading" && (connection === "connected" || connection === "connecting");
+  const accountLabel = (host: string, instanceId: string) =>
+    inventories
+      .find((i) => i.environmentId === host)
+      ?.accounts.find((a) => a.instanceId === instanceId)?.label ?? instanceId;
   const catalog = useMemo(
-    () => modelCatalog(snapshot?.inventories ?? [], environmentId, driver),
-    [snapshot, environmentId, driver],
+    () => modelCatalog(inventories, environmentId, driver),
+    [inventories, environmentId, driver],
   );
   const {
     dirty,
@@ -179,12 +175,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     [policy, driver],
   );
   const claudeChoices = useMemo(
-    () => allocationModelChoices(snapshot?.inventories ?? [], "claudeAgent"),
-    [snapshot],
+    () => allocationModelChoices(inventories, "claudeAgent"),
+    [inventories],
   );
   const fallback = policy ? modelFallback(policy) : null;
   const choice = validPreview ? workerChoice(validPreview) : null;
   const selectedCell = policy && selected ? modelCell(policy, driver, ...at(selected)) : null;
+  const earlier = snapshot?.policies.filter((p) => p.version !== snapshot.policy.version) ?? [];
   const call = async (operation: AllocationOperation, keepMessage = false) => {
     const epoch = generation.current;
     setBusy(true);
@@ -204,10 +201,24 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       if (mounted.current && epoch === generation.current) setBusy(false);
     }
   };
+  /** The accounts every computer reports; a slow computer delays only these. */
+  const readAccounts = useCallback(async () => {
+    const read = ++accountsRead.current;
+    setAccounts("loading");
+    const response = await execute({
+      environmentId,
+      input: { _tag: "modelSnapshot", part: "accounts" },
+    });
+    if (!mounted.current || read !== accountsRead.current) return;
+    if (response._tag === "Success" && response.value.modelSnapshot) {
+      setInventories(response.value.modelSnapshot.inventories);
+      setAccounts("loaded");
+    } else setAccounts("failed");
+  }, [environmentId, execute]);
   const refresh = async (keepMessage = false) => {
     const epoch = ++generation.current;
     setPreview(null);
-    const response = await call({ _tag: "modelSnapshot" }, keepMessage);
+    const response = await call({ _tag: "modelSnapshot", part: "settings" }, keepMessage);
     if (epoch !== generation.current || !response?.modelSnapshot) return;
     const next = response.modelSnapshot;
     setSnapshot(next);
@@ -215,7 +226,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     setDraft((current) => receiveSavedModelPolicy(current, next.policy));
     if (!next.authorityAvailable)
       setMessage(
-        "Coordinator or target is unavailable. Last-known values remain readable; reconnect through Provider allocation and refresh.",
+        "No coordinator is connected. Last-known values remain readable; choose one under Provider allocation and refresh.",
       );
   };
   useEffect(() => {
@@ -232,42 +243,43 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       }
       setBusy(true);
       setMessage("");
-      const response = await execute({ environmentId, input: { _tag: "modelSnapshot" } });
+      const response = await execute({
+        environmentId,
+        input: { _tag: "modelSnapshot", part: "settings" },
+      });
       if (!active || epoch !== generation.current) return;
       setBusy(false);
+      // Only now: the server runs one database query at a time, and this computer's inventory
+      // would otherwise hold up the saved values.
+      void readAccounts();
       if (response._tag === "Success" && response.value.modelSnapshot) {
         const next = response.value.modelSnapshot;
         setSnapshot(next);
         setSnapshotEpoch(connectionState.epoch);
         setDraft((current) => receiveSavedModelPolicy(current, next.policy));
-      } else
+      } else {
+        setFailedEpoch(connectionState.epoch);
         setMessage("Model coordinator unavailable. Your changes are kept; reconnect and refresh.");
+      }
     });
     return () => {
       active = false;
       mounted.current = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch]);
-  const showPreview = async () => {
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts]);
+  const tryTask = async () => {
     if (!policy) return;
-    const previewRequest = startAttempt
-      ? request
-      : { ...request, policyVersion: snapshot?.policy.version };
     try {
-      decodeRequest(previewRequest);
+      decodeRequest(request);
     } catch {
-      setMessage("Supply integer scores from 0 to 10.");
+      setMessage(
+        "Give difficulty and stakes as whole numbers from 0 to 10, and a job length of up to 168 hours.",
+      );
       return;
     }
-    setRequest(previewRequest);
-    const captured = modelPreviewKey(
-      policy,
-      previewRequest,
-      `${connection}:${connectionState.epoch}`,
-    );
-    const response = await call({ _tag: "modelPreview", request: previewRequest, policy });
-    if (response?.selection) setPreview({ key: captured, decision: response.selection });
+    const response = await call({ _tag: "modelPreview", request, policy });
+    if (response?.selection) setPreview({ key, decision: response.selection });
   };
   const save = async () => {
     if (!policy || !draft.baseline) return;
@@ -290,44 +302,6 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       // A conflict means a newer version exists: reload it so the page can offer the merge.
       await refresh(true);
   };
-  const create = async () => {
-    const input = startAttempt ?? startInput;
-    if (!input) return;
-    setBusy(true);
-    setStartAttempt(input);
-    const result = await start({
-      environmentId,
-      input,
-    });
-    setBusy(false);
-    if (result._tag !== "Success") {
-      setPreview(null);
-      setMessage(
-        `${modelFailureMessage(result.cause)} Startup did not confirm. Retry the identical intent to reconcile its receipt, or choose a new assignment identity for changed work.`,
-      );
-      return;
-    }
-    // A confirmed refusal/legacy observation without a reservation did not bind
-    // a startup intent. The owner may choose another account on these same IDs.
-    if (
-      result.value.state !== "submitted" &&
-      !result.value.allocation?.reservation &&
-      !result.value.selection?.allocation?.reservation
-    )
-      setStartAttempt(null);
-    if (result.value.selection) setPreview({ key, decision: result.value.selection });
-    if (result.value.state === "submitted")
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: { environmentId, threadId: result.value.threadId },
-      });
-    else
-      setMessage(
-        result.value.state === "observation"
-          ? "Observation mode: proposal recorded; no session started."
-          : "No account can start this. Inspect the decision.",
-      );
-  };
   const select = useCallback((cell: ModelCellPosition) => {
     setSelected(cell);
     setPendingModel(null);
@@ -335,6 +309,26 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const toggle = (section: Section) => (value: boolean) =>
     setOpen((current) => ({ ...current, [section]: value }));
   const example = policy ? modelCellSummary(modelCell(policy, driver, 7, 8)) : "";
+  const status = [
+    draft.saved
+      ? `Saved version ${draft.saved.version}`
+      : loadingTable
+        ? "Loading the saved table…"
+        : "Saved table not loaded",
+    ready
+      ? "Coordinator connected"
+      : loadingTable
+        ? null
+        : connection !== "connected"
+          ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
+          : `Coordinator unavailable${draft.saved ? ": showing the last known table" : ""}`,
+    draft.saved
+      ? dirty
+        ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
+        : "No unsaved changes"
+      : null,
+    loadingAccounts ? "Loading accounts…" : accounts === "failed" ? "Accounts not read" : null,
+  ].filter(Boolean);
   return (
     <div
       id="model-selection"
@@ -349,16 +343,17 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       <p role="status" className="text-sm">
         {message}
       </p>
-      <p className="text-sm text-muted-foreground">
-        {draft.saved ? `Saved version ${draft.saved.version}` : "Saved table not loaded"} ·{" "}
-        {ready
-          ? "Coordinator connected"
-          : "Coordinator not connected: showing the last known table"}{" "}
-        ·{" "}
-        {dirty
-          ? `${changeCount} unsaved ${changeCount === 1 ? "change" : "changes"}`
-          : "No unsaved changes"}
-      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm text-muted-foreground">{status.join(" · ")}</p>
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={busy || connection !== "connected"}
+          onClick={() => void refresh().then(readAccounts)}
+        >
+          Refresh
+        </Button>
+      </div>
       {stale && draft.saved && draft.baseline && (
         <Alert variant="warning">
           <AlertTitle>Version {draft.saved.version} was saved while you were editing</AlertTitle>
@@ -423,6 +418,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             catalog={catalog}
             allowed={policy[driver].allowedModels}
             online={Boolean(ready)}
+            loadingAccounts={loadingAccounts}
             pendingModel={pendingModel}
             onPendingModel={setPendingModel}
             onChange={(cell: RoutingCell) => {
@@ -507,452 +503,131 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           />
         </div>
       ) : (
-        <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-          The saved table has not loaded. Connect to this environment to view and edit it.
-        </p>
-      )}
-      <Disclosure title="Test an assignment" open={open.test} onToggle={toggle("test")}>
-        <fieldset className={group}>
-          <legend>Assignment preview</legend>
-          <p>{MODEL_SCORING_RUBRIC}</p>
-          <label>
-            <input
-              type="checkbox"
-              checked={Boolean(request.override)}
-              onChange={(e) => {
-                const { override: _previous, ...rest } = request;
-                const base = policy ? modelCell(policy, driver, ...at(selected ?? ORIGIN)) : null;
-                setRequest(
-                  e.target.checked && base
-                    ? {
-                        ...rest,
-                        override: {
-                          driver: ProviderDriverKind.make(driver),
-                          model: base.model,
-                          options: [{ id: routingEffortOptionId(driver), value: base.effort }],
-                        },
-                      }
-                    : rest,
-                );
-              }}
-            />{" "}
-            Pin a model
-          </label>
-          {request.override && (
-            <div className={group}>
-              <p>
-                A pinned model is where the choice starts. When it is drained on every account, the
-                closest ladder rung is used.
-              </p>
-              <label>
-                Override model
-                <input
-                  className={field}
-                  value={request.override.model}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      override: { ...request.override!, model: e.target.value },
-                    })
-                  }
-                />
-              </label>
-              <label>
-                Override effort
-                <input
-                  className={field}
-                  value={String(
-                    overrideOptions.find((o) => o.id === overrideEffortId)?.value ?? "",
-                  )}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      override: {
-                        ...request.override!,
-                        options: overrideOptions.some((o) => o.id === overrideEffortId)
-                          ? overrideOptions.map((o) =>
-                              o.id === overrideEffortId ? { ...o, value: e.target.value } : o,
-                            )
-                          : [...overrideOptions, { id: overrideEffortId, value: e.target.value }],
-                      },
-                    })
-                  }
-                />
-              </label>
-              <p>
-                Retained exact constraints:{" "}
-                {overrideOptions
-                  .filter((o) => o.id !== overrideEffortId)
-                  .map((o) => `${o.id}: ${String(o.value)}`)
-                  .join(", ") || "none"}
-                . Editing effort preserves these options.
-              </p>
-              <p>
-                Override provider: {request.override.driver === "codex" ? "Codex" : "Claude"}. To
-                choose another provider, clear the override, select its table tab and enable an
-                override again.
-              </p>
-            </div>
-          )}
-          {request.reassessment && (
-            <div className={group}>
-              <p>
-                Explicit reassessment starts a new session. The previous session keeps its model and
-                native identity. Transport and installation failures alone do not justify
-                escalation.
-              </p>
-              <label>
-                Reassessment cause
-                <select
-                  className={field}
-                  value={request.reassessment.cause}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      reassessment: {
-                        ...request.reassessment!,
-                        cause:
-                          e.target.value === "scope-change"
-                            ? "scope-change"
-                            : "substantive-failure",
-                      },
-                    })
-                  }
-                >
-                  <option value="scope-change">Scope change</option>
-                  <option value="substantive-failure">Substantive failure</option>
-                </select>
-              </label>
-              <label>
-                Reassessment reason
-                <textarea
-                  className={field}
-                  maxLength={500}
-                  value={request.reassessment.reason}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      reassessment: { ...request.reassessment!, reason: e.target.value },
-                    })
-                  }
-                />
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={request.reassessment.allowFreshProviderSession}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      reassessment: {
-                        ...request.reassessment!,
-                        allowFreshProviderSession: e.target.checked,
-                      },
-                    })
-                  }
-                />{" "}
-                Permit a different provider family in the new session
-              </label>
-            </div>
-          )}
-          <label>
-            Allowed providers
-            <select
-              className={field}
-              value={request.allowedDrivers.join(",")}
-              onChange={(e) =>
-                setRequest({
-                  ...request,
-                  allowedDrivers: e.target.value.split(",").map((d) => ProviderDriverKind.make(d)),
-                })
-              }
-            >
-              <option value="codex">Codex</option>
-              <option value="claudeAgent">Claude</option>
-              <option value="codex,claudeAgent">Codex and Claude</option>
-            </select>
-          </label>
-          <label>
-            Account constraint
-            <select
-              className={field}
-              value={request.explicitInstanceId ?? ""}
-              onChange={(e) => {
-                const { explicitInstanceId: _old, ...rest } = request;
-                setRequest(
-                  e.target.value
-                    ? { ...rest, explicitInstanceId: ProviderInstanceId.make(e.target.value) }
-                    : rest,
-                );
-              }}
-            >
-              <option value="">Any compatible account on this environment</option>
-              {accounts.map((a) => (
-                <option key={a.instanceId} value={a.instanceId}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(["difficulty", "stakes"] as const).map((axis) => (
-            <div key={axis} className="min-w-0 space-y-2">
-              <label>
-                {axis === "difficulty" ? "Difficulty" : "Stakes"} score
-                <input
-                  className={field}
-                  type="number"
-                  min={0}
-                  max={10}
-                  step={1}
-                  value={Number.isFinite(request.assessment[axis]) ? request.assessment[axis] : ""}
-                  onChange={(e) =>
-                    setRequest({
-                      ...request,
-                      assessment: {
-                        ...request.assessment,
-                        [axis]: e.target.value === "" ? NaN : Number(e.target.value),
-                      },
-                    })
-                  }
-                />
-              </label>
-            </div>
-          ))}
-          <Button size="sm-multiline" disabled={busy || !ready} onClick={() => void showPreview()}>
-            Preview choice
-          </Button>
-          {choice ? (
-            <div aria-label="Selection preview">
-              <p className="font-medium">
-                {choice.chosen
-                  ? `${
-                      accounts.find((a) => a.instanceId === choice.chosen!.instanceId)?.label ??
-                      choice.chosen.instanceId
-                    } · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
-                  : choice.state === "drained"
-                    ? `Drained until ${
-                        choice.drainedUntil
-                          ? new Date(choice.drainedUntil).toLocaleString()
-                          : "an unknown time"
-                      }`
-                    : "Unavailable"}
-              </p>
-              {choice.wanted && <p>Wanted {choice.wanted}</p>}
-              <p>{choice.reason}</p>
-              {choice.accounts.map((line) => (
-                <p key={line} className="text-sm">
-                  {line}
-                </p>
-              ))}
-            </div>
-          ) : (
-            <p>Preview required after input, table or connection changes.</p>
-          )}
-        </fieldset>
-        <fieldset className={group}>
-          <legend>Start a new human assignment</legend>
-          <p>Save your changes first. Start uses the previewed choice.</p>
-          <label>
-            Project
-            <select className={field} value={project} onChange={(e) => setProject(e.target.value)}>
-              <option value="">Choose project</option>
-              {projects.map((p) => (
-                <option value={p.id} key={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Title
-            <input className={field} value={title} onChange={(e) => setTitle(e.target.value)} />
-          </label>
-          <label>
-            Assignment
-            <textarea
-              className={field}
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-            />
-          </label>
-          <Button
-            size="sm-multiline"
-            disabled={
-              busy ||
-              !ready ||
-              (!startAttempt && !validPreview) ||
-              changedStart ||
-              !project ||
-              !prompt.trim() ||
-              (!startAttempt && dirty)
-            }
-            onClick={() => void create()}
-          >
-            {startAttempt ? "Retry identical assignment" : "Start assignment"}
-          </Button>
-          <Button
-            size="sm-multiline"
-            disabled={busy}
-            onClick={() => {
-              setStartAttempt(null);
-              setRequest({
-                ...request,
-                assignmentId: randomUUID(),
-                threadId: ThreadId.make(randomUUID()),
-              });
-              setPreview(null);
-            }}
-          >
-            New assignment identity
-          </Button>
-          {changedStart && (
-            <p>
-              The previous startup has a durable intent. Restore its inputs to retry, or choose a
-              new assignment identity.
-            </p>
-          )}
-        </fieldset>
-      </Disclosure>
-      <Disclosure
-        title="Policy settings, versions and raw JSON"
-        open={open.policy}
-        onToggle={toggle("policy")}
-      >
-        {policy && (
-          <label>
-            Maximum explicit reassessments
-            <input
-              className={field}
-              type="number"
-              min={0}
-              max={3}
-              value={policy.maxReassessments}
-              onChange={(e) =>
-                setDraft((current) =>
-                  editModelDraft(current, (p) => ({
-                    ...p,
-                    maxReassessments: Math.min(
-                      3,
-                      Math.max(0, Math.trunc(Number(e.target.value)) || 0),
-                    ),
-                  })),
-                )
-              }
-            />
-          </label>
-        )}
-        <div className="space-y-2">
-          <p className="text-sm">
-            Saved versions. Reverting restores that table as a new version
-            {dirty ? "; save or discard your changes first" : ""}.
+        !loadingTable && (
+          <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+            {connection === "connected"
+              ? "The saved table could not be read. Refresh to try again."
+              : "The saved table has not loaded. Connect to this environment to view and edit it."}
           </p>
-          {snapshot?.policies.map((p) => (
-            <div key={p.version}>
-              <Button
-                size="sm-multiline"
-                disabled={busy || !ready || dirty}
-                onClick={async () => {
-                  const response = await call({
-                    _tag: "modelRevert",
-                    expectedVersion: snapshot.policy.version,
-                    version: p.version,
-                  });
-                  if (response?.modelPolicy) {
-                    setDraft(adoptModelPolicy(response.modelPolicy));
-                    await refresh();
-                  }
+        )
+      )}
+      <Disclosure title="Try a task" open={open.task} onToggle={toggle("task")}>
+        <p className="text-sm text-muted-foreground">{MODEL_SCORING_RUBRIC}</p>
+        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-3">
+          {(
+            [
+              ["difficulty", "Difficulty (0–10)"],
+              ["stakes", "Stakes (0–10)"],
+              ["hours", "Job length (hours)"],
+            ] as const
+          ).map(([name, caption]) => (
+            <label key={name} className="grid min-w-0 gap-1 text-sm">
+              {caption}
+              <input
+                className={field}
+                type="number"
+                min={0}
+                max={name === "hours" ? 168 : 10}
+                step={name === "hours" ? 0.5 : 1}
+                value={Number.isFinite(task[name]) ? String(task[name]) : ""}
+                onChange={(e) => {
+                  const value = e.target.value === "" ? NaN : Number(e.target.value);
+                  setTask((current) => ({ ...current, [name]: value }));
                 }}
-              >
-                Revert version {p.version} as a new version
-              </Button>
-            </div>
+              />
+            </label>
           ))}
         </div>
-        <p className="text-sm">Draft policy (read-only JSON)</p>
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs">
-          {JSON.stringify(policy, null, 2)}
-        </pre>
+        <Button size="sm" disabled={busy || !ready} onClick={() => void tryTask()}>
+          Try
+        </Button>
+        {choice && (
+          <div aria-label="Task result" className="space-y-1 text-sm">
+            <p className="font-medium">
+              {choice.chosen
+                ? `${accountLabel(environmentId, choice.chosen.instanceId)} · ${choice.chosen.model} / ${choice.chosen.effort ?? "default"}`
+                : choice.state === "drained"
+                  ? `Drained until ${
+                      choice.drainedUntil
+                        ? new Date(choice.drainedUntil).toLocaleString()
+                        : "an unknown time"
+                    }`
+                  : "No account can run it"}
+            </p>
+            <p>{choice.reason}</p>
+          </div>
+        )}
       </Disclosure>
-      <Disclosure
-        title="Recent decisions (up to 50)"
-        open={open.history}
-        onToggle={toggle("history")}
-      >
-        <div className="space-y-3">
-          {snapshot?.history.map((d) => (
-            <article key={d.request.assignmentId} className={group}>
-              <p>
-                {new Date(d.at).toLocaleString()} · version {d.policyVersion}
-              </p>
-              <p>
-                Difficulty {d.request.assessment.difficulty} · stakes {d.request.assessment.stakes}
-              </p>
-              <p>
-                {d.allocation?.decision.request.model ?? "Unavailable"}{" "}
-                {d.allocation?.decision.request.options.map((o) => o.value).join(" / ")}
-              </p>
-              {d.reasons.map((reason) => (
-                <p key={reason}>{reason}</p>
+      <Disclosure title="Earlier versions" open={open.versions} onToggle={toggle("versions")}>
+        {earlier.length ? (
+          <div className="space-y-2">
+            <p className="text-sm">
+              Reverting saves that table again as a new version
+              {dirty ? "; save or discard your changes first" : ""}.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {earlier.map((p) => (
+                <Button
+                  key={p.version}
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !ready || dirty}
+                  onClick={async () => {
+                    const response = await call({
+                      _tag: "modelRevert",
+                      expectedVersion: snapshot!.policy.version,
+                      version: p.version,
+                    });
+                    if (response?.modelPolicy) {
+                      setDraft(adoptModelPolicy(response.modelPolicy));
+                      await refresh();
+                    }
+                  }}
+                >
+                  Revert to version {p.version}
+                </Button>
               ))}
-              <Button
-                size="sm-multiline"
-                disabled={busy || d.request.environmentId !== environmentId}
-                onClick={() => {
-                  setStartAttempt(null);
-                  setRequest({
-                    ...d.request,
-                    policyVersion: snapshot.policy.version,
-                    assignmentId: randomUUID(),
-                    threadId: ThreadId.make(randomUUID()),
-                    reassessment: {
-                      previousAssignmentId: d.request.assignmentId,
-                      cause: "scope-change",
-                      reason: "",
-                      allowFreshProviderSession: false,
-                    },
-                  });
-                  setPreview(null);
-                  setOpen((current) => ({ ...current, test: true }));
-                }}
-              >
-                Reassess as a new assignment
-              </Button>
-              <details>
-                <summary>Decision details</summary>
-                <pre className="whitespace-pre-wrap text-xs">
-                  {JSON.stringify(
-                    { assignmentId: d.request.assignmentId, reassessment: d.request.reassessment },
-                    null,
-                    2,
-                  )}
-                </pre>
-              </details>
-            </article>
-          ))}
-        </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No earlier saved versions.</p>
+        )}
       </Disclosure>
-      <Disclosure title="Connection" open={open.connection} onToggle={toggle("connection")}>
-        <p className="text-sm">
-          Table edits, tests and new assignments use the shared coordinator.{" "}
-          {ready
-            ? "It is connected."
-            : "It is not ready; choose or reconnect the coordinator in Provider allocation."}
-        </p>
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={busy} onClick={() => void refresh()}>
-            Refresh saved version
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void navigate({ to: "/settings/allocation" })}
-          >
-            Open Provider allocation
-          </Button>
-        </div>
+      <Disclosure title="Recent decisions" open={open.history} onToggle={toggle("history")}>
+        {snapshot?.history.length ? (
+          <ul className="space-y-2">
+            {snapshot.history.map((d) => {
+              const decided = workerChoice(d);
+              return (
+                <li
+                  key={`${d.at}:${d.request.assignmentId}`}
+                  className="rounded border p-2 text-sm"
+                >
+                  <p className="font-medium">
+                    {new Date(d.at).toLocaleString()} · difficulty {d.request.assessment.difficulty}{" "}
+                    · stakes {d.request.assessment.stakes}
+                  </p>
+                  <p>
+                    {decided.chosen
+                      ? `${accountLabel(d.request.environmentId, decided.chosen.instanceId)} · ${decided.chosen.model} / ${decided.chosen.effort ?? "default"}`
+                      : decided.state === "drained"
+                        ? "Drained: nothing started"
+                        : "No account: nothing started"}
+                  </p>
+                  {d.reasons.map((reason) => (
+                    <p key={reason} className="text-muted-foreground">
+                      {reason}
+                    </p>
+                  ))}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted-foreground">No decisions recorded yet.</p>
+        )}
       </Disclosure>
     </div>
   );
 }
-const ORIGIN: ModelCellPosition = { difficulty: 0, stakes: 0 };
 const at = (cell: ModelCellPosition) => [cell.difficulty, cell.stakes] as const;

@@ -108,8 +108,9 @@ Open **Settings > Provider allocation** for the accounts: each one's usage windo
 resets, what each limit holds, how long the account lasts at the current load, its workers now,
 whether workers may use it, its Fable mode, its daily goal and its hard cap; then the preference order, the
 closeness margin, the long wait, the Fable switch, and the learned numbers with their sample
-counts. Choose one shared coordinator and keep it reachable: it holds the settings and decides
-every start. Every value is stored there, so a change made on any computer applies to the next
+counts. Choose one shared coordinator under **Coordinator** at the bottom of the page and keep it
+reachable: it holds the settings and decides every start. The saved settings show at once;
+accounts and usage fill in as each computer answers. Every value is stored there, so a change made on any computer applies to the next
 start on every computer, without a restart. Every computer keeps a copy of the settings and
 learned numbers the coordinator last sent; while the coordinator cannot be reached, a start is
 decided on the requesting computer from that copy, and the result says how old it is. A decision
@@ -145,7 +146,8 @@ Open **Settings → Model selection** beside Provider allocation, or find it thr
 Settings search or the command palette. Choose the shared coordinator in Provider
 allocation first.
 
-The page is one lookup table per provider, on separate Codex and Claude tabs. Columns are
+The page is one lookup table per provider, on separate Claude and Codex tabs; it opens on
+Claude. Columns are
 an assignment's difficulty and rows are its stakes, each scored 0–10. Each cell is the model
 and reasoning that assignment wants, for example difficulty 7 with stakes 8. Select a cell,
 then change its model or reasoning, or set an alternative that is used only when no account on
@@ -167,9 +169,11 @@ uncertainty and interactions. Stakes measures failure impact, reversibility and 
 Use 0–3 for routine/low, 4–6 for moderate, 7 for demanding/high, 8 for very demanding/very
 high, 9 for extreme, and 10 only for exceptional assignments.
 
-**Test an assignment** previews the choice for a pair of scores with your unsaved table: the
-account, model and effort, the table's choice when it differs, and the reason. **Policy
-settings, versions and raw JSON** holds reverts and the raw policy.
+**Try a task** shows what an agent's start would get for a difficulty, stakes and job length in
+hours, using your unsaved table on the tab you are viewing: the account, model and effort, and
+the reason. **Earlier versions** reverts the table to a saved version, as a new version.
+**Recent decisions** lists the starts agents made: when, their scores, the account, model and
+effort chosen, and why.
 
 Agents use the same choice through `t3_allocate_account` (preview) and
 `t3_start_allocated_assignment`, and edit the table, ladder and fallback with

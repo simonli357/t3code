@@ -423,6 +423,7 @@ export function AllocationControls({
   policy,
   snapshot,
   now,
+  accounts,
   disabled,
   onChange,
   onWorkersChange,
@@ -431,6 +432,8 @@ export function AllocationControls({
   snapshot: AllocationSnapshot | null;
   /** When the snapshot was read: reading ages and resets are judged against it. */
   now: number;
+  /** Whether what every computer reports has arrived; the saved settings show before it. */
+  accounts: "loading" | "loaded" | "failed" | "offline";
   disabled: boolean;
   onChange: (policy: AllocationPolicy) => void;
   /** Turns workers on or off for this account on every computer that has it. */
@@ -470,8 +473,21 @@ export function AllocationControls({
         {rows.length ? (
           table(usable)
         ) : (
-          <p className="text-sm">Accounts appear when account information is available.</p>
+          <p className="text-sm text-muted-foreground">
+            {accounts === "loading"
+              ? "Loading accounts…"
+              : accounts === "failed"
+                ? "Accounts could not be read. Reload to try again."
+                : accounts === "offline"
+                  ? "Not connected: accounts appear once this environment connects."
+                  : "No accounts reported."}
+          </p>
         )}
+        {[...new Set(snapshot?.notices)].map((note) => (
+          <p key={note} className="text-sm text-muted-foreground">
+            {note}
+          </p>
+        ))}
         {others.length > 0 && (
           <details className="min-w-0 rounded-lg border p-3">
             <summary className="cursor-pointer font-medium">
