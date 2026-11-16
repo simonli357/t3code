@@ -100,8 +100,9 @@ computer.
 The five numbers behind this are stored with the allocation policy on the coordinator and
 apply to the next start on every computer: the expected memory of a worker (3 GiB at first), the
 minimum room (4 GiB), how long a start counts as just started (15 minutes), the reserve for each
-working session (0.25 GiB) and how long a memory kill holds a computer back (60 minutes). Ask an agent to
-change them, or use `t3_allocation_policy`.
+working session (0.25 GiB) and how long a memory kill holds a computer back (60 minutes). Change
+them under **Settings > Provider allocation > Computer for a new worker**, or ask an agent, which
+uses `t3_allocation_policy`.
 
 The start's result names the computer with one reason line and gives one line per computer.
 `t3_recommend_computer` still returns the plain numbers: idle and total CPU threads, free and
