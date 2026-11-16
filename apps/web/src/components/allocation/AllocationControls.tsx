@@ -543,7 +543,7 @@ function LearnedNumbers({ learned }: { learned: AllocationLearned }) {
             {cost.perHundredK > 0 && `, +${dollars(cost.perHundredK)} per 100k more`}
           </span>
           <span>
-            {cost.samples} turns over {number(cost.hours)} h
+            {cost.samples} {cost.samples === 1 ? "turn" : "turns"} over {number(cost.hours)} h
           </span>
           <span className="text-muted-foreground">
             {cost.measuredShare === undefined ? cost.source : "thin"}
@@ -562,7 +562,8 @@ function LearnedNumbers({ learned }: { learned: AllocationLearned }) {
             {number(limit.backgroundPercentPerHour)}% an hour
           </span>
           <span>
-            {limit.samples} reading pairs over {number(limit.hours)} h
+            {limit.samples} reading {limit.samples === 1 ? "pair" : "pairs"} over{" "}
+            {number(limit.hours)} h
           </span>
           <span className="text-muted-foreground">
             {limit.source}
