@@ -22,6 +22,7 @@ import {
   allocationAccountRows,
   allocationReadingAge,
   allocationSupportsFiveHourCap,
+  withAllocationAccountFableGoal,
   withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
@@ -51,7 +52,7 @@ const dollars = (value: number) =>
   `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
 /** One row of columns for the heading and every account, once the list is wide enough. */
 const columns =
-  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,2fr)_6rem_4.5rem_4.5rem_12rem] @min-[64rem]/accounts:gap-x-3";
+  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,2fr)_6rem_4.5rem_4.5rem_4.5rem_12rem] @min-[64rem]/accounts:gap-x-3";
 /** A control's name, where the heading row is not shown. */
 const caption = "text-xs text-muted-foreground @min-[64rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
@@ -61,6 +62,8 @@ const HINTS = {
   order: "Between accounts similarly behind their goal, the higher one is used.",
   fable: "Workers on this account run on Fable only.",
   goal: "Share of the weekly limit to use each day. It only ranks accounts.",
+  fableGoal:
+    "Share of the Fable weekly limit to use each day. Behind it, workers here run on Fable.",
   cap: "Usage where the account takes no more work.",
 };
 
@@ -356,6 +359,38 @@ function AccountRow({
             />
           </div>
           {failed("goal") && unsaved}
+        </div>
+        <div
+          className={cn(
+            "min-w-0 content-start gap-0.5",
+            row.fableMode === null ? "hidden @min-[64rem]/accounts:grid" : "grid",
+          )}
+        >
+          {row.fableMode !== null && (
+            <div className="flex h-7 items-center gap-2">
+              <Hinted hint={HINTS.fableGoal} render={<span className={cn(caption, HINT_MARK)} />}>
+                Fable goal
+              </Hinted>
+              <NumberField
+                name={`${row.name} Fable goal`}
+                unit="%"
+                value={row.fableGoal}
+                min={0}
+                max={100}
+                step={0.5}
+                placeholder="Off"
+                disabled={goalsDisabled}
+                onChange={(value) =>
+                  onEdit(
+                    (current) => withAllocationAccountFableGoal(current, row, value),
+                    TYPING_PAUSE,
+                  )
+                }
+                onCommit={onFlush}
+              />
+            </div>
+          )}
+          {row.fableMode !== null && failed("fableGoal") && unsaved}
         </div>
         <div className="grid min-w-0 content-start gap-0.5 text-xs">
           {row.supportsCaps ? (
@@ -697,6 +732,7 @@ export function AllocationControls({
                 ["Workers"],
                 ["Fable mode", HINTS.fable],
                 ["Daily goal", HINTS.goal],
+                ["Fable goal", HINTS.fableGoal],
                 ["Hard cap", HINTS.cap],
               ] as const
             ).map(([name, hint]) => (

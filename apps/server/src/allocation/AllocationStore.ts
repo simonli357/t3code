@@ -660,7 +660,8 @@ const make = Effect.gen(function* () {
                 | "fableWorkers"
                 | "fableAccounts"
                 | "fableOnly"
-                | "accountGoals",
+                | "accountGoals"
+                | "fableGoals",
             ) =>
               kept[name] === undefined && current[name] !== undefined
                 ? { [name]: current[name] }
@@ -690,6 +691,7 @@ const make = Effect.gen(function* () {
               ...carried("fableAccounts"),
               ...carried("fableOnly"),
               ...carried("accountGoals"),
+              ...carried("fableGoals"),
               ...legacy,
               version: current.version + 1,
             });

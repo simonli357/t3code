@@ -156,6 +156,7 @@ export function allocationAccountRows(
     const supportsCaps = allocationSupportsSubscriptionCaps(group.members);
     const saved = snapshot?.policy ?? policy;
     const ownGoal = policy.accountGoals?.find((goal) => group.keys.includes(goal.key));
+    const fableGoal = policy.fableGoals?.find((goal) => group.keys.includes(goal.key));
     const familyGoal = allocationFamilyGoal(policy, group.driver);
     const workersOffOn = group.members.flatMap((member) =>
       member.availableForWorkers === false ? [computer(member.environmentId)] : [],
@@ -263,6 +264,8 @@ export function allocationAccountRows(
         : familyGoal === null
           ? null
           : { percentPerDay: familyGoal, own: false },
+      /** Percent of the Fable weekly limit a day; undefined when unset. */
+      fableGoal: fableGoal?.percentPerDay,
       /** How long the account lasts and what each limit holds, from the coordinator. */
       runway,
       // Decided from the saved policy, so a row does not move while it is being edited.
@@ -284,6 +287,21 @@ export function withAllocationAccountGoal(
     ...policy,
     accountGoals: [
       ...(policy.accountGoals ?? []).filter((goal) => !row.keys.includes(goal.key)),
+      ...(percentPerDay === undefined ? [] : row.keys.map((key) => ({ key, percentPerDay }))),
+    ],
+  };
+}
+
+/** The policy with the login's Fable goal set, or cleared so its daily goal applies there. */
+export function withAllocationAccountFableGoal(
+  policy: AllocationPolicy,
+  row: Pick<AllocationAccountRow, "keys">,
+  percentPerDay: number | undefined,
+): AllocationPolicy {
+  return {
+    ...policy,
+    fableGoals: [
+      ...(policy.fableGoals ?? []).filter((goal) => !row.keys.includes(goal.key)),
       ...(percentPerDay === undefined ? [] : row.keys.map((key) => ({ key, percentPerDay }))),
     ],
   };
@@ -364,21 +382,28 @@ export function withAllocationAccountMoved(
 }
 
 /**
- * A policy as the parts a page edits one at a time: each account's cap and daily goal, and
- * every other value whole. The version is not a part.
+ * A policy as the parts a page edits one at a time: each account's cap, daily goal and Fable
+ * goal, and every other value whole. The version is not a part.
  */
 function allocationPolicyParts(policy: AllocationPolicy) {
-  const { version: _version, accountCaps = [], accountGoals = [], ...values } = policy;
+  const {
+    version: _version,
+    accountCaps = [],
+    accountGoals = [],
+    fableGoals = [],
+    ...values
+  } = policy;
   return new Map<string, unknown>([
     ...Object.entries(values).filter(([, value]) => value !== undefined),
     ...accountCaps.map((cap) => [`cap:${cap.key}`, cap] as const),
     ...accountGoals.map((goal) => [`goal:${goal.key}`, goal] as const),
+    ...fableGoals.map((goal) => [`fableGoal:${goal.key}`, goal] as const),
   ]);
 }
 
 /**
- * The parts that differ: a value's name such as `accountOrder`, `cap:` and an account key, or
- * `goal:` and an account key. Against the stored policy these are the values not stored yet.
+ * The parts that differ: a value's name such as `accountOrder`, or `cap:`, `goal:` or
+ * `fableGoal:` and an account key. Against the stored policy these are the values not stored yet.
  */
 export function allocationPolicyChanges(from: AllocationPolicy, to: AllocationPolicy) {
   const [before, after] = [allocationPolicyParts(from), allocationPolicyParts(to)];
@@ -403,7 +428,8 @@ export function rebaseAllocationPolicy(
   const before = allocationPolicyParts(base);
   const edited = allocationPolicyParts(mine);
   const newer = allocationPolicyParts(theirs);
-  const ofAccount = (part: string) => part.startsWith("cap:") || part.startsWith("goal:");
+  const ofAccount = (part: string) =>
+    part.startsWith("cap:") || part.startsWith("goal:") || part.startsWith("fableGoal:");
   const perAccount = <T extends { readonly key: string }>(
     prefix: string,
     own: readonly T[] = [],
@@ -423,6 +449,7 @@ export function rebaseAllocationPolicy(
       {
         accountCaps: perAccount("cap", mine.accountCaps, theirs.accountCaps),
         accountGoals: perAccount("goal", mine.accountGoals, theirs.accountGoals),
+        fableGoals: perAccount("fableGoal", mine.fableGoals, theirs.fableGoals),
       },
     ),
     collides: [...changed].some((part) => {
@@ -458,6 +485,8 @@ export function allocationPolicyInvalid(policy: AllocationPolicy): string | null
     return "A cap must be a number from 0 to 100.";
   if (!(policy.accountGoals ?? []).every((goal) => within(goal.percentPerDay, 100)))
     return "A daily goal must be a number from 0 to 100.";
+  if (!(policy.fableGoals ?? []).every((goal) => within(goal.percentPerDay, 100)))
+    return "A Fable goal must be a number from 0 to 100.";
   return null;
 }
 

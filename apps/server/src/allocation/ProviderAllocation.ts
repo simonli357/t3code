@@ -47,9 +47,9 @@ import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.t
 import { allocationIdentity, allocationInventory, windowModels } from "./inventory.ts";
 import { accountCap, accountRoom, accountRunways, decideAllocation } from "./decision.ts";
 import { learnAllocation } from "./learning.ts";
-import { span } from "./runway.ts";
+import { isFable, span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
-import { chooseProfile, fableModeAccount, isFable } from "./modelDecision.ts";
+import { chooseProfile, fableModeAccount } from "./modelDecision.ts";
 import {
   computerNumbers,
   placeWorker,
@@ -1453,6 +1453,8 @@ const make = Effect.gen(function* () {
       clearCaps,
       changes.setGoals,
       changes.clearGoals,
+      changes.setFableGoals,
+      changes.clearFableGoals,
       changes.fableWorkers,
       changes.fableAccounts,
     ];

@@ -22,6 +22,7 @@ import type {
 import { findCatalogModel } from "@t3tools/shared/model";
 import {
   demandLoad,
+  fableWindow,
   limitShare,
   paced,
   projectAccount,
@@ -250,8 +251,21 @@ export function accountGoal(
   return family === null ? null : { percentPerDay: family, from: "family" };
 }
 
-/** A candidate with the points left on its tightest limit at the job's end, kept internal. */
-type Ranked = AllocationCandidate & { readonly leftPoints?: number | null };
+/** Percent of the Fable weekly window this account should use per day; null without one. */
+export const accountFableGoal = (
+  policy: AllocationPolicy,
+  account: Pick<AllocationAccount, "driver" | "accountKey" | "environmentId" | "instanceId">,
+) =>
+  policy.fableGoals?.find((g) => g.key === allocationPreferenceKey(account))?.percentPerDay ?? null;
+
+/**
+ * A candidate with the points left on its tightest limit at the job's end and, with a Fable
+ * goal, the points its Fable window ends behind that line (negative: ahead), kept internal.
+ */
+type Ranked = AllocationCandidate & {
+  readonly leftPoints?: number | null;
+  readonly fableSlack?: number;
+};
 
 /** 0: fits, with a goal line; 1: fits, without one; 2: a limit runs out before the end. */
 const group = (c: AllocationCandidate) =>
@@ -332,6 +346,30 @@ export function decideAllocation(input: {
   authorityAvailable: boolean;
   learned?: AllocationLearned | undefined;
 }): AllocationDecision {
+  return judge(input).decision;
+}
+
+/**
+ * Where each usable account with a Fable goal would stand against it running `request`, a Fable
+ * rung: the points its Fable window ends the job behind the line (negative: ahead), and whether
+ * the rung fits there (not drained, lasting the job).
+ */
+export const fableGoalStandings = (input: Parameters<typeof decideAllocation>[0]) =>
+  judge(input).candidates.flatMap((c) =>
+    c.fableSlack === undefined || c.reasons.length
+      ? []
+      : [
+          {
+            instanceId: c.instanceId,
+            label: c.label,
+            slack: c.fableSlack,
+            fits: c.eligible && c.fits !== false,
+          },
+        ],
+  );
+
+/** The decision, and every candidate with the numbers it was ranked on. */
+function judge(input: Parameters<typeof decideAllocation>[0]) {
   const { policy, request, inventories } = input;
   // A queued start is judged as of when it begins.
   const at = request.startAt && request.startAt > input.at ? request.startAt : input.at;
@@ -393,8 +431,10 @@ export function decideAllocation(input: {
         learned: input.learned,
         cap,
         goal: goal?.percentPerDay ?? null,
+        fableGoal: accountFableGoal(policy, account),
       });
       projections.set(`${account.environmentId}:${account.instanceId}`, projection);
+      const fableLine = projection.windows.find((w) => w.fableGoal);
       const usable = reasons.length === 0 && globalReasons.length === 0;
       const known = projection.windows.length > 0;
       return {
@@ -417,6 +457,7 @@ export function decideAllocation(input: {
             }
           : {}),
         leftPoints: projection.leftPoints,
+        ...(fableLine ? { fableSlack: fableLine.slack! } : {}),
         line: `${account.label}${fable ? " (Fable mode)" : ""}: ${
           reasons.length
             ? `not usable (${reasons.join(" ")})`
@@ -489,13 +530,15 @@ export function decideAllocation(input: {
       ? `${drained[0]!.line}; a pinned account is exact.`
       : `${request.model} is drained on every account; earliest reset ${resets[0] ?? "unknown"}.`;
   })();
-  return {
+  const decision: AllocationDecision = {
     at: input.at,
     policyVersion: policy.version,
     request: decided,
     outcome: selected ? "selected" : reason ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
-    candidates: candidates.map(({ leftPoints: _leftPoints, ...candidate }) => candidate),
+    candidates: candidates.map(
+      ({ leftPoints: _leftPoints, fableSlack: _fableSlack, ...candidate }) => candidate,
+    ),
     confidence: "medium",
     reasons: reason
       ? [reason]
@@ -508,6 +551,7 @@ export function decideAllocation(input: {
         ],
     waitUntil: selected || !reason ? null : (resets[0] ?? null),
   };
+  return { decision, candidates };
 }
 
 /**
@@ -537,6 +581,7 @@ export function accountRunways(input: {
       )
       .map((d) => demandLoad(account.driver, d));
     const goal = accountGoal(input.policy, account);
+    const fableGoal = accountFableGoal(input.policy, account);
     const projection = projectAccount({
       account,
       key,
@@ -546,6 +591,7 @@ export function accountRunways(input: {
       learned: input.learned,
       cap: accountCap(input.policy, account, "worker"),
       goal: goal?.percentPerDay ?? null,
+      fableGoal,
     });
     const identity = {
       key,
@@ -557,13 +603,15 @@ export function accountRunways(input: {
       const share = projection.windows.find((p) => p.window.id === w.id);
       const learnedShare = limitShare(input.learned, identity, w);
       const cycleStart = w.cycleStartedAt ? Date.parse(w.cycleStartedAt) : null;
+      const perDay =
+        fableWindow(w) && fableGoal !== null ? fableGoal : (goal?.percentPerDay ?? null);
       return {
         id: w.id,
         label: w.label,
         meterPercent: w.usedPoints,
         goalPercent:
-          goal && paced(w) && cycleStart !== null
-            ? Math.min(share?.limit ?? 100, (goal.percentPerDay * (now - cycleStart)) / 86_400_000)
+          perDay !== null && paced(w) && cycleStart !== null
+            ? Math.min(share?.limit ?? 100, (perDay * (now - cycleStart)) / 86_400_000)
             : null,
         sizeDollars: 100 / learnedShare.percentPerDollar,
         source: learnedShare.source,

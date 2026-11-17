@@ -21,8 +21,8 @@ import {
   type RoutingProfile,
 } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
-import { decideAllocation } from "./decision.ts";
-import { span } from "./runway.ts";
+import { decideAllocation, fableGoalStandings } from "./decision.ts";
+import { isFable, span } from "./runway.ts";
 
 /**
  * The profile each allowed provider family wants before quota is looked at: the pinned model,
@@ -172,8 +172,6 @@ export function nearestRungs(
     .map(({ rung }) => rung);
 }
 
-export const isFable = (model: string) => /fable/i.test(model);
-
 const requestProfile = (request: AllocationRequest): RoutingProfile => ({
   model: request.model,
   effort: String(
@@ -208,7 +206,10 @@ const fits = (decision: AllocationDecision) =>
   decision.selectedInstanceId !== null &&
   decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId)?.fits !== false;
 
-/** Whether a worker on this account runs in Fable mode; never while Fable workers are off. */
+/**
+ * Whether a worker on this account runs in Fable mode by the stored list; never while Fable
+ * workers are off. An account's Fable goal can add it for one start (`chooseProfile`).
+ */
 export const fableModeAccount = (
   policy: AllocationPolicy,
   account: Parameters<typeof allocationFableMode>[1],
@@ -223,8 +224,10 @@ export const fableModeAccount = (
  * wait, queued for it; refused only when nothing comes back within the wait. With Fable
  * workers off, no worker gets a Fable model. On an account in Fable mode a worker starts from
  * the first Fable rung at or above the table entry and only Fable rungs stand in, never the
- * fallback; every account is judged on what it would run. A pinned model is kept. Codex and a
- * pinned account never change model.
+ * fallback; every account is judged on what it would run. An account with a Fable goal is in
+ * Fable mode for an unpinned worker when, on that Fable rung, it would end the job at or behind
+ * its Fable line and the rung lasts the job there, so the goal never refuses or delays a start.
+ * A pinned model is kept. Codex and a pinned account never change model.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -257,23 +260,57 @@ export function chooseProfile(input: {
     .flatMap((i) => i.accounts)
     .filter((a) => a.environmentId === request.environmentId);
   // Workers on these Claude accounts run in Fable mode.
-  const fableAccounts = workers ? here.filter((a) => fableModeAccount(policy, a)) : [];
-  const fableIds = fableAccounts.map((a) => a.instanceId);
-  const fableNames = [...new Set(fableAccounts.map((a) => a.label))].join(", ");
+  const listed = workers ? here.filter((a) => fableModeAccount(policy, a)) : [];
   const notes: string[] = [];
   const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
   let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
   const failures: string[] = [...resolved.reasons];
   const waitMinutes =
     request.assessment.stakes >= HIGH_STAKES ? START_WAIT_MINUTES_HIGH_STAKES : START_WAIT_MINUTES;
-  // With a pinned account, the others are not part of the choice.
-  const lines = (decision: AllocationDecision) =>
-    decision.candidates
-      .filter((c) => !request.explicitInstanceId || c.instanceId === request.explicitInstanceId)
-      .map((c) => c.line ?? c.instanceId);
   for (const asked of resolved.candidates) {
     let wanted = asked;
     const profile = requestProfile(asked.request);
+    // Accounts with a Fable goal, judged on the Fable rung their table entry would start from.
+    const goalRung =
+      asked.request.driver === "claudeAgent" &&
+      workers &&
+      !fableOff &&
+      !request.override &&
+      policy.fableGoals?.length
+        ? fableRung(profile)
+        : undefined;
+    const standings = goalRung
+      ? fableGoalStandings({ ...input, request: onRung(asked.request, goalRung) }).filter(
+          (s) => !listed.some((a) => a.instanceId === s.instanceId),
+        )
+      : [];
+    const behind = standings.filter((s) => s.fits && s.slack >= 0);
+    const fableIds = [...listed, ...behind].map((a) => a.instanceId);
+    const fableNames = [...new Set([...listed, ...behind].map((a) => a.label))].join(", ");
+    /** Where an account stands against its Fable goal, then what it runs: `rung` or `table`. */
+    const goalText = (s: (typeof standings)[number], rung: string, table: string) => {
+      const points = `${Math.round(Math.abs(s.slack))} points`;
+      const fable = `${goalRung!.model} / ${goalRung!.effort}`;
+      return s.slack < 0
+        ? `${points} ahead of its Fable goal, so ${table}`
+        : s.fits
+          ? `${points} behind its Fable goal, so ${rung} ${fable}`
+          : `${points} behind its Fable goal, but ${fable} does not fit there, so ${table}`;
+    };
+    // With a pinned account, the others are not part of the choice.
+    const lines = (decision: AllocationDecision) =>
+      decision.candidates
+        .filter((c) => !request.explicitInstanceId || c.instanceId === request.explicitInstanceId)
+        .map((c) => {
+          const standing = standings.find((s) => s.instanceId === c.instanceId);
+          // The line already says it when the Fable window is the account's tightest.
+          const said = standing && c.goalSlackPoints === standing.slack;
+          return `${c.line ?? c.instanceId}${
+            standing && !said
+              ? `; ${goalText(standing, "Fable mode on", "the table's choice")}`
+              : ""
+          }`;
+        });
     if (fableOff && isFable(asked.request.model)) {
       const rung = nearestRungs(ladder, profile).find(allowed);
       if (!rung) {
@@ -348,7 +385,18 @@ export function chooseProfile(input: {
         tried.push({ ...wanted, chosen: false });
       tried.push({ request: candidate, reason: why ?? wanted.reason, chosen: true });
       const account = decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId);
-      if (account && fableWanted && fableIds.includes(account.instanceId)) {
+      const same =
+        candidate.driver === asked.request.driver && label(candidate) === label(asked.request);
+      const standing = standings.find((s) => s.instanceId === account?.instanceId);
+      if (standing)
+        notes.push(
+          `Fable goal: ${standing.label} would end ${goalText(
+            standing,
+            "this worker starts on",
+            same ? "this worker runs the table's choice" : "it is not in Fable mode",
+          )}.`,
+        );
+      else if (account && fableWanted && fableIds.includes(account.instanceId)) {
         if (
           request.override &&
           !fableRungs.some((r) => r.model === profile.model && r.effort === profile.effort)
@@ -361,8 +409,6 @@ export function chooseProfile(input: {
             `Fable mode on ${account.label}: ${label(asked.request)} starts from ${rungLabel(fableWanted)}, the first Fable rung at or above it.`,
           );
       }
-      const same =
-        candidate.driver === asked.request.driver && label(candidate) === label(asked.request);
       return {
         decision,
         tried,

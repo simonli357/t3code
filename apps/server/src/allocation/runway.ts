@@ -111,6 +111,11 @@ export function limitShare(
 export const paced = (w: Pick<AllocationWindow, "kind" | "models">) =>
   w.kind === "weekly" || (w.kind === "monthly" && !w.models?.length);
 
+export const isFable = (model: string) => /fable/i.test(model);
+/** A weekly window of Fable models, such as "Weekly · Fable": an account's Fable goal is its line. */
+export const fableWindow = (w: Pick<AllocationWindow, "kind" | "models">) =>
+  w.kind === "weekly" && !!w.models?.length && w.models.every(isFable);
+
 export interface WindowProjection {
   readonly window: AllocationWindow;
   /** The hard cap, or 100. */
@@ -125,6 +130,8 @@ export interface WindowProjection {
   /** The daily goal's line at the job's end; null without a goal. */
   readonly goal: number | null;
   readonly goalPerDay: number | null;
+  /** The line is the account's Fable goal, not its daily goal. */
+  readonly fableGoal: boolean;
   /** Points the use at the job's end is below the goal line (negative: above); null without one. */
   readonly slack: number | null;
   /** Hours until this limit runs out at the projected load; null when it resets first. */
@@ -175,6 +182,8 @@ export function projectAccount(input: {
   readonly cap?: AllocationAccountCap | undefined;
   /** Percent of the weekly window per day; null without one. */
   readonly goal: number | null;
+  /** Percent of the Fable weekly window per day; absent or null: `goal` there too. */
+  readonly fableGoal?: number | null | undefined;
 }): AccountProjection {
   const { account, at, hours, learned } = input;
   const slug = (model: string) => findCatalogModel(account.models, model)?.slug ?? model;
@@ -227,11 +236,13 @@ export function projectAccount(input: {
         ? share.percentPerDollar * dollars * (hours - reset) +
           share.background(resetsAt!, hours - reset)
         : projected;
+      const fableGoal = fableWindow(w) && input.fableGoal != null;
+      const perDay = fableGoal ? input.fableGoal! : input.goal;
       const goalBudget =
-        input.goal !== null && paced(w) && cycleStart !== null
+        perDay !== null && paced(w) && cycleStart !== null
           ? Math.min(
               limit,
-              input.goal *
+              perDay *
                 ((resetsFirst ? at + hours * HOUR - resetsAt! : at + span * HOUR - cycleStart) /
                   DAY),
             )
@@ -247,7 +258,8 @@ export function projectAccount(input: {
         fits,
         atEnd: after,
         goal: goalBudget,
-        goalPerDay: goalBudget === null ? null : input.goal,
+        goalPerDay: goalBudget === null ? null : perDay,
+        fableGoal: goalBudget !== null && fableGoal,
         // The goal is measured against the meter's total, everyone's use included.
         slack: goalBudget === null ? null : goalBudget - after,
         lastsHours: runsOut === null || (reset !== null && runsOut >= reset) ? null : runsOut,
@@ -286,9 +298,9 @@ export const span = (hours: number) =>
       : `${Math.max(1, Math.round(hours * 60))}m`;
 
 /** Where an account stands against its daily goal, or on its tightest limit without one. */
-export const standing = (slack: number | null, leftPoints: number | null) =>
+export const standing = (slack: number | null, leftPoints: number | null, goal = "goal") =>
   slack !== null
-    ? `${Math.round(Math.abs(slack))} points ${slack < 0 ? "ahead of" : "behind"} its goal`
+    ? `${Math.round(Math.abs(slack))} points ${slack < 0 ? "ahead of" : "behind"} its ${goal}`
     : leftPoints !== null
       ? `no goal line, ${Math.round(leftPoints)}% left`
       : "no usage reading";
@@ -311,9 +323,10 @@ export function runwayText(p: AccountProjection, at: number): string {
   const w = p.paceWindow ?? p.tightest;
   if (!w) return standing(null, null);
   const resetsFirst = w.resetsAt !== null && w.resetsAt < at + p.hours * HOUR;
-  return `${standing(p.slack, p.leftPoints)} (${w.window.label} ${Math.round(w.used)}% used${
+  const goal = w.fableGoal ? "Fable goal" : "goal";
+  return `${standing(p.slack, p.leftPoints, goal)} (${w.window.label} ${Math.round(w.used)}% used${
     resetsFirst ? `, resets${resetIn(w)}` : ""
   }, ${Math.round(w.atEnd)}% by the job's end${
-    w.goal === null ? "" : ` against a goal of ${Math.round(w.goal)}%`
+    w.goal === null ? "" : ` against a ${goal} of ${Math.round(w.goal)}%`
   }${cap(w)})`;
 }

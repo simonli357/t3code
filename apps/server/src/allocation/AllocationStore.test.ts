@@ -586,7 +586,7 @@ it.effect(
     ),
 );
 
-it.effect("keeps the stored daily goals when a save does not change them", () =>
+it.effect("keeps the stored daily and Fable goals when a save does not change them", () =>
   Effect.gen(function* () {
     yield* migration;
     const sql = yield* SqlClient.SqlClient;
@@ -600,19 +600,37 @@ it.effect("keeps the stored daily goals when a save does not change them", () =>
     // A save from this build sends what it read, with its own change.
     const first = yield* store.savePolicy({
       expectedVersion: 12,
-      policy: { ...(yield* store.policy), accountGoals: [goal], fableWorkers: false },
+      policy: {
+        ...(yield* store.policy),
+        accountGoals: [goal],
+        fableGoals: [goal],
+        fableWorkers: false,
+      },
     });
-    expect(first).toMatchObject({ claude, codex, accountGoals: [goal], fableWorkers: false });
+    expect(first).toMatchObject({
+      claude,
+      codex,
+      accountGoals: [goal],
+      fableGoals: [goal],
+      fableWorkers: false,
+    });
     // A save that omits them keeps what is stored, never a constant.
     const {
       claude: _claude,
       codex: _codex,
       accountGoals: _goals,
+      fableGoals: _fableGoals,
       fableWorkers: _fable,
       ...partial
     } = first;
     const second = yield* store.savePolicy({ expectedVersion: 13, policy: partial });
-    expect(second).toMatchObject({ claude, codex, accountGoals: [goal], fableWorkers: false });
+    expect(second).toMatchObject({
+      claude,
+      codex,
+      accountGoals: [goal],
+      fableGoals: [goal],
+      fableWorkers: false,
+    });
     expect(yield* store.policy).toEqual(second);
   }).pipe(Effect.provide(layer)),
 );

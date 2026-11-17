@@ -102,6 +102,12 @@ export function allocationPolicyView(
             : [];
         }),
     ),
+    fableGoals: once(
+      (policy.fableGoals ?? []).map(({ key, percentPerDay }) => ({
+        account: label(key),
+        percentPerDay,
+      })),
+    ),
     fableWorkers: policy.fableWorkers !== false,
     fableAccounts: policy.fableAccounts
       ? once(policy.fableAccounts.map(label))
@@ -200,6 +206,28 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
       ...keys.map((key) => ({ key, percentPerDay })),
     ];
   }
+  // Only Claude runs Fable: a label shared with a Codex login names the Claude one.
+  const claudeKeys = Effect.fn(function* (account: string) {
+    const named = yield* resolve(account);
+    const claude = known.filter(
+      (i) => i.driver === "claudeAgent" && named.some((key) => i.keys.has(key)),
+    );
+    if (!claude.length)
+      return yield* invalid(`${account} is not a Claude account; only Claude runs Fable.`);
+    return claude.flatMap((i) => [...i.keys]);
+  });
+  let fableGoals = policy.fableGoals ?? [];
+  for (const account of edit.clearFableGoals ?? []) {
+    const keys = new Set(yield* resolve(account));
+    fableGoals = fableGoals.filter((goal) => !keys.has(goal.key));
+  }
+  for (const { account, percentPerDay } of edit.setFableGoals ?? []) {
+    const keys = yield* claudeKeys(account);
+    fableGoals = [
+      ...fableGoals.filter((g) => !keys.includes(g.key)),
+      ...keys.map((key) => ({ key, percentPerDay })),
+    ];
+  }
   let accountOrder = policy.accountOrder;
   if (edit.accountOrder) {
     const keys: string[] = [];
@@ -209,22 +237,14 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
   let fableAccounts = policy.fableAccounts;
   if (edit.fableAccounts) {
     const keys: string[] = [];
-    for (const account of edit.fableAccounts) {
-      const named = yield* resolve(account);
-      // Only Claude runs Fable: a label shared with a Codex login names the Claude one.
-      const claude = known.filter(
-        (i) => i.driver === "claudeAgent" && named.some((key) => i.keys.has(key)),
-      );
-      if (!claude.length)
-        return yield* invalid(`${account} is not a Claude account; only Claude runs Fable.`);
-      keys.push(...claude.flatMap((i) => [...i.keys]));
-    }
+    for (const account of edit.fableAccounts) keys.push(...(yield* claudeKeys(account)));
     fableAccounts = [...new Set(keys)];
   }
   return {
     ...policy,
     accountCaps: caps,
     ...(policy.accountGoals || edit.setGoals || edit.clearGoals ? { accountGoals: goals } : {}),
+    ...(policy.fableGoals || edit.setFableGoals || edit.clearFableGoals ? { fableGoals } : {}),
     ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
     ...(fableAccounts ? { fableAccounts } : {}),
     ...(accountOrder ? { accountOrder } : {}),

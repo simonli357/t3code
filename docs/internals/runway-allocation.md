@@ -51,6 +51,16 @@ goals; sizes only project use. The order never lifts one ahead of its goal over 
 Goals count the meter's total. Stored family values (`claude`, `codex`, `other`) are the
 defaults and are carried through every save, including saves from builds that do not know them.
 
+**The Fable window has its own line, and it only adds Fable.** Fable's weekly limit runs out at
+its own pace, so on the account's goal it counted as on pace while it would run out in days. An
+account's Fable goal (`fableGoals`) is that window's line instead. It also puts the account in
+Fable mode for an unpinned worker start, judged once before the choice (`chooseProfile`) on the
+Fable rung the table entry starts from: at or behind the line, and only when that rung fits
+there (not drained, not rejected, lasting the job). The fit condition is what keeps the goal from
+refusing, queueing or delaying a start, since an account in Fable mode lets only Fable rungs stand
+in. Judging once keeps the set of Fable-mode accounts fixed while the choice steps through waits
+and stand-ins, as the stored list (`fableAccounts`) is. A pin is never judged.
+
 **The master's computer chooses the worker's computer.** A worker start without `environmentId`
 is placed by the requesting server before any account is chosen (`placement.ts`), because accounts
 are judged per computer. Free memory lags a start by minutes, so each computer reports when its

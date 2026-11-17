@@ -55,7 +55,8 @@ the master names one, and then the account, model and effort together:
    plus the account's use outside T3. An account **fits** when no limit runs out before the job
    ends; a hard cap counts as the limit.
 3. Among accounts that fit, the one furthest behind its **daily goal** wins, in points of its
-   tightest weekly window at the job's end. Among those on its side of the goal within the
+   tightest weekly window at the job's end; an account's Fable window is measured against its
+   **Fable goal** when it has one. Among those on its side of the goal within the
    **closeness margin** (points), the **preference order** decides, then fewer workers, then
    the sooner reset. Accounts without a goal line follow, by points left.
 4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
@@ -77,11 +78,22 @@ Without one, an account uses its provider's default. A goal only changes which a
 recommended: it never stops, queues or changes a start, and a pinned account over its goal starts
 normally. Only a hard cap or a real limit stops work.
 
+A **Fable goal** is the same for a Claude account's own Fable limit (Weekly · Fable), which runs
+out on its own pace. With one set, that limit is measured against it instead of the daily goal,
+and the account turns to Fable when Fable is behind: a worker start whose model is not pinned runs
+in Fable mode there when, on the Fable model it would run, the account would end the job at or
+behind its Fable goal and that model fits there. Ahead of it, the account runs the table's choice.
+The result says which, with the numbers (for example "Fable goal: ARA would end 7 points behind
+its Fable goal, so this worker starts on claude-fable-5-2 / low"). A Fable goal never takes Fable
+from a start whose table entry or pin names it, and never stops, queues or delays a start. Without
+one, the daily goal applies to the Fable limit and only the Fable mode switch turns Fable on.
+
 **Fable workers** is one switch. Turned off, no worker runs on a Fable model: a table entry or
 pin that names Fable starts from the nearest ladder model without it, and a running worker never
 moves onto it. The result says so.
 
-**Fable mode** is a switch on each Claude account. A worker on an account in Fable mode runs
+**Fable mode** is a switch on each Claude account; switched on, it applies whatever the Fable
+goal says. A worker on an account in Fable mode runs
 Fable low, medium or high: its table entry starts from the first of those at or above it, and
 when it has no room only another of them stands in, never another model or the fallback. When
 that account's Fable limit is used up, it takes no workers until the limit resets. A worker on any
@@ -90,7 +102,7 @@ there, so the account furthest behind its goal still wins; the result shows the 
 when it differs and names the account's Fable mode. A model you pin for one worker is kept, with a
 note.
 Turning an account's Fable mode on turns Fable workers on; turning Fable workers off turns every
-account's Fable mode off.
+account's Fable mode off, including what a Fable goal would turn on.
 
 A running worker that hits a limit moves to another account with the same model that lasts the
 rest of its job. If there is none, it waits when the reset is within the **long wait** time
@@ -108,8 +120,9 @@ as estimated, until its own readings replace it.
 
 Open **Settings > Provider allocation** for the accounts, most preferred first. Each account is
 one line: its limits with the percent used and the time to the reset, whether workers may use it
-and how many run, its Fable mode, its daily goal and its hard cap. Hover a limit for when it was
-read, what it holds and what the daily goal allows by now. A line under the limits appears only
+and how many run, its Fable mode, its daily goal, its Fable goal and its hard cap. Hover a limit
+for when it was read, what it holds and what its goal allows by now (the Fable goal on the Fable
+limit when one is set). A line under the limits appears only
 when the account takes no more work or soon will not, and names the limit or the hard cap that
 is the reason. The arrows change the preference order. Below are the close-call margin, the wait
 for a reset and the Fable workers switch, and, folded, the five values behind the choice of

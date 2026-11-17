@@ -21,6 +21,7 @@ import {
   type RoutingCell,
   type RoutingProfile,
 } from "@t3tools/contracts";
+import { accountRunways, decideAllocation } from "./decision.ts";
 import {
   chooseProfile,
   ladderPosition,
@@ -1220,5 +1221,177 @@ describe("Fable mode", () => {
     expect(picked(master)).toBe(`A ${OPUS} / high`);
     expect(master.notes).toEqual([]);
     expect(master.accounts.some((line) => line.includes("Fable mode"))).toBe(false);
+  });
+});
+
+describe("Fable goal", () => {
+  const opusHigh = { model: OPUS, effort: "high" };
+  /** A Claude account 20% into its week whose Fable limit is `fable` percent used. */
+  const fableUsed = (label: string, fable: number, patch: Partial<AllocationAccount> = {}) =>
+    claude(label, [weekly(20), only(FABLE, fable)], patch);
+  /** A Fable goal of `percentPerDay` on these accounts; its line is 14 × 70 / 24 = 40.8% at 14. */
+  const fableGoals = (percentPerDay: number, ...labels: string[]) => ({
+    fableGoals: labels.map((label) => ({
+      key: allocationPreferenceKey(claude(label)),
+      percentPerDay,
+    })),
+  });
+  /** A daily goal of 20% (58.3% at the job's end) on these accounts. */
+  const dailyGoals = (...labels: string[]) => ({
+    accountGoals: labels.map((label) => ({
+      key: allocationPreferenceKey(claude(label)),
+      percentPerDay: 20,
+    })),
+  });
+
+  it("changes nothing while unset: the daily goal paces the Fable window and no account switches", () => {
+    const accounts = [
+      fableUsed("A", 10),
+      fableUsed("B", 60, { windows: [weekly(30), only(FABLE, 60)] }),
+    ];
+    const policy = dailyGoals("A", "B");
+    for (const wanted of [opusHigh, { model: FABLE, effort: "high" }]) {
+      const today = choose(accounts, wanted, { policy });
+      expect(choose(accounts, wanted, { policy: { ...policy, fableGoals: [] } })).toEqual(today);
+      // A goal on an account that is not here changes nothing either.
+      expect(choose(accounts, wanted, { policy: { ...policy, ...fableGoals(14, "Z") } })).toEqual(
+        today,
+      );
+      expect([...today.accounts, ...today.notes].join(" ")).not.toContain("Fable goal");
+    }
+    expect(picked(choose(accounts, opusHigh, { policy }))).toBe(`A ${OPUS} / high`);
+    expect(choose(accounts, { model: FABLE, effort: "high" }, { policy }).accounts[1]).toContain(
+      `against a goal of 58%`,
+    );
+  });
+
+  it("is the Fable window's line, so a Fable job goes to the account furthest behind it", () => {
+    // A's account-wide week is nearly at its line, B's Fable window is far behind the daily line.
+    const started = { cycleStartedAt: inHours(-68) };
+    const accounts = [
+      claude("A", [weekly(50, started), only(FABLE, 10, started)]),
+      claude("B", [weekly(20, started), only(FABLE, 38, started)]),
+    ];
+    const fableJob = (policy: Partial<AllocationPolicy>) =>
+      decideAllocation({
+        at,
+        policy: { ...defaultAllocationPolicy, ...noGoals, closeMarginPoints: 0, ...policy },
+        request: {
+          assignmentId: "job",
+          environmentId: "host",
+          threadId: request.threadId,
+          driver: claudeAgent,
+          model: FABLE,
+          options: [{ id: "effort", value: "high" }],
+        },
+        inventories: [host(accounts)],
+        reservations: [],
+        authorityAvailable: true,
+        learned: learned(accounts),
+      });
+    // Without a Fable goal, B's Fable window is 20 points behind the daily line, A only 8.
+    expect(fableJob(dailyGoals("A", "B")).selectedInstanceId).toBe("B");
+    // At 14% a day B is 3 points behind its Fable line; A's weekly line keeps counting.
+    const decision = fableJob({ ...dailyGoals("A", "B"), ...fableGoals(14, "A", "B") });
+    expect(decision.selectedInstanceId).toBe("A");
+    expect(decision.candidates.map((c) => c.line)).toEqual([
+      "A: 8 points behind its goal (Weekly 50% used, 50% by the job's end against a goal of 58%), 0 workers",
+      `B: 3 points behind its Fable goal (Weekly · ${FABLE} 38% used, 38% by the job's end against a Fable goal of 41%), 0 workers`,
+    ]);
+    // The usage page shows the Fable goal's budget by now on the Fable window: 14 × 68 / 24.
+    const runway = (policy: Partial<AllocationPolicy>) =>
+      accountRunways({
+        at,
+        policy: { ...defaultAllocationPolicy, ...noGoals, ...policy },
+        inventories: [host(accounts)],
+        learned: learned(accounts),
+      })[0]!.windows.map((w) => Math.round(w.goalPercent! * 10) / 10);
+    expect(runway(dailyGoals("A"))).toEqual([56.7, 56.7]);
+    expect(runway({ ...dailyGoals("A"), ...fableGoals(14, "A") })).toEqual([56.7, 39.7]);
+  });
+
+  it("puts an account behind its Fable line in Fable mode and one ahead of it on the table", () => {
+    const behind = choose([fableUsed("A", 10)], opusHigh, { policy: fableGoals(14, "A") });
+    expect(picked(behind)).toBe(`A ${FABLE} / low`);
+    expect(wantedLabel(behind)).toBe(`${OPUS} / high`);
+    expect(behind.notes).toEqual([
+      `Fable goal: A would end 31 points behind its Fable goal, so this worker starts on ${FABLE} / low.`,
+    ]);
+    expect(behind.accounts).toEqual([
+      `A (Fable mode): 31 points behind its Fable goal (Weekly · ${FABLE} 10% used, 10% by the job's end against a Fable goal of 41%), 0 workers`,
+    ]);
+    const ahead = choose([fableUsed("B", 60)], opusHigh, { policy: fableGoals(14, "B") });
+    expect(picked(ahead)).toBe(`B ${OPUS} / high`);
+    expect(ahead.notes).toEqual([
+      "Fable goal: B would end 19 points ahead of its Fable goal, so this worker runs the table's choice.",
+    ]);
+    expect(ahead.accounts).toEqual([
+      "B: no goal line, 80% left (Weekly 20% used, 20% by the job's end), 0 workers; 19 points ahead of its Fable goal, so the table's choice",
+    ]);
+    // Each account is judged on its own line: A runs Fable, B the table's choice.
+    const both = choose([fableUsed("A", 10), fableUsed("B", 60)], opusHigh, {
+      policy: fableGoals(14, "A", "B"),
+    });
+    expect(both.accounts.map((line) => line.split(":")[0])).toEqual(["A (Fable mode)", "B"]);
+    // Masters are never moved onto Fable.
+    expect(
+      picked(
+        choose([fableUsed("A", 10)], opusHigh, {
+          policy: fableGoals(14, "A"),
+          request: { kind: "session" },
+        }),
+      ),
+    ).toBe(`A ${OPUS} / high`);
+  });
+
+  it("never refuses or delays: behind the line but with Fable rejected, the table's choice starts now", () => {
+    const rejected = fableUsed("C", 10, {
+      limits: [{ windowId: `weekly_${FABLE}`, until: inHours(3) }],
+    });
+    const choice = choose([rejected], opusHigh, { policy: fableGoals(14, "C") });
+    expect(picked(choice)).toBe(`C ${OPUS} / high`);
+    expect(choice.startAt).toBeUndefined();
+    expect(choice.notes).toEqual([
+      `Fable goal: C would end 31 points behind its Fable goal, but ${FABLE} / low does not fit there, so this worker runs the table's choice.`,
+    ]);
+  });
+
+  it("leaves the stored list and the Fable workers switch in charge", () => {
+    // Listed, B stays in Fable mode although it is ahead of its Fable goal.
+    const listed = choose([fableUsed("B", 60)], opusHigh, {
+      policy: { ...fableGoals(14, "B"), fableAccounts: [allocationPreferenceKey(claude("B"))] },
+    });
+    expect(picked(listed)).toBe(`B ${FABLE} / low`);
+    expect(listed.notes).toEqual([
+      `Fable mode on B: ${OPUS} / high starts from ${FABLE} / low, the first Fable rung at or above it.`,
+    ]);
+    expect(listed.accounts.join(" ")).not.toContain("Fable goal,");
+    // With Fable workers off, an account far behind its Fable goal still runs the table's choice.
+    const off = choose([fableUsed("A", 10)], opusHigh, {
+      policy: { ...fableGoals(14, "A"), fableWorkers: false },
+    });
+    expect(picked(off)).toBe(`A ${OPUS} / high`);
+    expect([...off.accounts, ...off.notes].join(" ")).not.toContain("Fable goal,");
+  });
+
+  it("never takes Fable from a table entry or a pin, and keeps a pin as pinned", () => {
+    const fableHigh = { model: FABLE, effort: "high" };
+    const table = choose([fableUsed("B", 60)], fableHigh, { policy: fableGoals(14, "B") });
+    expect(picked(table)).toBe(`B ${FABLE} / high`);
+    expect(table.notes).toEqual([
+      "Fable goal: B would end 19 points ahead of its Fable goal, so this worker runs the table's choice.",
+    ]);
+    const pin = (model: string) => ({
+      policy: fableGoals(14, "A", "B"),
+      request: {
+        override: { driver: claudeAgent, model, options: [{ id: "effort", value: "high" }] },
+      },
+    });
+    const pinnedFable = choose([fableUsed("B", 60)], opusHigh, pin(FABLE));
+    expect(picked(pinnedFable)).toBe(`B ${FABLE} / high`);
+    expect(pinnedFable.notes).toEqual([]);
+    const pinnedOpus = choose([fableUsed("A", 10)], opusHigh, pin(OPUS));
+    expect(picked(pinnedOpus)).toBe(`A ${OPUS} / high`);
+    expect(pinnedOpus.notes).toEqual([]);
   });
 });

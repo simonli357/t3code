@@ -25,6 +25,7 @@ import {
   allocationResetIn,
   allocationSaveFailure,
   rebaseAllocationPolicy,
+  withAllocationAccountFableGoal,
   withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
@@ -256,6 +257,28 @@ it("reads each login's daily goal, its own or its provider's, and sets or clears
     percentPerDay: 10,
     own: false,
   });
+});
+
+it("reads, sets and clears each login's Fable goal, stored per account like the daily goal", () => {
+  const base: AllocationPolicy = { ...defaultAllocationPolicy, version: 4 };
+  const fableGoal = (policy: AllocationPolicy) =>
+    Object.fromEntries(
+      allocationAccountRows(snapshot(), policy, now).map((row) => [row.label, row.fableGoal]),
+    );
+  const es = allocationAccountRows(snapshot(), base, now).find((row) => row.label === "ES")!;
+  expect(fableGoal(base).ES).toBeUndefined();
+  const mine = withAllocationAccountFableGoal(base, es, 14);
+  expect(fableGoal(mine)).toMatchObject({ ES: 14, XL: undefined });
+  expect(fableGoal(withAllocationAccountFableGoal(mine, es, undefined)).ES).toBeUndefined();
+  expect([...allocationPolicyChanges(base, mine)]).toEqual([`fableGoal:${es.key}`]);
+  // Another account's Fable goal stored meanwhile is kept beside mine.
+  const xl = { key: "xl", percentPerDay: 10 };
+  const merged = rebaseAllocationPolicy(base, mine, { ...base, version: 5, fableGoals: [xl] });
+  expect(merged.collides).toBe(false);
+  expect(merged.policy.fableGoals).toEqual([xl, { key: es.key, percentPerDay: 14 }]);
+  expect(allocationPolicyInvalid({ ...base, fableGoals: [{ key: "a", percentPerDay: 101 }] })).toBe(
+    "A Fable goal must be a number from 0 to 100.",
+  );
 });
 
 it("switches Fable mode per Claude login, starting from the single switch stored before", () => {

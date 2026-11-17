@@ -200,6 +200,7 @@ it("reads both policies with accounts by label", () => {
       { account: "ES", percentPerDay: 17, from: "family" },
       { account: "XL", percentPerDay: 17, from: "family" },
     ],
+    fableGoals: [],
     fableWorkers: true,
     fableAccounts: [],
     ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
@@ -297,6 +298,41 @@ it.effect("sets Fable mode per account by label or instance ID, and only on Clau
       "ES",
       "XL",
     ]);
+  }),
+);
+
+it.effect("sets and clears Fable goals by label, only on Claude accounts", () =>
+  Effect.gen(function* () {
+    const codexEs = {
+      ...account("box", "codex_es", "ES", "es-codex"),
+      driver: ProviderDriverKind.make("codex"),
+    };
+    const stored = snapshot();
+    const withCodex = { ...stored, inventories: [...stored.inventories, host("box", [codexEs])] };
+    const change = (edit: AllocationPolicyEdit, policy?: Partial<AllocationPolicy>) =>
+      editAllocationPolicy({ ...withCodex, policy: { ...withCodex.policy, ...policy } }, edit);
+    // ES names the Claude ES logins, not the Codex one with the same label.
+    const set = yield* change({ setFableGoals: [{ account: "ES", percentPerDay: 14 }] });
+    expect(set.fableGoals).toEqual([
+      { key: key(es), percentPerDay: 14 },
+      { key: key(unknownEs), percentPerDay: 14 },
+    ]);
+    expect(
+      allocationPolicyView({ ...withCodex, policy: set }, defaultModelRoutingPolicy).fableGoals,
+    ).toEqual([{ account: "ES", percentPerDay: 14 }]);
+    // An edit that does not name them keeps them; clearing one leaves the others.
+    const both = yield* change({ setFableGoals: [{ account: "XL", percentPerDay: 10 }] }, set);
+    expect((yield* change({ closeMarginPoints: 4 }, both)).fableGoals).toEqual(both.fableGoals);
+    expect((yield* change({ clearFableGoals: ["claude_eol"] }, both)).fableGoals).toEqual([
+      { key: key(unknownEs), percentPerDay: 14 },
+      { key: key(xl), percentPerDay: 10 },
+    ]);
+    expect(
+      (yield* Effect.flip(change({ setFableGoals: [{ account: "codex_es", percentPerDay: 14 }] })))
+        .detail,
+    ).toBe("codex_es is not a Claude account; only Claude runs Fable.");
+    // A policy without Fable goals stays without them.
+    expect((yield* change({ closeMarginPoints: 4 })).fableGoals).toBeUndefined();
   }),
 );
 

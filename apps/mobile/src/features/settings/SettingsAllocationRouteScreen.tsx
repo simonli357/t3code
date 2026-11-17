@@ -24,6 +24,7 @@ import {
   allocationAutosaveRules,
   allocationPolicyChanges,
   allocationSaveFailure,
+  withAllocationAccountFableGoal,
   withAllocationAccountFableMode,
   withAllocationAccountGoal,
   withAllocationAccountMoved,
@@ -406,6 +407,27 @@ function AllocationEditor({ target }: { target: Target }) {
         <Text className="w-14 text-foreground-muted">%</Text>
       </View>
       {row.keys.some((key) => notSaved.has(`goal:${key}`)) ? unsaved : null}
+      {row.fableMode !== null ? (
+        <View className="flex-row items-center justify-between gap-3">
+          <Text className="flex-1">Fable goal</Text>
+          {numberInput({
+            id: `fableGoal:${row.key}`,
+            label: `Fable goal for ${row.label}`,
+            value: row.fableGoal,
+            placeholder: "Off",
+            editable: goalsEditable,
+            onChange: (value) =>
+              store.edit(
+                (current) => withAllocationAccountFableGoal(current, row, value),
+                TYPING_PAUSE,
+              ),
+          })}
+          <Text className="w-14 text-foreground-muted">%</Text>
+        </View>
+      ) : null}
+      {row.fableMode !== null && row.keys.some((key) => notSaved.has(`fableGoal:${key}`))
+        ? unsaved
+        : null}
       {row.supportsCaps && row.cap ? (
         <Text className="text-foreground-muted">
           Hard cap week {row.cap.weeklyPercent === null ? "off" : `${row.cap.weeklyPercent}%`}

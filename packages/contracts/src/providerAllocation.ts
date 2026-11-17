@@ -189,6 +189,16 @@ export const AllocationPolicy = Schema.Struct({
       Schema.isMaxLength(100),
     ),
   ),
+  /**
+   * Fable goals by `allocationPreferenceKey`: the percentage of the account's Fable weekly
+   * window to use per day. It is that window's goal line in place of the account's goal, and a
+   * worker start on an account that would end its job at or behind it runs in Fable mode.
+   */
+  fableGoals: Schema.optional(
+    Schema.Array(Schema.Struct({ key: TrimmedNonEmptyString, percentPerDay: Points })).check(
+      Schema.isMaxLength(100),
+    ),
+  ),
   // See `legacyAllocationPolicyFields`. Rules and worker models are dropped on save; the rest
   // is kept. `dailyPoints` of `claude`, `codex` and `other` are the family daily goals.
   claude: Legacy,
@@ -833,6 +843,12 @@ export const AllocationPolicyEdit = Schema.Struct({
   ),
   /** Back to the family's goal. */
   clearGoals: Schema.optional(Schema.Array(AccountRef)),
+  /** Fable goals: percent of the Fable weekly window per day. Only Claude accounts have one. */
+  setFableGoals: Schema.optional(
+    Schema.Array(Schema.Struct({ account: AccountRef, percentPerDay: Points })),
+  ),
+  /** Back to the account's goal on the Fable window, without automatic Fable mode. */
+  clearFableGoals: Schema.optional(Schema.Array(AccountRef)),
   fableWorkers: AllocationPolicy.fields.fableWorkers,
   /** Every account in Fable mode; the rest are not. Only Claude accounts can be. */
   fableAccounts: Schema.optional(Schema.Array(AccountRef).check(Schema.isMaxLength(100))),
@@ -884,6 +900,10 @@ export const AllocationPolicyView = Schema.Struct({
   fableWorkers: Schema.optional(Schema.Boolean),
   /** The accounts in Fable mode. */
   fableAccounts: Schema.optional(Schema.Array(Schema.String)),
+  /** Each account's Fable goal in percent of its Fable weekly window. */
+  fableGoals: Schema.optional(
+    Schema.Array(Schema.Struct({ account: Schema.String, percentPerDay: Schema.Number })),
+  ),
   /** The learned numbers, one line each, and when they were learned. */
   learned: Schema.optional(
     Schema.Struct({
