@@ -9,7 +9,7 @@ session's running total, and a resumed query carries on from its earlier turns. 
 keeps the total in the resume cursor and reports the difference as `turnCostUsd`, which includes
 subagents; a resumed session whose cursor has no total reports none. Until the cursor kept it,
 each resumed session's first turn carried the whole running total, which made T3's spend look
-four to ten times what it was. Learning prices a turn without subagents from its own tokens and
+three to five times what it was. Learning prices a turn without subagents from its own tokens and
 `usage-model-rates.json` (within about 10% of the SDK's figure), and takes the SDK's figure only
 for turns with subagents, whose use `result.usage` leaves out. Other providers' turns are priced
 from their tokens.
