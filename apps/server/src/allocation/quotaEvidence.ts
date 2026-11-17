@@ -216,11 +216,22 @@ export function inModelScope(
   );
 }
 
+/**
+ * The rejections still in force: for each window, the newest receipt, unless it allowed or a
+ * later proof says the limit it named is over. Proofs:
+ * - the provider accepted a later turn that the rejected limit covers (any turn for a session or
+ *   weekly limit, a turn on one of its models for a model limit such as Fable);
+ * - a reading of that same limit, taken after the rejection, shows room: in a later cycle, or in
+ *   the same cycle when the rejection recorded the limit used up, so the provider has since
+ *   restored it (as when meters are lowered without a reset).
+ * A proof taken after the rejection stays one as it ages; only a newer rejection undoes it. A
+ * rejection that did not record its limit used up, or that names no window, never clears on a
+ * low reading alone, so an account that is really out stays out.
+ */
 export function unresolvedQuotaRejections(
   evidence: readonly QuotaEvidence[],
   limits: ServerProviderUsageLimits | undefined,
   at: string,
-  maxAgeMinutes: number,
 ): QuotaEvidence[] {
   const latest = new Map<string, QuotaEvidence>();
   // The projection supplies newest insertion first for same-clock events.
@@ -229,6 +240,7 @@ export function unresolvedQuotaRejections(
     if (!old || e.at > old.at || (e.at === old.at && (e.ordinal ?? 0) > (old.ordinal ?? 0)))
       latest.set(e.windowId, e);
   }
+  const now = Date.parse(at);
   return [...latest.values()].filter((e) => {
     if (e.status === "allowed") return false;
     const windows =
@@ -239,17 +251,28 @@ export function unresolvedQuotaRejections(
               ? w.id === e.usageWindowId
               : w.id === e.windowId || w.enforcement?.windowId === e.windowId,
           );
-    // A known event binding cannot migrate to another model. Otherwise a later
-    // complete probe can establish it, but multiple possible buckets stay unknown.
+    const accountWide = e.windowId === "five_hour" || e.windowId === "seven_day";
+    if (
+      e.windowId !== "unknown" &&
+      evidence.some(
+        (a) =>
+          a.instanceId === e.instanceId &&
+          a.status === "allowed" &&
+          a.at > e.at &&
+          Date.parse(a.at) <= now &&
+          (accountWide ||
+            (a.model !== undefined &&
+              (a.model === e.model ||
+                (windows.length === 1 && inModelScope(windows[0]!, a.model))))),
+      )
+    )
+      return false;
+    // A known event binding cannot migrate to another model. Otherwise a complete probe taken
+    // after the rejection can establish it, but multiple possible buckets stay unknown.
     if (e.windowId !== "unknown" && windows.length !== 1) return true;
     if (!e.usageWindowId && windows[0]?.id !== e.windowId && e.windowId !== "unknown") {
       const mappedAt = Date.parse(windows[0]?.enforcement?.checkedAt ?? "");
-      if (
-        !Number.isFinite(mappedAt) ||
-        mappedAt > Date.parse(at) ||
-        Date.parse(at) - mappedAt > maxAgeMinutes * 60_000
-      )
-        return true;
+      if (!Number.isFinite(mappedAt) || mappedAt > now || mappedAt <= Date.parse(e.at)) return true;
     }
     // A passed timestamp is not replenishment. For legacy errors without a reset,
     // every reported window must prove a cycle beginning after the rejection.
@@ -257,13 +280,7 @@ export function unresolvedQuotaRejections(
       !windows.length ||
       !windows.every((w) => {
         const checked = Date.parse(w.checkedAt ?? limits!.checkedAt);
-        if (
-          checked > Date.parse(at) ||
-          Date.parse(at) - checked > maxAgeMinutes * 60_000 ||
-          checked <= Date.parse(e.at) ||
-          w.usedPercent >= 100
-        )
-          return false;
+        if (checked > now || checked <= Date.parse(e.at) || w.usedPercent >= 100) return false;
         // An explicit empty/inactive five-hour probe confirms that the old rolling
         // window ended. Missing resets on sparse updates provide no such evidence.
         if (
@@ -278,44 +295,11 @@ export function unresolvedQuotaRejections(
         )
           return true;
         if (!w.resetsAt) return false;
-        // A restored account-wide allowance can retain its scheduled weekly reset.
-        // Require recorded exhaustion AND later provider acceptance, not merely a
-        // low reading. Scoped/unknown limits never borrow another bucket's recovery.
         if (
           e.exhausted &&
-          (e.windowId === "five_hour" || e.windowId === "seven_day") &&
-          w.id === e.windowId &&
-          e.resetsAt &&
-          Math.abs(Date.parse(w.resetsAt) - Date.parse(e.resetsAt)) <= 1000 &&
-          evidence.some(
-            (a) =>
-              a.instanceId === e.instanceId &&
-              a.status === "allowed" &&
-              (a.windowId === "five_hour" || a.windowId === "seven_day") &&
-              a.at > e.at &&
-              Date.parse(a.at) <= checked,
-          )
-        )
-          return true;
-        // The same holds for a model-scoped allowance, on that bucket's own evidence only: its
-        // rejection recorded it exhausted, and the provider later accepted a turn on a model the
-        // bucket covers (an acceptance on another model proves nothing about this bucket).
-        if (
-          e.exhausted &&
-          e.windowId !== "five_hour" &&
-          e.windowId !== "seven_day" &&
           e.windowId !== "unknown" &&
           e.resetsAt &&
-          Math.abs(Date.parse(w.resetsAt) - Date.parse(e.resetsAt)) <= 1000 &&
-          evidence.some(
-            (a) =>
-              a.instanceId === e.instanceId &&
-              a.status === "allowed" &&
-              a.model !== undefined &&
-              inModelScope(w, a.model) &&
-              a.at > e.at &&
-              Date.parse(a.at) <= checked,
-          )
+          Math.abs(Date.parse(w.resetsAt) - Date.parse(e.resetsAt)) <= 1000
         )
           return true;
         if (e.resetsAt) return checked > Date.parse(e.resetsAt) && w.resetsAt > e.resetsAt;

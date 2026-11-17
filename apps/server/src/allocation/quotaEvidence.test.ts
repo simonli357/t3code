@@ -94,7 +94,6 @@ it("coalesces the last quota warning on the same turn/account across unrelated a
       ]),
       undefined,
       at,
-      15,
     ),
   ).toHaveLength(1);
 });
@@ -118,9 +117,9 @@ const probe = (entries: unknown[] = [entry("Fable")], checkedAt = at) =>
     },
   });
 const remaining = (limits = probe().limits, evidence = [rejected]) =>
-  unresolvedQuotaRejections(evidence, limits, at, 15);
+  unresolvedQuotaRejections(evidence, limits, at);
 
-it("recovers a stopped scoped rejection from a proven late mapping and fresh reset, never elapsed time alone", () => {
+it("recovers a stopped scoped rejection from a mapping and reset proven after it, never elapsed time alone", () => {
   expect(remaining()).toEqual([]);
   const fresh = probe().limits;
   for (const patch of [
@@ -134,7 +133,9 @@ it("recovers a stopped scoped rejection from a proven late mapping and fresh res
       remaining({ ...fresh, windows: fresh.windows.map((w) => ({ ...w, ...patch })) }),
     ).toHaveLength(1);
   expect(remaining(probe([], at).limits)).toHaveLength(1);
-  expect(remaining(probe([entry("Fable")], "2026-10-23T19:00:00.000Z").limits)).toHaveLength(1);
+  // A probe taken after the rejection still proves it over half an hour later.
+  expect(remaining(probe([entry("Fable")], "2026-10-23T19:00:00.000Z").limits)).toEqual([]);
+  expect(remaining(probe([entry("Fable")], "2026-10-23T16:30:00.000Z").limits)).toHaveLength(1);
 });
 
 it("requires one proven association without guessing the first model or colliding numeric identities", () => {
@@ -182,8 +183,8 @@ it("preserves a rejection's known numeric scope and does not clear another rejec
   expect(remaining(noReset, [again, rejected, allowed])).toEqual([again]);
 });
 
-it("sparse numeric updates retain but cannot renew stale association evidence", () => {
-  const old = probe([entry("Fable")], "2026-10-23T19:00:00.000Z").limits;
+it("sparse numeric updates retain but cannot renew an association from before the rejection", () => {
+  const old = probe([entry("Fable")], "2026-10-23T16:30:00.000Z").limits;
   const { enforcement: _mapping, ...numeric } = old.windows[0]!;
   const merged = applyUsageLimitsUpdate({
     previous: old,
@@ -195,7 +196,7 @@ it("sparse numeric updates retain but cannot renew stale association evidence", 
   expect(remaining(probe().limits)).toEqual([]);
 });
 
-it("recovers an exhausted account-wide allowance only with later provider acceptance and a fresh restored reading", () => {
+it("recovers an account-wide rejection on a later accepted turn, or once its used-up limit reads room again", () => {
   const row: QuotaEvidenceRow = {
     instanceId: "xl",
     thread_id: "old",
@@ -228,10 +229,36 @@ it("recovers an exhausted account-wide allowance only with later provider accept
     status: "allowed",
     at: "2026-10-24T05:02:56.822Z",
   };
-  const unresolved = (es: QuotaEvidence[], ls = limits) =>
-    unresolvedQuotaRejections(es, ls, checkedAt, 10);
-  expect(unresolved([...errors, accepted])).toEqual([]);
-  expect(unresolved([...errors, accepted].toReversed())).toEqual([]);
+  const unresolved = (es: QuotaEvidence[], ls: ServerProviderUsageLimits | undefined = limits) =>
+    unresolvedQuotaRejections(es, ls, checkedAt);
+  const patched = (patch: object) => ({
+    ...limits,
+    windows: limits.windows.map((w) => ({ ...w, ...patch })),
+  });
+  // The rejection recorded the weekly limit used up; a later reading of it shows room in the
+  // same cycle, so the provider restored it.
+  expect(unresolved(errors)).toEqual([]);
+  // A reading from before the rejection, a full one, or one of a cycle that has not begun since.
+  for (const patch of [
+    { checkedAt: row.created_at },
+    { usedPercent: 100 },
+    { resetsAt: "2026-10-25T20:55:00.000Z" },
+  ])
+    expect(unresolved(errors, patched(patch))).toHaveLength(1);
+  // A later accepted turn proves it over whatever the meter says, and without a reading.
+  for (const reading of [patched({ usedPercent: 100 }), undefined]) {
+    expect(unresolved([...errors, accepted], reading)).toEqual([]);
+    expect(unresolved([...errors, accepted].toReversed(), reading)).toEqual([]);
+  }
+  // Not this account, not after the rejection, or not yet.
+  for (const other of [
+    { ...accepted, instanceId: "another-account" },
+    { ...accepted, at: row.created_at },
+    { ...accepted, at: "2026-10-25T00:00:00.000Z" },
+  ])
+    expect(unresolved([...errors, other], patched({ usedPercent: 100 }))).toHaveLength(1);
+  // A rejection that did not record the limit used up is not explained by a low reading; only an
+  // accepted turn ends it.
   for (const detail of [
     { isUsingOverage: true, utilization: 1 },
     { isUsingOverage: false, utilization: 0.6 },
@@ -251,33 +278,22 @@ it("recovers an exhausted account-wide allowance only with later provider accept
       },
     ]);
     expect(unproven).toHaveLength(1);
-    expect(unresolved([...unproven, accepted])).toHaveLength(1);
+    expect(unresolved(unproven)).toHaveLength(1);
+    expect(unresolved([...unproven, accepted])).toEqual([]);
   }
-
-  expect(unresolved(errors)).toHaveLength(1);
-  expect(unresolved([...errors, { ...accepted, instanceId: "another-account" }])).toHaveLength(1);
-  expect(unresolved([...errors, { ...accepted, at: row.created_at }])).toHaveLength(1);
-  expect(unresolved([...errors, { ...accepted, at: "2026-10-25T00:00:00.000Z" }])).toHaveLength(1);
-  for (const patch of [
-    { checkedAt: row.created_at },
-    { usedPercent: 100 },
-    { resetsAt: "2026-10-25T20:55:00.000Z" },
-  ])
-    expect(
-      unresolved([...errors, accepted], {
-        ...limits,
-        windows: limits.windows.map((w) => ({ ...w, ...patch })),
-      }),
-    ).toHaveLength(1);
+  // A rejection that names no window, or another model's window, borrows no recovery.
   expect(
     unresolved([...errors.map((e) => ({ ...e, windowId: "unknown" })), accepted]),
   ).toHaveLength(1);
   expect(
     unresolved([...errors.map((e) => ({ ...e, windowId: "seven_day_sonnet" })), accepted]),
   ).toHaveLength(1);
-  // A new rejection after the acceptance is authoritative even if a reading is lower.
+  // A newer rejection outweighs every proof taken before it.
   expect(
-    unresolved([...errors, accepted, { ...errors[0]!, at: "2026-10-24T09:49:00.000Z" }]),
+    unresolved(
+      [...errors, accepted, { ...errors[0]!, at: "2026-10-24T09:49:00.000Z" }],
+      patched({ checkedAt: "2026-10-24T09:45:00.000Z" }),
+    ),
   ).toHaveLength(1);
 });
 
@@ -301,20 +317,19 @@ it("requires an explicit inactive complete Claude probe after the short reset, n
       },
     }).limits;
   const inactive = read({ utilization: 0, resets_at: null });
-  expect(unresolvedQuotaRejections(evidence, inactive, checkedAt, 10)).toEqual([]);
+  expect(unresolvedQuotaRejections(evidence, inactive, checkedAt)).toEqual([]);
   for (const limits of [
     read({ utilization: 0 }),
     read({ utilization: 1, resets_at: null }),
     read({ utilization: null, resets_at: null }),
     { ...inactive, checkedAt: "2026-10-24T09:19:00.000Z" },
   ])
-    expect(unresolvedQuotaRejections(evidence, limits, checkedAt, 10)).toHaveLength(1);
+    expect(unresolvedQuotaRejections(evidence, limits, checkedAt)).toHaveLength(1);
   expect(
     unresolvedQuotaRejections(
       [{ ...evidence[0]!, resetsAt: "2026-10-24T11:00:00.000Z" }],
       inactive,
       checkedAt,
-      10,
     ),
   ).toHaveLength(1);
   const sparse = applyUsageLimitsUpdate({
@@ -322,7 +337,7 @@ it("requires an explicit inactive complete Claude probe after the short reset, n
     checkedAt,
     update: { windows: [{ id: "five_hour", kind: "session", label: "Session", usedPercent: 0 }] },
   })!;
-  expect(unresolvedQuotaRejections(evidence, sparse, checkedAt, 10)).toHaveLength(1);
+  expect(unresolvedQuotaRejections(evidence, sparse, checkedAt)).toHaveLength(1);
 });
 
 it("recovers only the session scope stated by the native message on the exact failed Claude retry", () => {
@@ -510,88 +525,85 @@ const xyUnresolved = (
   rows: QuotaEvidenceRow[],
   reading: ServerProviderUsageLimits | undefined = xyReading,
   now = xyAt,
-) => unresolvedQuotaRejections(readQuotaEvidenceRows(rows), reading, now, 15);
+) => unresolvedQuotaRejections(readQuotaEvidenceRows(rows), reading, now);
 
-it("clears a restored model-scoped rejection once its own bucket reads room and the provider accepted a turn on that model", () => {
-  // Without a measured model on the acceptance (as before this rule), XY stays drained for Fable.
-  expect(xyUnresolved([...xyRejection, xyAccepted(fableAccepted.created_at, undefined)])).toEqual([
-    expect.objectContaining({ windowId: "seven_day_overage_included", exhausted: true }),
-  ]);
-  expect(xyUnresolved([...xyRejection, fableAccepted])).toEqual([]);
-  expect(xyUnresolved([fableAccepted, ...xyRejection].toReversed())).toEqual([]);
-  // A bound receipt names its bucket directly; its fresh reading needs no separate mapping.
+it("clears a restored model-scoped rejection once its own bucket reads room again, however old that reading", () => {
+  // No turn has run on Fable since; the bucket read 49% after the rejection, in the same cycle.
+  expect(xyUnresolved(xyRejection)).toEqual([]);
+  expect(xyUnresolved([...xyRejection, opusAccepted])).toEqual([]);
+  // The same reading twenty minutes later (XY on 2026-11-17, drained again once its reading aged).
+  expect(xyUnresolved(xyRejection, xyReading, "2026-11-14T16:08:10.000Z")).toEqual([]);
+  // A bound receipt names its bucket directly; its reading needs no separate mapping.
   expect(
     unresolvedQuotaRejections(
-      [
-        {
-          ...readQuotaEvidenceRows(xyRejection).at(-1)!,
-          usageWindowId: "seven_day_fable",
-        },
-        ...readQuotaEvidenceRows([fableAccepted]),
-      ],
+      [readQuotaEvidenceRows(xyRejection).at(-1)!].map((e) => ({
+        ...e,
+        usageWindowId: "seven_day_fable",
+      })),
       fableWindow({ enforcement: undefined }),
       xyAt,
-      15,
     ),
   ).toEqual([]);
 });
 
-it("keeps a model-scoped rejection without that bucket's own fresh room and a later acceptance on its model", () => {
+it("clears a model-scoped rejection once the provider accepts a later turn on a model it covers", () => {
+  // The bucket's only reading is from before the rejection, so it proves nothing on its own.
+  const before = "2026-11-13T22:00:00.000Z";
+  const old = fableWindow({
+    checkedAt: before,
+    enforcement: { windowId: "seven_day_overage_included", checkedAt: before },
+  });
+  expect(xyUnresolved(xyRejection, old)).toHaveLength(1);
+  expect(xyUnresolved([...xyRejection, fableAccepted], old)).toEqual([]);
+  expect(xyUnresolved([fableAccepted, ...xyRejection].toReversed(), old)).toEqual([]);
+  // Without any reading of the bucket, the same model as the rejected turn accepted again.
+  const unread = (rows: QuotaEvidenceRow[]) =>
+    unresolvedQuotaRejections(readQuotaEvidenceRows(rows), undefined, xyAt);
+  const onFable = xyRejection.map((row) => ({ ...row, model: FABLE }));
+  expect(unread([...onFable, fableAccepted])).toEqual([]);
+  expect(unread([...onFable, opusAccepted])).toHaveLength(1);
+  expect(unread([...xyRejection, fableAccepted])).toHaveLength(1);
+});
+
+it("keeps a model-scoped rejection that nothing after it shows over", () => {
   const held = (rows: QuotaEvidenceRow[], reading?: ServerProviderUsageLimits, now?: string) =>
     expect(xyUnresolved(rows, reading, now)).toHaveLength(1);
-  // The scoped window still reads full.
-  held([...xyRejection, fableAccepted], fableWindow({ usedPercent: 100 }));
-  // The reading is older than the rejection, or older than the maximum reading age.
-  const before = "2026-11-13T22:04:00.000Z";
-  held(
-    [...xyRejection, xyAccepted("2026-11-13T22:05:30.000Z", FABLE)],
-    fableWindow({
-      checkedAt: before,
-      enforcement: { windowId: "seven_day_overage_included", checkedAt: before },
-    }),
-    "2026-11-13T22:10:00.000Z",
-  );
-  held([...xyRejection, fableAccepted], xyReading, "2026-11-14T16:04:10.000Z");
-  // Only the account-wide windows recovered; the scoped bucket has no reading at all.
-  held([...xyRejection, fableAccepted], {
+  const before = "2026-11-13T22:00:00.000Z";
+  const old = fableWindow({
+    checkedAt: before,
+    enforcement: { windowId: "seven_day_overage_included", checkedAt: before },
+  });
+  // The scoped window still reads full, or was read before the rejection.
+  held(xyRejection, fableWindow({ usedPercent: 100 }));
+  held(xyRejection, old);
+  // Only the account-wide windows were read; the scoped bucket has no reading at all.
+  held(xyRejection, {
     ...xyReading,
     windows: xyReading.windows.filter((w) => w.id !== "seven_day_fable"),
   });
-  expect(
-    unresolvedQuotaRejections(
-      readQuotaEvidenceRows([...xyRejection, fableAccepted]),
-      undefined,
-      xyAt,
-      15,
-    ),
-  ).toHaveLength(1);
-  // A stale bucket association cannot identify the fresh numeric reading.
+  // An association from before the rejection cannot identify the later numeric reading.
   held(
-    [...xyRejection, fableAccepted],
-    fableWindow({
-      enforcement: {
-        windowId: "seven_day_overage_included",
-        checkedAt: "2026-11-14T15:00:00.000Z",
-      },
-    }),
+    xyRejection,
+    fableWindow({ enforcement: { windowId: "seven_day_overage_included", checkedAt: before } }),
   );
   // The reading belongs to another cycle than the one the rejection named.
-  held([...xyRejection, fableAccepted], fableWindow({ resetsAt: "2026-11-15T21:00:00.000Z" }));
-  // No acceptance after the rejection, or only one that came before it or after the reading.
-  held(xyRejection);
-  held([...xyRejection, xyAccepted("2026-11-13T21:58:26.846Z", FABLE)]);
-  held([...xyRejection, xyAccepted("2026-11-14T15:50:00.000Z", FABLE)]);
-  // An acceptance on another model, or on another account, says nothing about this bucket.
-  held([...xyRejection, opusAccepted]);
-  held([
-    ...xyRejection,
-    {
-      ...fableAccepted,
-      instanceId: "claude_xinya",
-      payload_json: fableAccepted.payload_json.replace("claude_xiyang", "claude_xinya"),
-    },
-  ]);
-  // A rejection that did not record the bucket exhausted is not explained by it.
+  held(xyRejection, fableWindow({ resetsAt: "2026-11-15T21:00:00.000Z" }));
+  // An acceptance before the rejection, after now, on another model or on another account.
+  held([...xyRejection, xyAccepted("2026-11-13T21:58:26.846Z", FABLE)], old);
+  held([...xyRejection, fableAccepted], old, "2026-11-14T15:40:00.000Z");
+  held([...xyRejection, opusAccepted], old);
+  held(
+    [
+      ...xyRejection,
+      {
+        ...fableAccepted,
+        instanceId: "claude_xinya",
+        payload_json: fableAccepted.payload_json.replace("claude_xiyang", "claude_xinya"),
+      },
+    ],
+    old,
+  );
+  // A rejection that did not record the bucket used up is not explained by a low reading.
   const notExhausted = xyRejection.map((row) =>
     row.kind === "runtime.warning"
       ? {
@@ -601,20 +613,20 @@ it("keeps a model-scoped rejection without that bucket's own fresh room and a la
       : row,
   );
   expect(notExhausted[1]!.payload_json).toContain('"utilization":0.99,');
-  held([...notExhausted, fableAccepted]);
-  // A new rejection after the acceptance is authoritative even with a lower reading.
+  held(notExhausted);
+  // A new rejection after the acceptance and the reading is authoritative.
   held([
     ...xyRejection,
     fableAccepted,
     ...xyRejection.map((row) => ({
       ...row,
-      created_at: row.created_at.replace("2026-11-13T22:04", "2026-11-14T15:47"),
+      created_at: row.created_at.replace("2026-11-13T22:04", "2026-11-14T15:49"),
       ordinal: row.ordinal + 20_000,
     })),
   ]);
 });
 
-it("offers XY for a Fable high worker once its restored Fable bucket clears the rejection", () => {
+it("offers XY for a Fable high worker once its restored Fable bucket clears the rejection, and as that reading ages", () => {
   const claudeProvider = (instanceId: string, label: string, limits: ServerProviderUsageLimits) =>
     decodeProvider({
       instanceId,
@@ -658,11 +670,11 @@ it("offers XY for a Fable high worker once its restored Fable bucket clears the 
       },
     ],
   });
-  const decide = (accepted: QuotaEvidenceRow) => {
+  const decide = (reading: ServerProviderUsageLimits, now = xyAt) => {
     const inventory = allocationInventory({
       environmentId: "sliara",
-      at: xyAt,
-      providers: [claudeProvider("claude_xiyang", "XY", xyReading), ara],
+      at: now,
+      providers: [claudeProvider("claude_xiyang", "XY", reading), ara],
       threads: [],
       measurements: {
         observedAt: xyAt,
@@ -675,11 +687,10 @@ it("offers XY for a Fable high worker once its restored Fable bucket clears the 
         profiles: [],
         limitations: [],
       },
-      quotaEvidence: readQuotaEvidenceRows([...xyRejection, accepted]),
-      maxReadingAgeMinutes: 15,
+      quotaEvidence: readQuotaEvidenceRows(xyRejection),
     });
     return decideAllocation({
-      at: xyAt,
+      at: now,
       policy: defaultAllocationPolicy,
       request: {
         kind: "worker",
@@ -696,7 +707,14 @@ it("offers XY for a Fable high worker once its restored Fable bucket clears the 
       authorityAvailable: true,
     });
   };
-  const before = decide(opusAccepted);
+  // Before the provider restored it, the bucket's last reading predates the rejection.
+  const old = "2026-11-13T22:00:00.000Z";
+  const before = decide(
+    fableWindow({
+      checkedAt: old,
+      enforcement: { windowId: "seven_day_overage_included", checkedAt: old },
+    }),
+  );
   expect(before.selectedInstanceId).toBe("claude_ara");
   expect(before.candidates.find((c) => c.instanceId === "claude_xiyang")).toMatchObject({
     drainedUntil: "2026-11-15T23:00:00.000Z",
@@ -704,10 +722,13 @@ it("offers XY for a Fable high worker once its restored Fable bucket clears the 
       "drained until 2026-11-15T23:00:00.000Z (provider limit rejection on Weekly · Fable)",
     ),
   });
-  const after = decide(fableAccepted);
-  expect(after.selectedInstanceId).toBe("claude_xiyang");
-  expect(after.candidates.find((c) => c.instanceId === "claude_xiyang")).toMatchObject({
-    eligible: true,
-    roomPoints: 51,
-  });
+  // Once it reads room, and still when that reading is twenty minutes old.
+  for (const now of [xyAt, "2026-11-14T16:08:10.000Z"]) {
+    const after = decide(xyReading, now);
+    expect(after.selectedInstanceId).toBe("claude_xiyang");
+    expect(after.candidates.find((c) => c.instanceId === "claude_xiyang")).toMatchObject({
+      eligible: true,
+      roomPoints: 51,
+    });
+  }
 });

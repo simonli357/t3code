@@ -55,7 +55,6 @@ export function allocationInventory(input: {
   threads: readonly OrchestrationThreadShell[];
   measurements: UsageMeasurementsReport;
   quotaEvidence?: readonly QuotaEvidence[];
-  maxReadingAgeMinutes?: number;
   request?: AllocationRequest;
   workerDisabledInstanceIds?: readonly string[];
 }): AllocationInventory {
@@ -90,12 +89,7 @@ export function allocationInventory(input: {
           at: t.session.updatedAt,
         });
     }
-    const rejected = unresolvedQuotaRejections(
-      evidence,
-      limits,
-      at,
-      input.maxReadingAgeMinutes ?? 15,
-    );
+    const rejected = unresolvedQuotaRejections(evidence, limits, at);
     const limitedUntil =
       rejected
         .map((e) => e.resetsAt)

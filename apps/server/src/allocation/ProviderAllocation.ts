@@ -406,7 +406,6 @@ const make = Effect.gen(function* () {
       workerDisabledInstanceIds: (yield* settings.getSettings).workerDisabledInstanceIds,
       threads,
       quotaEvidence,
-      maxReadingAgeMinutes: (yield* store.policy).maxReadingAgeMinutes,
       measurements: yield* measurements.read({ lookbackHours: 168, turnLimit: 1 }),
       ...(request ? { request } : {}),
     });

@@ -1558,7 +1558,7 @@ it.effect(
 );
 
 it.effect(
-  "a restored model-scoped rejection clears only on a later accepted turn measured on that model",
+  "a model-scoped rejection whose bucket still reads full clears only on a later accepted turn measured on that model",
   () => {
     const f = fixture();
     return Effect.gen(function* () {
@@ -1580,7 +1580,7 @@ it.effect(
               rate_limits: {
                 seven_day: { utilization: 40, resets_at: reset },
                 ...({
-                  model_scoped: [{ display_name: "Fable", utilization: 20, resets_at: reset }],
+                  model_scoped: [{ display_name: "Fable", utilization: 100, resets_at: reset }],
                 } as object),
               },
             },
@@ -1590,7 +1590,8 @@ it.effect(
       const write = (id: string, turn: string, kind: string, payload: unknown, createdAt: string) =>
         sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at)
           VALUES (${id}, 'worker', ${turn}, 'info', ${kind}, '', ${encodeUnknown(payload)}, ${createdAt})`;
-      // Claude rejected the Fable bucket at 100% of its use, then accepted a later turn.
+      // Claude rejected the Fable bucket at 100% of its use, which still reads full, then accepted
+      // a later turn.
       yield* write(
         "fable-rejected",
         "rejected-turn",
