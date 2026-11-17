@@ -19,7 +19,6 @@ import type {
   AllocationReservation,
   AllocationWindow,
 } from "@t3tools/contracts";
-import { profileLabel } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
 import {
   demandLoad,
@@ -29,6 +28,7 @@ import {
   runwayText,
   SEED_JOB_HOURS,
   span,
+  standing,
   type AccountProjection,
 } from "./runway.ts";
 
@@ -250,28 +250,39 @@ export function accountGoal(
   return family === null ? null : { percentPerDay: family, from: "family" };
 }
 
-/** 0: fits and within its goal; 1: fits but over its goal; 2: a limit runs out before the end. */
-const group = (c: AllocationCandidate) => (c.fits === false ? 2 : c.withinGoal === false ? 1 : 0);
+/** A candidate with the points left on its tightest limit at the job's end, kept internal. */
+type Ranked = AllocationCandidate & { readonly leftPoints?: number | null };
+
+/** 0: fits, with a goal line; 1: fits, without one; 2: a limit runs out before the end. */
+const group = (c: AllocationCandidate) =>
+  c.fits === false ? 2 : c.goalSlackPoints === undefined ? 1 : 0;
+
+/** Points behind the goal line, points left without one, hours it lasts when it does not fit. */
+const score = (c: Ranked) =>
+  group(c) === 0
+    ? c.goalSlackPoints!
+    : group(c) === 1
+      ? (c.leftPoints ?? -Infinity)
+      : (c.lastsHours ?? 0);
 
 /**
- * Usable accounts, best first. Accounts that fit and keep within their daily goal lead, by
- * spare capacity per hour until the reset on the tightest limit; among those within the
- * policy's margin (percent) of the best, the preference order decides, then fewer workers,
- * then the sooner reset. Then accounts over their goal, the least over first. Then accounts
- * where a limit runs out before the job ends, the longest lasting first. An account without a
- * reading comes after those with one in its group.
+ * Usable accounts, best first. Accounts that fit and have a goal line lead, the furthest behind
+ * their daily goal first, in points of their tightest paced window at the job's end (negative
+ * when ahead). Then accounts that fit without a goal line, by the points left on their tightest
+ * limit; one without a reading comes last of them. In either group, accounts within the
+ * policy's margin (points) of the best are close: the preference order decides between them,
+ * then fewer workers, then the sooner reset. Last, accounts where a limit runs out before the
+ * job ends, the longest lasting first.
  */
 export function rankCandidates(
-  candidates: readonly (AllocationCandidate & { overGoal?: number })[],
+  candidates: readonly Ranked[],
   policy: AllocationPolicy,
   driver: string,
 ) {
   const usable = candidates.filter((c) => c.eligible);
-  const room = (c: AllocationCandidate) => c.roomWorkers ?? -Infinity;
-  const most = Math.max(...usable.filter((c) => group(c) === 0).map(room));
-  const margin = (policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS) / 100;
-  const close = (c: AllocationCandidate) =>
-    group(c) === 0 && (room(c) === most || (most > 0 && room(c) >= most * (1 - margin)));
+  const margin = policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS;
+  const best = [0, 1].map((g) => Math.max(...usable.filter((c) => group(c) === g).map(score)));
+  const close = (c: Ranked) => group(c) < 2 && score(c) >= best[group(c)]! - margin;
   const preference = preferenceIndex(policy, driver);
   return usable.toSorted(
     (a, b) =>
@@ -282,9 +293,7 @@ export function rankCandidates(
           (a.workers ?? 0) - (b.workers ?? 0) ||
           (a.resetInHours ?? Infinity) - (b.resetInHours ?? Infinity)
         : 0) ||
-      (group(a) === 1 ? (a.overGoal ?? 0) - (b.overGoal ?? 0) : 0) ||
-      (group(a) === 2 ? (b.lastsHours ?? 0) - (a.lastsHours ?? 0) : 0) ||
-      room(b) - room(a) ||
+      score(b) - score(a) ||
       compare(a.label ?? "", b.label ?? "") ||
       compare(a.instanceId, b.instanceId),
   );
@@ -398,24 +407,18 @@ export function decideAllocation(input: {
         ...(known
           ? {
               fits: projection.fits,
-              roomWorkers: projection.roomWorkers,
               lastsHours: projection.lastsHours,
-              ...(projection.withinGoal === undefined ? {} : { withinGoal: projection.withinGoal }),
+              ...(projection.slack === null ? {} : { goalSlackPoints: projection.slack }),
               ...(projection.fitsFrom === undefined ? {} : { fitsFrom: projection.fitsFrom }),
             }
           : {}),
-        overGoal: projection.overGoal,
+        leftPoints: projection.leftPoints,
         line: `${account.label}${fable ? " (Fable mode)" : ""}: ${
           reasons.length
             ? `not usable (${reasons.join(" ")})`
             : room.drainedUntil !== undefined
               ? room.text
-              : runwayText(
-                  projection,
-                  profileLabel(run.driver, run.model, run.options),
-                  kind,
-                  Date.parse(at),
-                )
+              : runwayText(projection, Date.parse(at))
         }, ${workers} worker${workers === 1 ? "" : "s"}`,
         ...legacyAllocationCandidateFields,
       };
@@ -445,12 +448,10 @@ export function decideAllocation(input: {
             )
             .map((c) => c.instanceId),
         };
+  // The ranking is stable, so the selected account is the best when none scores higher.
   const best =
-    ranked[0] && group(ranked[0]) === 0
-      ? ranked
-          .filter((c) => group(c) === 0)
-          .toSorted((a, b) => (b.roomWorkers ?? -1) - (a.roomWorkers ?? -1))[0]
-      : undefined;
+    selected &&
+    ranked.filter((c) => group(c) === group(selected)).toSorted((a, b) => score(b) - score(a))[0];
   const preference = preferenceIndex(policy, request.driver);
   // Usable apart from being drained: these decide between "wait" and "unavailable".
   const drained = candidates.filter((c) => !c.reasons.length && c.drainedUntil !== undefined);
@@ -461,11 +462,17 @@ export function decideAllocation(input: {
       if (ranked.length === 1) return `${selected.line}; the only account that is not out.`;
       if (group(selected) === 2)
         return `${selected.line}; no account lasts the whole job, this one lasts longest.`;
-      if (group(selected) === 1)
-        return `${selected.line}; every account that fits is over its daily goal, this one least.`;
       if (!best || selected === best)
-        return `${selected.line}; most room of ${ranked.length} accounts.`;
-      return `${selected.line}; close to ${best.label} (room for about ${Math.floor(best.roomWorkers ?? 0)} more) and ${
+        return `${selected.line}; ${
+          group(selected) === 1
+            ? "no account that fits has a goal line; most left"
+            : selected.goalSlackPoints! < 0
+              ? "least ahead of its goal"
+              : "furthest behind its goal"
+        } of ${ranked.length} accounts.`;
+      return `${selected.line}; within ${
+        policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS
+      } points of ${best.label} (${standing(best.goalSlackPoints ?? null, best.leftPoints ?? null)}) and ${
         preference(selected) < preference(best)
           ? "earlier in the preference order"
           : (selected.workers ?? 0) < (best.workers ?? 0)
@@ -484,7 +491,7 @@ export function decideAllocation(input: {
     request: decided,
     outcome: selected ? "selected" : reason ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
-    candidates: candidates.map(({ overGoal: _overGoal, ...candidate }) => candidate),
+    candidates: candidates.map(({ leftPoints: _leftPoints, ...candidate }) => candidate),
     confidence: "medium",
     reasons: reason
       ? [reason]

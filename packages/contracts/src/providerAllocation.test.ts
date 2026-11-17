@@ -36,6 +36,15 @@ const decodeInventory = Schema.decodeUnknownSync(AllocationInventory);
 const decodeOperation = Schema.decodeUnknownSync(AllocationOperation);
 const decodeResponse = Schema.decodeUnknownSync(AllocationResponse);
 const decodePolicy = Schema.decodeUnknownSync(AllocationPolicy);
+/** A candidate as builds that ranked by room read it: no goal slack. */
+const { goalSlackPoints: _slack, ...olderCandidateFields } = AllocationCandidate.fields;
+const decodeOlderCandidate = Schema.decodeUnknownSync(
+  Schema.Struct({
+    ...olderCandidateFields,
+    withinGoal: Schema.optional(Schema.Boolean),
+    roomWorkers: Schema.optional(Schema.NullOr(Schema.Number)),
+  }),
+);
 const wire = (value: unknown): unknown => JSON.parse(JSON.stringify(value));
 
 const capacity: ComputerCapacity = {
@@ -402,6 +411,24 @@ describe("old and new builds on one wire", () => {
       confidence: "medium",
       windows: [],
     });
+  });
+
+  it("reads a candidate ranked by room, and writes a goal slack that older builds skip", () => {
+    const decode = Schema.decodeUnknownSync(AllocationCandidate);
+    const base = {
+      environmentId: "env",
+      instanceId: "claude_eol",
+      accountKey: "login",
+      eligible: true,
+      reasons: [],
+      resetInHours: 20,
+      fits: true,
+      ...legacyAllocationCandidateFields,
+    };
+    expect(decode(wire({ ...base, withinGoal: true, roomWorkers: 3.6 }))).toEqual(base);
+    const current = { ...base, goalSlackPoints: -2.5 };
+    expect(decode(wire(current))).toEqual(current);
+    expect(decodeOlderCandidate(wire(current))).toEqual(base);
   });
 
   it("takes a request with or without the reasons older builds require", () => {

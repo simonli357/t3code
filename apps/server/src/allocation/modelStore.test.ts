@@ -492,7 +492,7 @@ it.effect("counts a reserved start as load, so the next start goes to the other 
       // The reservation just made counts as a worker on a.
       const second = yield* start("second");
       expect(second.allocation?.decision.selectedInstanceId).toBe("b");
-      expect(second.reasons[0]).toContain("most room of 2 accounts.");
+      expect(second.reasons[0]).toContain("furthest behind its goal of 2 accounts.");
       expect((yield* start("third")).allocation?.decision.selectedInstanceId).toBe("a");
       expect(yield* store.reservations).toHaveLength(3);
     }),

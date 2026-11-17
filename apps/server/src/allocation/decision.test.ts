@@ -140,8 +140,13 @@ const learned = (
     })),
   ),
 });
-/** No family goals unless a test sets them, so ranking is by spare capacity alone. */
+/** No family goals unless a test sets them, so ranking is by the points left alone. */
 const noGoals = { claude: undefined, codex: undefined, other: undefined };
+/**
+ * Every account's goal is 20% of the week a day. A weekly window that resets in 100 hours began
+ * 68 hours ago, so at the end of a 2-hour job the goal line is at 20 × 70 / 24 = 58.3%.
+ */
+const paced = { codex: { dailyPoints: 20 } };
 const decide = (
   accounts: AllocationAccount[],
   patch: {
@@ -187,17 +192,16 @@ describe("room", () => {
     expect(candidate(decision, "a")).toMatchObject({ eligible: true, roomPoints: 20, workers: 0 });
     // $10 an hour for 2 hours on a 5-hour window that holds $100 is 20 points: exactly full.
     expect(candidate(decision, "a").line).toBe(
-      "a: room for less than one more astra / high worker until the 5-hour reset in 2h 0m; tightest limit 5-hour, 0 workers",
+      "a: no goal line, 0% left (5-hour 80% used, 100% by the job's end), 0 workers",
     );
   });
 
-  it("sends the worker to the account with the most room and says so in one line", () => {
+  it("without a goal line, sends the worker to the account with the most left and says so", () => {
     const decision = decide([account("a", 60), account("b", 20), account("c", 45)]);
     expect(decision).toMatchObject({ outcome: "selected", selectedInstanceId: "b" });
-    // 79.8 points left after the job, at $100 a point, over the 98 hours to the reset: $81 an
-    // hour, room for about 8 more $10-an-hour workers.
+    // $10 an hour for 2 hours is 0.2 points of a weekly window that holds $10,000.
     expect(decision.reasons).toEqual([
-      "b: room for about 8 more astra / high workers until the Weekly reset in 4d; tightest limit Weekly, 0 workers; most room of 3 accounts.",
+      "b: no goal line, 80% left (Weekly 20% used, 20% by the job's end), 0 workers; no account that fits has a goal line; most left of 3 accounts.",
     ]);
   });
 
@@ -268,14 +272,14 @@ describe("room", () => {
 });
 
 describe("close accounts", () => {
-  const order = (...ids: string[]) => ({ accountOrder: ids.map(key) });
+  const order = (...ids: string[]) => ({ ...paced, accountOrder: ids.map(key) });
 
   it("lets the preference order decide between accounts within the margin", () => {
-    // 49.8 and 46.8 points spare after the job: within 10 percent of each other.
+    // 8.1 and 5.1 points behind the 58.3% goal line after the job: within 10 points.
     const decision = decide([account("a", 50), account("b", 53)], { policy: order("b", "a") });
     expect(decision.selectedInstanceId).toBe("b");
     expect(decision.reasons[0]).toBe(
-      "b: room for about 4 more astra / high workers until the Weekly reset in 4d; tightest limit Weekly, 0 workers; close to a (room for about 5 more) and earlier in the preference order.",
+      "b: 5 points behind its goal (Weekly 53% used, 53% by the job's end against a goal of 58%), 0 workers; within 10 points of a (8 points behind its goal) and earlier in the preference order.",
     );
     // A listed account comes before an unlisted one.
     expect(
@@ -285,6 +289,7 @@ describe("close accounts", () => {
   });
 
   it("never lets the preference order override a clear difference", () => {
+    // 8.1 points behind against 2.9 ahead: 11 points apart.
     const accounts = [account("a", 50), account("b", 61)];
     expect(decide(accounts, { policy: order("b", "a") }).selectedInstanceId).toBe("a");
     // The margin is policy: widen it and the same accounts are close.
@@ -299,18 +304,28 @@ describe("close accounts", () => {
     ).toBe("a");
   });
 
+  it("lets the order decide between close accounts without a goal line too", () => {
+    // 49.8 and 46.8 points left after the job.
+    const decision = decide([account("a", 50), account("b", 53)], {
+      policy: { accountOrder: [key("b"), key("a")] },
+    });
+    expect(decision.selectedInstanceId).toBe("b");
+    expect(decision.reasons[0]).toContain("within 10 points of a (no goal line, 50% left)");
+  });
+
   it("then prefers fewer workers, then the sooner reset", () => {
     const fewer = decide([account("a", 50), account("b", 51)], {
+      policy: paced,
       demand: [worker("a", "w1"), worker("a", "w2")],
     });
     expect(candidate(fewer, "a").workers).toBe(2);
     expect(fewer.selectedInstanceId).toBe("b");
     expect(fewer.reasons[0]).toContain("and has fewer workers.");
 
-    const sooner = decide([
-      account("a", 50),
-      account("b", 51, { windows: [weekly(51, { resetsAt: inHours(99) })] }),
-    ]);
+    const sooner = decide(
+      [account("a", 50), account("b", 51, { windows: [weekly(51, { resetsAt: inHours(99) })] })],
+      { policy: paced },
+    );
     expect(sooner.selectedInstanceId).toBe("b");
     expect(sooner.reasons[0]).toContain("and resets sooner.");
   });
@@ -318,21 +333,17 @@ describe("close accounts", () => {
   it("never treats an account without a reading as close to one that has one", () => {
     const unread = account("b", 0, { windows: [] });
     expect(decide([account("a", 95), unread], { policy: order("b") }).selectedInstanceId).toBe("a");
+    expect(
+      decide([account("a", 95), unread], { policy: { accountOrder: [key("b")] } })
+        .selectedInstanceId,
+    ).toBe("a");
     expect(decide([unread]).selectedInstanceId).toBe("b");
   });
 });
 
 describe("runway", () => {
-  it("prefers a bigger plan with a lower percentage left over a smaller one with more", () => {
-    // a is 70% used but holds $10,000 a week; b is 20% used but holds $500.
-    const decision = decide([account("a", 70), account("b", 20)], {
-      learned: learned({ b: { weekly: 0.2 } }),
-    });
-    expect(decision.selectedInstanceId).toBe("a");
-    expect(candidate(decision, "a").roomWorkers!).toBeGreaterThan(
-      candidate(decision, "b").roomWorkers!,
-    );
-  });
+  const slack = (decision: ReturnType<typeof decide>, id: string) =>
+    candidate(decision, id).goalSlackPoints!;
 
   it("charges more for a session with a larger context", () => {
     const rate = (contextTokens: number) =>
@@ -346,32 +357,37 @@ describe("runway", () => {
     expect(rate(500_000)).toBe(rate(100_000) + 20);
     // A loaded account fills sooner when its sessions carry a larger context.
     const small = decide([account("a", 50)], {
+      policy: paced,
       demand: [{ ...worker("a", "w1"), contextTokens: 50_000 }],
     });
     const large = decide([account("a", 50)], {
+      policy: paced,
       demand: [{ ...worker("a", "w1"), contextTokens: 800_000 }],
     });
-    expect(candidate(large, "a").roomWorkers!).toBeLessThan(candidate(small, "a").roomWorkers!);
+    expect(slack(large, "a")).toBeLessThan(slack(small, "a"));
   });
 
   it("counts a master at the master rate, below a worker", () => {
     const { worker: _worker, ...master } = worker("a", "m1");
-    const withMaster = decide([account("a", 50), account("b", 50)], { demand: [master] });
+    const withMaster = decide([account("a", 50), account("b", 50)], {
+      policy: paced,
+      demand: [master],
+    });
     const withWorker = decide([account("a", 50), account("b", 50)], {
+      policy: paced,
       demand: [worker("a", "w1")],
     });
-    expect(candidate(withMaster, "a").roomWorkers!).toBeGreaterThan(
-      candidate(withWorker, "a").roomWorkers!,
-    );
-    expect(candidate(withMaster, "a").roomWorkers!).toBeLessThan(
-      candidate(withMaster, "b").roomWorkers!,
-    );
+    expect(slack(withMaster, "a")).toBeGreaterThan(slack(withWorker, "a"));
+    expect(slack(withMaster, "a")).toBeLessThan(slack(withMaster, "b"));
   });
 
   it("projects outside use as load", () => {
-    const quiet = decide([account("a", 50)]);
-    const busy = decide([account("a", 50)], { learned: learned({ a: { background: 0.2 } }) });
-    expect(candidate(busy, "a").roomWorkers!).toBeLessThan(candidate(quiet, "a").roomWorkers!);
+    const quiet = decide([account("a", 50)], { policy: paced });
+    const busy = decide([account("a", 50)], {
+      policy: paced,
+      learned: learned({ a: { background: 0.2 } }),
+    });
+    expect(slack(busy, "a")).toBeLessThan(slack(quiet, "a"));
   });
 
   it("starts a 5-hour window that has not begun with the job, so it resets during a long one", () => {
@@ -469,7 +485,7 @@ describe("runway", () => {
       },
     });
     expect(capped.selectedInstanceId).toBe("b");
-    expect(candidate(capped, "a").line).toContain("(hard cap 55%)");
+    expect(candidate(capped, "a").line).toContain(", hard cap 55%)");
   });
 });
 
@@ -484,24 +500,88 @@ describe("daily goal", () => {
     })),
   });
 
-  it("ranks an account within its goal ahead of one over its goal with more raw room", () => {
+  it("ranks an account behind its goal ahead of one ahead of its goal with more raw room", () => {
+    // By the job's end a may use 20 × 74 / 24 = 61.7%, b 15.4%.
     const decision = decide(
       [account("a", 40, { windows: [started(40)] }), account("b", 20, { windows: [started(20)] })],
       { policy: goals({ a: 20, b: 5 }) },
     );
-    expect(candidate(decision, "b")).toMatchObject({ withinGoal: false });
-    expect(candidate(decision, "a")).toMatchObject({ withinGoal: true });
+    expect(candidate(decision, "a").goalSlackPoints).toBeCloseTo(21.47, 2);
+    expect(candidate(decision, "b").goalSlackPoints).toBeCloseTo(-4.78, 2);
     expect(decision.selectedInstanceId).toBe("a");
-    expect(decision.reasons[0]).toContain("Weekly 40% used against a goal of 20% a day");
+    expect(decision.reasons[0]).toBe(
+      "a: 21 points behind its goal (Weekly 40% used, 40% by the job's end against a goal of 62%), 0 workers; furthest behind its goal of 2 accounts.",
+    );
   });
 
-  it("still uses an account over its goal when none is within, the least over first", () => {
+  it("still uses an account ahead of its goal when none is behind, the least ahead first", () => {
     const decision = decide(
       [account("a", 40, { windows: [started(40)] }), account("b", 30, { windows: [started(30)] })],
       { policy: goals({ a: 5, b: 5 }) },
     );
     expect(decision.selectedInstanceId).toBe("b");
-    expect(decision.reasons[0]).toContain("every account that fits is over its daily goal");
+    expect(decision.reasons[0]).toContain("b: 15 points ahead of its goal");
+    expect(decision.reasons[0]).toContain("least ahead of its goal of 2 accounts.");
+  });
+
+  it("ranks a small plan far behind its goal above a large plan slightly behind", () => {
+    // a holds $10,000 a week and is 3 points behind; b holds $500 and is 34 points behind.
+    const decision = decide([account("a", 55), account("b", 20)], {
+      policy: { ...paced, accountOrder: [key("a")] },
+      learned: learned({ b: { weekly: 0.2 } }),
+    });
+    expect(decision.selectedInstanceId).toBe("b");
+    expect(candidate(decision, "b").line).toBe(
+      "b: 34 points behind its goal (Weekly 20% used, 24% by the job's end against a goal of 58%), 0 workers",
+    );
+  });
+
+  it("puts an account ahead of its goal after one behind it, unless they are close and the order prefers it", () => {
+    // a is 6.9 points ahead of the 58.3% line, b 1.1 behind and c 13.1 behind.
+    const accounts = [account("a", 65), account("b", 57), account("c", 45)];
+    expect(decide(accounts, { policy: paced }).selectedInstanceId).toBe("c");
+    expect(decide(accounts.slice(0, 2), { policy: paced }).selectedInstanceId).toBe("b");
+    // Within the margin of the best, the order decides, wherever the goal line falls.
+    expect(
+      decide(accounts.slice(0, 2), { policy: { ...paced, accountOrder: [key("a")] } })
+        .selectedInstanceId,
+    ).toBe("a");
+    expect(
+      decide(accounts, { policy: { ...paced, accountOrder: [key("a")] } }).selectedInstanceId,
+    ).toBe("c");
+  });
+
+  it("paces a model's own weekly window, which ranks the account for that model only", () => {
+    const sol = weekly(60, { id: "sol_weekly", label: "Sol weekly", models: ["sol"] });
+    const base = learned();
+    const withSol: AllocationLearned = {
+      ...base,
+      limits: [...base.limits, { ...base.limits[0]!, windowId: "sol_weekly" }],
+    };
+    const accounts = [account("a", 30, { windows: [weekly(30), sol] }), account("b", 45)];
+    // On astra, a is 28 points behind its goal and b 13.
+    const astra = decide(accounts, { policy: paced, learned: withSol });
+    expect(astra.selectedInstanceId).toBe("a");
+    // Sol weekly is past its own line: a is 2 points ahead for Sol and b keeps its 13.
+    const onSol = decide(accounts, {
+      policy: paced,
+      learned: withSol,
+      request: { model: "sol" },
+    });
+    expect(onSol.selectedInstanceId).toBe("b");
+    expect(candidate(onSol, "a").line).toBe(
+      "a: 2 points ahead of its goal (Sol weekly 60% used, 60% by the job's end against a goal of 58%), 0 workers",
+    );
+  });
+
+  it("never puts an account that does not fit first while one fits", () => {
+    // a is far behind its goal, but its 5-hour window runs out during the job.
+    const accounts = [account("a", 10, { windows: [weekly(10), fiveHour(95)] }), account("b", 65)];
+    const decision = decide(accounts, {
+      policy: { ...paced, accountOrder: [key("a")], closeMarginPoints: 50 },
+    });
+    expect(candidate(decision, "a")).toMatchObject({ fits: false });
+    expect(decision.selectedInstanceId).toBe("b");
   });
 
   it("never refuses or redirects a pinned account that is over its goal", () => {
@@ -537,8 +617,11 @@ describe("daily goal", () => {
     const decision = decide([account("a", 40, { windows: [started(40)] })], {
       policy: { codex: { dailyPoints: 10 } },
     });
-    expect(candidate(decision, "a").withinGoal).toBe(false);
-    expect(decision.reasons[0]).toContain("against a goal of 10% a day");
+    // 10% a day allows 30.8% by the job's end.
+    expect(candidate(decision, "a").goalSlackPoints).toBeCloseTo(-9.37, 2);
+    expect(decision.reasons[0]).toContain(
+      "9 points ahead of its goal (Weekly 40% used, 40% by the job's end against a goal of 31%)",
+    );
   });
 });
 
@@ -607,7 +690,9 @@ describe("drained", () => {
     });
     const below = decide([account("a", 50)], { policy: cap() });
     expect(candidate(below, "a")).toMatchObject({ eligible: true, roomPoints: 30 });
-    expect(candidate(below, "a").line).toContain("tightest limit Weekly (hard cap 80%)");
+    expect(candidate(below, "a").line).toContain(
+      "(Weekly 50% used, 50% by the job's end, hard cap 80%)",
+    );
     // Room to the cap decides the ranking: b has more of its allowance left, a more to its cap.
     expect(
       decide([account("a", 50), account("b", 60)], {

@@ -27,8 +27,6 @@ const SEED_DOLLARS_PER_HOUR: Record<SessionKind, number> = { worker: 8, master: 
 const SEED_WINDOW_DOLLARS_PER_PLAN = { session: 13, weekly: 120, scoped: 36, monthly: 500 };
 /** Job length when neither the start nor the history gives one. */
 export const SEED_JOB_HOURS = 2;
-/** A reset closer than this after the job still leaves this much time to spend what is spare. */
-const MIN_HOURS_LEFT = 0.25;
 
 export interface SessionLoad {
   readonly driver: string;
@@ -106,9 +104,12 @@ export function limitShare(
   };
 }
 
-/** The daily goal applies to account-wide weekly and monthly windows; the 5-hour one has none. */
+/**
+ * The daily goal applies to weekly windows, account-wide or a model's own, and to an
+ * account-wide monthly one; the 5-hour one has none.
+ */
 export const paced = (w: Pick<AllocationWindow, "kind" | "models">) =>
-  (w.kind === "weekly" || w.kind === "monthly") && !w.models?.length;
+  w.kind === "weekly" || (w.kind === "monthly" && !w.models?.length);
 
 export interface WindowProjection {
   readonly window: AllocationWindow;
@@ -119,13 +120,13 @@ export interface WindowProjection {
   /** Use at the job's end or the window's reset, whichever is first; everyone's use included. */
   readonly projected: number;
   readonly fits: boolean;
-  /** The daily goal's budget at that time; null without a goal. */
+  /** Use at the job's end, in the next cycle when the window resets first. */
+  readonly atEnd: number;
+  /** The daily goal's line at the job's end; null without a goal. */
   readonly goal: number | null;
   readonly goalPerDay: number | null;
-  readonly withinGoal: boolean | null;
-  readonly overGoal: number;
-  /** Dollars per hour left until the reset after the job, against the goal where there is one. */
-  readonly spareDollarsPerHour: number;
+  /** Points the use at the job's end is below the goal line (negative: above); null without one. */
+  readonly slack: number | null;
   /** Hours until this limit runs out at the projected load; null when it resets first. */
   readonly lastsHours: number | null;
 }
@@ -133,16 +134,15 @@ export interface WindowProjection {
 export interface AccountProjection {
   readonly windows: readonly WindowProjection[];
   readonly fits: boolean;
-  /** Absent without a goal. */
-  readonly withinGoal?: boolean;
-  readonly overGoal: number;
-  /** More sessions like this one the tightest limit has room for; null without a reading. */
-  readonly roomWorkers: number | null;
+  /** The smallest slack of a paced window; null when none has a goal line. */
+  readonly slack: number | null;
+  readonly paceWindow?: WindowProjection;
+  /** Points left at the job's end on the tightest limit; null without a reading. */
+  readonly leftPoints: number | null;
   readonly tightest?: WindowProjection;
   readonly lastsHours: number | null;
   /** When it does not fit: the reset that clears the limit in its way, null when unknown. */
   readonly fitsFrom?: string | null;
-  readonly dollarsPerHour: number;
   readonly hours: number;
 }
 
@@ -227,14 +227,6 @@ export function projectAccount(input: {
         ? share.percentPerDollar * dollars * (hours - reset) +
           share.background(resetsAt!, hours - reset)
         : projected;
-      const hoursLeft = Math.max(
-        MIN_HOURS_LEFT,
-        resetsFirst
-          ? (duration ?? 168) - (hours - reset)
-          : reset === null
-            ? (duration ?? 168)
-            : reset - hours,
-      );
       const goalBudget =
         input.goal !== null && paced(w) && cycleStart !== null
           ? Math.min(
@@ -244,8 +236,6 @@ export function projectAccount(input: {
                   DAY),
             )
           : null;
-      // The goal is measured against the meter's total, everyone's use included.
-      const withinGoal = goalBudget === null ? null : after <= goalBudget + 1e-9;
       const burn = share.percentPerDollar * dollars + share.background(at, 1);
       const runsOut = burn > 0 ? Math.max(0, limit - used) / burn : null;
       return {
@@ -255,25 +245,26 @@ export function projectAccount(input: {
         resetsAt,
         projected,
         fits,
+        atEnd: after,
         goal: goalBudget,
         goalPerDay: goalBudget === null ? null : input.goal,
-        withinGoal,
-        overGoal: goalBudget === null ? 0 : Math.max(0, after - goalBudget),
-        spareDollarsPerHour:
-          Math.max(0, (goalBudget ?? limit) - after) / share.percentPerDollar / hoursLeft,
+        // The goal is measured against the meter's total, everyone's use included.
+        slack: goalBudget === null ? null : goalBudget - after,
         lastsHours: runsOut === null || (reset !== null && runsOut >= reset) ? null : runsOut,
       };
     });
-  const tightest = windows.toSorted((a, b) => a.spareDollarsPerHour - b.spareDollarsPerHour)[0];
+  const paceWindow = windows
+    .filter((w) => w.slack !== null)
+    .toSorted((a, b) => a.slack! - b.slack!)[0];
+  const tightest = windows.toSorted((a, b) => a.limit - a.atEnd - (b.limit - b.atEnd))[0];
   const failing = windows.filter((w) => !w.fits);
-  const goals = windows.filter((w) => w.withinGoal !== null);
   const lasts = windows.flatMap((w) => (w.lastsHours === null ? [] : [w.lastsHours]));
   return {
     windows,
     fits: failing.length === 0,
-    ...(goals.length ? { withinGoal: goals.every((w) => w.withinGoal) } : {}),
-    overGoal: Math.max(0, ...windows.map((w) => w.overGoal)),
-    roomWorkers: tightest && rate > 0 ? tightest.spareDollarsPerHour / rate : null,
+    slack: paceWindow?.slack ?? null,
+    ...(paceWindow ? { paceWindow } : {}),
+    leftPoints: tightest ? tightest.limit - tightest.atEnd : null,
     ...(tightest ? { tightest } : {}),
     lastsHours: lasts.length ? Math.min(...lasts) : null,
     ...(failing.length
@@ -283,7 +274,6 @@ export function projectAccount(input: {
             : DateTime.formatIso(DateTime.makeUnsafe(Math.max(...failing.map((w) => w.resetsAt!)))),
         }
       : {}),
-    dollarsPerHour: rate,
     hours,
   };
 }
@@ -295,34 +285,35 @@ export const span = (hours: number) =>
       ? `${Math.floor(hours)}h ${Math.round((hours % 1) * 60)}m`
       : `${Math.max(1, Math.round(hours * 60))}m`;
 
+/** Where an account stands against its daily goal, or on its tightest limit without one. */
+export const standing = (slack: number | null, leftPoints: number | null) =>
+  slack !== null
+    ? `${Math.round(Math.abs(slack))} points ${slack < 0 ? "ahead of" : "behind"} its goal`
+    : leftPoints !== null
+      ? `no goal line, ${Math.round(leftPoints)}% left`
+      : "no usage reading";
+
 /** The projection in words, without the account's name. */
-export function runwayText(
-  p: AccountProjection,
-  profile: string,
-  kind: SessionKind,
-  at: number,
-): string {
-  const tightest = p.tightest;
-  if (!tightest) return "no usage reading";
-  const room = p.roomWorkers ?? 0;
-  const sessions = `${kind === "worker" ? "worker" : "session"}${room < 2 ? "" : "s"}`;
+export function runwayText(p: AccountProjection, at: number): string {
   const resetIn = (w: WindowProjection) =>
     w.resetsAt === null ? "" : ` in ${span((w.resetsAt - at) / HOUR)}`;
-  const goal = p.windows.find((w) => w.goal !== null);
-  const goalText = goal
-    ? `; ${goal.window.label} ${Math.round(goal.used)}% used against a goal of ${Math.round(goal.goalPerDay!)}% a day (${Math.round(goal.goal!)}% by the job's end)`
-    : "";
+  const cap = (w: WindowProjection) => (w.limit < 100 ? `, hard cap ${w.limit}%` : "");
   if (!p.fits) {
     const out = p.windows
       .filter((w) => !w.fits)
       .toSorted((a, b) => (a.lastsHours ?? Infinity) - (b.lastsHours ?? Infinity))[0]!;
     return `${out.window.label} runs out ${
       out.lastsHours === null ? "before the job ends" : `in about ${span(out.lastsHours)}`
-    }, before this ${span(p.hours)} job ends (${Math.round(out.used)}% used${
-      out.limit < 100 ? `, hard cap ${out.limit}%` : ""
-    }, resets${resetIn(out) || " at an unknown time"})${goalText}`;
+    }, before this ${span(p.hours)} job ends (${Math.round(out.used)}% used${cap(out)}, resets${
+      resetIn(out) || " at an unknown time"
+    })`;
   }
-  return `room for ${room < 1 ? "less than one more" : `about ${Math.floor(room)} more`} ${profile} ${sessions} until the ${tightest.window.label} reset${resetIn(tightest)}; tightest limit ${tightest.window.label}${
-    tightest.limit < 100 ? ` (hard cap ${tightest.limit}%)` : ""
-  }${goalText}`;
+  const w = p.paceWindow ?? p.tightest;
+  if (!w) return standing(null, null);
+  const resetsFirst = w.resetsAt !== null && w.resetsAt < at + p.hours * HOUR;
+  return `${standing(p.slack, p.leftPoints)} (${w.window.label} ${Math.round(w.used)}% used${
+    resetsFirst ? `, resets${resetIn(w)}` : ""
+  }, ${Math.round(w.atEnd)}% by the job's end${
+    w.goal === null ? "" : ` against a goal of ${Math.round(w.goal)}%`
+  }${cap(w)})`;
 }

@@ -54,11 +54,10 @@ the master names one, and then the account, model and effort together:
    at its own model, effort and context, masters at their lower rate, idle sessions not at all,
    plus the account's use outside T3. An account **fits** when no limit runs out before the job
    ends; a hard cap counts as the limit.
-3. Among accounts that fit, those within their **daily goal** come first, then the one with the
-   most spare capacity per hour until the tightest limit resets. Between accounts within the
-   **closeness margin** (percent of the best one's room), the earlier one in the **preference
-   order** wins, then the one with fewer workers, then the one that resets sooner. Accounts over
-   their goal are used only when none is within it, the least over first.
+3. Among accounts that fit, the one furthest behind its **daily goal** wins, in points of its
+   tightest weekly window at the job's end (negative when ahead). Within the **closeness
+   margin** (points) of it, the earlier one in the **preference order** wins, then fewer
+   workers, then the sooner reset. Accounts without a goal line follow, by points left.
 4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
    (45 at stakes 8 or more); otherwise it takes the nearest ladder model that fits, at most two
    rungs away; otherwise, below the fallback's threshold, the **fallback** model; otherwise the
@@ -68,12 +67,12 @@ the master names one, and then the account, model and effort together:
    Codex is used only when a start asks for it and never changes model.
 
 The result names the choice, the table's choice when it differs, when a waiting start begins,
-one reason line with the numbers (for example "XY: room for about 3 more Fable-medium workers
-until the weekly reset; tightest limit Fable weekly"), and one line per account. A model the
-user named is the starting point and is replaced the same way. An account the user named is
-exact: when the model is used up there, the start is refused.
+one reason line with the numbers (for example "ARA: 35 points behind its goal (Weekly 16% used,
+18% by the job's end against a goal of 53%)"), and one line per account. A model the user named
+is the starting point and is replaced the same way. An account the user named is exact: when the
+model is used up there, the start is refused.
 
-A **daily goal** is the share of the weekly (or monthly) limit an account should use each day.
+A **daily goal** is the share of each weekly (or monthly) limit an account should use each day.
 Without one, an account uses its provider's default. A goal only changes which account is
 recommended: it never stops, queues or changes a start, and a pinned account over its goal starts
 normally. Only a hard cap or a real limit stops work.
@@ -87,8 +86,9 @@ Fable low, medium or high: its table entry starts from the first of those at or 
 when it has no room only another of them stands in, never another model or the fallback. When
 that account's Fable limit is used up, it takes no workers until the limit resets. A worker on any
 other account gets the table's choice as usual. Each account is judged on the model it would run
-there, so the account with the most room still wins; the result shows the table's choice when it
-differs and names the account's Fable mode. A model you pin for one worker is kept, with a note.
+there, so the account furthest behind its goal still wins; the result shows the table's choice
+when it differs and names the account's Fable mode. A model you pin for one worker is kept, with a
+note.
 Turning an account's Fable mode on turns Fable workers on; turning Fable workers off turns every
 account's Fable mode off.
 

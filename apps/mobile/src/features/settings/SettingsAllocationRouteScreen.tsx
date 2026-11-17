@@ -63,7 +63,7 @@ const RULES = [
   {
     key: "closeMarginPoints",
     label: "Close-call margin",
-    unit: "%",
+    unit: "points",
     initial: DEFAULT_CLOSE_MARGIN_POINTS,
   },
   {

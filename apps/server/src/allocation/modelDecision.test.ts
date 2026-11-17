@@ -218,7 +218,7 @@ describe("account, model and effort together", () => {
     expect(choice.tried).toHaveLength(1);
     expect(choice.accounts).toEqual([
       `A: drained until ${inHours(100)} (Weekly · ${FABLE} 100% used), 0 workers`,
-      `B: room for about 4 more ${FABLE} / medium workers until the Weekly reset in 4d; tightest limit Weekly, 0 workers`,
+      "B: no goal line, 40% left (Weekly 60% used, 60% by the job's end), 0 workers",
     ]);
   });
 
@@ -1094,9 +1094,9 @@ describe("Fable mode", () => {
     expect(normal.wanted).toBeUndefined();
     expect(normal.notes).toEqual([]);
     expect(normal.accounts[0]).toMatch(
-      new RegExp(`^A \\(Fable mode\\): room for .* ${FABLE} / low workers`),
+      new RegExp(`^A \\(Fable mode\\): no goal line, 20% left \\(Weekly · ${FABLE} 80% used`),
     );
-    expect(normal.accounts[1]).toMatch(new RegExp(`^B: room for .* ${OPUS} / high workers`));
+    expect(normal.accounts[1]).toMatch(/^B: no goal line, 50% left \(Weekly 50% used/);
     // Admission chooses among the accounts that run the chosen model only.
     expect(normal.decision!.request.allowedInstanceIds).toEqual(["B"]);
     // With more room for Fable on A than for Opus on B, A runs Fable.

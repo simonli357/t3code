@@ -58,7 +58,7 @@ const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
 const unsaved = <p className="text-xs text-destructive">Not saved</p>;
 /** What a name does not say by itself, shown on hover. */
 const HINTS = {
-  order: "Between accounts with similar room left, the higher one is used.",
+  order: "Between accounts similarly behind their goal, the higher one is used.",
   fable: "Workers on this account run on Fable only.",
   goal: "Share of the weekly limit to use each day. It only ranks accounts.",
   cap: "Usage where the account takes no more work.",
@@ -747,12 +747,12 @@ export function AllocationControls({
         <Rule
           title="Close-call margin"
           hint="accounts this close count as equal"
-          detail="Accounts within this much of the roomiest one count as equal; the order decides between them."
+          detail="Within this many points of the account furthest behind its goal, the order decides."
           failed={notSaved.has("closeMarginPoints")}
         >
           <NumberField
             name="Close-call margin"
-            unit="%"
+            unit="points"
             value={policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS}
             required
             min={0}

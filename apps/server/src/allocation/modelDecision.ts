@@ -215,8 +215,8 @@ export const fableModeAccount = (
 ) => policy.fableWorkers !== false && allocationFableMode(policy, account);
 
 /**
- * Picks account, model and effort together. The wanted model on the account with the most
- * spare capacity, when it fits the job somewhere. Otherwise: wait for a limit that resets
+ * Picks account, model and effort together. The wanted model on the account furthest behind
+ * its daily goal, when it fits the job somewhere. Otherwise: wait for a limit that resets
  * within 30 minutes (45 at high stakes); else the nearest ladder rung that fits, at most two
  * away; else the fallback model below its threshold; else the wanted model on the account
  * that lasts longest. When every candidate is out, the same choice as of a reset within the

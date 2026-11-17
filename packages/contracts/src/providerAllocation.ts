@@ -65,7 +65,7 @@ export const AllocationAccountCap = Schema.Struct({
   ...accountCapFields,
 });
 export type AllocationAccountCap = typeof AllocationAccountCap.Type;
-/** Two accounts whose room differs by at most this many points are close. */
+/** Two accounts at most this many points apart behind their daily goal are close. */
 export const DEFAULT_CLOSE_MARGIN_POINTS = 10;
 /** A limited worker waits for a reset this near before it changes model. */
 export const DEFAULT_LONG_WAIT_HOURS = 3;
@@ -134,7 +134,8 @@ export const AllocationPolicy = Schema.Struct({
   accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
   /**
    * Accounts by `allocationPreferenceKey`, most preferred first. It decides only between
-   * accounts whose room is close; unlisted accounts come after listed ones.
+   * accounts within `closeMarginPoints` of the one furthest behind its daily goal; unlisted
+   * accounts come after listed ones.
    */
   accountOrder: Schema.optional(Names),
   closeMarginPoints: Schema.optional(
@@ -468,10 +469,12 @@ export const AllocationCandidate = Schema.Struct({
   workers: Schema.optional(NonNegativeInt),
   /** No limit or hard cap runs out before the job ends or the window resets. */
   fits: Schema.optional(Schema.Boolean),
-  /** Inside its daily goal at the job's end; absent without a goal. */
-  withinGoal: Schema.optional(Schema.Boolean),
-  /** How many more workers like this one the tightest limit has room for until its reset. */
-  roomWorkers: Schema.optional(Schema.NullOr(Schema.Number)),
+  /**
+   * Points its tightest paced window is behind the daily goal line at the job's end (negative:
+   * ahead); absent without a goal line. Decisions from older builds carry `withinGoal` and
+   * `roomWorkers` instead, which decoding drops.
+   */
+  goalSlackPoints: Schema.optional(Schema.Number),
   /** Hours until the first limit runs out at the projected load; null when none does. */
   lastsHours: Schema.optional(Schema.NullOr(Schema.Number)),
   /** When it does not fit: the reset that clears the limit in its way; null when unknown. */
