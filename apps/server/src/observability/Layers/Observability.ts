@@ -17,6 +17,7 @@ import * as ServerConfig from "../../config.ts";
 import * as ResourceAttribution from "../../resourceTelemetry/ResourceAttribution.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import * as BrowserTraceCollector from "../BrowserTraceCollector.ts";
+import * as BurstEvidence from "../BurstEvidence.ts";
 
 export const ObservabilityLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -38,6 +39,26 @@ export const ObservabilityLive = Layer.unwrap(
 
     const tracerLayer = Layer.unwrap(
       Effect.gen(function* () {
+        // Before the sink opens: it rotates the previous run's files away.
+        const preserved = yield* Effect.try(() =>
+          BurstEvidence.preservePreviousRun({
+            logsDir: config.logsDir,
+            tracePath: config.serverTracePath,
+            runtimeStatePath: config.serverRuntimeStatePath,
+            logPath: BurstEvidence.stderrLogPath(),
+          }),
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Failed to set aside the previous run's traces.", { cause }),
+          ),
+        );
+        if (preserved !== undefined) {
+          yield* Effect.logWarning(
+            "The previous run did not shut down cleanly. Its last traces were set aside.",
+            { path: preserved },
+          );
+        }
+        const inFlight = yield* BurstEvidence.start(config.logsDir);
         const sink = yield* makeTraceSink({
           filePath: config.serverTracePath,
           maxBytes: config.traceMaxBytes,
@@ -68,6 +89,7 @@ export const ObservabilityLive = Layer.unwrap(
           maxFiles: config.traceMaxFiles,
           batchWindowMs: config.traceBatchWindowMs,
           sink,
+          inFlight,
           ...(delegate ? { delegate } : {}),
         });
 

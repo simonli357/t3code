@@ -1,4 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off - v8.writeHeapSnapshot has no Effect equivalent.
+// @effect-diagnostics nodeBuiltinImport:off - v8.writeHeapSnapshot has no Effect equivalent, and the request line must be written synchronously.
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeV8 from "node:v8";
 
@@ -30,6 +31,26 @@ export const writeHeapSnapshot = Effect.fn("server.heapSnapshot", { root: true }
 );
 
 /**
+ * Says at once that a snapshot was asked for. The write that follows blocks
+ * the event loop and can use several times the heap in native memory, so
+ * this line may be the only one the server gets out. It goes straight to the
+ * descriptor because a logger can buffer.
+ */
+export const announceHeapSnapshotRequest = (write: (text: string) => void = writeStderr) =>
+  write(
+    // @effect-diagnostics-next-line globalDate:off - runs in a signal handler, outside Effect.
+    `[${new Date().toISOString()}] WARN heap snapshot requested by SIGUSR2; the server stops answering until it is written (pid ${process.pid}, rss ${Math.round(process.memoryUsage.rss() / 1048576)} MB)\n`,
+  );
+
+const writeStderr = (text: string) => {
+  try {
+    NodeFS.writeSync(2, text);
+  } catch {
+    // Nothing else to tell.
+  }
+};
+
+/**
  * Writes a heap snapshot when the process gets SIGUSR2 (`kill -USR2 <pid>`),
  * so a maintainer can see what a long-running server holds. See "Heap
  * Snapshots" in docs/operations/observability.md.
@@ -43,7 +64,10 @@ export const layer = Layer.effectDiscard(
     if ((yield* HostProcessPlatform) === "win32") return;
     const { logsDir } = yield* ServerConfig.ServerConfig;
     const runFork = Effect.runForkWith(yield* Effect.context<FileSystem.FileSystem>());
-    const onSignal = () => void runFork(writeHeapSnapshot(logsDir));
+    const onSignal = () => {
+      announceHeapSnapshotRequest();
+      void runFork(writeHeapSnapshot(logsDir));
+    };
     yield* Effect.acquireRelease(
       Effect.sync(() => process.on("SIGUSR2", onSignal)),
       () => Effect.sync(() => process.off("SIGUSR2", onSignal)),

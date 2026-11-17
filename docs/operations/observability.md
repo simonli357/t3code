@@ -657,10 +657,40 @@ Current high-value span and metric boundaries include:
   captured in its launcher log
 - metrics are not snapshotted locally
 
+## Memory bursts
+
+Twice the server grew from under 2 GB to over 10 GB in two minutes and was killed without a log
+line. Three things now leave evidence for the next time. All thresholds are in `BURST_EVIDENCE` in
+`apps/server/src/observability/BurstEvidence.ts`.
+
+- **`<logsDir>/server.memory-burst.ndjson`.** A worker thread inside the server samples memory every
+  5 s and keeps 5 minutes in memory. It writes nothing until resident memory rises 1 GB within a
+  minute or the main thread has been silent for 10 s. Then it writes the samples it held, the
+  operations in flight, one line to stderr, and one sample per 5 s until a minute passes with
+  neither condition. It writes with synchronous calls from its own thread, so a blocked main thread
+  does not delay it and the lines survive a `SIGKILL`. `heapUsedMb`, `externalMb` and
+  `arrayBuffersMb` come from the main thread and are as old as `mainThreadSilentMs`; `rssMb`,
+  `virtualMb` and `swapMb` are current.
+- **`in-flight` records** in that file list the spans that had started and not ended, newest first.
+  A span reaches the trace file only when it ends, so this is the only record of the one a blocked
+  main thread is inside. Names only, up to 40 of them.
+- **`<logsDir>/unclean-shutdown-<time>-pid<pid>/`.** A clean shutdown removes `server-runtime.json`.
+  When the next start finds one whose process is gone, it moves that run's newest trace files (up to
+  40 MB) into this folder before the new run rotates them away, with a copy of the burst file,
+  `previous-run.json`, and `log-tail.txt` (the last 256 KB of the log, when stderr is a file as in
+  the service unit). The two newest folders are kept.
+
+To read one: open the folder for the killed pid, find `burst-start` in the burst file, read the
+samples before it for when memory began to move, the `in-flight` record for what was running, and
+the trace files for what finished just before.
+
+A start on a large database can block the main thread for more than 10 s and write one short record.
+
 ## Heap Snapshots
 
-To see what a long-running server holds in memory, send it `SIGUSR2`. The server writes a V8 heap
-snapshot to its logs dir and logs the path. This works for desktop, `npx t3`, and service installs
+To see what a long-running server holds in memory, send it `SIGUSR2`. The server writes one line
+to stderr at once (`heap snapshot requested by SIGUSR2`), then a V8 heap snapshot to its logs dir,
+and logs the path. This works for desktop, `npx t3`, and service installs
 on macOS and Linux. Windows has no `SIGUSR2`.
 
 Send the signal to the server pid in `server-runtime.json`, which sits in the server's state dir

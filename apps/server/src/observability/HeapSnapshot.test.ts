@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { vi } from "vite-plus/test";
 
-import { writeHeapSnapshot } from "./HeapSnapshot.ts";
+import { announceHeapSnapshotRequest, writeHeapSnapshot } from "./HeapSnapshot.ts";
 
 vi.mock("node:v8", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeV8>();
@@ -32,5 +32,15 @@ it.layer(NodeServices.layer)("writeHeapSnapshot", (it) => {
       assert.strictEqual(NodePath.dirname(partialPath ?? ""), logsDir);
       assert.deepEqual(yield* fs.readDirectory(logsDir), []);
     }),
+  );
+});
+
+it("announces a snapshot request with the pid before any work", () => {
+  const lines: Array<string> = [];
+  announceHeapSnapshotRequest((text) => lines.push(text));
+  assert.strictEqual(lines.length, 1);
+  assert.match(
+    lines[0] ?? "",
+    new RegExp(`heap snapshot requested by SIGUSR2.*pid ${process.pid}, rss \\d+ MB`),
   );
 });

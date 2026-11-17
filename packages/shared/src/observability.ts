@@ -156,6 +156,18 @@ export interface TraceSink {
 export interface LocalFileTracerOptions extends TraceSinkOptions {
   readonly delegate?: Tracer.Tracer;
   readonly sink?: TraceSink;
+  /**
+   * Told when each span starts and ends, so something outside the event loop
+   * can say which spans were open when the process stopped answering. A span
+   * is written to the trace file only when it ends.
+   */
+  readonly inFlight?: InFlightSpans;
+}
+
+export interface InFlightSpans {
+  /** Returns a token for `end`. */
+  readonly start: (name: string) => number;
+  readonly end: (token: number) => void;
 }
 
 type OtlpSpan = OtlpTracer.ScopeSpan["spans"][number];
@@ -473,14 +485,19 @@ class LocalFileSpan implements Tracer.Span {
   events: Array<[name: string, startTime: bigint, attributes: Record<string, unknown>]>;
   private readonly delegate: Tracer.Span;
   private readonly push: (record: EffectTraceRecord) => void;
+  private readonly inFlight: InFlightSpans | undefined;
+  private readonly inFlightToken: number;
 
   constructor(
     options: Parameters<Tracer.Tracer["span"]>[0],
     delegate: Tracer.Span,
     push: (record: EffectTraceRecord) => void,
+    inFlight?: InFlightSpans,
   ) {
     this.delegate = delegate;
     this.push = push;
+    this.inFlight = inFlight;
+    this.inFlightToken = inFlight ? inFlight.start(delegate.name) : -1;
     this.name = delegate.name;
     this.spanId = delegate.spanId;
     this.traceId = delegate.traceId;
@@ -498,6 +515,7 @@ class LocalFileSpan implements Tracer.Span {
   }
 
   end(endTime: bigint, exit: Exit.Exit<unknown, unknown>): void {
+    this.inFlight?.end(this.inFlightToken);
     this.status = {
       _tag: "Ended",
       startTime: this.status.startTime,
@@ -549,7 +567,12 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
 
   return Tracer.make({
     span(spanOptions) {
-      return new LocalFileSpan(spanOptions, delegate.span(spanOptions), sink.push);
+      return new LocalFileSpan(
+        spanOptions,
+        delegate.span(spanOptions),
+        sink.push,
+        options.inFlight,
+      );
     },
     ...(delegate.context ? { context: delegate.context } : {}),
   });
