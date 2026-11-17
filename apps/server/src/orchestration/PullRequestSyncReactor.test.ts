@@ -968,4 +968,45 @@ describe("PullRequestSyncReactor", () => {
       }),
     ),
   );
+
+  it.effect("backs off a pull request whose host read keeps failing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("failing", { pullRequests: [makeLink(7, { state: "open" })] }),
+          ]),
+          summary: () =>
+            Effect.fail(
+              new PullRequestOperationError({ operation: "summary", detail: "not visible" }),
+            ),
+        });
+        const reads = Ref.get(fixture.summaryCalls).pipe(Effect.map((calls) => calls.length));
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          assert.strictEqual(yield* reads, 1);
+          // One failure waits two minutes, two wait four.
+          yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(yield* reads, 1);
+          yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(yield* reads, 2);
+          for (let sweep = 0; sweep < 3; sweep++) yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(yield* reads, 2);
+          yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(yield* reads, 3);
+          // An explicit refresh does not wait.
+          yield* reactor.requestSync({
+            host: "github.com",
+            repository: "owner/repository",
+            number: 7,
+          });
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          assert.strictEqual(yield* reads, 4);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
 });

@@ -31,6 +31,11 @@ import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./Services/ProjectionSnapshotQuery.ts";
 
 const SLOW_SYNC_INTERVAL_MS = 15 * 60 * 1_000;
+const SWEEP_INTERVAL_MS = 60 * 1_000;
+
+/** How long a pull request whose host read failed `failures` times in a row waits to be read again. */
+const failureBackoffMs = (failures: number): number =>
+  Math.min(SLOW_SYNC_INTERVAL_MS, SWEEP_INTERVAL_MS * 2 ** failures);
 
 type SnapshotFields = Omit<ThreadPullRequestSnapshot, "syncedAt">;
 
@@ -137,9 +142,16 @@ export const make = Effect.gen(function* () {
   // linking dozens of pull requests) is read together and shares the summary batches.
   let requestedSweepQueued = false;
   const retryStacks = new Set<string>();
+  // Pull requests whose last host read failed. A read that fails usually keeps failing (the
+  // signed-in account cannot see the repository, the host is down), so each one backs off
+  // instead of spawning the host CLI again on every sweep.
+  const failures = new Map<string, { readonly count: number; readonly retryAtMs: number }>();
 
   const isDue = (key: string, entries: ReadonlyArray<LinkEntry>, nowMs: number): boolean => {
-    if (requested.has(key) || retryStacks.has(key)) return true;
+    if (requested.has(key)) return true;
+    const failure = failures.get(key);
+    if (failure !== undefined && nowMs < failure.retryAtMs) return false;
+    if (retryStacks.has(key)) return true;
     if (entries.some((entry) => entry.link.snapshot === null)) return true;
     if (entries.every((entry) => entry.link.snapshot?.state === "merged")) return false;
     if (entries.some((entry) => entry.link.snapshot?.state === "open" && isUnsettled(entry.thread)))
@@ -174,6 +186,7 @@ export const make = Effect.gen(function* () {
     for (const key of lastSyncedAt.keys()) if (!groups.has(key)) lastSyncedAt.delete(key);
     for (const key of retryStacks) if (!groups.has(key)) retryStacks.delete(key);
     for (const key of requested.keys()) if (!groups.has(key)) requested.delete(key);
+    for (const key of failures.keys()) if (!groups.has(key)) failures.delete(key);
 
     // Layers auto-linked this sweep, so two links of one thread that share a
     // stack do not both try to add the same sibling.
@@ -288,6 +301,7 @@ export const make = Effect.gen(function* () {
       }
       // The host answered, so the cadence clock ticks even if a dispatch below is rejected.
       lastSyncedAt.set(key, nowMs);
+      failures.delete(key);
       // A refresh requested while the host read was in flight belongs to the next sweep.
       if (requested.get(key) === generation) requested.delete(key);
       yield* Effect.forEach(
@@ -311,7 +325,18 @@ export const make = Effect.gen(function* () {
       ([key, entries]) =>
         (scope === "all" || requested.has(key)) && isDue(key, entries, nowMs)
           ? syncGroup(key, entries).pipe(
-              Effect.catchCause(logSkipped("pull request sync skipped", { key })),
+              Effect.catchCause((cause) => {
+                if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+                const count = (failures.get(key)?.count ?? 0) + 1;
+                failures.set(key, { count, retryAtMs: nowMs + failureBackoffMs(count) });
+                // Once per run of failures, with the reason; the retries that follow are silent.
+                return count === 1
+                  ? Effect.logWarning("pull request sync skipped", {
+                      key,
+                      cause: Cause.pretty(cause).split("\n", 1)[0],
+                    })
+                  : Effect.void;
+              }),
             )
           : Effect.void,
       // As wide as one batched summary read, so the sweep's reads on a host arrive together and
@@ -341,7 +366,7 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* worker.enqueue("all");
         yield* worker.drain;
-      }).pipe(Effect.repeat(Schedule.spaced("1 minute")), Effect.asVoid),
+      }).pipe(Effect.repeat(Schedule.spaced(SWEEP_INTERVAL_MS)), Effect.asVoid),
     );
   });
 
