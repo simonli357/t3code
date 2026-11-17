@@ -273,6 +273,15 @@ export function allocationFableMode(
   );
 }
 
+/** A weekly window of Fable models only, such as "Weekly · Fable": a Fable goal is its line. */
+export const allocationFableWindow = (window: {
+  readonly kind: string;
+  readonly models?: readonly string[] | undefined;
+}) =>
+  window.kind === "weekly" &&
+  !!window.models?.length &&
+  window.models.every((model) => /fable/i.test(model));
+
 export const AllocationWindow = Schema.Struct({
   id: TrimmedNonEmptyString,
   label: Schema.String,

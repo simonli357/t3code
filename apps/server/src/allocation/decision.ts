@@ -1,4 +1,5 @@
 import {
+  allocationFableWindow,
   allocationFamilyGoal,
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
@@ -22,7 +23,6 @@ import type {
 import { findCatalogModel } from "@t3tools/shared/model";
 import {
   demandLoad,
-  fableWindow,
   limitShare,
   paced,
   projectAccount,
@@ -604,7 +604,7 @@ export function accountRunways(input: {
       const learnedShare = limitShare(input.learned, identity, w);
       const cycleStart = w.cycleStartedAt ? Date.parse(w.cycleStartedAt) : null;
       const perDay =
-        fableWindow(w) && fableGoal !== null ? fableGoal : (goal?.percentPerDay ?? null);
+        allocationFableWindow(w) && fableGoal !== null ? fableGoal : (goal?.percentPerDay ?? null);
       return {
         id: w.id,
         label: w.label,

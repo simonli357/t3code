@@ -1,4 +1,5 @@
 import {
+  allocationFableWindow,
   publishedPlanSize,
   type AllocationAccount,
   type AllocationAccountCap,
@@ -112,9 +113,6 @@ export const paced = (w: Pick<AllocationWindow, "kind" | "models">) =>
   w.kind === "weekly" || (w.kind === "monthly" && !w.models?.length);
 
 export const isFable = (model: string) => /fable/i.test(model);
-/** A weekly window of Fable models, such as "Weekly · Fable": an account's Fable goal is its line. */
-export const fableWindow = (w: Pick<AllocationWindow, "kind" | "models">) =>
-  w.kind === "weekly" && !!w.models?.length && w.models.every(isFable);
 
 export interface WindowProjection {
   readonly window: AllocationWindow;
@@ -236,7 +234,7 @@ export function projectAccount(input: {
         ? share.percentPerDollar * dollars * (hours - reset) +
           share.background(resetsAt!, hours - reset)
         : projected;
-      const fableGoal = fableWindow(w) && input.fableGoal != null;
+      const fableGoal = allocationFableWindow(w) && input.fableGoal != null;
       const perDay = fableGoal ? input.fableGoal! : input.goal;
       const goalBudget =
         perDay !== null && paced(w) && cycleStart !== null

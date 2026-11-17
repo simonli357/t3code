@@ -279,6 +279,48 @@ it("reads, sets and clears each login's Fable goal, stored per account like the 
   expect(allocationPolicyInvalid({ ...base, fableGoals: [{ key: "a", percentPerDay: 101 }] })).toBe(
     "A Fable goal must be a number from 0 to 100.",
   );
+  // On the Fable limit the hover names the goal that applies there.
+  const window = {
+    label: "Weekly · Fable",
+    kind: "weekly" as const,
+    usedPoints: 4,
+    checkedAt: "2026-10-24T11:59:00.000Z",
+    resetsAt: null,
+    cycleStartedAt: null,
+    durationHours: 168,
+    models: ["claude-fable-5-2"],
+    ratePointsPerHour: null,
+    samples: 0,
+    rateAgeMinutes: null,
+  };
+  const fable = { ...accounts[5]!, windows: [{ ...window, id: "seven_day_fable" }] };
+  const detail = (policy: AllocationPolicy) =>
+    allocationAccountRows(
+      {
+        ...snapshot([fable]),
+        runways: [
+          {
+            key: es.key,
+            label: "ES",
+            line: "",
+            windows: [
+              {
+                id: "seven_day_fable",
+                label: "Weekly · Fable",
+                meterPercent: 4,
+                goalPercent: 22,
+                sizeDollars: null,
+                source: null,
+              },
+            ],
+          },
+        ],
+      },
+      policy,
+      now,
+    )[0]!.windows[0]!.detail;
+  expect(detail(mine)).toContain("Fable goal allows 22% by now");
+  expect(detail(base)).toContain("daily goal allows 22% by now");
 });
 
 it("switches Fable mode per Claude login, starting from the single switch stored before", () => {

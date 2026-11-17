@@ -3,6 +3,7 @@ import {
   MAX_START_SETTLE_MINUTES,
   WS_METHODS,
   allocationFableMode,
+  allocationFableWindow,
   allocationFamilyGoal,
   allocationPreferenceKey,
   modelLadder,
@@ -216,7 +217,9 @@ export function allocationAccountRows(
                 ]),
             ...(measured?.goalPercent == null
               ? []
-              : [`daily goal allows ${Math.round(measured.goalPercent)}% by now`]),
+              : [
+                  `${fableGoal && allocationFableWindow(window) ? "Fable" : "daily"} goal allows ${Math.round(measured.goalPercent)}% by now`,
+                ]),
             ...(capPercent === null ? [] : [`hard cap ${capPercent}%`]),
           ].join(" · "),
         };

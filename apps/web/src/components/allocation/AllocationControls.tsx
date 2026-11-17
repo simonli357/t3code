@@ -52,7 +52,7 @@ const dollars = (value: number) =>
   `$${value >= 100 ? Math.round(value).toLocaleString() : value.toFixed(2)}`;
 /** One row of columns for the heading and every account, once the list is wide enough. */
 const columns =
-  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,2fr)_6rem_4.5rem_4.5rem_4.5rem_12rem] @min-[64rem]/accounts:gap-x-3";
+  "@min-[64rem]/accounts:grid @min-[64rem]/accounts:grid-cols-[4.5rem_minmax(7rem,1fr)_minmax(14.5rem,2fr)_6rem_4.5rem_4.5rem_4.5rem_11rem] @min-[64rem]/accounts:gap-x-3";
 /** A control's name, where the heading row is not shown. */
 const caption = "text-xs text-muted-foreground @min-[64rem]/accounts:hidden";
 const divided = "[&>*+*]:border-t [&>*+*]:border-border/50";
