@@ -747,7 +747,7 @@ export function AllocationControls({
         <Rule
           title="Close-call margin"
           hint="accounts this close count as equal"
-          detail="Within this many points of the account furthest behind its goal, the order decides."
+          detail="Between accounts this close on the same side of their goal, the order decides."
           failed={notSaved.has("closeMarginPoints")}
         >
           <NumberField

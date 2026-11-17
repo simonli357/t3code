@@ -46,9 +46,9 @@ carries `learnedAt` only from this build, and the coordinator answers only when 
 
 **A goal ranks, it never refuses, and in points.** Accounts that fit rank by how far their
 tightest paced window (weekly, a model's own weekly, monthly) is behind its goal line at the
-job's end, in points. Ranking by dollars of room multiplied each account's slack by its learned
-size, so a large plan won whatever the goals said; sizes now only project use. Goals are
-measured against the meter's total. Stored family values (`claude`, `codex`, `other`) are the
+job's end. Dollars of room multiplied slack by learned size, so large plans won regardless of
+goals; sizes only project use. The order never lifts one ahead of its goal over one behind.
+Goals count the meter's total. Stored family values (`claude`, `codex`, `other`) are the
 defaults and are carried through every save, including saves from builds that do not know them.
 
 **The master's computer chooses the worker's computer.** A worker start without `environmentId`

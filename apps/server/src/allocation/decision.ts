@@ -270,9 +270,10 @@ const score = (c: Ranked) =>
  * their daily goal first, in points of their tightest paced window at the job's end (negative
  * when ahead). Then accounts that fit without a goal line, by the points left on their tightest
  * limit; one without a reading comes last of them. In either group, accounts within the
- * policy's margin (points) of the best are close: the preference order decides between them,
- * then fewer workers, then the sooner reset. Last, accounts where a limit runs out before the
- * job ends, the longest lasting first.
+ * policy's margin (points) of the best are close, but never across the goal line: one ahead of
+ * its goal is never close to one behind it. The preference order decides between close
+ * accounts, then fewer workers, then the sooner reset. Last, accounts where a limit runs out
+ * before the job ends, the longest lasting first.
  */
 export function rankCandidates(
   candidates: readonly Ranked[],
@@ -282,7 +283,10 @@ export function rankCandidates(
   const usable = candidates.filter((c) => c.eligible);
   const margin = policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS;
   const best = [0, 1].map((g) => Math.max(...usable.filter((c) => group(c) === g).map(score)));
-  const close = (c: Ranked) => group(c) < 2 && score(c) >= best[group(c)]! - margin;
+  const close = (c: Ranked) =>
+    group(c) < 2 &&
+    score(c) >= best[group(c)]! - margin &&
+    (group(c) === 1 || score(c) < 0 === best[0]! < 0);
   const preference = preferenceIndex(policy, driver);
   return usable.toSorted(
     (a, b) =>

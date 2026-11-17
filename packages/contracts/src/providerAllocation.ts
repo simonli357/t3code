@@ -65,7 +65,7 @@ export const AllocationAccountCap = Schema.Struct({
   ...accountCapFields,
 });
 export type AllocationAccountCap = typeof AllocationAccountCap.Type;
-/** Two accounts at most this many points apart behind their daily goal are close. */
+/** Accounts on one side of their goal line and at most this many points apart are close. */
 export const DEFAULT_CLOSE_MARGIN_POINTS = 10;
 /** A limited worker waits for a reset this near before it changes model. */
 export const DEFAULT_LONG_WAIT_HOURS = 3;
@@ -134,8 +134,8 @@ export const AllocationPolicy = Schema.Struct({
   accountCaps: Schema.optional(Schema.Array(AllocationAccountCap).check(Schema.isMaxLength(100))),
   /**
    * Accounts by `allocationPreferenceKey`, most preferred first. It decides only between
-   * accounts within `closeMarginPoints` of the one furthest behind its daily goal; unlisted
-   * accounts come after listed ones.
+   * accounts within `closeMarginPoints` of the one furthest behind its daily goal and on the
+   * same side of their goal line; unlisted accounts come after listed ones.
    */
   accountOrder: Schema.optional(Names),
   closeMarginPoints: Schema.optional(

@@ -55,9 +55,9 @@ the master names one, and then the account, model and effort together:
    plus the account's use outside T3. An account **fits** when no limit runs out before the job
    ends; a hard cap counts as the limit.
 3. Among accounts that fit, the one furthest behind its **daily goal** wins, in points of its
-   tightest weekly window at the job's end (negative when ahead). Within the **closeness
-   margin** (points) of it, the earlier one in the **preference order** wins, then fewer
-   workers, then the sooner reset. Accounts without a goal line follow, by points left.
+   tightest weekly window at the job's end. Among those on its side of the goal within the
+   **closeness margin** (points), the **preference order** decides, then fewer workers, then
+   the sooner reset. Accounts without a goal line follow, by points left.
 4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
    (45 at stakes 8 or more); otherwise it takes the nearest ladder model that fits, at most two
    rungs away; otherwise, below the fallback's threshold, the **fallback** model; otherwise the

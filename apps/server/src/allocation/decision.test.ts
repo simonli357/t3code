@@ -289,8 +289,8 @@ describe("close accounts", () => {
   });
 
   it("never lets the preference order override a clear difference", () => {
-    // 8.1 points behind against 2.9 ahead: 11 points apart.
-    const accounts = [account("a", 50), account("b", 61)];
+    // 18.1 and 3.1 points behind: 15 points apart.
+    const accounts = [account("a", 40), account("b", 55)];
     expect(decide(accounts, { policy: order("b", "a") }).selectedInstanceId).toBe("a");
     // The margin is policy: widen it and the same accounts are close.
     expect(
@@ -536,19 +536,24 @@ describe("daily goal", () => {
     );
   });
 
-  it("puts an account ahead of its goal after one behind it, unless they are close and the order prefers it", () => {
-    // a is 6.9 points ahead of the 58.3% line, b 1.1 behind and c 13.1 behind.
-    const accounts = [account("a", 65), account("b", 57), account("c", 45)];
-    expect(decide(accounts, { policy: paced }).selectedInstanceId).toBe("c");
-    expect(decide(accounts.slice(0, 2), { policy: paced }).selectedInstanceId).toBe("b");
-    // Within the margin of the best, the order decides, wherever the goal line falls.
-    expect(
-      decide(accounts.slice(0, 2), { policy: { ...paced, accountOrder: [key("a")] } })
-        .selectedInstanceId,
-    ).toBe("a");
-    expect(
-      decide(accounts, { policy: { ...paced, accountOrder: [key("a")] } }).selectedInstanceId,
-    ).toBe("c");
+  it("never lets the order put an account ahead of its goal over one behind it", () => {
+    const first = (accounts: AllocationAccount[], patch: Partial<AllocationPolicy> = {}) =>
+      decide(accounts, { policy: { ...paced, accountOrder: [key("a")], ...patch } });
+    // ARA, first in the order, is 4 points ahead of the 58.3% line; XY is 5 behind.
+    const ara = account("a", 62.13, { label: "ARA" });
+    const xy = account("b", 53.13, { label: "XY" });
+    const decision = first([ara, xy]);
+    expect(candidate(decision, "a").goalSlackPoints).toBeCloseTo(-4, 1);
+    expect(candidate(decision, "b").goalSlackPoints).toBeCloseTo(5, 1);
+    expect(decision.selectedInstanceId).toBe("b");
+    expect(decision.reasons[0]).toContain("XY: 5 points behind its goal");
+    // 1.1 points behind still beats 6.9 ahead, however wide the margin.
+    expect(first([account("a", 65), account("b", 57)], { closeMarginPoints: 50 })).toMatchObject({
+      selectedInstanceId: "b",
+    });
+    // On one side of the line the order still decides: both 2 and 4 ahead, or 2 and 5 behind.
+    expect(first([account("a", 62.13), account("b", 60.13)]).selectedInstanceId).toBe("a");
+    expect(first([account("a", 56.13), account("b", 53.13)]).selectedInstanceId).toBe("a");
   });
 
   it("paces a model's own weekly window, which ranks the account for that model only", () => {
