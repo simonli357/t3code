@@ -3901,6 +3901,73 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "charges a resumed session's first turn its own cost, not the session's running total",
+    () => {
+      const resume = "550e8400-e29b-41d4-a716-446655440030";
+      // One turn on a fresh harness; the SDK's total carries on across a resume.
+      const firstTurn = (resumeCursor: object | undefined, totalCostUsd: number) => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const completedFiber = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "turn.completed"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+            ...(resumeCursor ? { resumeCursor } : {}),
+          });
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "next", attachments: [] });
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            duration_ms: 100,
+            duration_api_ms: 90,
+            num_turns: 1,
+            result: "done",
+            stop_reason: "end_turn",
+            session_id: resume,
+            total_cost_usd: totalCostUsd,
+            usage: { input_tokens: 42, output_tokens: 9 },
+          } as unknown as SDKMessage);
+          const completed = yield* Fiber.join(completedFiber);
+          assert.equal(completed._tag, "Some");
+          const payload =
+            completed._tag === "Some" && completed.value.type === "turn.completed"
+              ? completed.value.payload
+              : undefined;
+          const cursor = (yield* adapter.listSessions())[0]?.resumeCursor as
+            | { totalCostUsd?: number }
+            | undefined;
+          return { payload, cursor };
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      };
+      return Effect.gen(function* () {
+        const kept = yield* firstTurn(
+          { threadId: THREAD_ID, resume, turnCount: 1, totalCostUsd: 70 },
+          70.5,
+        );
+        assert.equal(kept.payload?.totalCostUsd, 70.5);
+        assert.closeTo(kept.payload?.turnCostUsd ?? NaN, 0.5, 1e-9);
+        assert.equal(kept.cursor?.totalCostUsd, 70.5);
+        // A cursor from before the total was kept: the turn's own cost is unknown.
+        const lost = yield* firstTurn({ threadId: THREAD_ID, resume, turnCount: 1 }, 70.5);
+        assert.equal(lost.payload?.totalCostUsd, 70.5);
+        assert.equal(lost.payload?.turnCostUsd, undefined);
+        const fresh = yield* firstTurn(undefined, 2);
+        assert.equal(fresh.payload?.turnCostUsd, 2);
+      });
+    },
+  );
+
   it.effect("uses per-turn result usage across consecutive Claude turns", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

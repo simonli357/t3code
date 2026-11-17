@@ -263,6 +263,8 @@ interface ClaudeResumeState {
   readonly resumeSessionAt?: string;
   readonly turnCount?: number;
   readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+  /** The session's `total_cost_usd` after its last turn: a resumed query's total carries on from it. */
+  readonly totalCostUsd?: number;
 }
 
 interface ClaudeTurnState {
@@ -471,7 +473,7 @@ interface ClaudeSessionContext {
    * it keeps the last TTL.
    */
   promptCache: { requestStartedAt: DateTime.Utc; ttlMs: number | undefined } | undefined;
-  /** The query's running cost after the previous turn; its results report a cumulative total. */
+  /** The query's running total after the previous turn, kept in the resume cursor: a resumed query's total carries on. */
   lastTotalCostUsd: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
@@ -1021,6 +1023,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resumeSessionAt?: unknown;
     turnCount?: unknown;
     turnStartMessageIds?: unknown;
+    totalCostUsd?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -1044,11 +1047,19 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
       ? (cursor.turnStartMessageIds as Array<string | null>)
       : undefined;
 
+  const totalCostUsd =
+    typeof cursor.totalCostUsd === "number" &&
+    Number.isFinite(cursor.totalCostUsd) &&
+    cursor.totalCostUsd >= 0
+      ? cursor.totalCostUsd
+      : undefined;
+
   return {
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
     ...(turnStartMessageIds ? { turnStartMessageIds } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -2258,6 +2269,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.turnStartMessageIds.length,
       turnStartMessageIds: [...context.turnStartMessageIds],
+      ...(context.lastTotalCostUsd !== undefined ? { totalCostUsd: context.lastTotalCostUsd } : {}),
     };
 
     context.session = {
@@ -2888,6 +2900,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       rawPayload: result ?? { status },
     });
 
+    // A resumed query's total carries on from the session's earlier turns. Without the total
+    // its cursor kept, the first turn's own cost is unknown and its tokens price it instead.
+    const costBaseline =
+      context.lastTotalCostUsd ??
+      (readClaudeResumeState(context.startInput.resumeCursor)?.resume === undefined
+        ? 0
+        : undefined);
     const stamp = yield* makeEventStamp();
     yield* offerRuntimeEvent({
       type: "turn.completed",
@@ -2902,12 +2921,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(result?.usage ? { usage: result.usage } : {}),
         ...(result?.modelUsage ? { modelUsage: result.modelUsage } : {}),
         ...(typeof result?.total_cost_usd === "number"
+          ? { totalCostUsd: result.total_cost_usd }
+          : {}),
+        ...(typeof result?.total_cost_usd === "number" && costBaseline !== undefined
           ? {
-              totalCostUsd: result.total_cost_usd,
-              // A total below the last one means the query started over (resume, /clear).
+              // A total below the last one means the query started over (/clear).
               turnCostUsd:
-                result.total_cost_usd >= (context.lastTotalCostUsd ?? 0)
-                  ? result.total_cost_usd - (context.lastTotalCostUsd ?? 0)
+                result.total_cost_usd >= costBaseline
+                  ? result.total_cost_usd - costBaseline
                   : result.total_cost_usd,
             }
           : {}),
@@ -5296,6 +5317,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(resumeState?.turnStartMessageIds
             ? { turnStartMessageIds: resumeState.turnStartMessageIds }
             : {}),
+          ...(resumeState?.totalCostUsd !== undefined
+            ? { totalCostUsd: resumeState.totalCostUsd }
+            : {}),
         },
         createdAt: startedAt,
         updatedAt: startedAt,
@@ -5331,7 +5355,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         promptCache: undefined,
-        lastTotalCostUsd: undefined,
+        lastTotalCostUsd: resumeState?.totalCostUsd,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,

@@ -37,8 +37,9 @@ export class UsageMeasurements extends Context.Service<
   {
     readonly read: (input: UsageMeasurementsInput) => Effect.Effect<UsageMeasurementsReport>;
     /**
-     * Every retained finished turn, with its cost (the provider's own figure, else its tokens
-     * at API prices; null when neither is known), and every limit reading.
+     * Every retained finished turn, with its cost (its tokens at API prices when it ran no
+     * subagents, else the provider's own figure, else its tokens; null when neither is known),
+     * and every limit reading.
      */
     readonly evidence: Effect.Effect<{
       readonly turns: readonly (ReturnType<MeasurementHistory["evidence"]>["turns"][number] & {
@@ -186,9 +187,8 @@ const make = Effect.gen(function* () {
         turns: turns.map((turn) => {
           const tokens = turn.tokens;
           const rate = turn.model ? price(turn.model) : null;
-          const priced =
-            turn.costUsd ??
-            (rate && tokens?.inputTokens !== undefined && tokens.outputTokens !== undefined
+          const fromTokens =
+            rate && tokens?.inputTokens !== undefined && tokens.outputTokens !== undefined
               ? Math.max(
                   0,
                   tokens.inputTokens -
@@ -199,7 +199,15 @@ const make = Effect.gen(function* () {
                 (tokens.cachedInputTokens ?? 0) * rate.cacheRead +
                 (tokens.cacheCreationTokens ?? 0) * rate.cacheWrite +
                 tokens.outputTokens * rate.output
-              : null);
+              : null;
+          // A turn without subagents is all in its own tokens. The provider's figure is kept
+          // for subagents, which those tokens leave out: before the cost baseline moved into
+          // the resume cursor, a resumed Claude session's first turn carried the whole
+          // session's running total.
+          const priced =
+            fromTokens !== null && tokens?.hasSubagents === false
+              ? fromTokens
+              : (turn.costUsd ?? fromTokens);
           return { ...turn, priced };
         }),
       };
