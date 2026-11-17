@@ -28,6 +28,8 @@ const MIN_LIMIT_PAIRS = 5;
 const MIN_PAIR_MINUTES = 20;
 /** Two readings name the same reset when they are this close. */
 const SAME_RESET_MS = 5 * 60_000;
+/** Computers reading one login disagree by up to this many points (whole-percent rounding). */
+const READING_ROUNDING = 2;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const effortRank = (effort: string | null) => {
   const index = EFFORTS.indexOf(effort ?? "");
@@ -296,7 +298,13 @@ interface Pair {
   readonly delta: number;
 }
 
-/** Consecutive readings of one window cycle, merged until they are far enough apart. */
+/**
+ * Consecutive readings of one window cycle, merged until they are far enough apart. Every
+ * computer reads the same login, so their readings form one series: one a point or two below
+ * the last is another computer's rounding, not use going down. A larger drop in the same cycle
+ * is a reset credit and starts again. A full window cannot show more use, so pairs that start
+ * or end at 100% are left out.
+ */
 function readingPairs(readings: readonly EvidenceReading[]) {
   const sorted = [...new Map(readings.map((r) => [r.checkedAt, r])).values()].toSorted(
     (a, b) => Date.parse(a.checkedAt) - Date.parse(b.checkedAt),
@@ -310,14 +318,16 @@ function readingPairs(readings: readonly EvidenceReading[]) {
       (reading.resetsAt !== null &&
         anchor.resetsAt !== null &&
         Math.abs(Date.parse(reading.resetsAt) - Date.parse(anchor.resetsAt)) <= SAME_RESET_MS);
-    if (!sameCycle || reading.usedPercent < anchor.usedPercent) {
+    if (!sameCycle || reading.usedPercent < anchor.usedPercent - READING_ROUNDING) {
       anchor = reading;
       continue;
     }
+    if (reading.usedPercent < anchor.usedPercent) continue;
     const start = Date.parse(anchor.checkedAt);
     const end = Date.parse(reading.checkedAt);
     if (end - start < MIN_PAIR_MINUTES * 60_000) continue;
-    pairs.push({ start, end, delta: reading.usedPercent - anchor.usedPercent });
+    if (anchor.usedPercent < 100 && reading.usedPercent < 100)
+      pairs.push({ start, end, delta: reading.usedPercent - anchor.usedPercent });
     anchor = reading;
   }
   return pairs;
@@ -401,17 +411,29 @@ function solve(a: number[][], b: number[]) {
   return m.map((row, i) => row[n]! / row[i]!);
 }
 
-/** Background by quarter of day only when every quarter is well covered. */
+/** Outside use is seen once T3 left a window alone this long; by quarter of day once every quarter is. */
 const MIN_QUARTER_PAIRS = 3;
 const MIN_QUARTER_HOURS = 4;
 
+type OutsideUse = Pick<
+  LearnedLimit,
+  "backgroundPercentPerHour" | "backgroundByQuarter" | "samples" | "hours"
+>;
+
+/**
+ * Outside use is what a window does while T3 spends nothing on it; T3's share per dollar is the
+ * rest of its movement over T3's spend. Taking each from the readings that show it alone keeps
+ * both identifiable when T3's load is steady, and a ratio of totals does not shrink when a
+ * turn's spend lands a few minutes off its pair. Without enough idle time outside use is not
+ * seen and counts as none, so the share also carries any outside use while T3 works.
+ */
 function measuredLimit(
   account: LearningAccount,
   window: LearningAccount["windows"][number],
   readings: readonly EvidenceReading[],
   turns: ReturnType<typeof workingTurns>,
   at: number,
-): LearnedLimit | undefined {
+): { readonly limit?: LearnedLimit; readonly outside?: OutsideUse } {
   let mine = readings.filter((r) => r.key === account.key && r.windowId === window.id);
   // A new plan is a new allowance: learning starts again from the first reading under it. A
   // window whose length changed (a weekly limit now monthly) is a new allowance too.
@@ -437,44 +459,56 @@ function measuredLimit(
     quarters: quarterHours(pair.start, pair.end),
     w: weight(at - pair.end, LIMIT_HALF_LIFE_DAYS),
   }));
-  const dollars = pairs.reduce((s, p) => s + p.cost, 0);
-  if (dollars < MIN_LIMIT_DOLLARS || pairs.filter((p) => p.cost > 0).length < MIN_LIMIT_PAIRS)
-    return undefined;
-  // delta = share × T3's spend + background × hours. Spend T3 cannot see lands in background,
-  // never in the share per dollar.
-  const byQuarter = [0, 1, 2, 3].every(
-    (q) =>
-      pairs.filter((p) => p.quarters[q]! > 0).length >= MIN_QUARTER_PAIRS &&
-      pairs.reduce((s, p) => s + p.quarters[q]!, 0) >= MIN_QUARTER_HOURS,
-  );
-  const fit = nonNegativeFit(
-    pairs.map((p) => ({
-      x: byQuarter ? [p.cost, ...p.quarters] : [p.cost, p.hours],
-      y: p.delta,
-      w: p.w,
-    })),
-  );
-  const share = fit?.[0];
-  if (!fit || !(share! > 0)) return undefined;
-  const quarters = byQuarter ? fit.slice(1) : undefined;
+  type Measured = (typeof pairs)[number];
+  const idle = pairs.filter((p) => p.cost === 0);
+  const covered = (list: Measured[], hours: (p: Measured) => number) =>
+    list.length >= MIN_QUARTER_PAIRS && list.reduce((s, p) => s + hours(p), 0) >= MIN_QUARTER_HOURS;
+  const quarters = [0, 1, 2, 3].every((q) =>
+    covered(
+      idle.filter((p) => p.quarters[q]! > 0),
+      (p) => p.quarters[q]!,
+    ),
+  )
+    ? nonNegativeFit(idle.map((p) => ({ x: p.quarters, y: p.delta, w: p.w })))
+    : undefined;
+  const seen = quarters !== undefined || covered(idle, (p) => p.hours);
+  const rate =
+    !quarters && seen
+      ? idle.reduce((s, p) => s + p.w * p.delta, 0) / idle.reduce((s, p) => s + p.w * p.hours, 0)
+      : 0;
+  const outsideIn = (p: Measured) =>
+    quarters ? p.quarters.reduce((s, h, q) => s + h * quarters[q]!, 0) : rate * p.hours;
   const totalHours = pairs.reduce((s, p) => s + p.hours, 0);
-  const background = quarters
-    ? quarters.reduce((s, b, q) => s + b * pairs.reduce((h, p) => h + p.quarters[q]!, 0), 0) /
-      totalHours
-    : fit[1]!;
-  return {
-    key: account.key,
-    label: account.label,
-    driver: account.driver as LearnedLimit["driver"],
-    windowId: window.id,
-    windowLabel: window.label,
-    plan: latestPlan,
-    percentPerDollar: share!,
-    backgroundPercentPerHour: background,
+  const outside: OutsideUse = {
+    backgroundPercentPerHour: totalHours
+      ? pairs.reduce((s, p) => s + outsideIn(p), 0) / totalHours
+      : 0,
     ...(quarters ? { backgroundByQuarter: quarters } : {}),
     samples: pairs.length,
     hours: totalHours,
-    source: "measured",
+  };
+  const busy = pairs.filter((p) => p.cost > 0);
+  const share =
+    busy.reduce((s, p) => s + p.w * (p.delta - outsideIn(p)), 0) /
+    busy.reduce((s, p) => s + p.w * p.cost, 0);
+  if (
+    busy.reduce((s, p) => s + p.cost, 0) < MIN_LIMIT_DOLLARS ||
+    busy.length < MIN_LIMIT_PAIRS ||
+    !(share > 0)
+  )
+    return seen ? { outside } : {};
+  return {
+    limit: {
+      key: account.key,
+      label: account.label,
+      driver: account.driver as LearnedLimit["driver"],
+      windowId: window.id,
+      windowLabel: window.label,
+      plan: latestPlan,
+      percentPerDollar: share,
+      ...outside,
+      source: "measured",
+    },
   };
 }
 
@@ -535,7 +569,20 @@ export function learnAllocation(input: {
     input.evidence.flatMap((e) => e.turns),
     at,
   );
-  const readings = input.evidence.flatMap((e) => e.readings);
+  // A login's readings count from when every computer reporting it started measuring: before a
+  // computer's history starts (a new link, an older build), its use would read as outside use.
+  const since = new Map<string, number>();
+  for (const e of input.evidence) {
+    const from = e.readings.reduce(
+      (first, r) => Math.min(first, Date.parse(r.checkedAt)),
+      Infinity,
+    );
+    for (const key of new Set(e.readings.map((r) => r.key)))
+      since.set(key, Math.max(since.get(key) ?? -Infinity, from));
+  }
+  const readings = input.evidence
+    .flatMap((e) => e.readings)
+    .filter((r) => Date.parse(r.checkedAt) >= (since.get(r.key) ?? -Infinity));
   const raw = measuredCosts(turns, at);
   const solid = raw.filter((m) => evidenceShare(m.cost) === 1);
   const measured = raw.map((m) => {
@@ -570,16 +617,25 @@ export function learnAllocation(input: {
       if (estimate) costs.push(estimate);
     }
   const limits: LearnedLimit[] = [];
+  const outsideOnly = new Map<string, OutsideUse>();
   for (const account of input.accounts)
     for (const window of account.windows) {
-      const limit = measuredLimit(account, window, readings, turns, at);
+      const { limit, outside } = measuredLimit(account, window, readings, turns, at);
       if (limit) limits.push(limit);
+      else if (outside) outsideOnly.set(`${account.key}\n${window.id}`, outside);
     }
+  // An account T3 barely uses still shows the outside use its own readings measured.
   for (const account of input.accounts)
     for (const window of account.windows) {
       if (limits.some((l) => l.key === account.key && l.windowId === window.id)) continue;
       const estimate = estimateLimit(account, window, limits);
-      if (estimate) limits.push(estimate);
+      const outside = outsideOnly.get(`${account.key}\n${window.id}`);
+      if (estimate)
+        limits.push(
+          outside
+            ? { ...estimate, ...outside, basis: `${estimate.basis}; outside use measured` }
+            : estimate,
+        );
     }
   const workerJobs = new Map<string, { start: number; end: number }>();
   for (const { turn, start, end } of turns) {

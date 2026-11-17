@@ -4,17 +4,27 @@ Worker starts choose account, model and effort by projecting every usage limit t
 from numbers the coordinator learns itself (`apps/server/src/allocation/learning.ts`,
 `runway.ts`). The decisions below are the ones the code alone does not explain.
 
-**Claude's cost is cumulative.** The SDK's `total_cost_usd` is the query's running total and
-restarts on resume or `/clear`; `ClaudeAdapter` reports the difference as `turnCostUsd`, which
-includes subagents. `result.usage` is the main agent's alone, so pricing it undercounts.
-Other providers' turns are priced from their tokens and `usage-model-rates.json`.
+**Claude's cost is cumulative, also across a resume.** The SDK's `total_cost_usd` is the
+session's running total, and a resumed query carries on from its earlier turns. `ClaudeAdapter`
+keeps the total in the resume cursor and reports the difference as `turnCostUsd`, which includes
+subagents; a resumed session whose cursor has no total reports none. Until the cursor kept it,
+each resumed session's first turn carried the whole running total, which made T3's spend look
+four to ten times what it was. Learning prices a turn without subagents from its own tokens and
+`usage-model-rates.json` (within about 10% of the SDK's figure), and takes the SDK's figure only
+for turns with subagents, whose use `result.usage` leaves out. Other providers' turns are priced
+from their tokens.
 
-**Outside use absorbs what T3 cannot see.** A limit is fitted as change in percent = share × T3's
-spend + outside use × hours, with both kept at or above zero. Use from other people, the CLI,
-or a computer still on an older build lands in outside use, never in the share per dollar. The
-share is therefore only as good as the fraction of an account's use T3 records; every computer
-running this build closes the gap. Outside use is split by quarter of the UTC day once each
-quarter has enough reading pairs.
+**Outside use is what a limit does while T3 leaves it alone.** Outside use per hour comes from
+the reading pairs in which T3 spent nothing on the window, split by quarter of the UTC day once
+that idle time covers every quarter; T3's share per dollar is the rest of the movement in the
+other pairs over T3's spend in them. A joint fit of both against spend and hours could not tell
+them apart under a steady load, and shrank the share whenever spend landed a few minutes off its
+pair. Without idle time outside use is not seen and counts as none, so use T3 cannot see while
+it works lands in the share and the limit looks smaller, never larger. A login's readings count
+from when every computer reporting it started measuring, and the turn cap drops a computer's
+readings together with its turns. Every computer reads every login, so the readings form one
+series: one a point or two below the last is rounding, a larger drop in the same cycle is a reset
+credit, and pairs that start or end at 100% are left out because a full window shows no use.
 
 **A new allowance restarts learning.** A plan label change, or a window whose length changed
 (a weekly Codex limit that became monthly), discards the readings before it.

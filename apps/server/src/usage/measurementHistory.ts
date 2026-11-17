@@ -275,14 +275,18 @@ export class MeasurementHistory {
   }
 
   private prune(now: number) {
+    // Readings from before turns the cap drops would show use without the turns that made it.
+    let capped = -Infinity;
     for (const [id, turn] of this.turns) {
-      if (Date.parse(turn.lastObservedAt) < now - RETENTION || this.turns.size > MAX_TURNS) {
+      const expired = Date.parse(turn.lastObservedAt) < now - RETENTION;
+      if (expired || this.turns.size > MAX_TURNS) {
+        if (!expired) capped = Math.max(capped, Date.parse(turn.lastObservedAt));
         this.turns.delete(id);
         this.tools.delete(id);
       }
     }
     this.quotas = this.quotas
-      .filter((s) => Date.parse(s.checkedAt) >= now - RETENTION)
+      .filter((s) => Date.parse(s.checkedAt) >= Math.max(now - RETENTION, capped + 1))
       .slice(-MAX_SAMPLES);
     if (this.contexts.size > MAX_TURNS) this.contexts.clear();
   }

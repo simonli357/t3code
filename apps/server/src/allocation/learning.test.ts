@@ -146,14 +146,16 @@ describe("cost per working hour", () => {
 });
 
 describe("share of a limit per dollar", () => {
-  // T3 spends 2 to 12 dollars an hour; the limit moves 0.1% a dollar, and someone outside T3
-  // uses 0.4% an hour every afternoon (12–18 UTC).
-  const spendAt = (hour: number) => 2 + ((hour * 7) % 11);
+  // T3 works every other hour, spending 2 to 12 dollars; the limit moves 0.1% a dollar, and
+  // someone outside T3 uses 0.4% an hour every afternoon (12–18 UTC).
+  const spendAt = (hour: number) => (hour % 2 ? 0 : 2 + ((hour * 7) % 11));
   const outside = (hour: number) => (quarterOf(base + hour * HOUR) === 2 ? 0.4 : 0);
-  const history = (share: (hour: number) => number, plan: (hour: number) => string) => {
-    const turns = Array.from({ length: 48 }, (_, h) => turn("limit", h, spendAt(h)));
+  const history = (share: (hour: number) => number, plan: (hour: number) => string, hours = 48) => {
+    const turns = Array.from({ length: hours }, (_, h) => h)
+      .filter((h) => spendAt(h) > 0)
+      .map((h) => turn("limit", h, spendAt(h)));
     let used = 0;
-    const readings = Array.from({ length: 49 }, (_, h) => {
+    const readings = Array.from({ length: hours + 1 }, (_, h) => {
       const r = reading(h, used, plan(h));
       used += share(h) * spendAt(h) + outside(h);
       return r;
@@ -183,11 +185,12 @@ describe("share of a limit per dollar", () => {
 
   it("starts again when the plan changes", () => {
     const learned = learnAllocation({
-      at: iso(base + 48 * HOUR),
+      at: iso(base + 72 * HOUR),
       evidence: [
         history(
           (h) => (h < 24 ? 0.4 : 0.1),
           (h) => (h < 24 ? "Max 5x" : "Max 20x"),
+          72,
         ),
       ],
       accounts: [account("acct", "Max 20x")],
@@ -195,7 +198,7 @@ describe("share of a limit per dollar", () => {
       price,
     });
     const limit = learned.limits.find((l) => l.key === "acct")!;
-    expect(limit).toMatchObject({ plan: "Max 20x", samples: 24 });
+    expect(limit).toMatchObject({ plan: "Max 20x", samples: 48 });
     expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
   });
 
@@ -203,9 +206,10 @@ describe("share of a limit per dollar", () => {
     const { turns, readings } = history(
       (h) => (h < 24 ? 0.4 : 0.1),
       () => "Max 5x",
+      72,
     );
     const learned = learnAllocation({
-      at: iso(base + 48 * HOUR),
+      at: iso(base + 72 * HOUR),
       evidence: [
         evidence(
           [...turns],
@@ -217,7 +221,7 @@ describe("share of a limit per dollar", () => {
       price,
     });
     const limit = learned.limits.find((l) => l.key === "acct")!;
-    expect(limit.samples).toBe(24);
+    expect(limit.samples).toBe(48);
     expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
   });
 
@@ -269,5 +273,90 @@ describe("share of a limit per dollar", () => {
       basis: "AC, as large (plan size unknown)",
     });
     expect(unknown.percentPerDollar).toBeCloseTo(0.1, 6);
+  });
+});
+
+describe("what a limit's readings can tell apart", () => {
+  const learnLimit = (
+    hours: number,
+    evidences: AllocationEvidence[],
+    accounts = [account("acct", "Max 5x")],
+  ) =>
+    learnAllocation({
+      at: iso(base + hours * HOUR),
+      evidence: evidences,
+      accounts,
+      profiles: [],
+      price,
+    }).limits;
+
+  it("measures the share under a steady load with no outside use, where spend and hours move together", () => {
+    // $5 every hour around the clock; the meter shows whole percents.
+    const turns = Array.from({ length: 48 }, (_, h) => turn("steady", h, 5));
+    const readings = Array.from({ length: 49 }, (_, h) => reading(h, Math.floor(0.5 * h)));
+    const limit = learnLimit(48, [evidence(turns, readings)]).find((l) => l.key === "acct")!;
+    expect(limit).toMatchObject({ source: "measured", backgroundPercentPerHour: 0 });
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 2);
+  });
+
+  it("separates a steady load from steady outside use by the hours T3 leaves the account alone", () => {
+    // $5 an hour from 08 to 20 UTC; someone else uses 0.2% an hour around the clock.
+    const working = (h: number) => h % 24 >= 8 && h % 24 < 20;
+    const turns = Array.from({ length: 72 }, (_, h) => h)
+      .filter(working)
+      .map((h) => turn("steady", h, 5));
+    let used = 0;
+    const readings = Array.from({ length: 73 }, (_, h) => {
+      const r = reading(h, used);
+      used += (working(h) ? 0.5 : 0) + 0.2;
+      return r;
+    });
+    const limit = learnLimit(72, [evidence(turns, readings)]).find((l) => l.key === "acct")!;
+    expect(limit.source).toBe("measured");
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 6);
+    expect(limit.backgroundPercentPerHour).toBeCloseTo(0.2, 6);
+  });
+
+  it("keeps the outside use of an account T3 does not use, and estimates its share from its plan", () => {
+    // AC: $5 every other hour at 0.1% a dollar. XY: only someone else, 0.3% an hour.
+    const turns = Array.from({ length: 24 }, (_, i) => turn("measured", 2 * i, 5));
+    const readings = Array.from({ length: 49 }, (_, h) => reading(h, 0.5 * Math.ceil(h / 2)));
+    const outsideOnly = Array.from({ length: 49 }, (_, h) => ({
+      ...reading(h, 0.3 * h, "Max 20x"),
+      key: "other",
+      label: "XY",
+    }));
+    const limit = learnLimit(
+      48,
+      [evidence(turns, readings), evidence([], outsideOnly)],
+      [account("acct", "Max 5x"), account("other", "Max 20x")],
+    ).find((l) => l.key === "other")!;
+    expect(limit).toMatchObject({
+      source: "estimated",
+      samples: 48,
+      basis: "plan: Max 20x holds 2× AC's Max 5x; outside use measured",
+    });
+    expect(limit.percentPerDollar).toBeCloseTo(0.05, 6);
+    expect(limit.backgroundPercentPerHour).toBeCloseTo(0.3, 6);
+  });
+
+  it("learns across a reset, a reset credit, a full window and two computers a point apart", () => {
+    // $10 an hour moves the limit 1% an hour. It fills at hour 10 and stays full, still spent
+    // on (extra usage), until it resets at hour 16; a credit takes 10 points off at hour 30.
+    const turns = Array.from({ length: 40 }, (_, h) => turn("reset", h, 10));
+    const at = (h: number) => (h < 16 ? Math.min(100, 90 + h) : h < 30 ? h - 16 : h - 16 - 10);
+    const resetsAt = (h: number) => iso(base + (h < 16 ? 16 : 16 + 168) * HOUR);
+    const read = (h: number, offset: number) => ({
+      ...reading(h, Math.max(0, at(h) - offset)),
+      resetsAt: resetsAt(h),
+    });
+    // The second computer reads half an hour later and a point lower.
+    const readings = Array.from({ length: 41 }, (_, h) => read(h, 0)).concat(
+      Array.from({ length: 40 }, (_, h) => read(h + 0.5, 1)),
+    );
+    const limit = learnLimit(40, [evidence(turns, readings)]).find((l) => l.key === "acct")!;
+    expect(limit.source).toBe("measured");
+    expect(limit.percentPerDollar).toBeCloseTo(0.1, 4);
+    expect(limit.backgroundPercentPerHour).toBe(0);
   });
 });

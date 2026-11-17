@@ -260,6 +260,20 @@ describe("usage measurements", () => {
     restored.setAllowed([]);
     expect(restored.snapshot(base + 60 * 60000)).toMatchObject({ turns: [], quotas: [] });
   });
+  it("drops the readings from before turns the turn cap drops", () => {
+    const h = history();
+    for (let i = 0; i <= 5_000; i++) {
+      const turn = { turnId: `turn-${i}` };
+      h.observe(event("turn.started", i, {}, { ...turn, eventId: `started-${i}` }));
+      h.observe(
+        event("turn.completed", i + 0.5, { state: "completed" }, { ...turn, eventId: `done-${i}` }),
+      );
+    }
+    h.recordProviders([provider("codex", 6_000, 20)]);
+    const { turns, quotas } = h.evidence(base + 6_000 * 60_000);
+    expect(turns).toHaveLength(5_000);
+    expect(quotas.map((q) => q.window.usedPercent)).toEqual([20]);
+  });
   it("drops history outside retention", () => {
     const h = history();
     h.observe(event("turn.started", 0));
