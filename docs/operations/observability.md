@@ -689,7 +689,9 @@ Before you take one:
   Connected clients can reconnect during the pause, and an event loop monitor, if the server has
   one, records the pause as a stall. Send the signal once. A second signal sent during a write
   takes another snapshot after the first one finishes.
-- The write needs about as much free memory as the heap uses. On a machine that is already
-  swapping, it can make the problem worse or crash the server.
+- The write needs several times the heap in free memory: a server with a 0.5 GB heap grew by
+  2.7 GB while it built the snapshot and kept 2.4 GB of that afterwards, until it was restarted.
+  On a machine that is short of memory or already swapping, do not take one: it can get the
+  server killed.
 - The file contains everything in server memory, including tokens, secrets, and thread content. Do
   not share it publicly. Delete it when you are done, because storage cleanup does not remove it.
