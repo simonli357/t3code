@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Exit from "effect/Exit";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
@@ -3414,4 +3415,37 @@ it.effect("a whole snapshot asks every running start's computer at once", () =>
       expect((yield* store.reservations).map((r) => r.state)).toEqual(["released", "released"]);
     }).pipe(Effect.provide(f.layer));
   }),
+);
+
+it.effect(
+  "a learn that cannot read a linked computer's history keeps the stored numbers until it can",
+  () => {
+    let readable = false;
+    const f = fixture({
+      peerCall: (id, input) =>
+        !Predicate.isTagged(input, "allocationEvidence")
+          ? Effect.succeed(linkedInventory(id))
+          : readable
+            ? Effect.succeed({ environmentId: id, observedAt: at, turns: [], readings: [] })
+            : Effect.fail(new PeerUnavailable({ environmentId: id, message: "starting" })),
+    });
+    f.state.peers = [linkedInventory("remote")];
+    return Effect.gen(function* () {
+      const { store } = yield* f.setup;
+      yield* store.saveLearned({
+        learnedAt: at,
+        costs: [],
+        limits: [],
+        workerHours: null,
+        notes: ["stored"],
+      });
+      // The first learn runs two minutes after start, before the other computer answers.
+      yield* TestClock.adjust("3 minutes");
+      expect((yield* store.learned)?.notes).toEqual(["stored"]);
+      readable = true;
+      // Learns repeat 30 minutes apart, each after the same two-minute delay.
+      yield* TestClock.adjust("32 minutes");
+      expect((yield* store.learned)?.notes).toEqual([]);
+    }).pipe(Effect.provide(f.layer));
+  },
 );

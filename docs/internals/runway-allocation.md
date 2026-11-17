@@ -29,6 +29,14 @@ credit, and pairs that start or end at 100% are left out because a full window s
 **A new allowance restarts learning.** A plan label change, or a window whose length changed
 (a weekly Codex limit that became monthly), discards the readings before it.
 
+**A learn never replaces better numbers with worse ones.** A computer that has just started
+reaches its linked computers late, and a learn that cannot read one counts all of that
+computer's work as outside use: on 2026-11-17 such a learn made a Max 20x week hold $163. So a
+learn that could not read every linked computer's history keeps the stored numbers, and one
+resting on under half their turns or measured limits keeps them for up to a day. A measured size
+more than three times above or below what its plan suggests (the other measured accounts' size
+per plan unit, or the seed with fewer than two) is set aside for the plan's estimate.
+
 **Unmeasured means estimated, never a default.** A missing model is repriced from a measured
 model's token mix. A thin one (under 20 turns or 10 working hours) is blended with that estimate
 in proportion to its evidence, at the blended context, so half an hour at small context cannot

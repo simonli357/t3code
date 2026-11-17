@@ -46,7 +46,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.ts";
 import { allocationIdentity, allocationInventory, windowModels } from "./inventory.ts";
 import { accountCap, accountRoom, accountRunways, decideAllocation } from "./decision.ts";
-import { learnAllocation } from "./learning.ts";
+import { learnAllocation, replacesLearned } from "./learning.ts";
 import { isFable, span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
 import { chooseProfile, fableModeAccount } from "./modelDecision.ts";
@@ -712,6 +712,16 @@ const make = Effect.gen(function* () {
             ],
       ),
     });
+    // A learn missing a computer's history, or much of the evidence, keeps the stored numbers.
+    const stored = yield* store.learned;
+    const unread = remote.filter((r) => r._tag !== "Success").length;
+    if (stored && !replacesLearned(stored, learned, unread)) {
+      yield* Effect.logWarning("Allocation learning kept the stored numbers", {
+        storedAt: stored.learnedAt,
+        notes: learned.notes,
+      });
+      return stored;
+    }
     yield* store.saveLearned(learned);
     return learned;
   });

@@ -30,6 +30,32 @@ const MIN_PAIR_MINUTES = 20;
 const SAME_RESET_MS = 5 * 60_000;
 /** Computers reading one login disagree by up to this many points (whole-percent rounding). */
 const READING_ROUNDING = 2;
+/** A measured size this many times above or below what its plan suggests is not taken as measured. */
+const IMPLAUSIBLE_FACTOR = 3;
+/**
+ * A learn resting on less than this share of the stored numbers' turns or measured limits keeps
+ * the stored numbers until they are this old.
+ */
+const THIN_LEARN_SHARE = 0.5;
+const THIN_LEARN_HOLD_MS = DAY;
+/**
+ * Dollars a window of the smallest paid plan holds (from the first two weeks of measured
+ * history): the size of a window nothing has measured, and the yardstick for a measured size
+ * with fewer than two other accounts to compare it with.
+ */
+export const SEED_WINDOW_DOLLARS_PER_PLAN = { session: 13, weekly: 120, scoped: 36, monthly: 500 };
+/** Which seed a window takes: a model's own limit, the 5-hour one, a monthly one, else weekly. */
+export const windowSort = (window: {
+  readonly kind?: string | undefined;
+  readonly models?: readonly string[] | undefined;
+}) =>
+  window.models?.length
+    ? ("scoped" as const)
+    : window.kind === "session"
+      ? ("session" as const)
+      : window.kind === "monthly"
+        ? ("monthly" as const)
+        : ("weekly" as const);
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const effortRank = (effort: string | null) => {
   const index = EFFORTS.indexOf(effort ?? "");
@@ -433,7 +459,11 @@ function measuredLimit(
   readings: readonly EvidenceReading[],
   turns: ReturnType<typeof workingTurns>,
   at: number,
-): { readonly limit?: LearnedLimit; readonly outside?: OutsideUse } {
+): {
+  readonly limit?: LearnedLimit;
+  readonly outside?: OutsideUse;
+  readonly sort: ReturnType<typeof windowSort>;
+} {
   let mine = readings.filter((r) => r.key === account.key && r.windowId === window.id);
   // A new plan is a new allowance: learning starts again from the first reading under it. A
   // window whose length changed (a weekly limit now monthly) is a new allowance too.
@@ -446,6 +476,7 @@ function measuredLimit(
   );
   if (changed) mine = mine.filter((r) => r.checkedAt > changed.checkedAt);
   const models = mine.at(-1)?.models;
+  const sort = windowSort({ kind: window.kind, models });
   const relevant = turns.filter(
     ({ turn, start }) =>
       turn.key === account.key &&
@@ -496,8 +527,9 @@ function measuredLimit(
     busy.length < MIN_LIMIT_PAIRS ||
     !(share > 0)
   )
-    return seen ? { outside } : {};
+    return { sort, ...(seen ? { outside } : {}) };
   return {
+    sort,
     limit: {
       key: account.key,
       label: account.label,
@@ -552,6 +584,28 @@ export function estimateLimit(
         ? `${source.label}, as large (plan size unknown)`
         : `plan: ${account.plan} holds ${Number((size / sourceSize).toFixed(2))}× ${source.label}'s ${source.plan}`,
   };
+}
+
+/**
+ * Whether a new learn may replace the stored numbers. A learn that could not read every linked
+ * computer's history counts that computer's use as outside use, so it never does. One resting
+ * on less than half the stored numbers' turns or measured limits waits up to a day for its
+ * evidence to come back.
+ */
+export function replacesLearned(
+  stored: AllocationLearned,
+  next: AllocationLearned,
+  unreadComputers: number,
+) {
+  if (unreadComputers > 0) return false;
+  const turns = (l: AllocationLearned) =>
+    l.costs.reduce((s, c) => s + (c.source === "measured" ? c.samples : 0), 0);
+  const limits = (l: AllocationLearned) => l.limits.filter((x) => x.source === "measured").length;
+  return (
+    (turns(next) >= THIN_LEARN_SHARE * turns(stored) &&
+      limits(next) >= THIN_LEARN_SHARE * limits(stored)) ||
+    Date.parse(next.learnedAt) - Date.parse(stored.learnedAt) >= THIN_LEARN_HOLD_MS
+  );
 }
 
 /** Learns every number the choice needs from all computers' history. Pure. */
@@ -616,25 +670,62 @@ export function learnAllocation(input: {
       const estimate = estimateCost(profile, kind, measured, input.price);
       if (estimate) costs.push(estimate);
     }
-  const limits: LearnedLimit[] = [];
+  const measuredLimits: { limit: LearnedLimit; sort: string; perPlan: number | null }[] = [];
   const outsideOnly = new Map<string, OutsideUse>();
   for (const account of input.accounts)
     for (const window of account.windows) {
-      const { limit, outside } = measuredLimit(account, window, readings, turns, at);
-      if (limit) limits.push(limit);
+      const { limit, outside, sort } = measuredLimit(account, window, readings, turns, at);
+      const size = publishedPlanSize(account.driver, limit?.plan ?? null, window.kind);
+      if (limit)
+        measuredLimits.push({
+          limit,
+          sort,
+          perPlan: size ? 100 / limit.percentPerDollar / size : null,
+        });
       else if (outside) outsideOnly.set(`${account.key}\n${window.id}`, outside);
     }
+  // A measured size far from what its plan suggests comes from evidence that is missing
+  // something (another computer's turns, a broken reading): the plan's estimate stands instead.
+  // The plan suggests the other measured accounts' size per plan unit, else the seed.
+  const limits: LearnedLimit[] = [];
+  const setAside = new Map<string, string>();
+  for (const m of measuredLimits) {
+    const others = measuredLimits.flatMap((o) =>
+      o !== m && o.perPlan !== null && o.sort === m.sort && o.limit.driver === m.limit.driver
+        ? [o.perPlan]
+        : [],
+    );
+    const ratio =
+      m.perPlan === null
+        ? 1
+        : m.perPlan /
+          (others.length >= 2
+            ? median(others)
+            : SEED_WINDOW_DOLLARS_PER_PLAN[m.sort as keyof typeof SEED_WINDOW_DOLLARS_PER_PLAN]);
+    if (ratio <= IMPLAUSIBLE_FACTOR && ratio >= 1 / IMPLAUSIBLE_FACTOR) limits.push(m.limit);
+    else
+      setAside.set(
+        `${m.limit.key}\n${m.limit.windowId}`,
+        `a measured $${Math.round(100 / m.limit.percentPerDollar)} left out, ${Number(
+          (ratio > 1 ? ratio : 1 / ratio).toFixed(1),
+        )}× ${ratio > 1 ? "above" : "below"} its plan`,
+      );
+  }
   // An account T3 barely uses still shows the outside use its own readings measured.
   for (const account of input.accounts)
     for (const window of account.windows) {
       if (limits.some((l) => l.key === account.key && l.windowId === window.id)) continue;
       const estimate = estimateLimit(account, window, limits);
-      const outside = outsideOnly.get(`${account.key}\n${window.id}`);
+      const id = `${account.key}\n${window.id}`;
+      const outside = outsideOnly.get(id);
+      const note = setAside.get(id);
       if (estimate)
         limits.push(
           outside
             ? { ...estimate, ...outside, basis: `${estimate.basis}; outside use measured` }
-            : estimate,
+            : note
+              ? { ...estimate, basis: `${estimate.basis}; ${note}` }
+              : estimate,
         );
     }
   const workerJobs = new Map<string, { start: number; end: number }>();

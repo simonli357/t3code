@@ -11,7 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
-import { estimateLimit, quarterOf } from "./learning.ts";
+import { estimateLimit, quarterOf, SEED_WINDOW_DOLLARS_PER_PLAN, windowSort } from "./learning.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -20,12 +20,8 @@ const effortRank = (effort: string | null) => {
   const index = EFFORTS.indexOf(effort ?? "");
   return index < 0 ? 2 : index;
 };
-/**
- * Only for an installation that has learned nothing: dollars per working hour, and dollars a
- * window of the smallest paid plan holds (from the first two weeks of measured history).
- */
+/** Only for an installation that has learned nothing: dollars per working hour. */
 const SEED_DOLLARS_PER_HOUR: Record<SessionKind, number> = { worker: 8, master: 3 };
-const SEED_WINDOW_DOLLARS_PER_PLAN = { session: 13, weekly: 120, scoped: 36, monthly: 500 };
 /** Job length when neither the start nor the history gives one. */
 export const SEED_JOB_HOURS = 2;
 
@@ -91,13 +87,7 @@ export function limitShare(
       source: entry.source,
     };
   const size = publishedPlanSize(account.driver, account.plan, window.kind) ?? 1;
-  const unit = window.models?.length
-    ? SEED_WINDOW_DOLLARS_PER_PLAN.scoped
-    : window.kind === "session"
-      ? SEED_WINDOW_DOLLARS_PER_PLAN.session
-      : window.kind === "monthly"
-        ? SEED_WINDOW_DOLLARS_PER_PLAN.monthly
-        : SEED_WINDOW_DOLLARS_PER_PLAN.weekly;
+  const unit = SEED_WINDOW_DOLLARS_PER_PLAN[windowSort(window)];
   return {
     percentPerDollar: 100 / (unit * size),
     background: () => 0,

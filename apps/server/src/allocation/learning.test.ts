@@ -6,7 +6,13 @@ import {
   type EvidenceReading,
   type EvidenceTurn,
 } from "@t3tools/contracts";
-import { estimateLimit, learnAllocation, quarterOf, type PriceOf } from "./learning.ts";
+import {
+  estimateLimit,
+  learnAllocation,
+  quarterOf,
+  replacesLearned,
+  type PriceOf,
+} from "./learning.ts";
 
 const HOUR = 3_600_000;
 const base = Date.parse("2026-11-08T00:00:00.000Z");
@@ -358,5 +364,100 @@ describe("what a limit's readings can tell apart", () => {
     expect(limit.source).toBe("measured");
     expect(limit.percentPerDollar).toBeCloseTo(0.1, 4);
     expect(limit.backgroundPercentPerHour).toBe(0);
+  });
+});
+
+describe("when learned numbers are trusted", () => {
+  const history = (key: string, label: string, plan: string, share: number) => {
+    // $5 every other hour; the limit moves `share` a dollar.
+    const turns = Array.from({ length: 24 }, (_, i) => ({ ...turn(key, 2 * i, 5), key }));
+    const readings = Array.from({ length: 49 }, (_, h) => ({
+      ...reading(h, 5 * share * Math.ceil(h / 2), plan),
+      key,
+      label,
+    }));
+    return evidence(turns, readings);
+  };
+  const learnFrom = (accounts: [string, string, string, number][]) =>
+    learnAllocation({
+      at: iso(base + 48 * HOUR),
+      evidence: accounts.map(([key, label, plan, share]) => history(key, label, plan, share)),
+      accounts: accounts.map(([key, label, plan]) => ({ ...account(key, plan), label })),
+      profiles: [],
+      price,
+    }).limits;
+
+  it("takes a size far from its plan's as a sign of missing evidence, and estimates it instead", () => {
+    // AC measures $1,000 for Max 5x ($200 a plan unit, near the $120 seed); XY would hold
+    // $100,000 on Max 20x, 83 times the seed.
+    const limits = learnFrom([
+      ["acct", "AC", "Max 5x", 0.1],
+      ["other", "XY", "Max 20x", 0.001],
+    ]);
+    expect(limits.find((l) => l.key === "acct")).toMatchObject({ source: "measured" });
+    const other = limits.find((l) => l.key === "other")!;
+    expect(other).toMatchObject({
+      source: "estimated",
+      basis:
+        "plan: Max 20x holds 2× AC's Max 5x; a measured $100000 left out, 83.3× above its plan",
+    });
+    expect(other.percentPerDollar).toBeCloseTo(0.05, 6);
+  });
+
+  it("judges a size by the other measured accounts' sizes when there are two to compare", () => {
+    // $300 and $330 a plan unit for two Max 5x logins; a third at $60, near the seed of $120,
+    // is out of line with them.
+    const limits = learnFrom([
+      ["a", "AC", "Max 5x", 100 / 1500],
+      ["b", "ES", "Max 5x", 100 / 1650],
+      ["c", "XY", "Max 5x", 100 / 300],
+    ]);
+    expect(limits.map((l) => [l.label, l.source])).toEqual([
+      ["AC", "measured"],
+      ["ES", "measured"],
+      ["XY", "estimated"],
+    ]);
+  });
+
+  it("keeps stored numbers over a learn that missed a computer, or that rests on half the evidence for up to a day", () => {
+    const learned = (hours: number, turns: number, measuredLimits: number) => ({
+      learnedAt: iso(base + hours * HOUR),
+      costs: [
+        {
+          driver,
+          model: "opus",
+          effort: "high",
+          kind: "worker" as const,
+          dollarsPerHour: 5,
+          perHundredK: 0,
+          contextTokens: 100_000,
+          samples: turns,
+          hours: turns / 2,
+          source: "measured" as const,
+        },
+      ],
+      limits: Array.from({ length: measuredLimits }, (_, i) => ({
+        key: `account-${i}`,
+        label: `A${i}`,
+        driver,
+        windowId: "weekly",
+        windowLabel: "Weekly",
+        plan: "Max 5x",
+        percentPerDollar: 0.1,
+        backgroundPercentPerHour: 0,
+        samples: 48,
+        hours: 48,
+        source: "measured" as const,
+      })),
+      workerHours: null,
+      notes: [],
+    });
+    const stored = learned(0, 1_000, 10);
+    expect(replacesLearned(stored, learned(1, 1_100, 10), 0)).toBe(true);
+    expect(replacesLearned(stored, learned(1, 1_100, 10), 1)).toBe(false);
+    expect(replacesLearned(stored, learned(48, 1_100, 10), 1)).toBe(false);
+    expect(replacesLearned(stored, learned(1, 400, 10), 0)).toBe(false);
+    expect(replacesLearned(stored, learned(1, 1_000, 4), 0)).toBe(false);
+    expect(replacesLearned(stored, learned(24, 400, 4), 0)).toBe(true);
   });
 });
