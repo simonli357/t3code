@@ -74,6 +74,10 @@ it("survives the kernel OOM-killing a greedy agent child", () => {
   expect(unit).toContain("OOMPolicy=continue");
 });
 
+it("asks the kernel to kill the server after agents", () => {
+  expect(BootService.renderBootServiceUnit(linuxPlan)).toContain("OOMScoreAdjust=100");
+});
+
 const macRuntime = "/Users/theo/.t3/runtime/versions/1.2.3/t3";
 const macPlan = {
   program: [macRuntime, "__service-launcher"],

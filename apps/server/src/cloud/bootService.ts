@@ -121,6 +121,10 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
     "CPUWeight=1000",
     "IOWeight=1000",
     "ManagedOOMPreference=avoid",
+    // Under memory pressure the kernel should kill agents (oom_score_adj 800, see
+    // AgentScope) long before the server. 100 is the user manager's own score and the
+    // lowest an unprivileged unit can get; systemd's default for user services is 200.
+    "OOMScoreAdjust=100",
     `StandardOutput=append:${escapeSystemdSpecifiers(plan.logPath)}`,
     `StandardError=append:${escapeSystemdSpecifiers(plan.logPath)}`,
     "",
