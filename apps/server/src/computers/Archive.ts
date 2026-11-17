@@ -1,5 +1,11 @@
 import type { ComputerFile } from "@t3tools/contracts";
-import { configProblem, memberPlatformProblem, routeProblem, snapshotProblem } from "./Workenv.ts";
+import {
+  configProblem,
+  memberPlatformProblem,
+  routeProblem,
+  summarizeReceipt,
+  type ReceiptSummary,
+} from "./Workenv.ts";
 import { parseTime, type KeepReceipt, type WorkenvConfig } from "./WorkenvConfig.ts";
 
 /** Searching more archive files than this would cost the server more than it helps anyone. */
@@ -10,13 +16,10 @@ const ARCHIVE_ROW_LIMIT = 400_000;
  * manifest, reduced to what listing it needs. The full receipt, with every archive member's
  * hash, stays in `file` and is read again only to restore.
  */
-export interface ArchiveSource {
+export interface ArchiveSource extends ReceiptSummary {
   readonly origin: "request" | "receipt" | "library";
   readonly key: string;
   readonly file: string;
-  readonly receipt: Omit<KeepReceipt, "snapshot">;
-  readonly members: ReadonlyArray<readonly [name: string, bytes: number | null]>;
-  readonly snapshotProblem: string | null;
 }
 export interface ArchiveBundle {
   readonly id: string;
@@ -36,17 +39,7 @@ export function toSource(
   file: string,
   receipt: KeepReceipt,
 ): ArchiveSource {
-  const { snapshot, ...rest } = receipt;
-  return {
-    origin,
-    key,
-    file,
-    receipt: rest,
-    members: Object.entries(snapshot ?? {}).flatMap(([name, entry]) =>
-      entry.type === "file" ? [[name, entry.bytes ?? null] as const] : [],
-    ),
-    snapshotProblem: snapshotProblem(receipt),
-  };
+  return { origin, key, file, ...summarizeReceipt(receipt) };
 }
 
 /**

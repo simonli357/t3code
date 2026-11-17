@@ -30,12 +30,32 @@ const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
 
 const trimSlash = (value: string) => value.replace(/\/+$/, "");
 
+/**
+ * A keep receipt reduced to what listing it needs. A keep of a large tree records hundreds of
+ * thousands of members, each with its hash, so the full receipt is never held: it stays in its
+ * file and is read again only to restore.
+ */
+export interface ReceiptSummary {
+  readonly receipt: Omit<KeepReceipt, "snapshot">;
+  readonly members: ReadonlyArray<readonly [name: string, bytes: number | null]>;
+  readonly snapshotProblem: string | null;
+}
+export function summarizeReceipt(full: KeepReceipt): ReceiptSummary {
+  const { snapshot, ...receipt } = full;
+  return {
+    receipt,
+    members: Object.entries(snapshot ?? {}).flatMap(([name, entry]) =>
+      entry.type === "file" ? [[name, entry.bytes ?? null] as const] : [],
+    ),
+    snapshotProblem: snapshotProblem(full),
+  };
+}
+
 /** Receipts are read once per change: a file is parsed again only when its stamp moves. */
-export interface ReceiptFile {
+export interface ReceiptFile extends ReceiptSummary {
   readonly key: string;
   readonly file: string;
   readonly modifiedAt: number | null;
-  readonly receipt: KeepReceipt;
 }
 export interface ReceiptCache {
   readonly entries: Map<string, { stamp: string; value: ReceiptFile | null; error: string | null }>;
@@ -71,7 +91,12 @@ export const readReceipts = Effect.fn("Workenv.readReceipts")(function* (
         const parsed = yield* fs.readFileString(file).pipe(
           Effect.flatMap(decodeReceipt),
           Effect.map((receipt) => ({
-            value: { key: name.slice(0, -5), file, modifiedAt, receipt } satisfies ReceiptFile,
+            value: {
+              key: name.slice(0, -5),
+              file,
+              modifiedAt,
+              ...summarizeReceipt(receipt),
+            } satisfies ReceiptFile,
             error: null,
           })),
           Effect.catch((cause) =>
@@ -101,7 +126,10 @@ export const readReceipts = Effect.fn("Workenv.readReceipts")(function* (
 export const isPublished = (receipt: Pick<KeepReceipt, "status" | "writer_path">) =>
   receipt.status === "published" && Boolean(receipt.writer_path);
 
-export function keepActivity(file: ReceiptFile, sourceExists: boolean): ComputerActivity {
+export function keepActivity(
+  file: Pick<ReceiptFile, "key" | "modifiedAt" | "receipt">,
+  sourceExists: boolean,
+): ComputerActivity {
   const { key, receipt } = file;
   const published = receipt.status === "published";
   const cancelled = receipt.status === "cancelled";

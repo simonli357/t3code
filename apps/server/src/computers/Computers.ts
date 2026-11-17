@@ -27,13 +27,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ServerSettingsService from "../serverSettings.ts";
 import * as SessionWorkspaces from "../workspace/SessionWorkspaces.ts";
-import {
-  buildArchive,
-  fromLibraryManifest,
-  toSource,
-  type Archive,
-  type ArchiveSource,
-} from "./Archive.ts";
+import { buildArchive, fromLibraryManifest, type Archive, type ArchiveSource } from "./Archive.ts";
 import {
   indexableRoots,
   indexFiles,
@@ -384,7 +378,10 @@ const make = Effect.gen(function* () {
   } | null = null;
   let merged: { key: string; files: readonly ComputerFile[] } = { key: "", files: [] };
 
+  // Receipts and the cached catalog are first read here, when someone looks at kept data: at
+  // start they are hundreds of megabytes of JSON that most runs of the server never need.
   const currentArchive = Effect.fn("Computers.archive")(function* (workenv: WorkenvConfig) {
+    yield* loadCatalog(catalog, catalogDirectory, workenv);
     const files = yield* readLocal(workenv);
     const signature = [
       requestReceipts.version,
@@ -395,8 +392,8 @@ const make = Effect.gen(function* () {
     ].join("|");
     if (archiveState?.signature === signature) return archiveState;
     const sources = [
-      ...files.requests.map((file) => toSource("request", file.key, file.file, file.receipt)),
-      ...files.published.map((file) => toSource("receipt", file.key, file.file, file.receipt)),
+      ...files.requests.map((file) => ({ ...file, origin: "request" as const })),
+      ...files.published.map((file) => ({ ...file, origin: "receipt" as const })),
       ...[...catalog.entries.values()].map((entry) => entry.source),
     ];
     const archive = buildArchive(sources, { config: workenv, platform });
@@ -409,12 +406,6 @@ const make = Effect.gen(function* () {
     };
     return archiveState;
   });
-
-  const initialWorkenv = yield* load;
-  if (initialWorkenv.config) {
-    yield* readLocal(initialWorkenv.config);
-    yield* loadCatalog(catalog, catalogDirectory, initialWorkenv.config);
-  }
 
   // --- inspection --------------------------------------------------------------------------------
   const history: HostResourcesSnapshot[] = [];

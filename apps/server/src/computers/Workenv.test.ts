@@ -357,7 +357,6 @@ it.layer(NodeServices.layer)("restoring from the library", (it) => {
         const row = keepActivity(
           {
             key: "crashed",
-            file: "/unused",
             modifiedAt: 1,
             receipt: { ...bundle.receipt, status: phase, error: null },
           },
@@ -416,6 +415,15 @@ it.layer(NodeServices.layer)("keep receipts", (it) => {
             false,
           ),
         ).toMatchObject({ status: "published", retryable: false, detail: null });
+        // Only what listing needs is held: the members, not the receipt's hashes.
+        const published = first.receipts.find((entry) => entry.key === "b".repeat(24))!;
+        expect(published.receipt).not.toHaveProperty("snapshot");
+        expect(published.members).toEqual(
+          Object.entries(bundle.receipt.snapshot!).flatMap(([name, entry]) =>
+            entry.type === "file" ? [[name, entry.bytes ?? null]] : [],
+          ),
+        );
+        expect(published.snapshotProblem).toBeNull();
         // Nothing changed: nothing is parsed again.
         const parsed = cache.version;
         yield* readReceipts(folder, cache);
