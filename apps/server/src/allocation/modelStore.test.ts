@@ -310,7 +310,9 @@ it.effect("retries a refused start once there is room, then replays its reservat
       expect(refused.allocation).toBeNull();
       expect(refused.drainedUntil).toBe("2026-10-29T12:00:00.000Z");
       expect(refused.reasons[0]).toContain("a pinned account is exact.");
-      expect(refused.profiles.map((p) => [p.model, p.eligible])).toEqual([["gpt-6-astra", false]]);
+      expect(refused.profiles.map((p) => [p.model, p.eligible])).toEqual([
+        ["gpt-6.2-astra", false],
+      ]);
       expect(yield* store.reservations).toHaveLength(0);
       const recoveredAt = "2026-10-29T18:00:00.000Z";
       const recovered = {
@@ -340,7 +342,7 @@ it.effect("retries a refused start once there is room, then replays its reservat
             ...recovered,
             accounts: recovered.accounts.map((a) => ({
               ...a,
-              models: a.models.filter((m) => m.slug !== "gpt-6-astra"),
+              models: a.models.filter((m) => m.slug !== "gpt-6.2-astra"),
             })),
           },
         ],
@@ -348,7 +350,7 @@ it.effect("retries a refused start once there is room, then replays its reservat
       expect(missingExact.allocation).toBeNull();
       expect(missingExact.drainedUntil).toBeUndefined();
       expect(missingExact.reasons.join(" ")).toContain(
-        "no account on this computer offers gpt-6-astra / medium",
+        "no account on this computer offers gpt-6.2-astra / medium",
       );
       expect(yield* store.reservations).toHaveLength(0);
       const [retry, concurrent] = yield* Effect.all(
@@ -361,7 +363,7 @@ it.effect("retries a refused start once there is room, then replays its reservat
         assignmentId: "one",
         threadId: "one",
         explicitInstanceId: "codex",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         options: [{ id: "reasoningEffort", value: "medium" }],
       });
       expect(retry.policyVersion).toBe(0);
@@ -535,7 +537,7 @@ it.effect(
         expect(pinned.allocation?.decision.selectedInstanceId).toBe("codex");
         expect(pinned.allocation?.decision.request).toMatchObject({
           environmentId: "host",
-          model: "gpt-6-astra",
+          model: "gpt-6.2-astra",
           explicitInstanceId: "codex",
           options: [{ id: "reasoningEffort", value: "medium" }],
         });
@@ -575,7 +577,7 @@ it.effect(
             codex: {
               ...defaultModelRoutingPolicy.codex,
               cells: defaultModelRoutingPolicy.codex.cells.map((r) =>
-                r.map(() => ({ model: "gpt-6.1-sol", effort: "medium" })),
+                r.map(() => ({ model: "gpt-6.2-sol", effort: "medium" })),
               ),
             },
           },
@@ -844,7 +846,7 @@ for (const oldOutcome of ["denied", "observation"] as const)
             assessment: { ...request.assessment, difficulty: 7, stakes: 6 },
             override: {
               driver: ProviderDriverKind.make("codex"),
-              model: "gpt-6-astra",
+              model: "gpt-6.2-astra",
               options: [{ id: "reasoningEffort", value: "high" }],
               reason: "Master chose Astra High",
             },
@@ -872,7 +874,7 @@ for (const oldOutcome of ["denied", "observation"] as const)
             assignmentId: "one",
             threadId: "one",
             environmentId: "host",
-            model: "gpt-6-astra",
+            model: "gpt-6.2-astra",
             options: pinned.override.options,
           });
           expect(result.allocation?.decision.reasons[0]).toContain("pinned account.");
@@ -906,7 +908,7 @@ const bandPolicy = (version: number) => ({
   version,
   codex: {
     profiles: ["medium", "high", "max", "medium", "high", "xhigh"].map((effort, i) => ({
-      model: i < 3 ? "gpt-6.1-sol" : "gpt-6-astra",
+      model: i < 3 ? "gpt-6.2-sol" : "gpt-6.2-astra",
       effort,
     })),
     grid: [
@@ -918,7 +920,7 @@ const bandPolicy = (version: number) => ({
       [6, 6, 6, 6, 6, 6],
     ].map((row) => row.map((id) => (id === 4 ? 3 : id))),
     alternatives: [[], [], [], [], [], []],
-    allowedModels: ["gpt-6.1-sol", "gpt-6-astra"],
+    allowedModels: ["gpt-6.2-sol", "gpt-6.2-astra"],
   },
   claudeAgent: defaultModelRoutingPolicy.claudeAgent,
   maxReassessments: 2,
@@ -957,8 +959,8 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
       const saved = yield* store.modelPolicy;
       expect(saved.version).toBe(1);
       expect(saved.codex.cells).toHaveLength(11);
-      expect(saved.codex.cells[7]![7]).toEqual({ model: "gpt-6.1-sol", effort: "max" });
-      expect(saved.codex.cells[7]![8]).toEqual({ model: "gpt-6-astra", effort: "high" });
+      expect(saved.codex.cells[7]![7]).toEqual({ model: "gpt-6.2-sol", effort: "max" });
+      expect(saved.codex.cells[7]![8]).toEqual({ model: "gpt-6.2-astra", effort: "high" });
       // Reading never rewrites the stored row; it stays in its saved shape.
       const stored = () =>
         sql<{
@@ -967,8 +969,8 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
           Effect.map((rows) => storedPolicy(rows[0]!.policy_json)),
         );
       expect((yield* stored()).codex.grid).toBeDefined();
-      expect(yield* resolved(1, 7, 7)).toBe("gpt-6.1-sol/max");
-      expect(yield* resolved(1, 7, 8)).toBe("gpt-6-astra/high");
+      expect(yield* resolved(1, 7, 7)).toBe("gpt-6.2-sol/max");
+      expect(yield* resolved(1, 7, 8)).toBe("gpt-6.2-astra/high");
       // Saving one exact pair creates a new exact version; its neighbours keep their choices.
       const edit = {
         ...saved,
@@ -976,7 +978,7 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
           ...saved.codex,
           cells: saved.codex.cells.map((row, d) =>
             row.map((cell, s) =>
-              d === 7 && s === 8 ? { model: "gpt-6-astra", effort: "xhigh" } : cell,
+              d === 7 && s === 8 ? { model: "gpt-6.2-astra", effort: "xhigh" } : cell,
             ),
           ),
         },
@@ -987,8 +989,8 @@ it.effect("reads a saved band policy as an exact table and keeps its row until t
         inventories: [inventory],
       });
       expect(next.policy.version).toBe(2);
-      expect(yield* resolved(2, 7, 8)).toBe("gpt-6-astra/xhigh");
-      expect(yield* resolved(2, 7, 7)).toBe("gpt-6.1-sol/max");
+      expect(yield* resolved(2, 7, 8)).toBe("gpt-6.2-astra/xhigh");
+      expect(yield* resolved(2, 7, 7)).toBe("gpt-6.2-sol/max");
       for (const [d, s] of [
         [7, 7],
         [7, 9],

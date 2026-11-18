@@ -133,8 +133,8 @@ const inventory = {
       profileSamples: 0,
       profileUncertainty: 1,
       models: [
-        { slug: "gpt-6-astra", capabilities: efforts(["medium", "high", "xhigh"]) },
-        { slug: "gpt-6.1-sol", capabilities: efforts(["medium", "high", "max", "xhigh"]) },
+        { slug: "gpt-6.2-astra", capabilities: efforts(["medium", "high", "xhigh"]) },
+        { slug: "gpt-6.2-sol", capabilities: efforts(["medium", "high", "max", "xhigh"]) },
       ],
     },
   ],
@@ -242,7 +242,7 @@ beforeEach(() => {
       allocation: { ...allocationSnapshot.policy, version: 8, closeMarginPoints: 25 },
       model: {
         ...setModelCell(modelSnapshot.policy, "codex", 7, 8, {
-          model: "gpt-6.1-sol",
+          model: "gpt-6.2-sol",
           effort: "max",
         }),
         version: 8,
@@ -416,13 +416,13 @@ it(
     const fallback = () => toggle("Fallback model").getAttribute("aria-checked");
     await click(button("Codex"));
     expect([label(7, 8), fallback()]).toEqual([
-      "Difficulty 7, stakes 8: gpt-6-astra / high",
+      "Difficulty 7, stakes 8: gpt-6.2-astra / high",
       "true",
     ]);
     await click(cell(7, 8));
     await type(control("Reasoning"), "xhigh");
     await click(toggle("Fallback model"));
-    const edited = ["Difficulty 7, stakes 8: gpt-6-astra / xhigh, not saved yet", "false"];
+    const edited = ["Difficulty 7, stakes 8: gpt-6.2-astra / xhigh, not saved yet", "false"];
     expect(status()).toBe("Not saved yet");
     await connect("host", false);
     await pass(1200);
@@ -441,7 +441,7 @@ it(
     expect(stored.host!.model).toMatchObject({ version: 2, fallback: null });
     expect(modelCell(stored.host!.model, "codex", 7, 8).effort).toBe("xhigh");
     expect([label(7, 8), fallback()]).toEqual([
-      "Difficulty 7, stakes 8: gpt-6-astra / xhigh",
+      "Difficulty 7, stakes 8: gpt-6.2-astra / xhigh",
       "false",
     ]);
     expect(status()).toBe("Saved");
@@ -453,8 +453,8 @@ it(
     await scope("peer");
     await click(button("Codex"));
     expect([label(7, 8), label(0, 0), fallback()]).toEqual([
-      "Difficulty 7, stakes 8: gpt-6.1-sol / max",
-      "Difficulty 0, stakes 0: gpt-6.1-sol / medium",
+      "Difficulty 7, stakes 8: gpt-6.2-sol / max",
+      "Difficulty 0, stakes 0: gpt-6.2-sol / medium",
       "true",
     ]);
     await pass(1200);

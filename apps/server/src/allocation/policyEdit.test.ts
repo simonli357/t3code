@@ -253,8 +253,8 @@ it("reads both policies with accounts by label", () => {
   expect(custom.warnings).toEqual(["Ladder: no connected account offers claude-next-9."]);
   expect(custom.table).toHaveLength(11);
   expect(custom.table![0]).toHaveLength(11);
-  expect(custom.table![0]![0]).toBe("gpt-6.1-sol / medium");
-  expect(custom.table![10]![10]).toBe("gpt-6-astra / xhigh");
+  expect(custom.table![0]![0]).toBe("gpt-6.2-sol / medium");
+  expect(custom.table![10]![10]).toBe("gpt-6.2-astra / xhigh");
 });
 
 it.effect("sets Fable mode per account by label or instance ID, and only on Claude accounts", () =>
@@ -452,7 +452,7 @@ it("writes table entries for a range of scores and accepts any model ID", () => 
         model: "claude-next-9",
         effort: "high",
       },
-      { table: "codex", difficulty: 10, stakes: 0, model: "gpt-6-astra", effort: "low" },
+      { table: "codex", difficulty: 10, stakes: 0, model: "gpt-6.2-astra", effort: "low" },
     ],
   });
   for (const [d, row] of next.claudeAgent.cells.entries())
@@ -467,7 +467,7 @@ it("writes table entries for a range of scores and accepts any model ID", () => 
     ...policy.claudeAgent.allowedModels,
     "claude-next-9",
   ]);
-  expect(next.codex.cells[10]![0]).toEqual({ model: "gpt-6-astra", effort: "low" });
+  expect(next.codex.cells[10]![0]).toEqual({ model: "gpt-6.2-astra", effort: "low" });
   expect(next.codex.cells[10]![1]).toEqual(policy.codex.cells[10]![1]);
   expect(next.codex.allowedModels).toEqual(policy.codex.allowedModels);
   // A later entry for the same pair wins.

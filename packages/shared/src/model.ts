@@ -284,6 +284,11 @@ export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 }
 
+/** Every generation of Codex's Astra model: "gpt-6-astra", "gpt-6.2-astra". */
+export function isCodexAstraModel(slug: string): boolean {
+  return /^gpt-\d+(\.\d+)?-astra$/.test(codexModelFamily(slug));
+}
+
 export function normalizeModelSlug(
   model: string | null | undefined,
   provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,

@@ -11,6 +11,7 @@ import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as Measurements from "./UsageMeasurements.ts";
+import * as UsageService from "./UsageService.ts";
 
 const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -45,6 +46,7 @@ it.effect("records every account without opt-in and never stores its email", () 
         }),
         Layer.mock(ProviderService)({ streamEvents: Stream.empty }),
         Layer.mock(ProjectionSnapshotQuery)({}),
+        UsageService.layerTest,
       );
       const layer = Measurements.layer.pipe(Layer.provideMerge(dependencies));
       yield* Effect.scoped(
@@ -64,6 +66,46 @@ it.effect("records every account without opt-in and never stores its email", () 
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );
+
+const turn = (
+  turnId: string,
+  costUsd: number | undefined,
+  hasSubagents: boolean,
+  model = "test-model",
+) => ({
+  instanceId: "claudeAgent",
+  accountKey: "account",
+  threadId: "thread",
+  turnId,
+  model,
+  effort: null,
+  selectionSource: "provider",
+  sessionCreatedAt: null,
+  observedAt: "1970-01-01T00:00:00.000Z",
+  startedAt: "1970-01-01T00:00:00.000Z",
+  endedAt: "1970-01-01T00:10:00.000Z",
+  state: "completed",
+  lastObservedAt: "1970-01-01T00:10:00.000Z",
+  initialContextTokens: null,
+  latestContextTokens: null,
+  peakContextTokens: null,
+  contextCapacityTokens: null,
+  compactions: 0,
+  mixedModels: false,
+  toolWallMs: 0,
+  toolTimingComplete: true,
+  apiDurationMs: null,
+  tokens: {
+    usageStatus: "complete",
+    usageScope: "main_agent",
+    hasSubagents,
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 1_000_000,
+  },
+  ...(costUsd === undefined ? {} : { costUsd }),
+});
 
 it.effect(
   "prices a turn without subagents from its tokens, whatever cost the provider reported",
@@ -88,40 +130,6 @@ it.effect(
             },
           }),
         );
-        const turn = (turnId: string, costUsd: number, hasSubagents: boolean) => ({
-          instanceId: "claudeAgent",
-          accountKey: "account",
-          threadId: "thread",
-          turnId,
-          model: "test-model",
-          effort: null,
-          selectionSource: "provider",
-          sessionCreatedAt: null,
-          observedAt: "1970-01-01T00:00:00.000Z",
-          startedAt: "1970-01-01T00:00:00.000Z",
-          endedAt: "1970-01-01T00:10:00.000Z",
-          state: "completed",
-          lastObservedAt: "1970-01-01T00:10:00.000Z",
-          initialContextTokens: null,
-          latestContextTokens: null,
-          peakContextTokens: null,
-          contextCapacityTokens: null,
-          compactions: 0,
-          mixedModels: false,
-          toolWallMs: 0,
-          toolTimingComplete: true,
-          apiDurationMs: null,
-          tokens: {
-            usageStatus: "complete",
-            usageScope: "main_agent",
-            hasSubagents,
-            inputTokens: 1_000_000,
-            cachedInputTokens: 0,
-            cacheCreationTokens: 0,
-            outputTokens: 1_000_000,
-          },
-          costUsd,
-        });
         // The first turn of a resumed session reported the session's running total.
         yield* fs.writeFileString(
           `${dir}/userdata/usage-measurements.json`,
@@ -152,6 +160,7 @@ it.effect(
               }),
               Layer.mock(ProviderService)({ streamEvents: Stream.empty }),
               Layer.mock(ProjectionSnapshotQuery)({}),
+              UsageService.layerTest,
             ),
           ),
         );
@@ -164,6 +173,100 @@ it.effect(
           ["resumed", 2],
           ["subagents", 5],
         ]);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "prices a model the rate table lacks as its nearest version, and fetches the table again once",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped();
+        yield* fs.makeDirectory(`${dir}/userdata`, { recursive: true });
+        const rates = (models: Record<string, number>) =>
+          fs.writeFileString(
+            `${dir}/userdata/usage-model-rates.json`,
+            encodeJson({
+              fetchedAtMs: 0,
+              document: Object.fromEntries(
+                Object.entries(models).map(([model, perToken]) => [
+                  model,
+                  { input_cost_per_token: perToken, output_cost_per_token: perToken },
+                ]),
+              ),
+            }),
+          );
+        yield* rates({ "gpt-6-astra": 1e-6, "gpt-5.6-astra": 5e-6 });
+        yield* fs.writeFileString(
+          `${dir}/userdata/usage-measurements.json`,
+          encodeJson({
+            version: 1,
+            turns: [
+              turn("new", undefined, false, "gpt-6.2-astra"),
+              turn("unknown", undefined, false, "x"),
+            ],
+            quotas: [],
+          }),
+        );
+        const provider = decodeProvider({
+          instanceId: "claudeAgent",
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          version: "1",
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: "1970-01-01T00:00:00.000Z",
+          models: [],
+        });
+        let fetches = 0;
+        const layer = Measurements.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              ServerConfig.layerTest(process.cwd(), dir),
+              Layer.mock(ProviderRegistry)({
+                getProviders: Effect.succeed([provider]),
+                streamChanges: Stream.empty,
+              }),
+              Layer.mock(ProviderService)({ streamEvents: Stream.empty }),
+              Layer.mock(ProjectionSnapshotQuery)({}),
+              Layer.mock(UsageService.UsageService)({
+                // The fetched table has the new model at its own price.
+                refreshRates: Effect.sync(() => fetches++).pipe(
+                  Effect.andThen(rates({ "gpt-6-astra": 1e-6, "gpt-6.2-astra": 2e-6 })),
+                  Effect.orDie,
+                  Effect.as({
+                    status: "fresh" as const,
+                    source: "test",
+                    fetchedAt: null,
+                    knownModels: 2,
+                  }),
+                ),
+              }),
+            ),
+          ),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* Measurements.UsageMeasurements;
+          const priced = Effect.map(service.evidence, (evidence) =>
+            evidence.turns.map((t) => [t.turnId, t.priced]),
+          );
+          // Two million tokens at the older version's dollar a million, not dropped or free.
+          expect(yield* priced).toEqual([
+            ["new", 2],
+            ["unknown", null],
+          ]);
+          expect(fetches).toBe(0);
+          expect(yield* priced).toEqual([
+            ["new", 4],
+            ["unknown", null],
+          ]);
+          yield* priced;
+          // The model no table lists does not fetch it again before a day has passed.
+          expect(fetches).toBe(1);
+        }).pipe(Effect.provide(layer));
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
 );

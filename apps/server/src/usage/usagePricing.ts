@@ -183,6 +183,52 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
   return table.get(key) ?? null;
 }
 
+/** "gpt-6.2-astra" → name "gpt-astra", version [6, 2]; "claude-opus-5-5" → "claude-opus", [5, 5]. */
+function splitVersion(key: string) {
+  const words = key.split("-");
+  const isVersion = (word: string) => /^\d+(\.\d+)?$/.test(word);
+  return {
+    name: words.filter((word) => !isVersion(word)).join("-"),
+    version: words.filter(isVersion).flatMap((word) => word.split(".").map(Number)),
+  };
+}
+
+function compareVersions(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const difference = (a[i] ?? 0) - (b[i] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+/**
+ * The rate of the same model's nearest other version: the newest one older than `model`, else
+ * the oldest newer one. A stand-in for a model released since the table was fetched
+ * ("gpt-6.2-astra" takes "gpt-6-astra"), for callers that need a cost rather than "unpriced".
+ */
+export function lookupNearestVersionRate(table: RateTable, model: string): ModelRate | null {
+  const key = stripVariantSuffix(normalizeRateKey(model));
+  const target = splitVersion(key);
+  if (target.version.length === 0 || UNPRICEABLE_MODELS.has(bareModelName(key))) return null;
+  let best: { readonly version: readonly number[]; readonly rate: ModelRate } | undefined;
+  for (const [candidate, rate] of table) {
+    if (candidate === key || candidate.includes("/")) continue;
+    const { name, version } = splitVersion(candidate);
+    if (name !== target.name || version.length === 0) continue;
+    const older = compareVersions(version, target.version) < 0;
+    const bestOlder = best !== undefined && compareVersions(best.version, target.version) < 0;
+    const closer =
+      best === undefined ||
+      (older !== bestOlder
+        ? older
+        : older
+          ? compareVersions(version, best.version) > 0
+          : compareVersions(version, best.version) < 0);
+    if (closer) best = { version, rate };
+  }
+  return best?.rate ?? null;
+}
+
 /** The parts of a transcript record that decide its price. */
 export type PricedRecord = Pick<
   UsageRecord,

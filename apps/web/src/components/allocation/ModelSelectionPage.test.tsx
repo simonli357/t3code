@@ -211,8 +211,8 @@ beforeEach(async () => {
         demand: [],
         accounts: [
           account("ad", "codex", [
-            model("gpt-6.1-sol", "codex", ["medium", "high", "max", "xhigh"]),
-            model("gpt-6-astra", "codex", ["medium", "high", "xhigh"]),
+            model("gpt-6.2-sol", "codex", ["medium", "high", "max", "xhigh"]),
+            model("gpt-6.2-astra", "codex", ["medium", "high", "xhigh"]),
             model("gpt-6-luna", "codex", ["medium"]),
           ]),
           account("sl", "claudeAgent", [
@@ -326,7 +326,7 @@ it("shows an explicit 0 to 10 table with one labelled button per score pair, and
   ]);
   expect(container.querySelectorAll("tbody th")).toHaveLength(11);
   expect(container.querySelectorAll("table button")).toHaveLength(121);
-  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6-astra / high");
+  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.2-astra / high");
   expect(status()).toBe("Changes save automatically");
   for (const gone of ["Save changes", "Discard changes", "Undo this cell"])
     expect(button(gone)).toBeUndefined();
@@ -370,10 +370,10 @@ it("stores cell changes once they pause, as one version and exactly the cells ch
   ] as const;
   const before = neighbours.map(([d, s]) => label(d, s));
   await pick(5, 2);
-  expect(label(5, 2)).toContain("gpt-6.1-sol / high");
+  expect(label(5, 2)).toContain("gpt-6.2-sol / high");
   expect(cell(5, 2).getAttribute("aria-pressed")).toBe("true");
-  await change("Model", "gpt-6-astra");
-  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6-astra / high, not saved yet");
+  await change("Model", "gpt-6.2-astra");
+  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6.2-astra / high, not saved yet");
   expect(neighbours.map(([d, s]) => label(d, s))).toEqual(before);
   expect(status()).toBe("Not saved yet");
   await pass(600);
@@ -387,7 +387,7 @@ it("stores cell changes once they pause, as one version and exactly the cells ch
   expect(saved!.expectedVersion).toBe(3);
   expect(saved!.policy.codex).toEqual(
     withCell(
-      withCell(defaultModelRoutingPolicy, 5, 2, { model: "gpt-6-astra", effort: "high" }),
+      withCell(defaultModelRoutingPolicy, 5, 2, { model: "gpt-6.2-astra", effort: "high" }),
       1,
       1,
       { ...modelCell(defaultModelRoutingPolicy, "codex", 1, 1), effort: "high" },
@@ -396,7 +396,7 @@ it("stores cell changes once they pause, as one version and exactly the cells ch
   expect(saved!.policy.claudeAgent).toEqual(defaultModelRoutingPolicy.claudeAgent);
   expect(snapshot.policy.version).toBe(4);
   expect(status()).toBe("Saved");
-  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6-astra / high");
+  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6.2-astra / high");
 });
 it("stores a waiting change when the page is left", async () => {
   await pick(7, 8);
@@ -408,7 +408,7 @@ it("stores a waiting change when the page is left", async () => {
 });
 it("keeps a change made while a save is on its way, and stores it next", async () => {
   await pick(5, 2);
-  await change("Model", "gpt-6-astra");
+  await change("Model", "gpt-6.2-astra");
   const previous = state.execute.getMockImplementation()!;
   let complete!: () => void;
   state.execute.mockImplementationOnce(async (arg) => {
@@ -421,13 +421,13 @@ it("keeps a change made while a save is on its way, and stores it next", async (
   await change("Reasoning", "high");
   expect(label(1, 1)).toContain("high, not saved yet");
   await act(async () => complete());
-  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6-astra / high");
+  expect(label(5, 2)).toBe("Difficulty 5, stakes 2: gpt-6.2-astra / high");
   expect(label(1, 1)).toContain("high, not saved yet");
   expect(status()).toBe("Not saved yet");
   await pass(1200);
   expect(saves().map((save) => save.expectedVersion)).toEqual([3, 4]);
   expect(modelCell(snapshot.policy, "codex", 1, 1).effort).toBe("high");
-  expect(modelCell(snapshot.policy, "codex", 5, 2).model).toBe("gpt-6-astra");
+  expect(modelCell(snapshot.policy, "codex", 5, 2).model).toBe("gpt-6.2-astra");
   expect(status()).toBe("Saved");
 });
 it("shows a refused save, keeps the change marked, and stores it on a retry", async () => {
@@ -440,14 +440,14 @@ it("shows a refused save, keeps the change marked, and stores it on a retry", as
   expect(alert()?.textContent).toContain("Not saved");
   expect(alert()?.textContent).toContain("The settings computer is off.");
   expect(status()).toBe("Not saved");
-  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6-astra / xhigh, not saved yet");
+  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.2-astra / xhigh, not saved yet");
   expect(button("Codex (1 not saved)")).toBeDefined();
   expect(snapshot.policy.version).toBe(3);
   await click("Try again");
   await pass();
   expect(modelCell(snapshot.policy, "codex", 7, 8).effort).toBe("xhigh");
   expect(alert()).toBeNull();
-  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6-astra / xhigh");
+  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.2-astra / xhigh");
   expect(button("Codex")).toBeDefined();
 });
 it("shows the stored table again when a change that could not be stored is dropped", async () => {
@@ -457,7 +457,7 @@ it("shows the stored table again when a change that could not be stored is dropp
   await pass(1200);
   expect(alert()?.textContent).toContain("did not answer");
   await click("Drop my change");
-  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.1-sol / medium");
+  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.2-sol / medium");
   expect(alert()).toBeNull();
   expect(status()).toBe("Changes save automatically");
   await pass(1200);
@@ -467,42 +467,42 @@ it("applies a change on top of a table saved elsewhere instead of overwriting it
   await pick(7, 8);
   await change("Reasoning", "xhigh");
   // Another computer stores version 4 while this page is open.
-  store(withCell(snapshot.policy, 2, 2, { model: "gpt-6-astra", effort: "xhigh" }));
+  store(withCell(snapshot.policy, 2, 2, { model: "gpt-6.2-astra", effort: "xhigh" }));
   await pass(1200);
   expect(saves().map((save) => save.expectedVersion)).toEqual([3, 4]);
   expect(snapshot.policy.version).toBe(5);
   expect(modelCell(snapshot.policy, "codex", 2, 2)).toEqual({
-    model: "gpt-6-astra",
+    model: "gpt-6.2-astra",
     effort: "xhigh",
   });
   expect(modelCell(snapshot.policy, "codex", 7, 8).effort).toBe("xhigh");
-  expect(label(2, 2)).toBe("Difficulty 2, stakes 2: gpt-6-astra / xhigh");
+  expect(label(2, 2)).toBe("Difficulty 2, stakes 2: gpt-6.2-astra / xhigh");
   expect(alert()).toBeNull();
   expect(status()).toBe("Saved");
 });
 it("asks before replacing a cell that was also changed elsewhere", async () => {
   await pick(7, 8);
   await change("Reasoning", "xhigh");
-  store(withCell(snapshot.policy, 7, 8, { model: "gpt-6.1-sol", effort: "max" }));
+  store(withCell(snapshot.policy, 7, 8, { model: "gpt-6.2-sol", effort: "max" }));
   await pass(1200);
   expect(alert()?.textContent).toContain("Changed elsewhere");
   expect(status()).toBe("Not saved");
-  expect(label(7, 8)).toContain("gpt-6-astra / xhigh, not saved yet");
+  expect(label(7, 8)).toContain("gpt-6.2-astra / xhigh, not saved yet");
   expect(snapshot.policy.version).toBe(4);
   await click("Use theirs");
-  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.1-sol / max");
+  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.2-sol / max");
   expect(alert()).toBeNull();
   await pass(1200);
   expect(snapshot.policy.version).toBe(4);
 
-  store(withCell(snapshot.policy, 7, 8, { model: "gpt-6-astra", effort: "medium" }));
+  store(withCell(snapshot.policy, 7, 8, { model: "gpt-6.2-astra", effort: "medium" }));
   await change("Reasoning", "high");
   await pass(1200);
   await click("Keep mine");
   await pass();
   expect(snapshot.policy.version).toBe(6);
   expect(modelCell(snapshot.policy, "codex", 7, 8)).toEqual({
-    model: "gpt-6.1-sol",
+    model: "gpt-6.2-sol",
     effort: "high",
   });
   expect(alert()).toBeNull();
@@ -515,7 +515,7 @@ it("keeps a change across reconnects, ignores an overtaken read and stores on th
   // The save could not reach the computer: the change is still marked, and nothing is stored.
   expect(alert()?.textContent).toContain("did not answer");
   expect(status()).toBe("Not connected");
-  expect(label(7, 8)).toContain("gpt-6-astra / xhigh, not saved yet");
+  expect(label(7, 8)).toContain("gpt-6.2-astra / xhigh, not saved yet");
   const resolveOld = hold("settings");
   await connect("connected");
   expect(snapshotCalls()).toHaveLength(2);
@@ -533,48 +533,48 @@ it("keeps a change across reconnects, ignores an overtaken read and stores on th
     resolveOld({ _tag: "Failure", cause: Cause.fail(new Error("obsolete connection")) }),
   );
   expect(alert()).toBeNull();
-  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6-astra / xhigh");
+  expect(label(7, 8)).toBe("Difficulty 7, stakes 8: gpt-6.2-astra / xhigh");
 });
 it("never changes reasoning silently when the chosen model cannot offer it", async () => {
   await pick(7, 0);
-  expect(label(7, 0)).toContain("gpt-6.1-sol / max");
-  await change("Model", "gpt-6-astra");
-  expect(label(7, 0)).toBe("Difficulty 7, stakes 0: gpt-6.1-sol / max");
-  expect(container.textContent).toContain("Astra 6 does not offer max");
+  expect(label(7, 0)).toContain("gpt-6.2-sol / max");
+  await change("Model", "gpt-6.2-astra");
+  expect(label(7, 0)).toBe("Difficulty 7, stakes 0: gpt-6.2-sol / max");
+  expect(container.textContent).toContain("Astra 6.2 does not offer max");
   expect(control("Reasoning").value).toBe("");
   await pass(1200);
   expect(saves()).toEqual([]);
   expect(status()).toBe("Changes save automatically");
   await change("Reasoning", "xhigh");
-  expect(label(7, 0)).toContain("gpt-6-astra / xhigh, not saved yet");
+  expect(label(7, 0)).toContain("gpt-6.2-astra / xhigh, not saved yet");
   await pass(1200);
   expect(modelCell(snapshot.policy, "codex", 7, 0)).toMatchObject({
-    model: "gpt-6-astra",
+    model: "gpt-6.2-astra",
     effort: "xhigh",
   });
   await pick(5, 2);
-  await change("Model", "gpt-6-astra");
-  expect(label(5, 2)).toContain("gpt-6-astra / high");
+  await change("Model", "gpt-6.2-astra");
+  expect(label(5, 2)).toContain("gpt-6.2-astra / high");
 });
 it("sets and clears one alternative without touching the choice, offering every advertised model", async () => {
   await pick(0, 0);
   const models = [...(control("Model") as HTMLSelectElement).options].map((o) => o.value);
-  expect(models).toEqual(["gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol"]);
-  await change("If unavailable", "gpt-6-astra\nhigh");
+  expect(models).toEqual(["gpt-6-luna", "gpt-6.2-astra", "gpt-6.2-sol"]);
+  await change("If unavailable", "gpt-6.2-astra\nhigh");
   expect(label(0, 0)).toBe(
-    "Difficulty 0, stakes 0: gpt-6.1-sol / medium, with an alternative, not saved yet",
+    "Difficulty 0, stakes 0: gpt-6.2-sol / medium, with an alternative, not saved yet",
   );
   await pass(1200);
   expect(modelCell(snapshot.policy, "codex", 0, 0)).toEqual({
-    model: "gpt-6.1-sol",
+    model: "gpt-6.2-sol",
     effort: "medium",
-    alternatives: [{ model: "gpt-6-astra", effort: "high" }],
+    alternatives: [{ model: "gpt-6.2-astra", effort: "high" }],
   });
-  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.1-sol / medium, with an alternative");
+  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.2-sol / medium, with an alternative");
   await change("If unavailable", "");
   await pass(1200);
   expect(modelCell(snapshot.policy, "codex", 0, 0)).toEqual({
-    model: "gpt-6.1-sol",
+    model: "gpt-6.2-sol",
     effort: "medium",
   });
   expect(snapshot.policy.version).toBe(5);
@@ -586,7 +586,7 @@ it("flags what the connected catalog cannot offer, and stores a change made offl
       ...inventory,
       accounts: inventory.accounts.map((a) =>
         a.driver === "codex"
-          ? { ...a, models: a.models.filter((m) => m.slug !== "gpt-6-astra") }
+          ? { ...a, models: a.models.filter((m) => m.slug !== "gpt-6.2-astra") }
           : a,
       ),
     })),
@@ -594,13 +594,13 @@ it("flags what the connected catalog cannot offer, and stores a change made offl
   await remount();
   await click("Codex");
   expect(label(7, 8)).toBe(
-    "Difficulty 7, stakes 8: gpt-6-astra / high, not offered by connected accounts",
+    "Difficulty 7, stakes 8: gpt-6.2-astra / high, not offered by connected accounts",
   );
   expect(label(0, 0)).not.toContain("not offered");
   await pick(7, 8);
   const select = control("Model") as HTMLSelectElement;
-  expect(select.value).toBe("gpt-6-astra");
-  expect([...select.options].find((o) => o.value === "gpt-6-astra")!.textContent).toContain(
+  expect(select.value).toBe("gpt-6.2-astra");
+  expect([...select.options].find((o) => o.value === "gpt-6.2-astra")!.textContent).toContain(
     "not offered",
   );
   await connect("offline");
@@ -609,12 +609,12 @@ it("flags what the connected catalog cannot offer, and stores a change made offl
   await change("Reasoning", "high");
   expect(container.textContent).toContain("a change is saved once this computer reconnects");
   await pass(1200);
-  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.1-sol / high, not saved yet");
+  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.2-sol / high, not saved yet");
   expect(snapshot.policy.version).toBe(3);
   await connect("connected");
   await pass();
   expect(snapshot.policy.version).toBe(4);
-  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.1-sol / high");
+  expect(label(0, 0)).toBe("Difficulty 0, stakes 0: gpt-6.2-sol / high");
   expect(alert()).toBeNull();
 });
 it("brings the editor into view when a cell far below it is picked", async () => {
@@ -843,10 +843,10 @@ it("accepts any typed model ID, marks one no account offers, and shows the save'
   await pass();
   const list = container.querySelector('[aria-label="Codex models"]')!;
   expect(list.textContent).toContain("typed-model· not offered by a connected account");
-  expect(list.textContent).not.toContain("gpt-6-astra·");
+  expect(list.textContent).not.toContain("gpt-6.2-astra·");
   expect(snapshot.policy.codex.allowedModels).toEqual([
-    "gpt-6.1-sol",
-    "gpt-6-astra",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "typed-model",
   ]);
   expect(container.textContent).toContain("Saved with warnings");
@@ -862,11 +862,11 @@ it("accepts any typed model ID, marks one no account offers, and shows the save'
     effort: "medium",
   });
   await pick(0, 0);
-  await change("Model", "gpt-6.1-sol");
+  await change("Model", "gpt-6.2-sol");
   await act(async () => named("Remove typed-model").click());
   await pass(1200);
   expect(list.textContent).not.toContain("typed-model");
-  expect(snapshot.policy.codex.allowedModels).toEqual(["gpt-6.1-sol", "gpt-6-astra"]);
+  expect(snapshot.policy.codex.allowedModels).toEqual(["gpt-6.2-sol", "gpt-6.2-astra"]);
 });
 it("goes back to an earlier version once changes are stored, and to the built-in table", async () => {
   await click("Claude");

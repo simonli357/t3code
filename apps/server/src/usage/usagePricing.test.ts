@@ -4,6 +4,7 @@ import { cursorRateModel } from "./cursorUsageReader.ts";
 import {
   cacheSavingsUsd,
   createOverrideRateTable,
+  lookupNearestVersionRate,
   lookupRate,
   parseRateTable,
   priceUsage,
@@ -13,6 +14,30 @@ const rate = (input: number, cacheRead?: number) => ({
   input_cost_per_token: input,
   output_cost_per_token: input * 5,
   ...(cacheRead === undefined ? {} : { cache_read_input_token_cost: cacheRead }),
+});
+
+it("stands in the nearest other version for a model the table lacks", () => {
+  const table = parseRateTable({
+    "gpt-5.6-sol": rate(1),
+    "gpt-6-sol": rate(2),
+    "gpt-6.1-sol": rate(3),
+    "gpt-7-sol": rate(4),
+    "gpt-6-astra": rate(5),
+    "azure/gpt-6.2-astra": rate(6),
+    "azure/eu/gpt-6.2-astra": rate(7),
+    "claude-opus-5-5": rate(8),
+  });
+  const input = (model: string) =>
+    lookupNearestVersionRate(table, model)?.inputCostPerToken ?? null;
+  // The newest older version, never another model or a reseller's price.
+  expect(input("gpt-6.2-sol")).toBe(3);
+  expect(input("gpt-6.2-astra")).toBe(5);
+  expect(input("claude-opus-5-6[1m]")).toBe(8);
+  // Only newer versions exist: the oldest of them.
+  expect(input("gpt-5-sol")).toBe(1);
+  expect(input("gpt-6.2-luna")).toBeNull();
+  expect(input("opus")).toBeNull();
+  expect(lookupRate(table, "gpt-6.2-sol")).toBeNull();
 });
 
 describe("usage pricing", () => {

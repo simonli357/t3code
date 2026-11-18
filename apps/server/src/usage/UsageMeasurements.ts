@@ -16,7 +16,13 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { MeasurementHistory } from "./measurementHistory.ts";
-import { lookupRate, parseRateTable, type RateTable } from "./usagePricing.ts";
+import {
+  lookupNearestVersionRate,
+  lookupRate,
+  parseRateTable,
+  type RateTable,
+} from "./usagePricing.ts";
+import { UsageService } from "./UsageService.ts";
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeRates = Schema.decodeUnknownEffect(
@@ -30,6 +36,8 @@ export interface TokenPrice {
   readonly output: number;
 }
 const RATES_RELOAD_MS = 60 * 60_000;
+/** While a model stays unpriced, the rate table is fetched again this often. */
+const RATES_REFETCH_MS = 24 * 60 * 60_000;
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 export class UsageMeasurements extends Context.Service<
@@ -47,7 +55,10 @@ export class UsageMeasurements extends Context.Service<
       })[];
       readonly quotas: ReturnType<MeasurementHistory["evidence"]>["quotas"];
     }>;
-    /** API prices from the usage page's cached rate table. */
+    /**
+     * API prices from the usage page's cached rate table. A model the table lacks takes the
+     * price of its nearest other version, and has the table fetched again before the next read.
+     */
     readonly prices: Effect.Effect<(model: string) => TokenPrice | null>;
   }
 >()("t3/usage/UsageMeasurements") {}
@@ -58,6 +69,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const providers = yield* ProviderRegistry;
   const runtime = yield* ProviderService;
+  const usage = yield* UsageService;
   const projection = yield* ProjectionSnapshotQuery;
   const history = new MeasurementHistory();
   const file = path.join(config.stateDir, "usage-measurements.json");
@@ -150,23 +162,37 @@ const make = Effect.gen(function* () {
     ),
     Effect.forkScoped,
   );
-  // The usage page fetches and caches the rate table; learning only reads that copy.
+  // The usage page fetches and caches the rate table; learning reads that copy. A model it
+  // lacks was released since the fetch, so the table is fetched again: once when such a model
+  // first appears, then daily while any stays unpriced.
   let rates: { table: RateTable; loadedAt: number } | undefined;
+  const unpriced = new Set<string>();
+  let refetched: { at: number; unpriced: number } | undefined;
   const rateTable = Effect.gen(function* () {
     const at = yield* Clock.currentTimeMillis;
-    if (rates && at - rates.loadedAt < RATES_RELOAD_MS) return rates.table;
-    const table = yield* fs
+    const refetch =
+      unpriced.size > 0 &&
+      (!refetched || unpriced.size > refetched.unpriced || at - refetched.at >= RATES_REFETCH_MS);
+    if (rates && !refetch && at - rates.loadedAt < RATES_RELOAD_MS) return rates.table;
+    if (refetch) yield* usage.refreshRates;
+    const table: RateTable = yield* fs
       .readFileString(path.join(config.stateDir, "usage-model-rates.json"))
       .pipe(
         Effect.flatMap(decodeRates),
         Effect.map((cached) => parseRateTable(cached.document)),
         Effect.catchCause(() => Effect.succeed(rates?.table ?? new Map())),
       );
+    if (refetch) {
+      for (const model of unpriced) if (lookupRate(table, model)) unpriced.delete(model);
+      refetched = { at, unpriced: unpriced.size };
+    }
     rates = { table, loadedAt: at };
     return table;
   });
   const prices = Effect.map(rateTable, (table) => (model: string) => {
-    const rate = lookupRate(table, model);
+    const listed = lookupRate(table, model);
+    if (!listed) unpriced.add(model);
+    const rate = listed ?? lookupNearestVersionRate(table, model);
     return rate
       ? {
           input: rate.inputCostPerToken,

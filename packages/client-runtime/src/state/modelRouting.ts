@@ -55,7 +55,7 @@ function splitModelName(slug: string) {
     version: words.filter(isVersion).join("."),
   };
 }
-/** "gpt-6.1-sol" → "Sol 6.1", "claude-sonnet-5-5" → "Sonnet 5.5". */
+/** "gpt-6.2-sol" → "Sol 6.2", "claude-sonnet-5-5" → "Sonnet 5.5". */
 export function modelDisplayName(slug: string) {
   const { name, version } = splitModelName(slug);
   return [name, version].filter(Boolean).join(" ") || slug;

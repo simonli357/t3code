@@ -104,7 +104,7 @@ const claude = (
   patch: Partial<AllocationAccount> = {},
 ) => account(label, claudeAgent, [HAIKU, SONNET, OPUS, FABLE], windows, patch);
 const gpt = (label: string, windows: AllocationWindow[] = [weekly(20)]) =>
-  account(label, codex, ["gpt-6.1-sol", "gpt-6-astra"], windows);
+  account(label, codex, ["gpt-6.2-sol", "gpt-6.2-astra"], windows);
 /** DeepSeek as the user runs it: a Codex-protocol account without usage windows. */
 const deepseek = account("DS", codex, ["deepseek-flash"], []);
 const host = (accounts: AllocationAccount[]): AllocationInventory => ({
@@ -292,7 +292,7 @@ describe("account, model and effort together", () => {
         effort: "high",
       }),
     ).toBe(0);
-    expect(rungs({ model: "gpt-6-astra", effort: "high" })).toEqual([]);
+    expect(rungs({ model: "gpt-6.2-astra", effort: "high" })).toEqual([]);
   });
 
   it("uses the fallback only when no Claude rung has room and the wanted rung is below the threshold", () => {
@@ -502,22 +502,22 @@ describe("account, model and effort together", () => {
     const forCodex = { allowedDrivers: [codex] };
     const table = { model: OPUS, effort: "high" };
     const sol = (used: number, hours = 100) =>
-      only("gpt-6.1-sol", used, { resetsAt: inHours(hours) });
+      only("gpt-6.2-sol", used, { resetsAt: inHours(hours) });
     const pick = (accounts: AllocationAccount[], policy: Partial<AllocationPolicy> = {}) =>
       choose(accounts, table, { request: forCodex, policy });
-    // The default Codex table wants gpt-6.1-sol / medium for difficulty 0, stakes 0.
+    // The default Codex table wants gpt-6.2-sol / medium for difficulty 0, stakes 0.
     expect(picked(pick([gpt("SL", [weekly(50)]), gpt("AD", [weekly(30)])]))).toBe(
-      "AD gpt-6.1-sol / medium",
+      "AD gpt-6.2-sol / medium",
     );
     expect(picked(pick([gpt("SL", [weekly(20), sol(100)]), gpt("AD", [weekly(90)])]))).toBe(
-      "AD gpt-6.1-sol / medium",
+      "AD gpt-6.2-sol / medium",
     );
     const order = { accountOrder: [allocationPreferenceKey(gpt("SL"))] };
     expect(picked(pick([gpt("SL", [weekly(35)]), gpt("AD", [weekly(30)])], order))).toBe(
-      "SL gpt-6.1-sol / medium",
+      "SL gpt-6.2-sol / medium",
     );
     expect(picked(pick([gpt("SL", [weekly(45)]), gpt("AD", [weekly(30)])], order))).toBe(
-      "AD gpt-6.1-sol / medium",
+      "AD gpt-6.2-sol / medium",
     );
     // Drained on every account: refused, though Astra, Claude and the fallback all have room.
     const refused = pick([
@@ -579,12 +579,12 @@ describe("the table", () => {
   // How scores were grouped before exact-score tables: 0-3, 4-6, then 7, 8, 9 and 10.
   const band = (score: number) => (score <= 3 ? 0 : score <= 6 ? 1 : score - 5);
   const defaults = [
-    "gpt-6.1-sol/medium",
-    "gpt-6.1-sol/high",
-    "gpt-6.1-sol/max",
-    "gpt-6-astra/medium",
-    "gpt-6-astra/high",
-    "gpt-6-astra/xhigh",
+    "gpt-6.2-sol/medium",
+    "gpt-6.2-sol/high",
+    "gpt-6.2-sol/max",
+    "gpt-6.2-astra/medium",
+    "gpt-6.2-astra/high",
+    "gpt-6.2-astra/xhigh",
   ];
   const bands = [
     [1, 2, 2, 4, 5, 5],
@@ -611,14 +611,14 @@ describe("the table", () => {
 
   it("changes only the exact score pair that was edited, even where the old bands were shared", () => {
     const edited = withCell(defaultModelRoutingPolicy, 5, 2, {
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       effort: "xhigh",
     });
     for (const difficulty of MODEL_SCORES)
       for (const stakes of MODEL_SCORES)
         expect(choice(edited, difficulty, stakes)).toBe(
           difficulty === 5 && stakes === 2
-            ? "gpt-6-astra/xhigh"
+            ? "gpt-6.2-astra/xhigh"
             : choice(defaultModelRoutingPolicy, difficulty, stakes),
         );
   });
@@ -628,12 +628,12 @@ describe("the table", () => {
       version: 4,
       codex: {
         profiles: [
-          { model: "gpt-6.1-sol", effort: "medium" },
-          { model: "gpt-6.1-sol", effort: "ultra" },
-          { model: "gpt-6-astra", effort: "high" },
+          { model: "gpt-6.2-sol", effort: "medium" },
+          { model: "gpt-6.2-sol", effort: "ultra" },
+          { model: "gpt-6.2-astra", effort: "high" },
           { model: "gpt-6-luna", effort: "high" },
-          { model: "gpt-6-astra", effort: "medium" },
-          { model: "gpt-6.1-sol", effort: "max" },
+          { model: "gpt-6.2-astra", effort: "medium" },
+          { model: "gpt-6.2-sol", effort: "max" },
         ],
         grid: [
           [1, 2, 3, 4, 5, 6],
@@ -644,7 +644,7 @@ describe("the table", () => {
           [6, 6, 6, 2, 6, 1],
         ],
         alternatives: [[], [3, 6], [5], [1], [], []],
-        allowedModels: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"],
+        allowedModels: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna"],
       },
       claudeAgent: defaultModelRoutingPolicy.claudeAgent,
       maxReassessments: 2,
@@ -683,7 +683,7 @@ describe("the table", () => {
     ]);
     expect(result.candidates.map((c) => [c.request.driver, c.request.model])).toEqual([
       ["claudeAgent", OPUS],
-      ["codex", "gpt-6.1-sol"],
+      ["codex", "gpt-6.2-sol"],
     ]);
   });
 
@@ -711,12 +711,12 @@ describe("the table", () => {
       effort: "medium",
       alternatives: [
         { model: "gpt-6-luna", effort: "high" },
-        { model: "gpt-6-astra", effort: "medium" },
+        { model: "gpt-6.2-astra", effort: "medium" },
       ],
     });
     const result = wantedProfiles(changed, forCodex, [inventory]);
     expect(result.candidates[0]!.reason).toContain("table alternative");
-    expect(choice(changed, 0, 0)).toBe("gpt-6-astra/medium");
+    expect(choice(changed, 0, 0)).toBe("gpt-6.2-astra/medium");
     const none = wantedProfiles(
       withCell(changed, 0, 0, { model: "missing", effort: "medium" }),
       forCodex,
@@ -829,10 +829,10 @@ describe("model policy warnings", () => {
     // A Codex account that offers the model does not make it a Claude choice.
     expect(
       modelPolicyWarnings(
-        withClaudeCell({ model: "gpt-6-astra", effort: "high" }, [SONNET, OPUS, "gpt-6-astra"]),
+        withClaudeCell({ model: "gpt-6.2-astra", effort: "high" }, [SONNET, OPUS, "gpt-6.2-astra"]),
         [everything],
       ),
-    ).toEqual(["claudeAgent table: no connected account offers gpt-6-astra."]);
+    ).toEqual(["claudeAgent table: no connected account offers gpt-6.2-astra."]);
   });
 
   it("checks the ladder and the fallback", () => {
@@ -842,12 +842,12 @@ describe("model policy warnings", () => {
         { model: SONNET, effort: "high" },
         { model: "claude-next-9", effort: "high" },
       ],
-      fallback: { model: "kimi", effort: "max", below: { model: "gpt-6-astra", effort: "high" } },
+      fallback: { model: "kimi", effort: "max", below: { model: "gpt-6.2-astra", effort: "high" } },
     };
     expect(modelPolicyWarnings(policy, [everything])).toEqual([
       "Ladder: no connected account offers claude-next-9.",
       "Fallback: no connected account offers kimi.",
-      "Fallback: gpt-6-astra / high is not on the ladder, so the fallback never applies.",
+      "Fallback: gpt-6.2-astra / high is not on the ladder, so the fallback never applies.",
     ]);
     expect(
       modelPolicyWarnings({ ...defaultModelRoutingPolicy, fallback: null }, [everything]),

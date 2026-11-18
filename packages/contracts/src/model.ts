@@ -151,7 +151,7 @@ const DEEPSEEK_HARNESS_DRIVER_KIND = ProviderDriverKind.make("deepseekHarness");
 const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-export const DEFAULT_MODEL = "gpt-6-astra";
+export const DEFAULT_MODEL = "gpt-6.2-astra";
 
 /**
  * Codex default-model preference, most preferred first. The provider snapshot
@@ -160,6 +160,7 @@ export const DEFAULT_MODEL = "gpt-6-astra";
  */
 export const PREFERRED_DEFAULT_CODEX_MODELS: ReadonlyArray<string> = [
   DEFAULT_MODEL,
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
 ];

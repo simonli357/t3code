@@ -145,7 +145,7 @@ const defaultTable = (models: readonly [string, string]): RoutingTable =>
   });
 export const defaultModelRoutingPolicy: ModelRoutingPolicy = {
   version: 0,
-  codex: defaultTable(["gpt-6.1-sol", "gpt-6-astra"]),
+  codex: defaultTable(["gpt-6.2-sol", "gpt-6.2-astra"]),
   claudeAgent: defaultTable(["claude-sonnet-5-5", "claude-opus-5-5"]),
   maxReassessments: 2,
 };

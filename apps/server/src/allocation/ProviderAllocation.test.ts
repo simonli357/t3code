@@ -2038,26 +2038,26 @@ it.effect(
               return profile ? `${profile.model} / ${String(profile.options[0]?.value)}` : null;
             }),
           );
-        expect(yield* chosen(authority)).toBe("gpt-6.1-sol / high");
-        expect(yield* chosen(client)).toBe("gpt-6.1-sol / high");
+        expect(yield* chosen(authority)).toBe("gpt-6.2-sol / high");
+        expect(yield* chosen(client)).toBe("gpt-6.2-sol / high");
 
         const view = yield* client.allocation.editPolicy({
           setCells: [
-            { table: "codex", difficulty: 3, stakes: 4, model: "gpt-6-astra", effort: "xhigh" },
+            { table: "codex", difficulty: 3, stakes: 4, model: "gpt-6.2-astra", effort: "xhigh" },
           ],
           showTable: "codex",
         });
         expect(view.modelVersion).toBe(1);
-        expect(view.table?.[3]?.[4]).toBe("gpt-6-astra / xhigh");
-        expect(view.table?.[3]?.[5]).toBe("gpt-6.1-sol / high");
+        expect(view.table?.[3]?.[4]).toBe("gpt-6.2-astra / xhigh");
+        expect(view.table?.[3]?.[5]).toBe("gpt-6.2-sol / high");
         // Stored on the coordinator; the editing computer's own copy is untouched.
         expect((yield* authority.store.modelPolicy).codex.cells[3]![4]).toEqual({
-          model: "gpt-6-astra",
+          model: "gpt-6.2-astra",
           effort: "xhigh",
         });
         expect((yield* client.store.modelPolicy).version).toBe(0);
-        expect(yield* chosen(authority)).toBe("gpt-6-astra / xhigh");
-        expect(yield* chosen(client)).toBe("gpt-6-astra / xhigh");
+        expect(yield* chosen(authority)).toBe("gpt-6.2-astra / xhigh");
+        expect(yield* chosen(client)).toBe("gpt-6.2-astra / xhigh");
 
         // A new build's request reaches the coordinator with the reasons older builds require.
         const forwarded = () =>
@@ -2083,12 +2083,12 @@ it.effect(
         expect(
           yield* chosen(client, {
             ...request,
-            override: { driver: provider.driver, model: "gpt-6.1-sol" },
+            override: { driver: provider.driver, model: "gpt-6.2-sol" },
           }),
-        ).toBe("gpt-6.1-sol / xhigh");
+        ).toBe("gpt-6.2-sol / xhigh");
         expect(forwarded()?.override).toEqual({
           driver: "codex",
-          model: "gpt-6.1-sol",
+          model: "gpt-6.2-sol",
           reason: "Pinned",
         });
 
@@ -2104,7 +2104,7 @@ it.effect(
           fallback: null,
         });
         // The table edit is still there.
-        expect(yield* chosen(authority)).toBe("gpt-6-astra / xhigh");
+        expect(yield* chosen(authority)).toBe("gpt-6.2-astra / xhigh");
       }).pipe(Effect.provide(Layer.fresh(caller.layer)));
     }).pipe(Effect.provide(coordinator.layer));
   },
@@ -2165,14 +2165,14 @@ it.effect(
           );
         // Nothing ever came from the coordinator: this computer's own settings decide, and say so.
         expect(yield* preview(client.allocation)).toEqual({
-          chosen: "gpt-6.1-sol / high",
+          chosen: "gpt-6.2-sol / high",
           notes: [
             "The coordinator could not be reached and never sent its settings here: decided with this computer's own settings.",
           ],
         });
         yield* authority.allocation.editPolicy({
           setCells: [
-            { table: "codex", difficulty: 3, stakes: 4, model: "gpt-6-astra", effort: "xhigh" },
+            { table: "codex", difficulty: 3, stakes: 4, model: "gpt-6.2-astra", effort: "xhigh" },
           ],
         });
         // The regular read of the coordinator's settings stores them here with what it learned.
@@ -2190,7 +2190,7 @@ it.effect(
         yield* Effect.gen(function* () {
           const restarted = yield* Allocation.ProviderAllocation;
           expect(yield* preview(restarted)).toEqual({
-            chosen: "gpt-6-astra / xhigh",
+            chosen: "gpt-6.2-astra / xhigh",
             notes: [
               "The coordinator could not be reached: decided here with the settings and learned numbers it last sent, 7m ago.",
             ],
@@ -2421,7 +2421,7 @@ it.effect("two servers exchange capacity and checkouts over the peer wire", () =
   }).pipe(Effect.scoped),
 );
 
-// Difficulty 3 / stakes 4 maps to gpt-6.1-sol / high in the default Codex table.
+// Difficulty 3 / stakes 4 maps to gpt-6.2-sol / high in the default Codex table.
 const automaticStart = (id: string, pins: Partial<ModelRoutingRequest> = {}): AllocationStart => ({
   kind: "worker",
   projectId: startInput.projectId,
@@ -2459,7 +2459,7 @@ it.effect("a worker start records the server's own choice next to the one that r
     ];
     const astra = {
       driver: provider.driver,
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       options: [{ id: "reasoningEffort", value: "xhigh" }],
     };
     // The user named the account and the model.
@@ -2470,14 +2470,14 @@ it.effect("a worker start records the server's own choice next to the one that r
     expect(pinned.state).toBe("submitted");
     expect(f.calls[0]?.modelSelection).toEqual({
       instanceId: "spare",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       options: astra.options,
     });
     const free = yield* assignments.start(automaticStart("free"), master);
     expect(free.state).toBe("submitted");
     expect(f.calls[1]?.modelSelection).toEqual({
       instanceId: "chosen",
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       options: [{ id: "reasoningEffort", value: "high" }],
     });
     expect(yield* storedRecommendations).toEqual([
@@ -2486,12 +2486,12 @@ it.effect("a worker start records the server's own choice next to the one that r
         recommendation: {
           at,
           assessment: { difficulty: 3, stakes: 4 },
-          model: { recommended: "gpt-6.1-sol / high", chosen: "gpt-6.1-sol / high" },
+          model: { recommended: "gpt-6.2-sol / high", chosen: "gpt-6.2-sol / high" },
           account: { recommended: "chosen", chosen: "chosen" },
         },
         request: {
           driver: "codex",
-          model: "gpt-6.1-sol",
+          model: "gpt-6.2-sol",
           options: [{ id: "reasoningEffort", value: "high" }],
         },
       },
@@ -2500,7 +2500,7 @@ it.effect("a worker start records the server's own choice next to the one that r
         recommendation: {
           at,
           assessment: { difficulty: 3, stakes: 4 },
-          model: { recommended: "gpt-6.1-sol / high", chosen: "gpt-6-astra / xhigh" },
+          model: { recommended: "gpt-6.2-sol / high", chosen: "gpt-6.2-astra / xhigh" },
           account: { recommended: "chosen", chosen: "spare" },
         },
         request: astra,
@@ -2517,14 +2517,14 @@ it.effect("a model-only pin takes its effort from the table", () => {
     const result = yield* assignments.start(
       automaticStart("pinned-model", {
         explicitInstanceId: provider.instanceId,
-        override: { driver: provider.driver, model: "gpt-6-astra" },
+        override: { driver: provider.driver, model: "gpt-6.2-astra" },
       }),
       ThreadId.make("master"),
     );
     expect(result.state).toBe("submitted");
     expect(f.calls[0]?.modelSelection).toEqual({
       instanceId: provider.instanceId,
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       options: [{ id: "reasoningEffort", value: "high" }],
     });
   }).pipe(Effect.provide(f.layer));

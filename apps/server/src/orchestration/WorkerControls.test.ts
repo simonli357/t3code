@@ -104,8 +104,8 @@ const infrastructure = Layer.mergeAll(
 );
 
 const instances = [
-  ["codex", "codex", "gpt-6.1-sol", "reasoningEffort", "max"],
-  ["codex_antoine", "codex", "gpt-6-astra", "reasoningEffort", "high"],
+  ["codex", "codex", "gpt-6.2-sol", "reasoningEffort", "max"],
+  ["codex_antoine", "codex", "gpt-6.2-astra", "reasoningEffort", "high"],
   ["claudeAgent", "claudeAgent", "claude-opus-5-5", "effort", "xhigh"],
   ["claude_eol", "claudeAgent", "claude-sonnet-5-5", "effort", "max"],
   ["deepseek_codex", "codex", "deepseek-flash", "reasoningEffort", "max"],
@@ -3740,7 +3740,7 @@ it.effect(
           }),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      // Difficulty 8, stakes 8 is gpt-6-astra / high in the default Codex table.
+      // Difficulty 8, stakes 8 is gpt-6.2-astra / high in the default Codex table.
       const scores = { environmentId: "env-local", difficulty: 8, stakes: 8, driver: "codex" };
       const chosen = {
         instanceId: "codex_antoine",

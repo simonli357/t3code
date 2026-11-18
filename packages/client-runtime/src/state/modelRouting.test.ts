@@ -59,13 +59,24 @@ it("names models briefly, keeping the version only where two models would read t
     [
       "gpt-6.1-sol",
       "gpt-6-astra",
+      "gpt-6.2-sol",
+      "gpt-6.2-astra",
       "claude-sonnet-5-5",
       "claude-opus-5-5",
       "gpt-5.4",
       "o3-mini",
     ].map(modelDisplayName),
-  ).toEqual(["Sol 6.1", "Astra 6", "Sonnet 5.5", "Opus 5.5", "GPT 5.4", "O3 Mini"]);
-  expect([...modelShortNames(["gpt-6.1-sol", "gpt-6-astra"]).values()]).toEqual(["Sol", "Astra"]);
+  ).toEqual([
+    "Sol 6.1",
+    "Astra 6",
+    "Sol 6.2",
+    "Astra 6.2",
+    "Sonnet 5.5",
+    "Opus 5.5",
+    "GPT 5.4",
+    "O3 Mini",
+  ]);
+  expect([...modelShortNames(["gpt-6.2-sol", "gpt-6.2-astra"]).values()]).toEqual(["Sol", "Astra"]);
   expect([
     ...modelShortNames(["claude-sonnet-5-5", "claude-sonnet-4-5", "claude-opus-5-5"]).values(),
   ]).toEqual(["Sonnet 5.5", "Sonnet 4.5", "Opus"]);
@@ -138,7 +149,7 @@ it("edits exactly one entry, approves its model, and never changes the other pro
     effort: "max",
     alternatives: [
       { model: "gpt-6-sol-pro", effort: "max" },
-      { model: "gpt-6-astra", effort: "high" },
+      { model: "gpt-6.2-astra", effort: "high" },
     ],
   });
   expect(modelCellChanges(defaultModelRoutingPolicy, edited)).toEqual([
@@ -147,7 +158,7 @@ it("edits exactly one entry, approves its model, and never changes the other pro
   expect(modelCell(edited, "codex", 7, 8)).toEqual({
     model: "gpt-6-sol-pro",
     effort: "max",
-    alternatives: [{ model: "gpt-6-astra", effort: "high" }],
+    alternatives: [{ model: "gpt-6.2-astra", effort: "high" }],
   });
   expect(edited.codex.allowedModels).toEqual([
     ...defaultModelRoutingPolicy.codex.allowedModels,

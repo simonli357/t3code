@@ -89,7 +89,7 @@ it("keeps the default choices for all 121 score pairs", () => {
   ];
   const efforts = ["medium", "high", "max", "medium", "high", "xhigh"];
   const models = {
-    codex: ["gpt-6.1-sol", "gpt-6-astra"],
+    codex: ["gpt-6.2-sol", "gpt-6.2-astra"],
     claudeAgent: ["claude-sonnet-5-5", "claude-opus-5-5"],
   } as const;
   for (const driver of ["codex", "claudeAgent"] as const)

@@ -82,6 +82,34 @@ it("accepts the default OpenAI model provider as a subscription source", () => {
   );
 });
 
+it("defaults every Astra generation to medium effort", () => {
+  const defaultEffort = (model: string) => {
+    const effort = mapCodexModelCapabilities({
+      additionalSpeedTiers: [],
+      defaultReasoningEffort: "low",
+      description: "",
+      displayName: model,
+      hidden: false,
+      id: model,
+      isDefault: false,
+      model,
+      serviceTiers: [],
+      supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({
+        description: "",
+        reasoningEffort,
+      })),
+    }).optionDescriptors?.find((option) => option.id === "reasoningEffort");
+    return effort?.type === "select"
+      ? effort.options.find((option) => option.isDefault)?.id
+      : undefined;
+  };
+
+  assert.strictEqual(defaultEffort("gpt-6-astra"), "medium");
+  assert.strictEqual(defaultEffort("gpt-6.2-astra"), "medium");
+  assert.strictEqual(defaultEffort("openai.gpt-6.2-astra"), "medium");
+  assert.strictEqual(defaultEffort("gpt-6.2-sol"), "low");
+});
+
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({
     additionalSpeedTiers: [],
