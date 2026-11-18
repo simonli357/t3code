@@ -27,7 +27,9 @@ import { isFable, span } from "./runway.ts";
 /**
  * The profile each allowed provider family wants before quota is looked at: the pinned model,
  * or the table's entry for the scores. A table alternative applies only when no account on the
- * computer offers the entry itself.
+ * computer offers the entry itself. With two families allowed, a pinned account asks only its
+ * own family, a pinned model goes to the family that offers it, and `unoffered` has the table
+ * entry of a family no account offers, so its accounts can still be listed.
  */
 export function wantedProfiles(
   policy: ModelRoutingPolicy,
@@ -38,6 +40,7 @@ export function wantedProfiles(
   const rule = `Difficulty ${difficulty}, stakes ${stakes}`;
   const reasons: string[] = [];
   const candidates: { request: AllocationRequest; reason: string }[] = [];
+  const unoffered: AllocationRequest[] = [];
   const {
     selection: _selection,
     assessment: _assessment,
@@ -48,35 +51,62 @@ export function wantedProfiles(
     ...constraints
   } = request;
   if (new Set(allowedDrivers).size !== allowedDrivers.length)
-    return { rule, candidates, reasons: ["Allowed provider families must be unique."] };
+    return {
+      rule,
+      candidates,
+      unoffered,
+      reasons: ["Allowed provider families must be unique."],
+    };
+  const local = inventories
+    .flatMap((i) => i.accounts)
+    .filter((a) => a.environmentId === request.environmentId);
+  const sorted = [...allowedDrivers].sort();
+  const pinned = local.find((a) => a.instanceId === request.explicitInstanceId);
+  const drivers = !request.explicitInstanceId
+    ? sorted
+    : pinned && sorted.includes(pinned.driver)
+      ? [pinned.driver]
+      : [sorted[0]!];
   if (override) {
     if (!allowedDrivers.includes(override.driver))
       return {
         rule,
         candidates,
+        unoffered,
         reasons: ["The pinned model's provider family is not among the allowed ones."],
       };
-    let options = override.options;
+    const driver =
+      [override.driver, ...drivers].find(
+        (d) =>
+          drivers.includes(d) &&
+          local.some((a) => a.driver === d && findCatalogModel(a.models, override.model)),
+      ) ?? (drivers.includes(override.driver) ? override.driver : drivers[0]!);
+    // The pinned effort keeps its value under the other family's option ID.
+    let options = override.options?.map((o) =>
+      o.id === routingEffortOptionId(override.driver)
+        ? { ...o, id: routingEffortOptionId(driver) }
+        : o,
+    );
     if (!options) {
       // A model-only pin keeps the table's effort for this score pair.
-      if (override.driver !== "codex" && override.driver !== "claudeAgent")
+      if (driver !== "codex" && driver !== "claudeAgent")
         return {
           rule,
           candidates,
-          reasons: [`${override.driver}: the table has no effort for this provider; pin one.`],
+          unoffered,
+          reasons: [`${driver}: the table has no effort for this provider; pin one.`],
         };
-      const table = override.driver === "codex" ? policy.codex : policy.claudeAgent;
+      const table = driver === "codex" ? policy.codex : policy.claudeAgent;
       const cell = table.cells[difficulty]![stakes]!;
-      options = [{ id: routingEffortOptionId(override.driver), value: cell.effort }];
+      options = [{ id: routingEffortOptionId(driver), value: cell.effort }];
     }
     candidates.push({
-      request: { ...constraints, driver: override.driver, model: override.model, options },
-      reason: `${override.driver}: pinned model.`,
+      request: { ...constraints, driver, model: override.model, options },
+      reason: `${driver}: pinned model.`,
     });
-    return { rule: `${rule}; model pinned`, candidates, reasons };
+    return { rule: `${rule}; model pinned`, candidates, unoffered, reasons };
   }
-  // Claude first: Codex is used only when a start asks for it.
-  for (const driver of [...allowedDrivers].sort()) {
+  for (const driver of drivers) {
     if (driver !== "codex" && driver !== "claudeAgent") {
       reasons.push(`${driver}: the table covers Claude and Codex only; pin a model.`);
       continue;
@@ -99,10 +129,14 @@ export function wantedProfiles(
     );
     const profile = profiles[index];
     if (!profile) {
+      if (drivers.length > 1 && local.some((a) => a.driver === driver))
+        unoffered.push({
+          ...constraints,
+          driver: ProviderDriverKind.make(driver),
+          model: cell.model,
+          options: [{ id: routingEffortOptionId(driver), value: cell.effort }],
+        });
       // A pin that names no account here is the problem, not the model.
-      const local = inventories
-        .flatMap((i) => i.accounts)
-        .filter((a) => a.environmentId === request.environmentId);
       const pin = request.explicitInstanceId;
       const named = local.find((a) => a.label.toLowerCase() === pin?.toLowerCase());
       reasons.push(
@@ -125,7 +159,7 @@ export function wantedProfiles(
           : `${driver}: table alternative for difficulty ${difficulty}, stakes ${stakes}; the entry itself is not offered here.`,
     });
   }
-  return { rule, candidates, reasons };
+  return { rule, candidates, unoffered, reasons };
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -197,7 +231,7 @@ export interface ProfileChoice {
   readonly drainedUntil?: string | null;
   /** The start waits for a limit's reset and begins then. */
   readonly startAt?: string;
-  /** One line per account of the wanted family on the computer. */
+  /** One line per account of the judged families on the computer. */
   readonly accounts: readonly string[];
   readonly notes: readonly string[];
 }
@@ -227,7 +261,9 @@ export const fableModeAccount = (
  * fallback; every account is judged on what it would run. An account with a Fable goal is in
  * Fable mode for an unpinned worker when, on that Fable rung, it would end the job at or behind
  * its Fable line and the rung lasts the job there, so the goal never refuses or delays a start.
- * A pinned model is kept. Codex and a pinned account never change model.
+ * A pinned model is kept. Codex and a pinned account never change model. A worker start that
+ * names no provider family judges the accounts of both families together, each on its own
+ * family's table entry, by the same ranking; only the Claude accounts step through stand-ins.
  */
 export function chooseProfile(input: {
   readonly at: string;
@@ -248,6 +284,8 @@ export function chooseProfile(input: {
   };
   const ladder = modelLadder(modelPolicy);
   const workers = request.kind !== "session";
+  // No family named: the accounts of every family are ranked together.
+  const together = workers && resolved.candidates.length + resolved.unoffered.length > 1;
   const fableOff = workers && policy.fableWorkers === false;
   const fableRungs = ladder.filter((r) => isFable(r.model));
   const allowed = (r: RoutingProfile) => !(fableOff && isFable(r.model));
@@ -267,8 +305,11 @@ export function chooseProfile(input: {
   const failures: string[] = [...resolved.reasons];
   const waitMinutes =
     request.assessment.stakes >= HIGH_STAKES ? START_WAIT_MINUTES_HIGH_STAKES : START_WAIT_MINUTES;
-  for (const asked of resolved.candidates) {
+  for (const [index, asked] of resolved.candidates.entries()) {
     let wanted = asked;
+    // The other families, whose accounts are judged on their own table entry.
+    const rest = together ? resolved.candidates.slice(index + 1) : [];
+    const others = together ? [...rest.map((c) => c.request), ...resolved.unoffered] : [];
     const profile = requestProfile(asked.request);
     // Accounts with a Fable goal, judged on the Fable rung their table entry would start from.
     const goalRung =
@@ -343,18 +384,28 @@ export function chooseProfile(input: {
         );
     }
     const split = !!fableWanted && fableWanted !== wanted.request;
-    const wantedText =
-      fableWanted && split
-        ? `${label(wanted.request)} (${label(fableWanted)} in Fable mode)`
-        : label(wanted.request);
-    /** One step: Fable-mode accounts run `fable`, the others `normal`; null leaves them out. */
+    const elsewhere = [
+      ...(fableWanted && split ? [`${label(fableWanted)} in Fable mode`] : []),
+      ...rest.map(
+        (c) =>
+          `${label(c.request)} on ${c.request.driver === "codex" ? "Codex" : "Claude"} accounts`,
+      ),
+    ];
+    const wantedText = `${label(wanted.request)}${elsewhere.length ? ` (${elsewhere.join(", ")})` : ""}`;
+    /**
+     * One step: Fable-mode accounts run `fable`, the others `normal`; null leaves them out.
+     * The other families take part only next to the wanted profile, since they have no stand-in.
+     */
     const decide = (
       normal: AllocationRequest | null,
       fable: AllocationRequest | null | undefined,
       startAt?: string,
+      families = false,
     ) => {
       const when = (r: AllocationRequest) => (startAt ? { ...r, startAt } : r);
-      if (fable === undefined) return decideAllocation({ ...input, request: when(normal!) });
+      const mixed = families && others.length ? { others: others.map(when) } : {};
+      if (fable === undefined)
+        return decideAllocation({ ...input, ...mixed, request: when(normal!) });
       // Only Fable-mode accounts take part.
       const only = normal
         ? undefined
@@ -366,27 +417,32 @@ export function chooseProfile(input: {
           };
       return decideAllocation({
         ...input,
+        ...mixed,
         request: only ?? when(normal!),
         fableMode: { instanceIds: fableIds, request: only ?? (fable && when(fable)) },
       });
     };
-    const first = decide(wanted.request, fableWanted);
+    const start = (startAt?: string) => decide(wanted.request, fableWanted, startAt, true);
+    const first = start();
     const chosen = (
       decision: AllocationDecision,
       why: string | undefined,
       extra: Partial<ProfileChoice> = {},
     ): ProfileChoice => {
       const candidate = decision.request;
+      // An account of another family runs its own table entry.
+      const other = rest.find((c) => c.request.driver === candidate.driver);
       if (
         candidate.driver !== wanted.request.driver ||
         label(candidate) !== label(wanted.request) ||
         candidate.startAt !== wanted.request.startAt
       )
         tried.push({ ...wanted, chosen: false });
-      tried.push({ request: candidate, reason: why ?? wanted.reason, chosen: true });
+      tried.push({ request: candidate, reason: why ?? (other ?? wanted).reason, chosen: true });
       const account = decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId);
       const same =
-        candidate.driver === asked.request.driver && label(candidate) === label(asked.request);
+        !!other ||
+        (candidate.driver === asked.request.driver && label(candidate) === label(asked.request));
       const standing = standings.find((s) => s.instanceId === account?.instanceId);
       if (standing)
         notes.push(
@@ -438,7 +494,7 @@ export function chooseProfile(input: {
       ),
     ].sort();
     for (const reset of resets) {
-      const later = decide(wanted.request, fableWanted, reset);
+      const later = start(reset);
       if (fits(later))
         return chosen(
           later,
@@ -545,7 +601,7 @@ export function chooseProfile(input: {
     if (now) return chosen(now.decision, now.why);
     // Everything is out now: decide as of a reset within the wait by the same rules, and queue.
     for (const reset of resets) {
-      const then = standIn(decide(wanted.request, fableWanted, reset), reset);
+      const then = standIn(start(reset), reset);
       if (then)
         return chosen(
           then.decision,
@@ -564,6 +620,8 @@ export function chooseProfile(input: {
         : `Drained: ${wantedText} and every model that may stand in for it are out; earliest reset ${drainedUntil ?? "unknown"}.${fableWanted === undefined ? "" : ` Fable mode on ${fableNames}: only Fable rungs stand in there.`}`,
       accounts: lines(first),
     };
+    // The other families were judged with this one.
+    if (rest.length) break;
   }
   return {
     tried,

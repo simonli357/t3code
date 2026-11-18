@@ -531,15 +531,11 @@ describe("account, model and effort together", () => {
     expect(refused.tried).toHaveLength(1);
   });
 
-  it("uses Codex only when the start asks for it", () => {
-    const both = { allowedDrivers: [codex, claudeAgent] };
+  it("keeps to the family a start asks for", () => {
     const wanted = { model: SONNET, effort: "high" };
-    expect(
-      picked(
-        choose([gpt("SL", [weekly(0)]), claude("A", [weekly(90)])], wanted, { request: both }),
-      ),
-    ).toBe(`A ${SONNET} / high`);
-    expect(picked(choose([gpt("SL"), claude("A")], wanted))).toBe(`A ${SONNET} / high`);
+    expect(picked(choose([gpt("SL", [weekly(0)]), claude("A", [weekly(90)])], wanted))).toBe(
+      `A ${SONNET} / high`,
+    );
   });
 
   it("is unavailable, not drained, when no account offers the wanted model", () => {
@@ -1019,18 +1015,18 @@ describe("a pinned account's refusal", () => {
         request: { explicitInstanceId: ProviderInstanceId.make("elsewhere") },
       }).reason,
     ).toBe("claudeAgent: the pinned account elsewhere is not an account ID on this computer.");
-    // A pin on another family's account is there; that family's table entry is what is missing.
-    expect(
-      wantedProfiles(
-        wanting({ model: FABLE, effort: "high" }),
-        {
-          ...request,
-          allowedDrivers: [claudeAgent, codex],
-          explicitInstanceId: ProviderInstanceId.make("claude_xiyang"),
-        },
-        [host([xy(), gpt("G")])],
-      ).reasons,
-    ).toEqual([expect.stringMatching(/^codex: no account on this computer offers /)]);
+    // A pinned account asks only its own family.
+    const pinned = wantedProfiles(
+      wanting({ model: FABLE, effort: "high" }),
+      {
+        ...request,
+        allowedDrivers: [claudeAgent, codex],
+        explicitInstanceId: ProviderInstanceId.make("claude_xiyang"),
+      },
+      [host([xy(), gpt("G")])],
+    );
+    expect(pinned.reasons).toEqual([]);
+    expect(pinned.candidates.map((c) => c.request.driver)).toEqual([claudeAgent]);
   });
 });
 
@@ -1393,5 +1389,247 @@ describe("Fable goal", () => {
     const pinnedOpus = choose([fableUsed("A", 10)], opusHigh, pin(OPUS));
     expect(picked(pinnedOpus)).toBe(`A ${OPUS} / high`);
     expect(pinnedOpus.notes).toEqual([]);
+  });
+});
+
+describe("a worker start that names no provider family", () => {
+  const both = { allowedDrivers: [claudeAgent, codex] };
+  const opusHigh = { model: OPUS, effort: "high" };
+  /** What the Codex table gives for difficulty 0, stakes 0. */
+  const cell = defaultModelRoutingPolicy.codex.cells[0]![0]!;
+  const SOL = `${cell.model} / ${cell.effort}`;
+  /** 68 hours into the week: a goal of 20% a day is at 58% when a two-hour job ends. */
+  const used = (points: number, patch: Partial<AllocationWindow> = {}) => [
+    weekly(points, { cycleStartedAt: inHours(-68), ...patch }),
+  ];
+  const goals = { claude: { dailyPoints: 20 }, codex: { dailyPoints: 20 } };
+  const sol = (
+    label: string,
+    windows: AllocationWindow[],
+    patch: Partial<AllocationAccount> = {},
+  ) => account(label, codex, [cell.model], windows, patch);
+  const start = (accounts: AllocationAccount[], patch: Parameters<typeof choose>[2] = {}) =>
+    choose(accounts, opusHigh, {
+      ...patch,
+      request: { ...both, ...patch.request },
+      policy: { ...goals, ...patch.policy },
+    });
+  const order = (...accounts: AllocationAccount[]) => ({
+    policy: { accountOrder: accounts.map(allocationPreferenceKey) },
+  });
+
+  it("ranks the accounts of both families together, each on its own table entry", () => {
+    const codexBehind = start([claude("A", used(40)), claude("B", used(50)), sol("AD", used(10))]);
+    expect(picked(codexBehind)).toBe(`AD ${SOL}`);
+    expect(codexBehind.wanted).toBeUndefined();
+    expect(codexBehind.startAt).toBeUndefined();
+    expect(codexBehind.accounts).toEqual([
+      `A (${OPUS} / high): 18 points behind its goal (Weekly 40% used, 40% by the job's end against a goal of 58%), 0 workers`,
+      `AD (${SOL}): 48 points behind its goal (Weekly 10% used, 10% by the job's end against a goal of 58%), 0 workers`,
+      `B (${OPUS} / high): 8 points behind its goal (Weekly 50% used, 50% by the job's end against a goal of 58%), 0 workers`,
+    ]);
+    expect(codexBehind.reason).toBe(
+      `${codexBehind.accounts[1]}; furthest behind its goal of 3 accounts.`,
+    );
+    // Admission chooses among the accounts that run the chosen model.
+    expect(codexBehind.decision!.request.driver).toBe(codex);
+    expect(codexBehind.decision!.request.allowedInstanceIds).toEqual(["AD"]);
+    expect(codexBehind.tried.map((t) => [t.request.driver, t.chosen])).toEqual([
+      [claudeAgent, false],
+      [codex, true],
+    ]);
+
+    const claudeBehind = start([claude("A", used(10)), claude("B", used(50)), sol("AD", used(40))]);
+    expect(picked(claudeBehind)).toBe(`A ${OPUS} / high`);
+    expect(claudeBehind.wanted).toBeUndefined();
+    expect(claudeBehind.decision!.request.allowedInstanceIds).toEqual(["A", "B"]);
+    expect(claudeBehind.reason).toMatch(
+      new RegExp(`^A \\(${OPUS} / high\\): 48 points behind .* furthest behind its goal of 3`),
+    );
+    // AD has no goal of its own: without the Codex family's goal it has no line and ranks after.
+    expect(
+      picked(start([claude("A", used(50)), sol("AD", used(10))], { policy: { codex: undefined } })),
+    ).toBe(`A ${OPUS} / high`);
+  });
+
+  it("lets the preference order decide between close accounts of either family", () => {
+    const a = claude("A", used(25));
+    const ad = sol("AD", used(30));
+    expect(picked(start([a, ad]))).toBe(`A ${OPUS} / high`);
+    const preferred = start([a, ad], order(ad, a));
+    expect(picked(preferred)).toBe(`AD ${SOL}`);
+    expect(preferred.reason).toContain(
+      "within 10 points of A (33 points behind its goal) and earlier in the preference order.",
+    );
+    expect(picked(start([a, ad], order(a, ad)))).toBe(`A ${OPUS} / high`);
+    // Beyond the margin the order does not count.
+    expect(picked(start([a, sol("AD", used(45))], order(ad, a)))).toBe(`A ${OPUS} / high`);
+    expect(picked(start([claude("A", used(45)), ad], order(a, ad)))).toBe(`AD ${SOL}`);
+  });
+
+  it("changes nothing for a start that names a family, an account or a model", () => {
+    const accounts = [claude("A", used(40)), claude("B", used(50)), sol("AD", used(10))];
+    const claudeOnly = accounts.slice(0, 2);
+    const options = { learned: learned(accounts), policy: goals };
+    const one = (request: Partial<ModelRoutingRequest>, among = accounts) =>
+      choose(among, opusHigh, { ...options, request });
+    // Claude asked for: as if the Codex account were not there.
+    const asked = one({ allowedDrivers: [claudeAgent] });
+    expect(picked(asked)).toBe(`A ${OPUS} / high`);
+    expect(asked).toEqual(one({ allowedDrivers: [claudeAgent] }, claudeOnly));
+    expect(picked(one({ allowedDrivers: [codex] }, [claude("A", used(0)), accounts[2]!]))).toBe(
+      `AD ${SOL}`,
+    );
+    // A pinned account is exact, whatever the other family's accounts would rank.
+    const b = { explicitInstanceId: ProviderInstanceId.make("B") };
+    expect(one({ ...both, ...b })).toEqual(one({ allowedDrivers: [claudeAgent], ...b }));
+    expect(picked(one({ ...both, ...b }))).toBe(`B ${OPUS} / high`);
+    const ad = { explicitInstanceId: ProviderInstanceId.make("AD") };
+    const pinnedCodex = one({ ...both, ...ad }, [claude("A", used(0)), accounts[2]!]);
+    expect(pinnedCodex).toEqual(
+      one({ allowedDrivers: [codex], ...ad }, [claude("A", used(0)), accounts[2]!]),
+    );
+    expect(picked(pinnedCodex)).toBe(`AD ${SOL}`);
+    expect(pinnedCodex.accounts).toHaveLength(1);
+    // A pinned model goes to the family that offers it.
+    const sonnet = { override: { driver: claudeAgent, model: SONNET } };
+    expect(one({ ...both, ...sonnet })).toEqual(one({ allowedDrivers: [claudeAgent], ...sonnet }));
+    expect(picked(one({ ...both, ...sonnet }))).toBe(`A ${SONNET} / high`);
+    const pinnedSol = one({
+      ...both,
+      override: {
+        driver: claudeAgent,
+        model: cell.model,
+        options: [{ id: "effort", value: "xhigh" }],
+      },
+    });
+    expect(picked(pinnedSol)).toBe(`AD ${cell.model} / xhigh`);
+    expect(pinnedSol.decision!.request.options).toEqual([
+      { id: "reasoningEffort", value: "xhigh" },
+    ]);
+    expect(pinnedSol).toEqual(
+      one({
+        allowedDrivers: [codex],
+        override: {
+          driver: codex,
+          model: cell.model,
+          options: [{ id: "reasoningEffort", value: "xhigh" }],
+        },
+      }),
+    );
+    // A master's start is not a worker's.
+    expect(picked(one({ ...both, kind: "session" }))).toBe(`A ${OPUS} / high`);
+  });
+
+  it("leaves out an account that lacks its family's model or is off for workers, without delay", () => {
+    const a = claude("A", used(50));
+    const free = account("SL", codex, ["gpt-mini"], used(0));
+    // No Codex account offers the entry: they are listed, and the Claude choice starts now.
+    const unoffered = start([a, free, deepseek]);
+    expect(picked(unoffered)).toBe(`A ${OPUS} / high`);
+    expect(unoffered.startAt).toBeUndefined();
+    expect(unoffered.wanted).toBeUndefined();
+    expect(unoffered.accounts).toEqual([
+      `A (${OPUS} / high): 8 points behind its goal (Weekly 50% used, 50% by the job's end against a goal of 58%), 0 workers`,
+      `DS (${SOL}): not usable (Exact model/options are not supported.), 0 workers`,
+      `SL (${SOL}): not usable (Exact model/options are not supported.), 0 workers`,
+    ]);
+    // One offers it: the others stay out and it is ranked as usual.
+    const offered = start([a, free, deepseek, sol("AD", used(10))]);
+    expect(picked(offered)).toBe(`AD ${SOL}`);
+    expect(offered.accounts.filter((line) => line.includes("not usable"))).toHaveLength(2);
+    // The workers switch keeps an account out.
+    const off = start([a, sol("AD", used(10), { availableForWorkers: false })]);
+    expect(picked(off)).toBe(`A ${OPUS} / high`);
+    expect(off.accounts[1]).toMatch(new RegExp(`^AD \\(${SOL.replace(".", "\\.")}\\): not usable`));
+    // Only unusable Codex accounts and a drained Claude model: the usual stand-in, at once.
+    const rung = start([claude("A", [...used(50), only(OPUS, 100)]), free]);
+    expect(picked(rung)).toBe(`A ${SONNET} / xhigh`);
+    expect(rung.startAt).toBeUndefined();
+  });
+
+  it("keeps the sequence when no account fits its table entry, and Codex on its model", () => {
+    const opusOut = (label: string, hours: number) =>
+      claude(label, [...used(50), only(OPUS, 100, { resetsAt: inHours(hours) })]);
+    // The Codex account fits: no wait and no stand-in.
+    const fits = start([opusOut("A", 0.2), sol("AD", used(50))]);
+    expect(picked(fits)).toBe(`AD ${SOL}`);
+    expect(fits.startAt).toBeUndefined();
+    // Nothing fits now and a limit resets within the wait: the start waits for it.
+    const out = (hours: number) => sol("AD", used(100, { resetsAt: inHours(hours) }));
+    const waits = start([opusOut("A", 0.2), out(30)]);
+    expect(picked(waits)).toBe(`A ${OPUS} / high`);
+    expect(waits.startAt).toBe(inHours(0.2));
+    expect(waits.reason).toContain(
+      `${OPUS} / high (${SOL} on Codex accounts) fits on no account now; a limit in its way resets in`,
+    );
+    const codexBack = start([opusOut("A", 30), out(0.2)]);
+    expect(picked(codexBack)).toBe(`AD ${SOL}`);
+    expect(codexBack.startAt).toBe(inHours(0.2));
+    expect(codexBack.decision!.request.startAt).toBe(inHours(0.2));
+    // No reset in reach: a Claude rung stands in; the Codex account never changes model.
+    const rung = start([opusOut("A", 30), out(30)]);
+    expect(picked(rung)).toBe(`A ${SONNET} / xhigh`);
+    expect(wantedLabel(rung)).toBe(`${OPUS} / high`);
+    expect(rung.accounts[1]).toMatch(/^AD \(.*\): drained until /);
+    // Everything out: refused with the earliest reset of either family.
+    const all = (hours: number) => claude("A", used(100, { resetsAt: inHours(hours) }));
+    const refused = start([all(40), out(30)]);
+    expect(picked(refused)).toBeNull();
+    expect(refused.drainedUntil).toBe(inHours(30));
+    expect(refused.accounts).toHaveLength(2);
+    expect(refused.tried).toHaveLength(1);
+  });
+
+  it("leaves Fable mode and Fable goals as they are next to a Codex account", () => {
+    const summary = (choice: ProfileChoice) => ({
+      picked: picked(choice),
+      wanted: wantedLabel(choice),
+      notes: choice.notes,
+      startAt: choice.startAt,
+      // The lines without the model each account is judged on.
+      accounts: choice.accounts
+        .filter((line) => !line.startsWith("AD "))
+        .map((line) =>
+          line
+            .replace(/^(\w+) \(Fable mode, [^)]*\)/, "$1 (Fable mode)")
+            .replace(/^(\w+) \((?!Fable mode\))[^)]*\)/, "$1"),
+        ),
+    });
+    const fableOn = (...labels: string[]) => ({
+      fableAccounts: labels.map((label) => allocationPreferenceKey(claude(label))),
+    });
+    const fableGoal = (...labels: string[]) => ({
+      fableGoals: labels.map((label) => ({
+        key: allocationPreferenceKey(claude(label)),
+        percentPerDay: 14,
+      })),
+    });
+    // The Codex account is 5 points ahead of its goal, so it ranks after every account behind.
+    const ad = sol("AD", used(63));
+    const cases: [AllocationAccount[], Partial<AllocationPolicy>][] = [
+      [[claude("A", [...used(20), only(FABLE, 80)]), claude("B", used(50))], fableOn("A")],
+      [[claude("A", [...used(20), only(FABLE, 10)]), claude("B", used(50))], fableOn("A")],
+      [[claude("A", [...used(20), only(FABLE, 100)]), claude("B", used(50))], fableOn("A", "B")],
+      [[claude("A", [...used(20), only(FABLE, 10)])], fableGoal("A")],
+      [[claude("B", [...used(20), only(FABLE, 60)])], fableGoal("B")],
+      [
+        [claude("A", [...used(20), only(FABLE, 10)]), claude("B", [...used(20), only(FABLE, 60)])],
+        fableGoal("A", "B"),
+      ],
+    ];
+    for (const [accounts, policy] of cases) {
+      const alone = choose(accounts, opusHigh, { policy: { ...goals, ...policy } });
+      const next = start([...accounts, ad], {
+        policy,
+        learned: learned([...accounts, ad]),
+      });
+      expect(alone.decision?.selectedInstanceId).not.toBe(undefined);
+      expect(summary(next)).toEqual(summary(alone));
+    }
+    const fable = start([claude("A", [...used(20), only(FABLE, 10)]), ad], {
+      policy: fableOn("A"),
+    });
+    expect(fable.accounts[0]).toMatch(new RegExp(`^A \\(Fable mode, ${FABLE} / low\\): `));
   });
 });

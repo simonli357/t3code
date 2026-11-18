@@ -205,21 +205,38 @@ it.effect(
       }),
     ),
 );
-it.effect("asks Claude first when both families are allowed, whatever room Codex has", () =>
+it.effect("ranks both families together when both are allowed, and admits the choice", () =>
   run(
     Effect.gen(function* () {
       const store = yield* setup;
-      const current = {
+      const used = (codex: number, claude: number) => ({
         ...inventory,
         accounts: inventory.accounts.map((a) => ({
           ...a,
-          windows: a.windows.map((w) => ({ ...w, usedPoints: a.driver === "codex" ? 0 : 90 })),
+          windows: a.windows.map((w) => ({
+            ...w,
+            usedPoints: a.driver === "codex" ? codex : claude,
+          })),
         })),
-      };
-      const chosen = yield* store.selectModel({ ...args, reserve: false, inventories: [current] });
-      expect(chosen.allocation?.decision.request.driver).toBe("claudeAgent");
-      expect(chosen.profiles.map((p) => [p.driver, p.eligible])).toEqual([["claudeAgent", true]]);
+      });
+      const preview = yield* store.selectModel({
+        ...args,
+        reserve: false,
+        inventories: [used(90, 0)],
+      });
+      expect(preview.allocation?.decision.request.driver).toBe("claudeAgent");
+      expect(preview.profiles.map((p) => [p.driver, p.eligible])).toEqual([["claudeAgent", true]]);
       expect(yield* store.reservations).toHaveLength(0);
+      const chosen = yield* store.selectModel({ ...args, inventories: [used(0, 90)] });
+      expect(chosen.allocation?.decision.request.driver).toBe("codex");
+      expect(chosen.allocation?.reservation?.instanceId).toBe("codex");
+      expect(chosen.wanted).toBeUndefined();
+      expect(chosen.profiles.map((p) => [p.driver, p.eligible])).toEqual([
+        ["claudeAgent", false],
+        ["codex", true],
+      ]);
+      expect(chosen.accounts).toHaveLength(2);
+      expect(workerChoice(chosen).chosen).toMatchObject({ instanceId: "codex", driver: "codex" });
     }),
   ),
 );

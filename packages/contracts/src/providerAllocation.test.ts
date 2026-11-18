@@ -492,15 +492,18 @@ describe("worker choice", () => {
     expect(() => start(input)).toThrow();
   });
 
-  it("stands for an automatic Claude request unless the start asks for Codex or pins", () => {
+  it("stands for an automatic request over both families unless the start names one", () => {
     expect(workerChoiceRequest({ ...input, ...identity })).toEqual({
       selection: "automatic",
       assignmentId: "job",
       environmentId: "desk",
       threadId: "thread",
       assessment: { difficulty: 6, stakes: 3 },
-      allowedDrivers: ["claudeAgent"],
+      allowedDrivers: ["claudeAgent", "codex"],
     });
+    expect(workerChoiceRequest({ ...input, ...identity, driver: claude }).allowedDrivers).toEqual([
+      "claudeAgent",
+    ]);
     const codex = ProviderDriverKind.make("codex");
     const pinned = workerChoiceRequest({
       ...input,

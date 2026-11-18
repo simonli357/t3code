@@ -65,7 +65,10 @@ the master names one, and then the account, model and effort together:
    wanted model on the account that lasts longest. When every account is out now but a limit
    resets within that wait, the same choice is made as of the reset and the start waits for it.
    It is refused only when everything stays out beyond the wait, with the earliest reset time.
-   Codex is used only when a start asks for it and never changes model.
+   A Codex account never changes model.
+5. A start that names no provider family ranks the Claude and Codex accounts that are on for
+   workers together, each on its own family's table entry, and each account line names the
+   model it was judged on. A start that asks for one family looks at that family only.
 
 The result names the choice, the table's choice when it differs, when a waiting start begins,
 one reason line with the numbers (for example "ARA: 35 points behind its goal (Weekly 16% used,

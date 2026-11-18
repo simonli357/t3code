@@ -4,6 +4,7 @@ import {
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
   legacyAllocationCandidateFields,
+  profileLabel,
   WORKER_ACCOUNT_DISABLED_REASON,
 } from "@t3tools/contracts";
 import type {
@@ -232,13 +233,12 @@ export const accountCap = (
       (kind === "session" ? cap.stopMasters : cap.stopWorkers),
   );
 
-const preferenceIndex =
-  (policy: AllocationPolicy, driver: string) => (candidate: AllocationCandidate) => {
-    const index = (policy.accountOrder ?? []).indexOf(
-      allocationPreferenceKey({ ...candidate, driver }),
-    );
-    return index < 0 ? Infinity : index;
-  };
+const preferenceIndex = (policy: AllocationPolicy, driver: string) => (candidate: Ranked) => {
+  const index = (policy.accountOrder ?? []).indexOf(
+    allocationPreferenceKey({ ...candidate, driver: candidate.driver ?? driver }),
+  );
+  return index < 0 ? Infinity : index;
+};
 
 /** Percent of the weekly window this account should use per day, and whose value it is. */
 export function accountGoal(
@@ -265,6 +265,8 @@ export const accountFableGoal = (
 type Ranked = AllocationCandidate & {
   readonly leftPoints?: number | null;
   readonly fableSlack?: number;
+  /** The account's provider family, when it is not the request's. */
+  readonly driver?: string;
 };
 
 /** 0: fits, with a goal line; 1: fits, without one; 2: a limit runs out before the end. */
@@ -341,6 +343,11 @@ export function decideAllocation(input: {
   fableMode?:
     | { readonly instanceIds: readonly string[]; readonly request: AllocationRequest | null }
     | undefined;
+  /**
+   * The requests of other provider families. An account of one of them is a candidate too,
+   * judged on its family's request, and every line then names what its account would run.
+   */
+  others?: readonly AllocationRequest[] | undefined;
   inventories: readonly AllocationInventory[];
   reservations: readonly AllocationReservation[];
   authorityAvailable: boolean;
@@ -390,15 +397,22 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
   const projections = new Map<string, AccountProjection>();
   /** What each account runs; null when it is out. */
   const runs = new Map<string, AllocationRequest | null>();
+  const mixed = !!input.others?.length;
+  const familyRequest = (driver: string) =>
+    driver === request.driver ? request : input.others?.find((o) => o.driver === driver);
   const candidates = everyAccount
-    .filter((a) => a.environmentId === request.environmentId && a.driver === request.driver)
+    .filter((a) => a.environmentId === request.environmentId && familyRequest(a.driver))
     .map((local) => {
       const account = { ...local, ...sharedReadings(local, everyAccount) };
       const reasons: string[] = [];
       const fable = input.fableMode?.instanceIds.includes(account.instanceId) === true;
-      const own = fable ? input.fableMode!.request : request;
+      const own = fable ? input.fableMode!.request : familyRequest(account.driver)!;
       if (own === null) reasons.push("Fable mode: no Fable rung takes this place.");
       const run = own ?? request;
+      const tags = [
+        ...(fable ? ["Fable mode"] : []),
+        ...(mixed ? [profileLabel(run.driver, run.model, run.options)] : []),
+      ];
       runs.set(account.instanceId, own);
       if (account.enabled === false) reasons.push("Provider is turned off in settings.");
       if (request.kind !== "session" && account.availableForWorkers === false)
@@ -421,7 +435,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         at: Date.parse(at),
         hours,
         session: {
-          driver: request.driver,
+          driver: run.driver,
           model: run.model,
           effort: effortOf(run),
           kind,
@@ -458,7 +472,8 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
           : {}),
         leftPoints: projection.leftPoints,
         ...(fableLine ? { fableSlack: fableLine.slack! } : {}),
-        line: `${account.label}${fable ? " (Fable mode)" : ""}: ${
+        driver: account.driver,
+        line: `${account.label}${tags.length ? ` (${tags.join(", ")})` : ""}: ${
           reasons.length
             ? `not usable (${reasons.join(" ")})`
             : room.drainedUntil !== undefined
@@ -526,9 +541,12 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
       }.`;
     }
     if (globalReasons.length || !drained.length) return undefined;
+    const models = mixed
+      ? [...new Set(drained.map((c) => runs.get(c.instanceId)?.model ?? request.model))]
+      : [request.model];
     return request.explicitInstanceId
       ? `${drained[0]!.line}; a pinned account is exact.`
-      : `${request.model} is drained on every account; earliest reset ${resets[0] ?? "unknown"}.`;
+      : `${models.join(" and ")} ${models.length > 1 ? "are" : "is"} drained on every account; earliest reset ${resets[0] ?? "unknown"}.`;
   })();
   const decision: AllocationDecision = {
     at: input.at,
@@ -537,7 +555,8 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
     outcome: selected ? "selected" : reason ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
     candidates: candidates.map(
-      ({ leftPoints: _leftPoints, fableSlack: _fableSlack, ...candidate }) => candidate,
+      ({ leftPoints: _leftPoints, fableSlack: _fableSlack, driver: _driver, ...candidate }) =>
+        candidate,
     ),
     confidence: "medium",
     reasons: reason

@@ -677,7 +677,7 @@ const workerChoiceFields = {
   environmentId: Schema.optional(TrimmedNonEmptyString),
   difficulty: AssignmentScore,
   stakes: AssignmentScore,
-  /** `codex` only when the start asks for Codex; Claude otherwise. */
+  /** Only when the user asked for a provider family; without it both are considered. */
   driver: Schema.optional(ProviderDriverKind),
   /** Pins, only for what the user named: an account's instance ID, a model ID, an effort. */
   account: Schema.optional(ProviderInstanceId),
@@ -707,6 +707,7 @@ export type WorkerStartInput = typeof WorkerStartInput.Type;
 export function workerChoiceRequest(
   input: WorkerChoiceInput & { environmentId: string; assignmentId: string; threadId: ThreadId },
 ): ModelRoutingRequest {
+  // No family named: Claude and Codex accounts are ranked together.
   const driver = input.driver ?? ProviderDriverKind.make("claudeAgent");
   return {
     selection: "automatic",
@@ -714,7 +715,7 @@ export function workerChoiceRequest(
     environmentId: input.environmentId,
     threadId: input.threadId,
     assessment: { difficulty: input.difficulty, stakes: input.stakes },
-    allowedDrivers: [driver],
+    allowedDrivers: input.driver ? [driver] : [driver, ProviderDriverKind.make("codex")],
     ...(input.hours ? { expectedHours: input.hours } : {}),
     ...(input.account ? { explicitInstanceId: input.account } : {}),
     ...(input.model

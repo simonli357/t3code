@@ -59,6 +59,17 @@ goals; sizes only project use. The order never lifts one ahead of its goal over 
 Goals count the meter's total. Stored family values (`claude`, `codex`, `other`) are the
 defaults and are carried through every save, including saves from builds that do not know them.
 
+**No family named means both families, in one ranking.** A worker start without `driver`
+asks for both tables (`workerChoiceRequest`), and `decideAllocation` judges each account on its
+own family's request (`others`), as it judges a Fable-mode account on its rung. Asking Claude
+first and Codex only on refusal never reached a Codex account while any Claude account could
+start. Points behind a goal compare across families because a goal is a share of each account's
+own week. Only the wanted profiles are ranked together: stand-ins are Claude's, so a Codex
+account takes no part in a rung or fallback step. The chosen request is kept to the accounts
+that run it, so admission chooses within one family. A pinned account asks only its own family
+and a pinned model the family that offers it. An older coordinator reads the same request as
+Claude first.
+
 **The Fable window has its own line, and it only adds Fable.** Fable's weekly limit runs out at
 its own pace, so on the account's goal it counted as on pace while it would run out in days. An
 account's Fable goal (`fableGoals`) is that window's line instead. It also puts the account in
