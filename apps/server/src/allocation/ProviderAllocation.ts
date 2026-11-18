@@ -12,6 +12,8 @@ import {
   ModelSelection,
   ThreadId,
   WORKER_ACCOUNT_DISABLED_REASON,
+  ASSIGNMENT_FINISHED,
+  ASSIGNMENT_FINISHED_REASON,
   allocationPreferenceKey,
   modelFallback,
   modelLadder,
@@ -1419,7 +1421,14 @@ const make = Effect.gen(function* () {
               ...(coordinatorModelPolicy ? { modelPolicy: coordinatorModelPolicy } : {}),
               ...(coordinatorLearned ? { learned: coordinatorLearned } : {}),
             });
-          if (refused || !decidesHere) return Effect.fail(unavailable());
+          // The coordinator's own words tell the caller what to do; only silence is "unavailable".
+          if (refused)
+            return Effect.fail(
+              cause.message.includes(ASSIGNMENT_FINISHED)
+                ? new AllocationError({ code: "conflict", detail: ASSIGNMENT_FINISHED_REASON })
+                : new AllocationError({ code: "unavailable", detail: cause.message }),
+            );
+          if (!decidesHere) return Effect.fail(unavailable());
           return Effect.logWarning("Allocation coordinator unavailable; deciding locally", {
             operation: operation._tag,
             cause: cause.message,

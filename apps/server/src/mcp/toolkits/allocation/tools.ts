@@ -34,7 +34,7 @@ const allocate = Tool.make("t3_allocate_account", {
   dependencies: [Assignments.AllocationAssignments, Invocation.McpInvocationContext],
 });
 const start = Tool.make("t3_start_allocated_assignment", {
-  description: `Start a fresh managed worker. ${CHOICE} started=false means no worker was created. After an attempted startup, retry the entire input unchanged to prevent duplicates.`,
+  description: `Start a fresh managed worker. ${CHOICE} started=false means no worker was created. After a lost response or an error that says something is unavailable or unconfirmed, retry the entire input unchanged: the same assignmentId and threadId never create a second worker. When the error says the assignment is finished (it finished, was cancelled or its start failed), an unchanged retry can never start: fix the stated cause if there is one and call again with a new assignmentId and threadId. If the reserved account was switched off for workers before the worker started, the same call chooses again among the accounts still on and a note says so.`,
   parameters: WorkerStartInput,
   success: WorkerStartResult,
   failure: AllocationError,

@@ -1,5 +1,6 @@
 import {
   AllocationError,
+  ASSIGNMENT_FINISHED_REASON,
   AllocationLearned,
   AllocationPolicy,
   AllocationReservation,
@@ -216,7 +217,7 @@ const make = Effect.gen(function* () {
               if (prior.state === "released")
                 return yield* new AllocationError({
                   code: "conflict",
-                  detail: "This assignment has finished or was cancelled.",
+                  detail: ASSIGNMENT_FINISHED_REASON,
                 });
               return { decision: prior.decision, reservation: prior, mode: current.mode };
             }
@@ -761,6 +762,16 @@ const make = Effect.gen(function* () {
                 code: "conflict",
                 detail: "Reservation cannot start with a different intent or after expiry.",
               });
+            if (input.action === "reopen") {
+              if (
+                !["reserved", "starting", "expired"].includes(r.state) ||
+                (r.startIntent !== undefined && r.startIntent !== input.startIntent)
+              )
+                return yield* conflict("Only a start that has not run can choose again.");
+              yield* sql`DELETE FROM provider_allocation_reservations WHERE id = ${r.assignmentId}`;
+              yield* sql`DELETE FROM model_selection_decisions WHERE assignment_id = ${r.assignmentId}`;
+              return { ...r, state: "released" as const };
+            }
             if (input.action === "consume" && !["starting", "consumed"].includes(r.state))
               return yield* new AllocationError({
                 code: "conflict",

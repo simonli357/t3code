@@ -349,7 +349,12 @@ function fixture(
     workPaths: Array<string | undefined>;
     refresh: (instanceId: string) => Effect.Effect<void>;
     turns: Array<UsageTurnMeasurement & { readonly priced: number | null }>;
+    /** Runs when a spawn arrives; a failure is the spawn's refusal, before any worker exists. */
+    beforeSpawn: (
+      input: typeof Workers.RemoteSpawnInput.Type,
+    ) => Effect.Effect<void, Workers.WorkerError>;
   } = {
+    beforeSpawn: () => Effect.void,
     turns: [],
     threads: [],
     peers: [],
@@ -428,9 +433,11 @@ function fixture(
     }),
     Layer.mock(Workers.WorkerControls)({
       spawn: (owner, input) =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
           calls.push(input);
-          return {
+          return state.beforeSpawn(input);
+        }).pipe(
+          Effect.map(() => ({
             threadId: input.threadId,
             ownerThreadId: owner,
             sourceThreadId: null,
@@ -442,8 +449,8 @@ function fixture(
             latestRequest: null,
             pendingReports: 0,
             deliveryError: null,
-          };
-        }),
+          })),
+        ),
     }),
   );
   const layer = Assignments.layer.pipe(
@@ -3449,3 +3456,168 @@ it.effect(
     }).pipe(Effect.provide(f.layer));
   },
 );
+
+const master = ThreadId.make("master");
+const refusal = (message: string) => Effect.fail(new Workers.WorkerError({ message }));
+const OFF = "Turned off for workers in Provider allocation settings";
+const FINISHED =
+  "This assignment has finished or was cancelled, or its start failed; nothing is reserved for it. Start again with a new assignmentId and threadId.";
+
+it.effect("a retry of a finished assignment says so and asks for new IDs", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation, assignments, store } = yield* f.setup;
+    const sql = yield* SqlClient.SqlClient;
+    expect((yield* assignments.start(startInput, master)).state).toBe("submitted");
+    yield* sql`INSERT INTO custom_worker_jobs (id, worker_id, target_id, kind, prompt, created_at, state) VALUES ('spawn:worker', 'worker', 'worker', 'work', '', ${at}, 'completed')`;
+    yield* allocation.execute({ _tag: "snapshot" });
+    expect((yield* store.reservations)[0]?.state).toBe("released");
+    const error = yield* Effect.flip(assignments.start(startInput, master));
+    expect(error).toMatchObject({ code: "conflict", detail: FINISHED });
+    expect(f.calls).toHaveLength(1);
+  }).pipe(Effect.provide(f.layer));
+});
+
+for (const [answer, expected] of [
+  // A coordinator from before the instruction existed still gets it added here.
+  [
+    "remote: This assignment has finished or was cancelled.",
+    { code: "conflict", detail: FINISHED },
+  ],
+  [
+    "remote: This thread already has an active allocation.",
+    { code: "unavailable", detail: "remote: This thread already has an active allocation." },
+  ],
+] as const)
+  it.effect(`a master is told the coordinator's refusal: ${answer}`, () => {
+    const f = fixture({
+      remote: true,
+      peerCall: () => Effect.fail(new PeerRejected({ message: answer })),
+    });
+    return Effect.gen(function* () {
+      const { assignments } = yield* f.setup;
+      expect(yield* Effect.flip(assignments.start(startInput, master))).toMatchObject(expected);
+      expect(f.calls).toHaveLength(0);
+    }).pipe(Effect.provide(f.layer), Effect.scoped);
+  });
+
+it.effect("a coordinator that cannot be reached for work on itself stays 'unavailable'", () => {
+  const f = fixture({
+    remote: true,
+    peerCall: (id) => Effect.fail(new PeerUnavailable({ environmentId: id, message: "offline" })),
+  });
+  return Effect.gen(function* () {
+    const { assignments } = yield* f.setup;
+    const error = yield* Effect.flip(
+      assignments.start(
+        { ...startInput, request: { ...startInput.request, environmentId: "remote" } },
+        master,
+      ),
+    );
+    expect(error.detail).toBe(
+      "Allocation authority or execution environment is unavailable; capacity remains reserved.",
+    );
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
+it.effect("a start the spawn refused gives the reason, and its retry asks for new IDs", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    f.state.beforeSpawn = () => refusal("That destination thread already exists.");
+    const error = yield* Effect.flip(assignments.start(startInput, master));
+    expect(error.detail).toBe(
+      "No worker was created: That destination thread already exists. This assignment is finished; start again with a new assignmentId and threadId.",
+    );
+    f.state.beforeSpawn = () => Effect.void;
+    expect(yield* Effect.flip(assignments.start(startInput, master))).toMatchObject({
+      code: "conflict",
+      detail: FINISHED,
+    });
+    expect(f.calls).toHaveLength(1);
+    expect((yield* store.reservations).map((r) => r.state)).toEqual(["released"]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("an account switched off after it was reserved is replaced in the same start", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    yield* roomy;
+    const settings = yield* Settings.ServerSettingsService;
+    f.state.providers = [provider, spareProvider];
+    // The user switches the reserved account off between the reservation and the spawn.
+    f.state.beforeSpawn = (input) =>
+      input.modelSelection.instanceId === provider.instanceId
+        ? settings
+            .updateSettings({ workerDisabledInstanceIds: [provider.instanceId] })
+            .pipe(Effect.orDie, Effect.andThen(refusal(OFF)))
+        : Effect.void;
+    const started = yield* assignments.start(startInput, master);
+    expect(started.state).toBe("submitted");
+    expect(started.allocation?.decision.selectedInstanceId).toBe(spareProvider.instanceId);
+    expect(f.calls.map((call) => call.modelSelection.instanceId)).toEqual(["chosen", "spare"]);
+    const held = () =>
+      store.reservations.pipe(
+        Effect.map((all) => all.map((r) => [r.assignmentId, r.instanceId, r.state])),
+      );
+    expect(yield* held()).toEqual([["assignment", "spare", "starting"]]);
+    // A retry after a lost response returns the same worker: the spawn gets the identical input.
+    const retry = yield* assignments.start(startInput, master);
+    expect(retry.state).toBe("submitted");
+    expect(f.calls).toHaveLength(3);
+    expect(f.calls[2]).toEqual(f.calls[1]);
+    expect(yield* held()).toEqual([["assignment", "spare", "starting"]]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("when no other account fits, the start says the account was switched off", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { assignments, store } = yield* f.setup;
+    const settings = yield* Settings.ServerSettingsService;
+    f.state.providers = [{ ...provider, models: tableModels }];
+    f.state.beforeSpawn = () =>
+      settings
+        .updateSettings({ workerDisabledInstanceIds: [provider.instanceId] })
+        .pipe(Effect.orDie, Effect.andThen(refusal(OFF)));
+    const input = automaticStart("only");
+    const refused = yield* assignments.start(input, master);
+    expect(refused.state).toBe("unavailable");
+    expect(refused.selection?.notes?.[0]).toBe(
+      `chosen was reserved for this start and then switched off (${OFF}); its reservation was released and the choice made again.`,
+    );
+    expect(f.calls).toHaveLength(1);
+    expect(yield* store.reservations).toHaveLength(0);
+    // Nothing started and nothing is held, so the same assignment starts once the account is on.
+    yield* settings.updateSettings({ workerDisabledInstanceIds: [] });
+    f.state.beforeSpawn = () => Effect.void;
+    expect((yield* assignments.start(input, master)).state).toBe("submitted");
+    expect(f.calls).toHaveLength(2);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("only a start that has not run can be reopened", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation, assignments, store } = yield* f.setup;
+    expect((yield* assignments.start(startInput, master)).state).toBe("submitted");
+    const reopen = (startIntent: string) =>
+      allocation.execute({
+        _tag: "lifecycle",
+        input: {
+          assignmentId: "assignment",
+          environmentId: "local",
+          threadId: startInput.request.threadId,
+          action: "reopen",
+          startIntent,
+        },
+      });
+    expect((yield* Effect.flip(reopen("another start"))).code).toBe("conflict");
+    f.state.threads = [shell()];
+    yield* allocation.execute({ _tag: "snapshot" });
+    const [running] = yield* store.reservations;
+    expect(running?.state).toBe("consumed");
+    expect((yield* Effect.flip(reopen(running!.startIntent!))).code).toBe("conflict");
+  }).pipe(Effect.provide(f.layer));
+});

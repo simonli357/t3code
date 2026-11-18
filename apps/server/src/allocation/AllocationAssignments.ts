@@ -213,9 +213,14 @@ const make = Effect.gen(function* () {
       ],
     };
   });
-  const start = Effect.fn("AllocationAssignments.start")(function* (
+  /**
+   * One choice and its start. A local spawn that refuses the reserved account because it was
+   * switched off after the choice gives the reservation back and answers `rechoose`.
+   */
+  const startOnce = Effect.fn("AllocationAssignments.startOnce")(function* (
     raw: AllocationStart,
-    owner?: ThreadId,
+    owner: ThreadId | undefined,
+    rechosen: boolean,
   ) {
     if (raw.kind === "worker" && !owner)
       return yield* invalid("Managed allocation requires the authenticated master.");
@@ -320,7 +325,7 @@ const make = Effect.gen(function* () {
       options: input.request.options,
     };
     const createdAt = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
-    const start =
+    const start: Effect.Effect<void, Workers.WorkerError | AllocationError> =
       input.kind === "worker" && owner
         ? workers
             .spawn(owner, {
@@ -339,11 +344,12 @@ const make = Effect.gen(function* () {
               Effect.flatMap((worker) =>
                 worker.error || worker.latestRequest?.state === "error"
                   ? Effect.fail(
-                      invalid("Worker startup failed. Inspect the worker's retained error."),
+                      new Workers.WorkerError({
+                        message: "Worker startup failed. Inspect the worker's retained error.",
+                      }),
                     )
                   : Effect.void,
               ),
-              Effect.mapError(() => invalid("Worker startup failed; inspect its durable receipt.")),
             )
         : Effect.gen(function* () {
             yield* engine.dispatch({
@@ -380,33 +386,80 @@ const make = Effect.gen(function* () {
           );
     // Worker spawn and orchestration command IDs are themselves durable and
     // idempotent. A disconnect retains starting capacity until receipt recovery.
-    yield* start.pipe(
-      Effect.tapError(() =>
-        Effect.gen(function* () {
-          if (input.kind !== "worker" || input.request.environmentId !== local.environmentId)
-            return;
-          // A local spawn that returned an error before its durable worker row
-          // exists cannot have queued provider work. Remote errors remain uncertain.
-          const rows =
-            yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = ${input.request.threadId}`;
-          if (!rows.length)
-            yield* sql`INSERT OR IGNORE INTO provider_allocation_failed_starts (assignment_id, thread_id) VALUES (${input.request.assignmentId}, ${input.request.threadId})`;
-        }).pipe(Effect.mapError(() => invalid("Could not preserve startup failure receipt."))),
-      ),
-      Effect.mapError(
-        () =>
-          new AllocationError({
-            code: "unavailable",
-            detail:
-              "Startup did not confirm success. The same assignment can reconcile its durable receipt; capacity remains protected.",
-          }),
-      ),
+    const unconfirmed = new AllocationError({
+      code: "unavailable",
+      detail:
+        "Startup did not confirm success. The same assignment can reconcile its durable receipt; capacity remains protected.",
+    });
+    const failure = yield* start.pipe(
+      Effect.as(undefined),
+      Effect.catch((cause) => Effect.succeed(cause)),
     );
+    if (failure) {
+      if (input.kind !== "worker") return yield* unconfirmed;
+      const here = input.request.environmentId === local.environmentId;
+      // A local spawn that returned an error before its durable worker row exists cannot have
+      // queued provider work. Another computer proves the same with its typed refusal.
+      const created = here
+        ? (yield* sql`SELECT 1 FROM custom_workers WHERE thread_id = ${input.request.threadId}`.pipe(
+            Effect.mapError(() => invalid("Could not preserve startup failure receipt.")),
+          )).length > 0
+        : failure.code !== "allocation_start_rejected";
+      if (created) return yield* unconfirmed;
+      const accountOff =
+        failure.message.includes(WORKER_ACCOUNT_DISABLED_REASON) ||
+        failure.message.includes(Workers.PROVIDER_UNAVAILABLE_REASON);
+      if (here && accountOff && !rechosen) {
+        const reopened = yield* allocation
+          .execute({
+            _tag: "lifecycle",
+            input: {
+              assignmentId: input.request.assignmentId,
+              environmentId: input.request.environmentId,
+              threadId: input.request.threadId,
+              action: "reopen",
+              startIntent,
+            },
+          })
+          .pipe(
+            Effect.andThen(
+              sql`DELETE FROM worker_recommendations WHERE thread_id = ${input.request.threadId}`,
+            ),
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
+        if (reopened) return { rechoose: reservation.instanceId, reason: failure.message };
+      }
+      if (here)
+        yield* sql`INSERT OR IGNORE INTO provider_allocation_failed_starts (assignment_id, thread_id) VALUES (${input.request.assignmentId}, ${input.request.threadId})`.pipe(
+          Effect.mapError(() => invalid("Could not preserve startup failure receipt.")),
+        );
+      return yield* invalid(
+        `No worker was created: ${failure.message.replace(/\.$/, "")}. This assignment is finished; start again with a new assignmentId and threadId.`,
+      );
+    }
     return {
       allocation: result,
       ...(selectionDecision ? { selection: selectionDecision } : {}),
       threadId: input.request.threadId,
       state: "submitted" as const,
+    };
+  });
+  const start = Effect.fn("AllocationAssignments.start")(function* (
+    raw: AllocationStart,
+    owner?: ThreadId,
+  ) {
+    const first = yield* startOnce(raw, owner, false);
+    if (!("rechoose" in first)) return first;
+    const second = yield* startOnce(raw, owner, true);
+    // The second attempt never asks again.
+    if ("rechoose" in second) return yield* invalid("The choice could not be made again.");
+    const note = `${first.rechoose} was reserved for this start and then switched off (${first.reason}); its reservation was released and the choice made again.`;
+    return {
+      ...second,
+      ...(second.selection
+        ? { selection: { ...second.selection, notes: [note, ...(second.selection.notes ?? [])] } }
+        : {}),
     };
   });
   return AllocationAssignments.of({

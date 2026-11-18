@@ -25,6 +25,10 @@ const Names = Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(100))
 const OptionalCapPercent = Schema.NullOr(Points);
 export const WORKER_ACCOUNT_DISABLED_REASON =
   "Turned off for workers in Provider allocation settings";
+/** Coordinators from before the instruction was added answer with this much. */
+export const ASSIGNMENT_FINISHED = "This assignment has finished or was cancelled";
+/** A retry of an assignment whose reservation is released can never start it. */
+export const ASSIGNMENT_FINISHED_REASON = `${ASSIGNMENT_FINISHED}, or its start failed; nothing is reserved for it. Start again with a new assignmentId and threadId.`;
 export const AllocationRequest = Schema.Struct({
   /** Unspecified requests are worker recommendations; human starts set session on the server. */
   kind: Schema.optional(Schema.Literals(["worker", "session"])),
@@ -639,7 +643,8 @@ export const AllocationLifecycle = Schema.Struct({
   assignmentId: TrimmedNonEmptyString,
   environmentId: TrimmedNonEmptyString,
   threadId: ThreadId,
-  action: Schema.Literals(["start", "consume", "release"]),
+  /** `reopen` forgets a choice whose start provably created nothing, so the assignment chooses again. */
+  action: Schema.Literals(["start", "consume", "release", "reopen"]),
 });
 export const RecommendedChoice = Schema.Struct({
   /** What the table and the ranking give without the user's pin; null when nothing had room. */

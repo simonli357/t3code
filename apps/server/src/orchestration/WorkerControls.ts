@@ -83,6 +83,9 @@ const USAGE_RETRY_MS = 30 * 60_000;
 const UNREPORTED_REMINDER =
   "[T3 reminder] Your turn ended without a report to your master. If the assignment is finished, needs review or is blocked, call the t3-code MCP server's t3_worker_report tool now (Claude Code names it mcp__t3-code__t3_worker_report; load it with ToolSearch first if it is deferred). If you are still waiting on background work, do nothing.";
 
+/** A spawn refuses with this when the account's provider is off, missing or lacks the model. */
+export const PROVIDER_UNAVAILABLE_REASON =
+  "The selected provider/model is unavailable; no substitution was made.";
 export class WorkerError extends Schema.TaggedError<WorkerError>()("WorkerError", {
   message: Schema.String,
   code: Schema.optional(Schema.String),
@@ -1018,7 +1021,7 @@ const make = Effect.gen(function* () {
       !model
     )
       return yield* new WorkerError({
-        message: "The selected provider/model is unavailable; no substitution was made.",
+        message: PROVIDER_UNAVAILABLE_REASON,
       });
     for (const option of selection.options ?? []) {
       const descriptor = model.capabilities?.optionDescriptors?.find(
