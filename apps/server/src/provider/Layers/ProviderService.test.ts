@@ -36,6 +36,7 @@ import {
 } from "@t3tools/shared/assistantCitations";
 import { createModelSelection } from "@t3tools/shared/model";
 import { IDLE_COMPACTION_SOURCE } from "@t3tools/shared/claudeCompaction";
+import { HostProcessHostname } from "@t3tools/shared/hostProcess";
 import { it, assert, describe, vi } from "@effect/vitest";
 import { afterAll } from "vite-plus/test";
 
@@ -73,10 +74,12 @@ import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
 import {
+  layerConfig as sqliteLayerConfig,
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ServerConfig from "../../config.ts";
+import { claimInstallation } from "../../installationOwner.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
@@ -2446,6 +2449,118 @@ it.effect(
 
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
     }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a copied database never resumes the original's native session, on any boot", () =>
+  Effect.gen(function* () {
+    const originalDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-copy-original-"));
+    const copyDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-copy-"));
+    const threadId = asThreadId("thread-copied");
+    const originalCursor = { resume: "native-session-of-the-original" };
+    const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+    const registry = makeAdapterRegistryMock({ [CLAUDE_AGENT_DRIVER]: claude.adapter });
+    /** One server process on `baseDir`, on the same computer. Startup claims the database first. */
+    const boot = <A, E>(
+      baseDir: string,
+      run: Effect.Effect<A, E, ProviderService.ProviderService | SqlClient.SqlClient>,
+    ) => {
+      const persistence = sqliteLayerConfig.pipe(
+        Layer.provideMerge(ServerConfig.layerTest(baseDir, baseDir)),
+      );
+      const provider = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+        Layer.provide(
+          ProviderSessionDirectoryLive.pipe(
+            Layer.provide(ProviderSessionRuntime.layer),
+            Layer.provide(persistence),
+          ),
+        ),
+        Layer.provide(persistence),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      );
+      return Effect.gen(function* () {
+        const { copied } = yield* claimInstallation({ adoptUnrecorded: true });
+        return { copied, result: yield* run };
+      }).pipe(
+        Effect.provide(Layer.mergeAll(provider, persistence)),
+        Effect.provideService(HostProcessHostname, "sliara"),
+      );
+    };
+
+    // The original left the thread's session stopped, as the session reaper does when it idles.
+    const original = yield* boot(
+      originalDir,
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          cwd: fixtureCwd("copied-thread"),
+          runtimeMode: "full-access",
+          resumeCursor: originalCursor,
+        });
+        yield* provider.stopSession({ threadId });
+        // AGENTS.md "Test data": a VACUUM INTO snapshot taken while the original runs.
+        const sql = yield* SqlClient.SqlClient;
+        const target = NodePath.join(copyDir, "userdata", "state.sqlite");
+        NodeFS.mkdirSync(NodePath.dirname(target), { recursive: true });
+        yield* sql.unsafe(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
+      }),
+    );
+    assert.isFalse(original.copied);
+
+    const startsBefore = claude.startSession.mock.calls.length;
+    // What a restart continuation or a retry sends, and what idle compaction asks for.
+    const unprompted = Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      return [
+        yield* provider.sendTurn({ threadId, input: "Continue." }).pipe(Effect.flip),
+        yield* provider
+          .compactThread(threadId, undefined, undefined, { idle: true })
+          .pipe(Effect.flip),
+      ];
+    });
+    const firstBoot = yield* boot(copyDir, unprompted);
+    // The copy's later boots count it as their own installation.
+    const laterBoot = yield* boot(
+      copyDir,
+      Effect.gen(function* () {
+        const refused = yield* unprompted;
+        // A user's message starts the thread's session the way the command reactor does.
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        return refused;
+      }),
+    );
+
+    assert.isTrue(firstBoot.copied);
+    assert.isFalse(laterBoot.copied);
+    for (const failure of [...firstBoot.result, ...laterBoot.result]) {
+      assert.instanceOf(failure, ProviderValidationError);
+    }
+    assert.equal(claude.sendTurn.mock.calls.length, 0);
+    // Only the user's message started a session, and a fresh one.
+    assert.deepEqual(
+      claude.startSession.mock.calls.slice(startsBefore).map(([input]) => input.resumeCursor),
+      [null],
+    );
+
+    NodeFS.rmSync(originalDir, { recursive: true, force: true });
+    NodeFS.rmSync(copyDir, { recursive: true, force: true });
+  }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {

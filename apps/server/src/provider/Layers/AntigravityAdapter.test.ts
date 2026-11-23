@@ -1335,4 +1335,18 @@ it.layer(layer)("AntigravityAdapter", (it) => {
       expect(active.launches).toHaveLength(0);
     }),
   );
+
+  it.effect("starts a fresh native session when the saved one was cleared", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      yield* h.adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "approval-required",
+        resumeCursor: null,
+      });
+      expect(h.launches).toHaveLength(1);
+      expect(h.launches[0]?.resumeSessionId).toBeUndefined();
+    }),
+  );
 });

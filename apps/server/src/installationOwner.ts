@@ -18,7 +18,9 @@ import * as ServerConfig from "./config.ts";
  *
  * `claimInstallation` runs before any reactor starts. On a copy it settles the
  * copied work in the same transaction that records this installation, so a
- * crash in between repeats the settling instead of resuming.
+ * crash in between repeats the settling instead of resuming. Every later boot
+ * finds this installation recorded and treats the copy as its own, so the
+ * settling must leave nothing that can reach the original's sessions.
  */
 export interface InstallationClaim {
   /** The database was another installation's; its running and queued work was settled. */
@@ -79,8 +81,8 @@ export const claimInstallation = Effect.fn("claimInstallation")(function* (optio
 /**
  * Settles everything that would act on its own once the server starts and
  * returns how many rows changed. Rows stay for history; only their pending
- * state ends. Startup reconciliation then shows the copied running threads as
- * stopped.
+ * state and their native sessions end. Startup reconciliation then shows the
+ * copied running threads as stopped.
  */
 const settleCopiedWork = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -103,6 +105,12 @@ const settleCopiedWork = Effect.gen(function* () {
     WHERE status != 'stopped'
       OR json_extract(${payload}, '$.activeTurnId') IS NOT NULL
       OR json_extract(${payload}, '$.continueAfterServerUpdate') IS NOT NULL`;
+  // The resume cursor names the original's native session (a Claude session id,
+  // a Codex thread id). Without it nothing on any boot of the copy can resume
+  // one: idle compaction and continuations are refused, and a user's message
+  // starts a fresh session.
+  yield* sql`UPDATE provider_session_runtime SET resume_cursor_json = NULL
+    WHERE resume_cursor_json IS NOT NULL`;
   // Worker jobs: queued prompts, assignments, wake-ups (resume_at), retries,
   // peer deliveries and reports, plus outcomes not yet reported to a master.
   yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled', error = ${COPIED_WORK_ERROR}

@@ -759,7 +759,8 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
           });
         }
         const cursor = decodeResumeCursor(input.resumeCursor);
-        if (input.resumeCursor !== undefined && Option.isNone(cursor)) {
+        // A null cursor was cleared, as on a copied database; the thread starts a fresh session.
+        if (input.resumeCursor != null && Option.isNone(cursor)) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
             operation: "startSession",

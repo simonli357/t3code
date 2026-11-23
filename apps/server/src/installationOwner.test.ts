@@ -105,7 +105,8 @@ const settledCopy = {
       thread_id: "idle",
       status: "stopped",
       payload: JSON.stringify({ activeTurnId: null }),
-      cursor: JSON.stringify({ resume: "native-idle" }),
+      // Idle compaction would resume an idle thread's native session.
+      cursor: null,
     },
     {
       thread_id: "released",
@@ -115,7 +116,7 @@ const settledCopy = {
         continueAfterServerUpdate: null,
         continueAfterServerUpdatePrepared: null,
       }),
-      cursor: JSON.stringify({ resume: "native-released" }),
+      cursor: null,
     },
     {
       thread_id: "running-turn",
@@ -126,7 +127,7 @@ const settledCopy = {
         continueAfterServerUpdate: null,
         continueAfterServerUpdatePrepared: null,
       }),
-      cursor: JSON.stringify({ resume: "native-running-turn" }),
+      cursor: null,
     },
   ],
   jobs: [
