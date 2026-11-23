@@ -51,14 +51,18 @@ so it keeps the record. A copy, whether made for testing or moved to another pat
 computer, carries a record that does not match the server starting on it. Before any
 reactor starts, `claimInstallation` settles the copy's work in one transaction with
 the new record: provider sessions, worker jobs and reports, handoffs, renewals,
-session moves and ownership changes. It also clears every resume cursor, so no
-copied thread can resume the original's native session; a message in one starts a
-fresh session. Startup reconciliation then shows the copy's running threads as
-stopped. Every later boot finds its own record and treats the copy as its own, so
-the settled rows are the only guard: idle compaction, for one, re-arms from copied
-context readings on each boot. A new table whose rows make the server act on its
-own, at startup or later, belongs in that list. Databases from builds before the
-record are adopted only by the launcher-managed service or the packaged desktop app.
+session moves and ownership changes. The launcher-managed service and the packaged
+desktop app keep the resume cursors: they are the installation itself after a host
+rename or a moved database, so a native session they resume is their own. Any other
+server, such as a dev server on a copy, runs beside the original, so it also clears
+every resume cursor; no copied thread can then resume the original's native session,
+and a message in one starts a fresh session. Startup reconciliation then shows the
+copy's running threads as stopped. Every later boot finds its own record and treats
+the copy as its own, so the settled rows are the only guard: idle compaction, for
+one, re-arms from copied context readings on each boot. A new table whose rows make
+the server act on its own, at startup or later, belongs in that list. Databases from
+builds before the record are adopted only by the launcher-managed service or the
+packaged desktop app.
 
 ## Client acknowledgement
 

@@ -19,8 +19,8 @@ import * as ServerConfig from "./config.ts";
  * `claimInstallation` runs before any reactor starts. On a copy it settles the
  * copied work in the same transaction that records this installation, so a
  * crash in between repeats the settling instead of resuming. Every later boot
- * finds this installation recorded and treats the copy as its own, so the
- * settling must leave nothing that can reach the original's sessions.
+ * finds this installation recorded and treats the copy as its own; only the
+ * settled rows keep it from acting for the original.
  */
 export interface InstallationClaim {
   /** The database was another installation's; its running and queued work was settled. */
@@ -37,9 +37,11 @@ const COPIED_WORK_ERROR = "Copied from another installation; not resumed here.";
 
 export const claimInstallation = Effect.fn("claimInstallation")(function* (options: {
   /**
-   * Databases from builds before this record carry none. Only the installed
-   * service or the packaged desktop app adopts such a database as its own;
-   * anything else, such as a dev server, treats it as a copy.
+   * True for the installed service and the packaged desktop app, which are the
+   * installation. Databases from builds before this record carry none; only
+   * these adopt such a database as their own, and anything else, such as a dev
+   * server, treats it as a copy. On a database recorded elsewhere they also keep
+   * its native sessions (`settleCopiedWork`).
    */
   readonly adoptUnrecorded: boolean;
 }) {
@@ -58,7 +60,7 @@ export const claimInstallation = Effect.fn("claimInstallation")(function* (optio
         owner === undefined
           ? !options.adoptUnrecorded
           : owner.host !== host || owner.databasePath !== databasePath;
-      const settled = copied ? yield* settleCopiedWork : 0;
+      const settled = copied ? yield* settleCopiedWork(options) : 0;
       yield* sql`INSERT INTO custom_installation_owner (id, host, database_path, claimed_at)
         VALUES (1, ${host}, ${databasePath}, ${claimedAt})
         ON CONFLICT(id) DO UPDATE SET host = excluded.host,
@@ -81,10 +83,13 @@ export const claimInstallation = Effect.fn("claimInstallation")(function* (optio
 /**
  * Settles everything that would act on its own once the server starts and
  * returns how many rows changed. Rows stay for history; only their pending
- * state and their native sessions end. Startup reconciliation then shows the
- * copied running threads as stopped.
+ * state ends and, on a server that is not the installation, their native
+ * sessions. Startup reconciliation then shows the copied running threads as
+ * stopped.
  */
-const settleCopiedWork = Effect.gen(function* () {
+const settleCopiedWork = Effect.fn("settleCopiedWork")(function* (options: {
+  readonly adoptUnrecorded: boolean;
+}) {
   const sql = yield* SqlClient.SqlClient;
   const changes = sql<{ readonly count: number }>`SELECT total_changes() AS count`.pipe(
     Effect.map(([row]) => row?.count ?? 0),
@@ -105,12 +110,16 @@ const settleCopiedWork = Effect.gen(function* () {
     WHERE status != 'stopped'
       OR json_extract(${payload}, '$.activeTurnId') IS NOT NULL
       OR json_extract(${payload}, '$.continueAfterServerUpdate') IS NOT NULL`;
-  // The resume cursor names the original's native session (a Claude session id,
-  // a Codex thread id). Without it nothing on any boot of the copy can resume
-  // one: idle compaction and continuations are refused, and a user's message
-  // starts a fresh session.
-  yield* sql`UPDATE provider_session_runtime SET resume_cursor_json = NULL
-    WHERE resume_cursor_json IS NOT NULL`;
+  // The installed service and the desktop app are the installation itself, renamed
+  // or moved, so a native session they resume is their own and keeps its cursor.
+  // Any other server, such as a dev server on a copy, runs beside the original, so
+  // it clears the cursors naming the original's sessions (a Claude session id, a
+  // Codex thread id); on every later boot nothing can resume one, and a user's
+  // message starts a fresh session.
+  if (!options.adoptUnrecorded) {
+    yield* sql`UPDATE provider_session_runtime SET resume_cursor_json = NULL
+      WHERE resume_cursor_json IS NOT NULL`;
+  }
   // Worker jobs: queued prompts, assignments, wake-ups (resume_at), retries,
   // peer deliveries and reports, plus outcomes not yet reported to a master.
   yield* sql`UPDATE custom_worker_jobs SET state = 'cancelled', error = ${COPIED_WORK_ERROR}

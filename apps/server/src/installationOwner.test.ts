@@ -154,6 +154,15 @@ const settledCopy = {
   announcements: [{ id: "change", announced: 1 }],
 };
 
+/** The installed service, renamed or moved, settles the same work but keeps its native sessions. */
+const settledInstallation = {
+  ...settledCopy,
+  sessions: settledCopy.sessions.map((session) => ({
+    ...session,
+    cursor: JSON.stringify({ resume: `native-${session.thread_id}` }),
+  })),
+};
+
 const tempBaseDir = (prefix: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -191,7 +200,7 @@ it.layer(NodeServices.layer)("installation claim", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("a copy at another path settles everything that would run", () =>
+  it.effect("a dev server's copy settles everything that would run, on every boot", () =>
     Effect.gen(function* () {
       const original = yield* tempBaseDir("t3-installation-original-");
       const copy = yield* tempBaseDir("t3-installation-copy-");
@@ -200,7 +209,7 @@ it.layer(NodeServices.layer)("installation claim", (it) => {
       const seeded = yield* withDatabase(original, readWork);
       yield* copyDatabase(original, copy);
 
-      const copied = yield* boot(copy, { host: "myacer", adoptUnrecorded: true });
+      const copied = yield* boot(copy, { host: "myacer", adoptUnrecorded: false });
       assert.isTrue(copied.copied);
       assert.deepStrictEqual(copied.work, settledCopy);
 
@@ -214,16 +223,26 @@ it.layer(NodeServices.layer)("installation claim", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("a copy on another computer at the same path settles everything that would run", () =>
-    Effect.gen(function* () {
-      const baseDir = yield* tempBaseDir("t3-installation-moved-");
-      yield* boot(baseDir, { host: "myacer", adoptUnrecorded: true });
-      yield* withDatabase(baseDir, seedRunningWork);
+  it.effect.each([
+    { change: "host name", host: "sliara", moved: false },
+    { change: "database path", host: "myacer", moved: true },
+  ] as const)(
+    "the installed service after a changed $change settles running work and keeps its native sessions",
+    ({ host, moved }) =>
+      Effect.gen(function* () {
+        const original = yield* tempBaseDir("t3-installation-service-");
+        yield* boot(original, { host: "myacer", adoptUnrecorded: true });
+        yield* withDatabase(original, seedRunningWork);
+        const baseDir = moved ? yield* tempBaseDir("t3-installation-service-moved-") : original;
+        if (moved) yield* copyDatabase(original, baseDir);
 
-      const moved = yield* boot(baseDir, { host: "sliara", adoptUnrecorded: true });
-      assert.isTrue(moved.copied);
-      assert.deepStrictEqual(moved.work, settledCopy);
-    }).pipe(Effect.scoped),
+        const changed = yield* boot(baseDir, { host, adoptUnrecorded: true });
+        assert.isTrue(changed.copied);
+        assert.deepStrictEqual(changed.work, settledInstallation);
+        const restarted = yield* boot(baseDir, { host, adoptUnrecorded: true });
+        assert.isFalse(restarted.copied);
+        assert.deepStrictEqual(restarted.work, settledInstallation);
+      }).pipe(Effect.scoped),
   );
 
   it.effect("an older build's database is adopted only by the installed server", () =>
