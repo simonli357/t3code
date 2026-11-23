@@ -143,7 +143,10 @@ export interface AccountProjection {
   readonly leftPoints: number | null;
   readonly tightest?: WindowProjection;
   readonly lastsHours: number | null;
-  /** When it does not fit: the reset that clears the limit in its way, null when unknown. */
+  /**
+   * When it does not fit inside its plan, on credits too: the reset that clears the limit in its
+   * way, null when unknown.
+   */
   readonly fitsFrom?: string | null;
   readonly hours: number;
   /**
@@ -326,7 +329,7 @@ export function projectAccount(input: {
     leftPoints: tightest ? tightest.limit - tightest.atEnd : null,
     ...(tightest ? { tightest } : {}),
     lastsHours: lasts.length ? Math.min(...lasts) : null,
-    ...(failing.length && !coveredByCredits
+    ...(failing.length
       ? {
           fitsFrom: failing.some((w) => w.resetsAt === null)
             ? null

@@ -278,19 +278,29 @@ type Ranked = AllocationCandidate & {
   readonly fableSlack?: number;
   /** The account's provider family, when it is not the request's. */
   readonly driver?: string;
+  /** On credits: what is left of them after the job. */
+  readonly creditsLeft?: number;
 };
 
-/** 0: fits, with a goal line; 1: fits, without one; 2: a limit runs out before the end. */
+/**
+ * 0: fits inside its plan, with a goal line; 1: inside its plan, without one; 2: fits on the
+ * provider's credits; 3: a limit runs out before the end.
+ */
 const group = (c: AllocationCandidate) =>
-  c.fits === false ? 2 : c.goalSlackPoints === undefined ? 1 : 0;
+  c.fits === false ? 3 : c.onCredits ? 2 : c.goalSlackPoints === undefined ? 1 : 0;
 
-/** Points behind the goal line, points left without one, hours it lasts when it does not fit. */
+/**
+ * Points behind the goal line, points left without one, credits left after the job on them,
+ * hours it lasts when it does not fit.
+ */
 const score = (c: Ranked) =>
   group(c) === 0
     ? c.goalSlackPoints!
     : group(c) === 1
       ? (c.leftPoints ?? -Infinity)
-      : (c.lastsHours ?? 0);
+      : group(c) === 2
+        ? (c.creditsLeft ?? 0)
+        : (c.lastsHours ?? 0);
 
 /**
  * Usable accounts, best first. Accounts that fit and have a goal line lead, the furthest behind
@@ -299,8 +309,9 @@ const score = (c: Ranked) =>
  * limit; one without a reading comes last of them. In either group, accounts within the
  * policy's margin (points) of the best are close, but never across the goal line: one ahead of
  * its goal is never close to one behind it. The preference order decides between close
- * accounts, then fewer workers, then the sooner reset. Last, accounts where a limit runs out
- * before the job ends, the longest lasting first.
+ * accounts, then fewer workers, then the sooner reset. Then accounts that last the job only on
+ * the provider's credits, the most left after the job first. Last, accounts where a limit runs
+ * out before the job ends, the longest lasting first.
  */
 export function rankCandidates(
   candidates: readonly Ranked[],
@@ -461,6 +472,8 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
       });
       projections.set(`${account.environmentId}:${account.instanceId}`, projection);
       const fableLine = projection.windows.find((w) => w.fableGoal);
+      // It pays for part of the job with the provider's credits.
+      const credits = projection.fits ? projection.credits : undefined;
       const usable = reasons.length === 0 && globalReasons.length === 0;
       const known = projection.windows.length > 0;
       return {
@@ -477,6 +490,12 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         ...(known
           ? {
               fits: projection.fits,
+              ...(credits
+                ? {
+                    onCredits: true as const,
+                    creditsLeft: credits.unlimited ? Infinity : credits.balance - credits.needed,
+                  }
+                : {}),
               lastsHours: projection.lastsHours,
               ...(projection.slack === null ? {} : { goalSlackPoints: projection.slack }),
               ...(projection.fitsFrom === undefined ? {} : { fitsFrom: projection.fitsFrom }),
@@ -531,8 +550,10 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
   const reason = (() => {
     if (selected) {
       if (request.explicitInstanceId) return `${selected.line}; pinned account.`;
-      if (ranked.length === 1) return `${selected.line}; the only account that is not out.`;
       if (group(selected) === 2)
+        return `${selected.line}; no account lasts this job inside its plan.`;
+      if (ranked.length === 1) return `${selected.line}; the only account that is not out.`;
+      if (group(selected) === 3)
         return `${selected.line}; no account lasts the whole job, this one lasts longest.`;
       if (!best || selected === best)
         return `${selected.line}; ${
@@ -567,8 +588,13 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
     outcome: selected ? "selected" : reason ? "wait" : "unavailable",
     selectedInstanceId: selected?.instanceId ?? null,
     candidates: candidates.map(
-      ({ leftPoints: _leftPoints, fableSlack: _fableSlack, driver: _driver, ...candidate }) =>
-        candidate,
+      ({
+        leftPoints: _leftPoints,
+        fableSlack: _fableSlack,
+        driver: _driver,
+        creditsLeft: _creditsLeft,
+        ...candidate
+      }) => candidate,
     ),
     confidence: "medium",
     reasons: reason

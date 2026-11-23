@@ -54,18 +54,21 @@ the master names one, and then the account, model and effort together:
    at its own model, effort and context, masters at their lower rate, idle sessions not at all,
    plus the account's use outside T3. An account **fits** when no limit runs out before the job
    ends; a hard cap counts as the limit. A Codex account whose limit is used up but which has
-   ChatGPT credits runs on them: it fits when they pay for that use past the limit, at 25 credits
-   a dollar unless an agent changes `creditsPerDollar`, and its line says how many are left.
-   Credits never pay past a hard cap, and an account Codex refuses stays out.
+   ChatGPT credits can run on them: they cover the job when they pay for its use past the limit,
+   at 25 credits a dollar unless an agent changes `creditsPerDollar`, and its line says how many
+   are left. Credits never pay past a hard cap, and an account Codex refuses stays out.
 3. Among accounts that fit, the one furthest behind its **daily goal** wins, in points of its
    tightest weekly window at the job's end; an account's Fable window is measured against its
    **Fable goal** when it has one. Among those on its side of the goal within the
    **closeness margin** (points), the **preference order** decides, then fewer workers, then
-   the sooner reset. Accounts without a goal line follow, by points left.
+   the sooner reset. Accounts without a goal line follow, by points left. An account that would
+   spend credits on the job comes after all of these, the one with the most left after it first,
+   and before accounts whose limit runs out.
 4. When the model fits nowhere, the start waits for a limit that resets within 30 minutes
    (45 at stakes 8 or more); otherwise it takes the nearest ladder model that fits, at most two
    rungs away; otherwise, below the fallback's threshold, the **fallback** model; otherwise the
-   wanted model on the account that lasts longest. When every account is out now but a limit
+   wanted model on credits; otherwise on the account that lasts longest. A pinned account on
+   credits starts at once. When every account is out now but a limit
    resets within that wait, the same choice is made as of the reset and the start waits for it.
    It is refused only when everything stays out beyond the wait, with the earliest reset time.
    A Codex account never changes model.

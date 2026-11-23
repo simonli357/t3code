@@ -1633,3 +1633,85 @@ describe("a worker start that names no provider family", () => {
     expect(fable.accounts[0]).toMatch(new RegExp(`^A \\(Fable mode, ${FABLE} / low\\): `));
   });
 });
+
+describe("an account on the provider's credits", () => {
+  const both = { allowedDrivers: [claudeAgent, codex] };
+  const opusHigh = { model: OPUS, effort: "high" };
+  const cell = defaultModelRoutingPolicy.codex.cells[0]![0]!;
+  const SOL = `${cell.model} / ${cell.effort}`;
+  const credits = { credits: { balance: 34_000, unlimited: false, checkedAt: at } };
+  /** AD on Sol with its windows and 34,000 credits. */
+  const ad = (windows: AllocationWindow[]) => account("AD", codex, [cell.model], windows, credits);
+  const session = (usedPoints: number, hours: number) =>
+    weekly(usedPoints, {
+      id: "five_hour",
+      label: "Session",
+      kind: "session",
+      durationHours: 5,
+      resetsAt: inHours(hours),
+    });
+  const goals = { claude: { dailyPoints: 20 }, codex: { dailyPoints: 20 } };
+  const cycle = { cycleStartedAt: inHours(-68) };
+
+  it("loses to an account that runs the job inside its plan", () => {
+    // After its weekly reset AD is far behind its goal, but its session window would overflow.
+    const fresh = ad([weekly(5, cycle), session(99.9, 3)]);
+    const choice = choose([claude("A", [weekly(70, cycle)]), fresh], opusHigh, {
+      request: both,
+      policy: goals,
+    });
+    expect(picked(choice)).toBe(`A ${OPUS} / high`);
+    // Late in its cycle on credits, against an account far ahead of its goal.
+    const late = ad([weekly(100, { resetsAt: inHours(6) })]);
+    expect(
+      picked(
+        choose([claude("A", [weekly(70, { resetsAt: inHours(150) })]), late], opusHigh, {
+          request: both,
+          policy: goals,
+        }),
+      ),
+    ).toBe(`A ${OPUS} / high`);
+  });
+
+  it("loses to a stand-in rung that fits inside a plan", () => {
+    const choice = choose([...drainedEverywhere(OPUS), ad([weekly(100)])], opusHigh, {
+      request: both,
+    });
+    expect(picked(choice)).toBe(`A ${SONNET} / xhigh`);
+    expect(choice.reason).toContain(
+      `${OPUS} / high (${SOL} on Codex accounts) fits on no account inside its plan for this job; the nearest ladder rung that fits is ${SONNET} / xhigh.`,
+    );
+  });
+
+  it("starts on credits when nothing runs the job inside its plan, after a near reset", () => {
+    const codexOnly = { allowedDrivers: [codex] };
+    const now = choose([ad([weekly(20), session(99.9, 3)])], opusHigh, { request: codexOnly });
+    expect(picked(now)).toBe(`AD ${SOL}`);
+    expect(now.startAt).toBeUndefined();
+    expect(now.reason).toMatch(
+      /^AD: on credits in about 60m, 34,000 left, .*; no account lasts this job inside its plan\.$/,
+    );
+    expect(now.reason).not.toMatch(/fits on no account|runs out/);
+    // Against a Claude account whose limit runs out, credits come first.
+    const runsOut = choose([claude("A", [weekly(99.95)]), ad([weekly(100)])], opusHigh, {
+      request: both,
+    });
+    expect(picked(runsOut)).toBe(`AD ${SOL}`);
+    expect(runsOut.reason).toMatch(/; no account lasts this job inside its plan\.$/);
+    // The used-up week resets in 24 minutes: the start waits for it and spends no credits.
+    const soon = choose([ad([weekly(100, { resetsAt: inHours(0.4) })])], opusHigh, {
+      request: codexOnly,
+    });
+    expect(picked(soon)).toBe(`AD ${SOL}`);
+    expect(soon.startAt).toBe(inHours(0.4));
+  });
+
+  it("starts a pinned account on credits at once", () => {
+    const pinned = choose([claude("A"), ad([weekly(100, { resetsAt: inHours(0.4) })])], opusHigh, {
+      request: { ...both, explicitInstanceId: ProviderInstanceId.make("AD") },
+    });
+    expect(picked(pinned)).toBe(`AD ${SOL}`);
+    expect(pinned.startAt).toBeUndefined();
+    expect(pinned.reason).toMatch(/^AD: on credits.*; pinned account\.$/);
+  });
+});

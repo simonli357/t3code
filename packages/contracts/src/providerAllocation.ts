@@ -515,6 +515,11 @@ export const AllocationCandidate = Schema.Struct({
   /** No limit or hard cap runs out before the job ends or the window resets. */
   fits: Schema.optional(Schema.Boolean),
   /**
+   * It fits only by spending the provider's credits past a window's limit. Such an account is
+   * taken only when no account runs the job inside its plan.
+   */
+  onCredits: Schema.optional(Schema.Literal(true)),
+  /**
    * Points its tightest paced window is behind the daily goal line at the job's end (negative:
    * ahead); absent without a goal line. Decisions from older builds carry `withinGoal` and
    * `roomWorkers` instead, which decoding drops.
@@ -522,7 +527,10 @@ export const AllocationCandidate = Schema.Struct({
   goalSlackPoints: Schema.optional(Schema.Number),
   /** Hours until the first limit runs out at the projected load; null when none does. */
   lastsHours: Schema.optional(Schema.NullOr(Schema.Number)),
-  /** When it does not fit: the reset that clears the limit in its way; null when unknown. */
+  /**
+   * When it does not fit inside its plan, on credits too: the reset that clears the limit in its
+   * way; null when unknown.
+   */
   fitsFrom: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** The numbers above as one line. */
   line: Schema.optional(Schema.String),

@@ -35,10 +35,15 @@ refusing. The account lasts the job when the credits cover its overflow: the poi
 over the window's percent per dollar, the largest over its windows because they overlap, times
 the stored `creditsPerDollar`. Credits count only while the provider says the account has them
 and no spend control is reached; the adapter keeps whole credits so the notification that rides
-along every token tick does not republish the snapshot. There is no ranking rule for credits: the
-account ranks from a window at 100%, which is usually far ahead of its goal, but late in its cycle
-its goal line nears 100% and it can rank ahead of an account inside its plan that ran far ahead of
-its own goal early in its cycle. Learning is unaffected, since pairs at 100% are left out.
+along every token tick does not republish the snapshot. Credits come last: an account that would
+pay for any part of the job with them (a window already at the limit, or one the job would push
+past it) is marked `onCredits` and ranks after every account that runs the job inside its plan,
+whatever its goal standing, because a goal line can sit behind a freshly reset window or near
+100% late in a cycle. Accounts on credits rank before those whose limit runs out, the most left
+after the job first. The model choice counts only an in-plan fit as fitting, so the near-reset
+wait, a stand-in rung and the fallback all come before credits; a pinned account starts on them
+at once. Credits that do not cover the job make an ordinary account that runs out, lasting its
+window plus its credit hours. Learning is unaffected, since pairs at 100% are left out.
 
 **A new allowance restarts learning.** A plan label change, or a window whose length changed
 (a weekly Codex limit that became monthly), discards the readings before it.

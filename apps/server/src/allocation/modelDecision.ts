@@ -236,9 +236,14 @@ export interface ProfileChoice {
   readonly notes: readonly string[];
 }
 
-const fits = (decision: AllocationDecision) =>
-  decision.selectedInstanceId !== null &&
-  decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId)?.fits !== false;
+const selectedOf = (decision: AllocationDecision) =>
+  decision.candidates.find((c) => c.instanceId === decision.selectedInstanceId);
+
+/** The selected account runs the job inside its plan, spending no credits. */
+const fits = (decision: AllocationDecision) => {
+  const selected = selectedOf(decision);
+  return !!selected && selected.fits !== false && !selected.onCredits;
+};
 
 /**
  * Whether a worker on this account runs in Fable mode by the stored list; never while Fable
@@ -251,10 +256,11 @@ export const fableModeAccount = (
 
 /**
  * Picks account, model and effort together. The wanted model on the account furthest behind
- * its daily goal, when it fits the job somewhere. Otherwise: wait for a limit that resets
- * within 30 minutes (45 at high stakes); else the nearest ladder rung that fits, at most two
- * away; else the fallback model below its threshold; else the wanted model on the account
- * that lasts longest. When every candidate is out, the same choice as of a reset within the
+ * its daily goal, when it fits the job inside a plan somewhere. Otherwise: wait for a limit
+ * that resets within 30 minutes (45 at high stakes); else the nearest ladder rung that fits,
+ * at most two away; else the fallback model below its threshold; else the wanted model on an
+ * account that lasts the job on the provider's credits, or failing that the one that lasts
+ * longest. A pinned account on credits starts at once. When every candidate is out, the same choice as of a reset within the
  * wait, queued for it; refused only when nothing comes back within the wait. With Fable
  * workers off, no worker gets a Fable model. On an account in Fable mode a worker starts from
  * the first Fable rung at or above the table entry and only Fable rungs stand in, never the
@@ -476,7 +482,9 @@ export function chooseProfile(input: {
         ...extra,
       };
     };
-    if (fits(first)) return chosen(first, undefined);
+    // A pinned account is exact: on credits it starts at once.
+    if (fits(first) || (request.explicitInstanceId && selectedOf(first)?.onCredits))
+      return chosen(first, undefined);
     if (first.outcome === "unavailable") {
       tried.push({ ...wanted, chosen: false });
       failures.push(...first.reasons, ...first.candidates.flatMap((c) => c.reasons));
@@ -559,7 +567,9 @@ export function chooseProfile(input: {
     /** The nearest rung, the fallback, then the account that lasts longest, as of `startAt`. */
     const standIn = (base: AllocationDecision, startAt?: string) => {
       const why = base.selectedInstanceId
-        ? `${wantedText} fits on no account for this job;`
+        ? `${wantedText} fits on no account${
+            selectedOf(base)?.onCredits ? " inside its plan" : ""
+          } for this job;`
         : `${wantedText} is drained on every account (earliest reset ${base.waitUntil ?? "unknown"});`;
       for (const step of steps) {
         const decision = decide(step.normal, step.fable, startAt);
@@ -577,7 +587,7 @@ export function chooseProfile(input: {
             why: `${why} no Claude rung within ${MAX_RUNG_DISTANCE} fits, and below ${fallback!.below.model} / ${fallback!.below.effort} the fallback ${fallback!.model} / ${fallback!.effort} applies.`,
           };
       }
-      // Nothing fits the whole job: the account that lasts longest, as long as one is not out.
+      // Nothing fits inside a plan: an account on credits, else the one that lasts longest.
       if (base.selectedInstanceId) return { decision: base, why: undefined };
       for (const step of steps) {
         const decision = decide(step.normal, step.fable, startAt);

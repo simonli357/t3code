@@ -1031,17 +1031,58 @@ describe("credits", () => {
     ).toBe(false);
   });
 
-  it("ranks an account on credits after every account still inside its plan", () => {
+  it("takes an account on credits only when no account lasts the job inside its plan", () => {
     const accounts = [account("a", 70), onCredits("b", 34_000), account("c", 30)];
     for (const policy of [{}, { ...paced }, { accountOrder: [key("b")] }]) {
       const decision = decide(accounts, { policy });
       expect(decision.selectedInstanceId).not.toBe("b");
       expect(decision.candidates.filter((c) => c.eligible)).toHaveLength(3);
     }
-    // Nothing in the plan lasts the job: the account on credits does.
+    // After its weekly reset, far behind its goal, but the 5-hour window would overflow: the
+    // job would spend credits, so an account ahead of its goal that fits inside its plan wins.
+    const fresh = onCredits("b", 34_000, { windows: [weekly(5), fiveHour(85)] });
+    const behind = decide([account("a", 70), fresh], { policy: paced });
+    expect(candidate(behind, "b")).toMatchObject({ fits: true, onCredits: true });
+    expect(candidate(behind, "b").fitsFrom).toBe(inHours(2));
+    expect(behind.selectedInstanceId).toBe("a");
+    // Late in its cycle on credits, against an in-plan account far ahead of its goal.
+    const late = onCredits("b", 34_000, { windows: [weekly(100, { resetsAt: inHours(6) })] });
+    const ahead = account("a", 70, { windows: [weekly(70, { resetsAt: inHours(150) })] });
+    expect(decide([ahead, late], { policy: paced }).selectedInstanceId).toBe("a");
+    expect(decide([ahead, late]).selectedInstanceId).toBe("a");
+  });
+
+  it("puts an account on credits before one whose limit runs out, and says why", () => {
     const full = [account("a", 99.9), onCredits("b", 34_000), account("c", 99.95)];
-    expect(decide(full).selectedInstanceId).toBe("b");
-    expect(decide(full, { policy: paced }).selectedInstanceId).toBe("b");
+    for (const policy of [{}, paced]) {
+      const decision = decide(full, { policy });
+      expect(decision.selectedInstanceId).toBe("b");
+      expect(decision.reasons).toEqual([
+        "b: on credits, 34,000 left, about 6d at this load (Weekly 100% used, resets in 4d), 0 workers; no account lasts this job inside its plan.",
+      ]);
+    }
+    // The only account: still said plainly.
+    expect(decide([onCredits("b", 34_000)]).reasons[0]).toMatch(
+      /; no account lasts this job inside its plan\.$/,
+    );
+    // Among accounts on credits, the most left after the job first.
+    expect(decide([onCredits("a", 1_000), onCredits("b", 5_000)]).selectedInstanceId).toBe("b");
+    expect(
+      decide([onCredits("a", 5_000, { windows: [weekly(5), fiveHour(85)] }), onCredits("b", 1_000)])
+        .selectedInstanceId,
+    ).toBe("a");
+  });
+
+  it("treats credits that do not cover the job as a limit that runs out, after their hours", () => {
+    // 100 credits last 0.4 hours past the used-up window; 0.05 points last c half an hour.
+    const short = decide([onCredits("b", 100), account("c", 99.95)]);
+    expect(candidate(short, "b")).toMatchObject({ fits: false });
+    expect(candidate(short, "b").onCredits).toBeUndefined();
+    expect(short.selectedInstanceId).toBe("c");
+    // 400 credits last 1.6 hours: longer than c.
+    const longer = decide([onCredits("b", 400), account("c", 99.95)]);
+    expect(longer.selectedInstanceId).toBe("b");
+    expect(longer.reasons[0]).toMatch(/no account lasts the whole job, this one lasts longest\.$/);
   });
 
   it("takes the newest balance of one login from whichever computer reports it", () => {

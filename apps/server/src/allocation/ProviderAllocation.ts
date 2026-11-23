@@ -788,7 +788,8 @@ const make = Effect.gen(function* () {
       ...(remaining === undefined ? {} : { expectedHours: Math.min(168, remaining) }),
     };
     const context = { at, policy, inventories, reservations, authorityAvailable: true, learned };
-    // The same model on another account that lasts the rest of the job, ranked like a start.
+    // The same model on another account that lasts the rest of the job inside its plan, ranked
+    // like a start; an account on credits comes only after the wait, as for a start.
     const same = decideAllocation({
       ...context,
       request: {
@@ -799,7 +800,7 @@ const make = Effect.gen(function* () {
       },
     });
     const sameModel = same.candidates.find(
-      (c) => c.instanceId === same.selectedInstanceId && c.fits !== false,
+      (c) => c.instanceId === same.selectedInstanceId && c.fits !== false && !c.onCredits,
     )?.instanceId;
     if (sameModel)
       return {
