@@ -1467,6 +1467,7 @@ const make = Effect.gen(function* () {
       changes.startSettleMinutes,
       changes.sessionReserveGiB,
       changes.memoryKillHoldMinutes,
+      changes.creditsPerDollar,
       setCaps,
       clearCaps,
       changes.setGoals,

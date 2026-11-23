@@ -53,7 +53,10 @@ the master names one, and then the account, model and effort together:
    Fable's) is projected to the job's end: every working session on that login on any computer
    at its own model, effort and context, masters at their lower rate, idle sessions not at all,
    plus the account's use outside T3. An account **fits** when no limit runs out before the job
-   ends; a hard cap counts as the limit.
+   ends; a hard cap counts as the limit. A Codex account whose limit is used up but which has
+   ChatGPT credits runs on them: it fits when they pay for that use past the limit, at 25 credits
+   a dollar unless an agent changes `creditsPerDollar`, and its line says how many are left.
+   Credits never pay past a hard cap, and an account Codex refuses stays out.
 3. Among accounts that fit, the one furthest behind its **daily goal** wins, in points of its
    tightest weekly window at the job's end; an account's Fable window is measured against its
    **Fable goal** when it has one. Among those on its side of the goal within the
@@ -110,7 +113,9 @@ account's Fable mode off, including what a Fable goal would turn on.
 A running worker that hits a limit moves to another account with the same model that lasts the
 rest of its job. If there is none, it waits when the reset is within the **long wait** time
 (3 hours unless changed); otherwise it continues on the nearest model that fits, at most two
-rungs away, and its master is told. A worker that supervises its own workers only waits.
+rungs away, and its master is told. A worker that supervises its own workers only waits. A worker
+on an account running on its credits stays where it is until Codex refuses a turn. **Usage →
+Limits** shows an account's credit balance as a Credits row.
 
 The numbers behind these choices are learned, not set: what an hour of work costs at API prices
 for each model, effort and context, and how much of each account's limit a dollar of use takes,

@@ -6,6 +6,7 @@ import {
   collectExternalUsageLinks,
   collectLimitNotices,
   collectLimitPools,
+  creditBalance,
   cursorUsageWindowDetails,
   displayLimitWindows,
   formatDuration,
@@ -344,6 +345,7 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
     ?.windows.find((candidate) => candidate.id === windowId && candidate.kind === windowKind);
   const window = pool?.members.find((member) => member.account.key === accountKey)?.window;
   const reset = pool?.resets.find((candidate) => candidate.member.account.key === accountKey);
+  const credits = account ? creditBalance(account.limits) : null;
   const [revealed, setRevealed] = useState(false);
   return (
     <SettingsScreen title="Account">
@@ -380,6 +382,11 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
               {account.plan ? (
                 <Text selectable className="text-sm text-foreground-muted">
                   {account.plan}
+                </Text>
+              ) : null}
+              {credits ? (
+                <Text selectable className="text-sm text-foreground-muted">
+                  Credits {credits}
                 </Text>
               ) : null}
             </View>

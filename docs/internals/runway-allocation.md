@@ -26,6 +26,20 @@ readings together with its turns. Every computer reads every login, so the readi
 series: one a point or two below the last is rounding, a larger drop in the same cycle is a reset
 credit, and pairs that start or end at 100% are left out because a full window shows no use.
 
+**Credits pay past the provider's limit, never past a cap.** Codex keeps running on ChatGPT
+credits once a plan window is used up, so a window at the provider's own 100% does not drain an
+account that has credits to spend (`accountRoom`); every caller of that judgment, including the
+checks that hold or move a running worker, follows. A hard cap still drains, even one at 100%,
+because a cap means stop, and so does a rejection still in force, which is the provider really
+refusing. The account lasts the job when the credits cover its overflow: the points past the limit
+over the window's percent per dollar, the largest over its windows because they overlap, times
+the stored `creditsPerDollar`. Credits count only while the provider says the account has them
+and no spend control is reached; the adapter keeps whole credits so the notification that rides
+along every token tick does not republish the snapshot. There is no ranking rule for credits: the
+account ranks from a window at 100%, which is usually far ahead of its goal, but late in its cycle
+its goal line nears 100% and it can rank ahead of an account inside its plan that ran far ahead of
+its own goal early in its cycle. Learning is unaffected, since pairs at 100% are left out.
+
 **A new allowance restarts learning.** A plan label change, or a window whose length changed
 (a weekly Codex limit that became monthly), discards the readings before it.
 

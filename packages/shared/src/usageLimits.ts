@@ -526,6 +526,14 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   return limits.windows.length === 0 ? "No limits reported." : null;
 }
 
+/** The provider credits left, as the credits row shows them; null when there are none. */
+export function creditBalance(limits: ServerProviderUsageLimits): string | null {
+  if (limits.credits?.unlimited) return "Unlimited";
+  return limits.credits && limits.credits.balance > 0
+    ? Math.floor(limits.credits.balance).toLocaleString()
+    : null;
+}
+
 /** Quota left in the window, 0..100. Bars and labels show what remains, as Codex does. */
 export function remainingPercent(window: ServerProviderUsageWindow): number {
   return Math.round(100 - Math.max(0, Math.min(100, window.usedPercent)));

@@ -8,6 +8,7 @@
  */
 import type {
   ProviderUsageLimitsUpdate,
+  ServerProviderCredits,
   ServerProviderResetCredits,
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
@@ -31,6 +32,12 @@ export interface CodexRateLimitSnapshot {
   readonly rateLimitReachedType?: string | null;
   readonly primary?: CodexRateLimitWindow | null;
   readonly secondary?: CodexRateLimitWindow | null;
+  readonly credits?: {
+    readonly hasCredits: boolean;
+    readonly unlimited: boolean;
+    readonly balance?: string | null;
+  } | null;
+  readonly spendControlReached?: boolean | null;
 }
 
 /** Structural view of the read response's `rateLimitResetCredits`. */
@@ -98,6 +105,26 @@ function codexRateLimitsToWindows(
   return windows;
 }
 
+/**
+ * The ChatGPT credits Codex spends once a plan window is used up. They count only when the
+ * account has them or they are unlimited; the balance is kept in whole credits so the
+ * notification that rides along every token tick does not republish the snapshot each time.
+ * Credits are account-wide, so a model bucket's snapshot says nothing about them.
+ */
+function codexCredits(snapshot: CodexRateLimitSnapshot): ServerProviderCredits | undefined {
+  const credits = snapshot.credits;
+  if (!credits || (snapshot.limitId && snapshot.limitId !== "codex")) return undefined;
+  const balance = Number(credits.balance ?? 0);
+  return {
+    balance:
+      (credits.hasCredits || credits.unlimited) && Number.isFinite(balance)
+        ? Math.max(0, Math.floor(balance))
+        : 0,
+    ...(credits.unlimited ? { unlimited: true } : {}),
+    ...(snapshot.spendControlReached === true ? { spendControlReached: true } : {}),
+  };
+}
+
 export function codexResetCreditsToContract(
   summary: CodexResetCreditsSummary | null | undefined,
 ): ServerProviderResetCredits | undefined {
@@ -129,6 +156,7 @@ export function codexRateLimitsToLimits(input: {
   const buckets = new Map(Object.entries(input.rateLimitsByLimitId ?? {}));
   if (!buckets.has(input.snapshot.limitId ?? "codex"))
     buckets.set(input.snapshot.limitId ?? "codex", input.snapshot);
+  const credits = codexCredits(buckets.get("codex") ?? input.snapshot);
   const windows = [...buckets]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .flatMap(([limitId, snapshot]) => codexRateLimitsToWindows({ ...snapshot, limitId }));
@@ -156,6 +184,7 @@ export function codexRateLimitsToLimits(input: {
       windows,
     }),
     ...(resetCredits ? { resetCredits } : {}),
+    ...(credits ? { credits } : {}),
     ...(shortWindowAbsent
       ? { shortWindowAbsent: true, shortWindowAbsentCheckedAt: input.checkedAt }
       : {}),
@@ -166,7 +195,8 @@ export function codexRateLimitsToUpdate(
   snapshot: CodexRateLimitSnapshot,
 ): ProviderUsageLimitsUpdate | undefined {
   const windows = codexRateLimitsToWindows(snapshot);
-  return windows.length > 0 ? { windows } : undefined;
+  const credits = codexCredits(snapshot);
+  return windows.length > 0 || credits ? { windows, ...(credits ? { credits } : {}) } : undefined;
 }
 
 /**

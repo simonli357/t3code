@@ -658,6 +658,7 @@ const make = Effect.gen(function* () {
                 | "startSettleMinutes"
                 | "sessionReserveGiB"
                 | "memoryKillHoldMinutes"
+                | "creditsPerDollar"
                 | "fableWorkers"
                 | "fableAccounts"
                 | "fableOnly"
@@ -688,6 +689,7 @@ const make = Effect.gen(function* () {
               ...carried("startSettleMinutes"),
               ...carried("sessionReserveGiB"),
               ...carried("memoryKillHoldMinutes"),
+              ...carried("creditsPerDollar"),
               ...carried("fableWorkers"),
               ...carried("fableAccounts"),
               ...carried("fableOnly"),

@@ -2808,6 +2808,56 @@ it.effect(
   },
 );
 
+it.effect("a worker on credits past its window stays where it is until Codex refuses it", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const selection = { instanceId: provider.instanceId, model: "astra", options: [] };
+    const route = (options?: { readonly rejected?: boolean }) =>
+      allocation.reroute(ThreadId.make("worker"), selection, options);
+    const usedUp = (credits?: NonNullable<ServerProvider["usageLimits"]>["credits"]) => ({
+      ...provider,
+      usageLimits: {
+        ...provider.usageLimits!,
+        windows: provider.usageLimits!.windows.map((w) =>
+          w.id === "weekly" ? { ...w, usedPercent: 100 } : w,
+        ),
+        ...(credits ? { credits } : {}),
+      },
+    });
+    f.state.providers = [usedUp({ balance: 34_000 }), spareProvider];
+    // Not held, not moved, not switched: Codex spends the credits.
+    expect(yield* allocation.limited(selection)).toBe(false);
+    expect(yield* route()).toEqual({ _tag: "proceed" });
+    // A turn Codex refused still stops it: with no reset known, it waits a while.
+    expect(yield* route({ rejected: true })).toMatchObject({ _tag: "wait", observed: false });
+    // Without credits to spend, the used-up window holds it as before.
+    for (const credits of [
+      undefined,
+      { balance: 0 },
+      { balance: 34_000, spendControlReached: true as const },
+    ]) {
+      f.state.providers = [usedUp(credits), spareProvider];
+      expect(yield* allocation.limited(selection)).toBe(true);
+      expect(yield* route()).toMatchObject({ _tag: "switch" });
+    }
+    // So does a hard cap, which means stop.
+    f.state.providers = [usedUp({ balance: 34_000 }), spareProvider];
+    yield* allocation.editPolicy({
+      setCaps: [
+        {
+          account: "chosen",
+          weeklyPercent: 100,
+          fiveHourPercent: null,
+          stopWorkers: true,
+          stopMasters: true,
+        },
+      ],
+    });
+    expect(yield* allocation.limited(selection)).toBe(true);
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
+
 it.effect("a reached hard cap closes its account to workers until the provider reset", () => {
   const f = fixture();
   return Effect.gen(function* () {

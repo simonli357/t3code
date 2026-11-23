@@ -51,6 +51,19 @@ export const ServerProviderResetCredits = Schema.Struct({
 export type ServerProviderResetCredits = typeof ServerProviderResetCredits.Type;
 
 /**
+ * Credits the provider spends once a plan window is used up, such as the ChatGPT credits a
+ * Codex account runs on past its weekly limit. `balance` is 0 when the provider reports none.
+ */
+export const ServerProviderCredits = Schema.Struct({
+  balance: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  unlimited: Schema.optional(Schema.Literal(true)),
+  /** A spend control stops the account spending them. */
+  spendControlReached: Schema.optional(Schema.Literal(true)),
+  checkedAt: Schema.optional(IsoDateTime),
+});
+export type ServerProviderCredits = typeof ServerProviderCredits.Type;
+
+/**
  * Subscription usage the provider knows about the signed-in account.
  *
  * `unavailable` distinguishes an account that can never report windows (API
@@ -67,6 +80,7 @@ export const ServerProviderUsageLimits = Schema.Struct({
   /** Opaque credential identity when the provider does not report an account. */
   credentialFingerprint: Schema.optional(TrimmedNonEmptyString),
   resetCredits: Schema.optional(ServerProviderResetCredits),
+  credits: Schema.optional(ServerProviderCredits),
   /** Provider-owned usage settings when quota windows are not available to the client. */
   externalUsage: Schema.optional(
     Schema.Struct({
@@ -101,6 +115,8 @@ export type ProviderQuotaState = typeof ProviderQuotaState.Type;
 export const ProviderUsageLimitsUpdate = Schema.Struct({
   windows: Schema.Array(ServerProviderUsageWindow),
   states: Schema.optional(Schema.Array(ProviderQuotaState)),
+  /** Replaces the published credits; absent leaves them unchanged. */
+  credits: Schema.optional(ServerProviderCredits),
 });
 export type ProviderUsageLimitsUpdate = typeof ProviderUsageLimitsUpdate.Type;
 

@@ -219,6 +219,51 @@ describe("codexRateLimitsToUpdate", () => {
   });
 });
 
+describe("Codex credits", () => {
+  // AD's real `account/rateLimits/read` answer, weekly window used up, on 2026-11-23.
+  const usedUp = {
+    limitId: "codex",
+    planType: "plus",
+    rateLimitReachedType: "rate_limit_reached",
+    primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1795477857 },
+    secondary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: 1795552925 },
+    credits: { hasCredits: true, unlimited: false, balance: "34000.3352800000" },
+    spendControlReached: false,
+  };
+
+  it("carries the balance from the read and from the notification, in whole credits", () => {
+    expect(
+      codexRateLimitsToLimits({
+        checkedAt,
+        snapshot: usedUp,
+        rateLimitsByLimitId: { codex: usedUp },
+      }).credits,
+    ).toEqual({ balance: 34_000 });
+    expect(codexRateLimitsToUpdate(usedUp)?.credits).toEqual({ balance: 34_000 });
+    // A notification that carries only credits still updates them.
+    expect(
+      codexRateLimitsToUpdate({ credits: { hasCredits: true, unlimited: true, balance: null } }),
+    ).toEqual({ windows: [], credits: { balance: 0, unlimited: true } });
+  });
+
+  it("counts them only when the account has some and no spend control stops them", () => {
+    const credits = (patch: object) =>
+      codexRateLimitsToLimits({ checkedAt, snapshot: { ...usedUp, ...patch } }).credits;
+    expect(credits({ credits: { hasCredits: false, unlimited: false, balance: "500" } })).toEqual({
+      balance: 0,
+    });
+    expect(credits({ spendControlReached: true })).toEqual({
+      balance: 34_000,
+      spendControlReached: true,
+    });
+    expect(credits({ credits: null })).toBeUndefined();
+    // A model bucket's snapshot says nothing about the account's credits.
+    expect(codexRateLimitsToUpdate({ ...usedUp, limitId: "codex_bengalfox" })?.credits).toBe(
+      undefined,
+    );
+  });
+});
+
 describe("codexRateLimitsFailureMessage", () => {
   it("keeps the JSON-RPC code and nothing else from a request failure", () => {
     expect(

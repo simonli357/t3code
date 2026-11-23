@@ -87,6 +87,8 @@ export const DEFAULT_SESSION_RESERVE_GIB = 0.25;
 export const DEFAULT_MEMORY_KILL_HOLD_MINUTES = 60;
 /** The longest hold; computers report their last memory kill this far back. */
 export const MAX_MEMORY_KILL_HOLD_MINUTES = 1440;
+/** Codex credits one dollar of use takes: OpenAI prices them at 25 per API dollar. */
+export const DEFAULT_CREDITS_PER_DOLLAR = 25;
 /**
  * Pacing, forecast and rule settings from before smart allocation. Nothing here reads them, but
  * builds from before it require them, so every saved policy carries these values while the
@@ -173,6 +175,13 @@ export const AllocationPolicy = Schema.Struct({
   memoryKillHoldMinutes: Schema.optional(
     Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: MAX_MEMORY_KILL_HOLD_MINUTES })),
   ),
+  /**
+   * Provider credits one dollar of use takes, to judge whether an account past a window's limit
+   * lasts the job on its credits.
+   */
+  creditsPerDollar: Schema.optional(
+    Schema.Number.check(Schema.isBetween({ minimum: 0.01, maximum: 10_000 })),
+  ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
   /**
@@ -245,6 +254,7 @@ export const defaultAllocationPolicy: AllocationPolicy = {
   startSettleMinutes: DEFAULT_START_SETTLE_MINUTES,
   sessionReserveGiB: DEFAULT_SESSION_RESERVE_GIB,
   memoryKillHoldMinutes: DEFAULT_MEMORY_KILL_HOLD_MINUTES,
+  creditsPerDollar: DEFAULT_CREDITS_PER_DOLLAR,
   ...legacyAllocationPolicyFields,
 };
 
@@ -341,6 +351,18 @@ export const AllocationAccount = Schema.Struct({
       count: NonNegativeInt,
       expiresAt: Schema.NullOr(IsoDateTime),
       scope: Schema.String,
+    }),
+  ),
+  /**
+   * Credits the provider spends once a window is used up (a Codex account's ChatGPT credits), as
+   * last read: what the account can spend now, 0 when a spend control stops it. Absent: none
+   * reported, as on older computers.
+   */
+  credits: Schema.optional(
+    Schema.Struct({
+      balance: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+      unlimited: Schema.Boolean,
+      checkedAt: IsoDateTime,
     }),
   ),
   /** Existing opt-in token measurements, never interpreted as subscription quota. */
@@ -848,6 +870,7 @@ export const AllocationPolicyEdit = Schema.Struct({
   startSettleMinutes: AllocationPolicy.fields.startSettleMinutes,
   sessionReserveGiB: AllocationPolicy.fields.sessionReserveGiB,
   memoryKillHoldMinutes: AllocationPolicy.fields.memoryKillHoldMinutes,
+  creditsPerDollar: AllocationPolicy.fields.creditsPerDollar,
   setCaps: Schema.optional(
     Schema.Array(Schema.Struct({ account: AccountRef, ...accountCapFields })),
   ),
@@ -901,6 +924,8 @@ export const AllocationPolicyView = Schema.Struct({
   startSettleMinutes: Schema.optional(Schema.Number),
   sessionReserveGiB: Schema.optional(Schema.Number),
   memoryKillHoldMinutes: Schema.optional(Schema.Number),
+  /** Provider credits a dollar of use takes. Absent from a server that predates it. */
+  creditsPerDollar: Schema.optional(Schema.Number),
   caps: Schema.Array(Schema.Struct({ account: Schema.String, ...accountCapFields })),
   /** Each account's daily goal in percent of its weekly window, and where it comes from. */
   goals: Schema.optional(

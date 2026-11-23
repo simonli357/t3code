@@ -64,8 +64,14 @@ export function applyUsageLimitsUpdate(input: {
   readonly checkedAt: string;
 }): ServerProviderUsageLimits | undefined {
   const { previous, update } = input;
+  // Credits alone only refresh limits that already have windows to show.
+  const creditsOnly =
+    update.windows.length === 0 &&
+    update.credits !== undefined &&
+    previous !== undefined &&
+    previous.unavailable === undefined;
   if (
-    update.windows.length === 0 ||
+    (update.windows.length === 0 && !creditsOnly) ||
     previous?.unavailable?.reason === "unsupported" ||
     previous?.unavailable?.reason === "unverified"
   ) {
@@ -110,12 +116,20 @@ export function applyUsageLimitsUpdate(input: {
       changed = true;
     }
   }
+  const credits = update.credits
+    ? { ...update.credits, checkedAt: input.checkedAt }
+    : previous?.credits && {
+        ...previous.credits,
+        checkedAt: previous.credits.checkedAt ?? previous.checkedAt,
+      };
+  if (update.credits && !sameCredits(previous?.credits, update.credits)) changed = true;
   if (!changed && previous !== undefined && previous.unavailable === undefined) {
     return previous;
   }
   return {
     ...makeUsageLimits({ checkedAt: input.checkedAt, windows: merged.values() }),
     ...(previous?.resetCredits !== undefined ? { resetCredits: previous.resetCredits } : {}),
+    ...(credits ? { credits } : {}),
     ...(previous?.shortWindowAbsent !== undefined
       ? { shortWindowAbsent: previous.shortWindowAbsent }
       : {}),
@@ -124,6 +138,15 @@ export function applyUsageLimitsUpdate(input: {
       : {}),
   };
 }
+
+const sameCredits = (
+  a: ServerProviderUsageLimits["credits"],
+  b: NonNullable<ServerProviderUsageLimits["credits"]>,
+) =>
+  a !== undefined &&
+  a.balance === b.balance &&
+  a.unlimited === b.unlimited &&
+  a.spendControlReached === b.spendControlReached;
 
 function usageWindowEquals(a: ServerProviderUsageWindow, b: ServerProviderUsageWindow): boolean {
   return (

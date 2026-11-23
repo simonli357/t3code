@@ -949,3 +949,134 @@ describe("active workers", () => {
     expect(workers(decision)).toBe(1);
   });
 });
+
+describe("credits", () => {
+  const credits = (
+    balance: number,
+    patch: Partial<NonNullable<AllocationAccount["credits"]>> = {},
+  ) => ({
+    credits: { balance, unlimited: false, checkedAt: at, ...patch },
+  });
+  /** An account whose weekly window is used up, with `balance` credits. */
+  const onCredits = (id: string, balance: number, patch: Partial<AllocationAccount> = {}) =>
+    account(id, 100, { ...credits(balance), ...patch });
+
+  it("keeps an account past its weekly limit usable on its credits, pinned or not", () => {
+    // A worker costs $10 an hour: 250 credits an hour, so 34,000 credits last 136 hours.
+    const room = accountRoom({ account: onCredits("a", 34_000), model: "astra", at });
+    expect(room.drainedUntil).toBeUndefined();
+    const decision = decide([onCredits("a", 34_000)], {
+      request: { explicitInstanceId: ProviderInstanceId.make("a") },
+    });
+    expect(decision).toMatchObject({ outcome: "selected", selectedInstanceId: "a" });
+    expect(candidate(decision, "a")).toMatchObject({ eligible: true, fits: true });
+    expect(decision.reasons).toEqual([
+      "a: on credits, 34,000 left, about 6d at this load (Weekly 100% used, resets in 4d), 0 workers; pinned account.",
+    ]);
+    expect(decide([onCredits("a", 34_000)]).selectedInstanceId).toBe("a");
+  });
+
+  it("drains it as before without credits, past a hard cap, or while a rejection is in force", () => {
+    const drained = (a: AllocationAccount, policy: Partial<AllocationPolicy> = {}) =>
+      candidate(decide([a], { policy }), a.instanceId).drainedUntil;
+    expect(drained(account("a", 100))).toBe(inHours(100));
+    expect(drained(onCredits("a", 0))).toBe(inHours(100));
+    const cap = {
+      key: key("a"),
+      weeklyPercent: 90,
+      fiveHourPercent: null,
+      stopWorkers: true,
+      stopMasters: true,
+    };
+    expect(drained(onCredits("a", 34_000, { windows: [weekly(92)] }), { accountCaps: [cap] })).toBe(
+      inHours(100),
+    );
+    // A cap at the provider's own limit still means stop.
+    expect(drained(onCredits("a", 34_000), { accountCaps: [{ ...cap, weeklyPercent: 100 }] })).toBe(
+      inHours(100),
+    );
+    expect(
+      drained(onCredits("a", 34_000, { limits: [{ windowId: "weekly", until: inHours(100) }] })),
+    ).toBe(inHours(100));
+  });
+
+  it("lasts the job only when its credits cover the overflow of every session on the login", () => {
+    // A 2-hour job at $10 an hour overruns the window by $20: 500 credits at 25 a dollar.
+    const fits = (a: AllocationAccount, patch: Parameters<typeof decide>[1] = {}) =>
+      candidate(decide([a], patch), a.instanceId).fits;
+    expect(fits(onCredits("a", 500))).toBe(true);
+    expect(fits(onCredits("a", 499))).toBe(false);
+    // Credits per dollar is the stored policy's.
+    expect(fits(onCredits("a", 500), { policy: { creditsPerDollar: 30 } })).toBe(false);
+    expect(fits(onCredits("a", 0, credits(0, { unlimited: true })))).toBe(true);
+    // Another worker on the login doubles the overflow.
+    expect(fits(onCredits("a", 500), { demand: [worker("a", "other")] })).toBe(false);
+    expect(fits(onCredits("a", 1_000), { demand: [worker("a", "other")] })).toBe(true);
+    // Windows overlap, so the one the job overruns most decides, never their sum: the weekly
+    // window has $10 left and overruns by $10, the used-up 5-hour window by $20.
+    expect(fits(onCredits("a", 500, { windows: [weekly(99.9), fiveHour(100)] }))).toBe(true);
+    expect(fits(onCredits("a", 499, { windows: [weekly(99.9), fiveHour(100)] }))).toBe(false);
+    // Credits never pay past a hard cap.
+    const cap = {
+      key: key("a"),
+      weeklyPercent: 99.9,
+      fiveHourPercent: null,
+      stopWorkers: true,
+      stopMasters: true,
+    };
+    expect(
+      fits(onCredits("a", 34_000, { windows: [weekly(99.85)] }), {
+        policy: { accountCaps: [cap] },
+      }),
+    ).toBe(false);
+  });
+
+  it("ranks an account on credits after every account still inside its plan", () => {
+    const accounts = [account("a", 70), onCredits("b", 34_000), account("c", 30)];
+    for (const policy of [{}, { ...paced }, { accountOrder: [key("b")] }]) {
+      const decision = decide(accounts, { policy });
+      expect(decision.selectedInstanceId).not.toBe("b");
+      expect(decision.candidates.filter((c) => c.eligible)).toHaveLength(3);
+    }
+    // Nothing in the plan lasts the job: the account on credits does.
+    const full = [account("a", 99.9), onCredits("b", 34_000), account("c", 99.95)];
+    expect(decide(full).selectedInstanceId).toBe("b");
+    expect(decide(full, { policy: paced }).selectedInstanceId).toBe("b");
+  });
+
+  it("takes the newest balance of one login from whichever computer reports it", () => {
+    const decisionWith = (older: number, newer: number) =>
+      decide([], {
+        inventories: [
+          inventory([onCredits("a", older, { accountKey: "login" })]),
+          inventory(
+            [
+              onCredits("a", newer, {
+                accountKey: "login",
+                environmentId: "other",
+                ...credits(newer, { checkedAt: inHours(0.1) }),
+              }),
+            ],
+            {
+              environmentId: "other",
+            },
+          ),
+        ],
+        learned: learned(),
+      });
+    expect(candidate(decisionWith(34_000, 0), "a").drainedUntil).toBe(inHours(100));
+    expect(candidate(decisionWith(0, 34_000), "a").drainedUntil).toBeUndefined();
+  });
+
+  it("says in the accounts table that the login runs on its credits", () => {
+    const [runway] = accountRunways({
+      at,
+      policy: { ...defaultAllocationPolicy, ...noGoals },
+      inventories: [inventory([onCredits("a", 34_000)], { demand: [worker("a", "w")] })],
+      learned: learned(),
+    });
+    expect(runway?.line).toBe(
+      "Weekly is used up; on credits, 34,000 left, about 6d at the current load; it resets in about 4d.",
+    );
+  });
+});

@@ -154,11 +154,14 @@ function WindowBar({
 export function LimitWindows({
   driver,
   windows,
+  credits = null,
   now,
   compact = false,
 }: {
   readonly driver: ServerProvider["driver"];
   readonly windows: ReadonlyArray<ServerProviderUsageWindow>;
+  /** The provider credits left, a row of its own after the windows. */
+  readonly credits?: string | null;
   readonly now: number;
   readonly compact?: boolean;
 }) {
@@ -190,6 +193,14 @@ export function LimitWindows({
           </Fragment>
         );
       })}
+      {credits ? (
+        <span className="flex min-w-0 items-center gap-2 text-xs">
+          <span className="truncate text-muted-foreground">Credits</span>
+          <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
+            {credits}
+          </span>
+        </span>
+      ) : null}
     </div>
   );
 }

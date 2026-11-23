@@ -3,6 +3,7 @@ import {
   allocationFableMode,
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
+  DEFAULT_CREDITS_PER_DOLLAR,
   DEFAULT_LONG_WAIT_HOURS,
   modelFallback,
   modelLadder,
@@ -83,6 +84,7 @@ export function allocationPolicyView(
     closeMarginPoints: policy.closeMarginPoints ?? DEFAULT_CLOSE_MARGIN_POINTS,
     longWaitHours: policy.longWaitHours ?? DEFAULT_LONG_WAIT_HOURS,
     ...placementValues(policy),
+    creditsPerDollar: policy.creditsPerDollar ?? DEFAULT_CREDITS_PER_DOLLAR,
     caps: once(
       (policy.accountCaps ?? []).map(({ key, ...cap }) => ({ account: label(key), ...cap })),
     ),
@@ -259,6 +261,7 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     ...(edit.memoryKillHoldMinutes === undefined
       ? {}
       : { memoryKillHoldMinutes: edit.memoryKillHoldMinutes }),
+    ...(edit.creditsPerDollar === undefined ? {} : { creditsPerDollar: edit.creditsPerDollar }),
   } satisfies AllocationPolicy;
 });
 

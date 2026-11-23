@@ -3,6 +3,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  type ServerProviderUsageLimits,
   EventId,
   type OrchestrationThreadActivity,
   UsageLimitSourceId,
@@ -10,6 +11,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  creditBalance,
   type LimitAccount,
   isUsageLimitsCommand,
   collectProviderUsageLimits,
@@ -1368,5 +1370,19 @@ describe("ChatGPT sharing presentation", () => {
         "Limit reached",
       ),
     ).toBe(false);
+  });
+});
+
+describe("creditBalance", () => {
+  const limits = (credits?: ServerProviderUsageLimits["credits"]) => ({
+    checkedAt: "2026-11-23T19:00:00.000Z",
+    windows: [],
+    ...(credits ? { credits } : {}),
+  });
+  it("shows whole credits left, Unlimited, or nothing when there are none", () => {
+    expect(creditBalance(limits({ balance: 34_000.4 }))).toBe((34_000).toLocaleString());
+    expect(creditBalance(limits({ balance: 0, unlimited: true }))).toBe("Unlimited");
+    expect(creditBalance(limits({ balance: 0 }))).toBeNull();
+    expect(creditBalance(limits())).toBeNull();
   });
 });

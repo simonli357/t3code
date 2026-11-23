@@ -141,6 +141,10 @@ it.effect("replaces the whole order and changes only what the edit names", () =>
       ...placed,
       minFreeMemoryGiB: 0,
     });
+    expect(yield* edit({ creditsPerDollar: 40 }, saved)).toEqual({
+      ...snapshot(saved).policy,
+      creditsPerDollar: 40,
+    });
     // Nothing named: the stored policy, with the fields older builds require.
     expect(yield* edit({}, saved)).toEqual(snapshot(saved).policy);
     expect(yield* edit({ ladder: [], showTable: "codex" }, saved)).toEqual(snapshot(saved).policy);
@@ -194,6 +198,7 @@ it("reads both policies with accounts by label", () => {
     startSettleMinutes: 15,
     sessionReserveGiB: 0.25,
     memoryKillHoldMinutes: 60,
+    creditsPerDollar: 25,
     caps: [{ account: "ES", ...cap }],
     // Without a goal of its own an account reads its provider family's.
     goals: [

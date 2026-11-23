@@ -9,6 +9,7 @@ import type {
   UsageProviderKind,
 } from "@t3tools/contracts";
 import {
+  creditBalance,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -140,6 +141,7 @@ export function AccountLimits(props: {
   const color = useBarColor(props.driver);
   if (!limits) return null;
   const notice = limitsNotice(limits);
+  const credits = creditBalance(limits);
   const externalUsage = limits.externalUsage;
   const padding = dense ? "px-4 py-3" : "p-4";
   return (
@@ -170,6 +172,12 @@ export function AccountLimits(props: {
           {limits.windows.map((window) => (
             <WindowRow key={window.id} window={window} color={color} now={now} />
           ))}
+          {credits ? (
+            <View className="flex-row items-baseline justify-between gap-3">
+              <Text className="text-sm text-foreground">Credits</Text>
+              <Text className="text-sm font-t3-medium tabular-nums text-foreground">{credits}</Text>
+            </View>
+          ) : null}
         </View>
       )}
       {externalUsage ? (

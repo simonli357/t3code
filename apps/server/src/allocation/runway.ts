@@ -1,5 +1,6 @@
 import {
   allocationFableWindow,
+  DEFAULT_CREDITS_PER_DOLLAR,
   publishedPlanSize,
   type AllocationAccount,
   type AllocationAccountCap,
@@ -108,6 +109,12 @@ export interface WindowProjection {
   readonly window: AllocationWindow;
   /** The hard cap, or 100. */
   readonly limit: number;
+  /** The limit is a hard cap we set, which credits never pay past. */
+  readonly capped: boolean;
+  /** Percent of the window a dollar uses. */
+  readonly percentPerDollar: number;
+  /** Points an hour at the projected load, everyone's use included. */
+  readonly burn: number;
   readonly used: number;
   readonly resetsAt: number | null;
   /** Use at the job's end or the window's reset, whichever is first; everyone's use included. */
@@ -139,6 +146,18 @@ export interface AccountProjection {
   /** When it does not fit: the reset that clears the limit in its way, null when unknown. */
   readonly fitsFrom?: string | null;
   readonly hours: number;
+  /**
+   * The provider's credits, when a window is past its own limit now or before the job's end and
+   * the account has some: the window, what is left, how long that lasts at the projected load
+   * (null: unlimited or no load), and what the job takes of it.
+   */
+  readonly credits?: {
+    readonly window: WindowProjection;
+    readonly balance: number;
+    readonly unlimited: boolean;
+    readonly hours: number | null;
+    readonly needed: number;
+  };
 }
 
 const effortOf = (options: AllocationDemand["options"]) => {
@@ -158,7 +177,10 @@ export const demandLoad = (driver: string, d: AllocationDemand): SessionLoad => 
  * login (any computer), this one, and the background use T3 does not see.
  */
 export function projectAccount(input: {
-  readonly account: Pick<AllocationAccount, "driver" | "label" | "models" | "windows" | "plan">;
+  readonly account: Pick<
+    AllocationAccount,
+    "driver" | "label" | "models" | "windows" | "plan" | "credits"
+  >;
   readonly key: string;
   /** When the session would start. */
   readonly at: number;
@@ -172,6 +194,8 @@ export function projectAccount(input: {
   readonly goal: number | null;
   /** Percent of the Fable weekly window per day; absent or null: `goal` there too. */
   readonly fableGoal?: number | null | undefined;
+  /** Provider credits a dollar of use takes. */
+  readonly creditsPerDollar?: number | undefined;
 }): AccountProjection {
   const { account, at, hours, learned } = input;
   const slug = (model: string) => findCatalogModel(account.models, model)?.slug ?? model;
@@ -209,6 +233,7 @@ export function projectAccount(input: {
             ? input.cap?.weeklyPercent
             : null;
       const limit = Math.min(100, capPercent ?? 100);
+      const capped = capPercent !== null && capPercent !== undefined;
       const share = limitShare(learned, identity, w);
       const dollars =
         input.load
@@ -240,6 +265,9 @@ export function projectAccount(input: {
       return {
         window: w,
         limit,
+        capped,
+        percentPerDollar: share.percentPerDollar,
+        burn,
         used,
         resetsAt,
         projected,
@@ -258,16 +286,47 @@ export function projectAccount(input: {
     .toSorted((a, b) => a.slack! - b.slack!)[0];
   const tightest = windows.toSorted((a, b) => a.limit - a.atEnd - (b.limit - b.atEnd))[0];
   const failing = windows.filter((w) => !w.fits);
-  const lasts = windows.flatMap((w) => (w.lastsHours === null ? [] : [w.lastsHours]));
+  // Credits pay for use past the provider's own limit, never past a hard cap we set. Windows
+  // overlap, so the job takes the credits of the one it overruns most.
+  const balance = input.account.credits;
+  const overLimit = windows.filter((w) => !w.capped && (w.used >= w.limit || !w.fits));
+  const perDollar = input.creditsPerDollar ?? DEFAULT_CREDITS_PER_DOLLAR;
+  const credits =
+    balance && (balance.unlimited || balance.balance > 0) && overLimit.length
+      ? (() => {
+          const over = (w: WindowProjection) => (w.projected - w.limit) / w.percentPerDollar;
+          const window = overLimit.toSorted((a, b) => over(b) - over(a))[0]!;
+          const perHour =
+            Math.max(...overLimit.map((w) => w.burn / w.percentPerDollar)) * perDollar;
+          return {
+            window,
+            balance: balance.balance,
+            unlimited: balance.unlimited,
+            hours: balance.unlimited || perHour <= 0 ? null : balance.balance / perHour,
+            needed: Math.max(0, over(window)) * perDollar,
+          };
+        })()
+      : undefined;
+  const coveredByCredits =
+    !!credits &&
+    failing.every((w) => !w.capped) &&
+    (credits.unlimited || credits.needed <= credits.balance + 1e-6);
+  const lasts = windows.flatMap((w) => {
+    if (w.lastsHours === null) return [];
+    if (!credits || w.capped) return [w.lastsHours];
+    if (credits.hours === null) return [];
+    const total = w.lastsHours + credits.hours;
+    return w.resetsAt !== null && at + total * HOUR >= w.resetsAt ? [] : [total];
+  });
   return {
     windows,
-    fits: failing.length === 0,
+    fits: failing.length === 0 || coveredByCredits,
     slack: paceWindow?.slack ?? null,
     ...(paceWindow ? { paceWindow } : {}),
     leftPoints: tightest ? tightest.limit - tightest.atEnd : null,
     ...(tightest ? { tightest } : {}),
     lastsHours: lasts.length ? Math.min(...lasts) : null,
-    ...(failing.length
+    ...(failing.length && !coveredByCredits
       ? {
           fitsFrom: failing.some((w) => w.resetsAt === null)
             ? null
@@ -275,6 +334,7 @@ export function projectAccount(input: {
         }
       : {}),
     hours,
+    ...(credits ? { credits } : {}),
   };
 }
 
@@ -293,11 +353,31 @@ export const standing = (slack: number | null, leftPoints: number | null, goal =
       ? `no goal line, ${Math.round(leftPoints)}% left`
       : "no usage reading";
 
+/** Whole credits, as people read a balance: `34,000`. */
+export const creditCount = (credits: number) => Math.floor(credits).toLocaleString("en-US");
+
+/** `on credits, 34,000 left, about 7d at this load`, without the window it is past. */
+export function creditsText(c: NonNullable<AccountProjection["credits"]>, load = "this load") {
+  const w = c.window;
+  return `on ${c.unlimited ? "unlimited " : ""}credits${
+    w.used >= w.limit || w.lastsHours === null ? "" : ` in about ${span(w.lastsHours)}`
+  }${c.unlimited ? "" : `, ${creditCount(c.balance)} left`}${
+    c.hours === null ? "" : `, about ${span(c.hours)} at ${load}`
+  }`;
+}
+
 /** The projection in words, without the account's name. */
 export function runwayText(p: AccountProjection, at: number): string {
   const resetIn = (w: WindowProjection) =>
     w.resetsAt === null ? "" : ` in ${span((w.resetsAt - at) / HOUR)}`;
   const cap = (w: WindowProjection) => (w.limit < 100 ? `, hard cap ${w.limit}%` : "");
+  // Past the provider's own limit on credits, whether or not they last the job.
+  if (p.credits && p.windows.every((w) => w.fits || !w.capped)) {
+    const w = p.credits.window;
+    return `${creditsText(p.credits)}${p.fits ? "" : `, not enough for this ${span(p.hours)} job`} (${
+      w.window.label
+    } ${Math.round(w.used)}% used${w.resetsAt === null ? "" : `, resets${resetIn(w)}`})`;
+  }
   if (!p.fits) {
     const out = p.windows
       .filter((w) => !w.fits)

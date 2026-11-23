@@ -105,6 +105,49 @@ describe("applyUsageLimitsUpdate", () => {
   });
 });
 
+describe("credits", () => {
+  const later = "2026-09-03T12:00:05.000Z";
+
+  it("replaces them from an update, keeps them when an update omits them", () => {
+    const withCredits = { ...published, credits: { balance: 34_000 } };
+    const spent = applyUsageLimitsUpdate({
+      previous: withCredits,
+      checkedAt: later,
+      update: { windows: [], credits: { balance: 33_990 } },
+    });
+    expect(spent?.credits).toEqual({ balance: 33_990, checkedAt: later });
+    expect(spent?.windows).toHaveLength(2);
+    const moved = applyUsageLimitsUpdate({
+      previous: withCredits,
+      checkedAt: later,
+      update: { windows: [{ ...session, usedPercent: 55 }] },
+    });
+    expect(moved?.credits).toEqual({ balance: 34_000, checkedAt });
+  });
+
+  it("publishes nothing new when the balance has not moved", () => {
+    const previous = { ...published, credits: { balance: 34_000, checkedAt } };
+    expect(
+      applyUsageLimitsUpdate({
+        previous,
+        checkedAt: later,
+        update: { windows: [session], credits: { balance: 34_000 } },
+      }),
+    ).toBe(previous);
+  });
+
+  it("does not turn a failed probe into empty limits", () => {
+    const failed = { checkedAt, windows: [], unavailable: { reason: "probeFailed" as const } };
+    expect(
+      applyUsageLimitsUpdate({
+        previous: failed,
+        checkedAt: later,
+        update: { windows: [], credits: { balance: 10 } },
+      }),
+    ).toBe(failed);
+  });
+});
+
 describe("resolveUsageLimitsAfterProbe", () => {
   it("does not renew complete-read absence evidence with sparse updates or failed probes", () => {
     const previous = {

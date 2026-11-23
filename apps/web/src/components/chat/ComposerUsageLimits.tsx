@@ -1,5 +1,5 @@
 import type { EnvironmentId, UsageLimitsReport } from "@t3tools/contracts";
-import { limitsNotice } from "@t3tools/shared/usageLimits";
+import { creditBalance, limitsNotice } from "@t3tools/shared/usageLimits";
 import { GaugeIcon } from "lucide-react";
 
 import { ensureLocalApi } from "../../localApi";
@@ -102,6 +102,7 @@ function UsageLimitsBannerBody({
                   compact
                   driver={account.driver}
                   windows={account.limits.windows}
+                  credits={creditBalance(account.limits)}
                   now={now}
                 />
               )}

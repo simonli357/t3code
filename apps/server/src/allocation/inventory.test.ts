@@ -332,3 +332,36 @@ it("reports each limit rejection still in force with the usage window it names",
     }).accounts[0]!.limits,
   ).toEqual([]);
 });
+
+it("carries the credits the account can spend, none while a spend control stops them", () => {
+  const withCredits = (credits: NonNullable<ServerProvider["usageLimits"]>["credits"]) => {
+    const p = provider("credits@example.test");
+    return allocationInventory({
+      environmentId: "local",
+      at,
+      providers: [{ ...p, usageLimits: { ...p.usageLimits!, credits } }],
+      threads: [],
+      measurements,
+    }).accounts[0]!.credits;
+  };
+  expect(withCredits({ balance: 34_000 })).toEqual({
+    balance: 34_000,
+    unlimited: false,
+    checkedAt: at,
+  });
+  expect(withCredits({ balance: 34_000, spendControlReached: true, checkedAt: at })).toEqual({
+    balance: 0,
+    unlimited: false,
+    checkedAt: at,
+  });
+  expect(withCredits({ balance: 0, unlimited: true })).toMatchObject({ unlimited: true });
+  expect(
+    allocationInventory({
+      environmentId: "local",
+      at,
+      providers: [provider("none@example.test")],
+      threads: [],
+      measurements,
+    }).accounts[0]!.credits,
+  ).toBeUndefined();
+});

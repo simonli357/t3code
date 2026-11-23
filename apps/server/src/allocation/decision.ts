@@ -3,6 +3,7 @@ import {
   allocationFamilyGoal,
   allocationPreferenceKey,
   DEFAULT_CLOSE_MARGIN_POINTS,
+  DEFAULT_CREDITS_PER_DOLLAR,
   legacyAllocationCandidateFields,
   profileLabel,
   WORKER_ACCOUNT_DISABLED_REASON,
@@ -23,6 +24,7 @@ import type {
 } from "@t3tools/contracts";
 import { findCatalogModel } from "@t3tools/shared/model";
 import {
+  creditsText,
   demandLoad,
   limitShare,
   paced,
@@ -110,7 +112,8 @@ const accountDemand = (
 
 /**
  * One login is one allowance, whatever computer reports it: each window's newest observation,
- * the more used one when two are equally new, and every computer's limit rejections.
+ * the more used one when two are equally new, every computer's limit rejections, and the newest
+ * credit balance, the smaller one when two are equally new.
  */
 function sharedReadings(account: AllocationAccount, all: readonly AllocationAccount[]) {
   const siblings = account.accountKey
@@ -127,11 +130,15 @@ function sharedReadings(account: AllocationAccount, all: readonly AllocationAcco
       )
         byId.set(w.id, w);
     }
+  const credits = siblings
+    .flatMap((a) => (a.credits ? [a.credits] : []))
+    .toSorted((a, b) => compare(b.checkedAt, a.checkedAt) || a.balance - b.balance)[0];
   return {
     windows: [...byId.values()].sort((a, b) => compare(a.id, b.id)),
     limits: siblings.flatMap(
       (a) => a.limits ?? (a.limitedUntil ? [{ windowId: null, until: a.limitedUntil }] : []),
     ),
+    ...(credits ? { credits } : {}),
   };
 }
 
@@ -148,11 +155,14 @@ export interface AccountRoom {
 /**
  * How much of this account is left for `model`. Drained means only this: a usage window that
  * applies to the model is used up (to its hard cap, when `cap` sets one), or a provider limit
- * rejection for it is still in force. A window whose reset has passed says nothing any more.
+ * rejection for it is still in force. A window used up to the provider's own limit does not
+ * drain an account that has credits: the provider spends them. A hard cap still does, and so
+ * does a rejection. A window whose reset has passed says nothing any more.
  */
 export function accountRoom(input: {
   readonly account: Pick<AllocationAccount, "models" | "windows" | "limitedUntil"> & {
     readonly limits?: AllocationAccount["limits"] | undefined;
+    readonly credits?: AllocationAccount["credits"] | undefined;
   };
   readonly model: string;
   readonly cap?: AllocationAccountCap | undefined;
@@ -172,9 +182,10 @@ export function accountRoom(input: {
             ? cap?.weeklyPercent
             : null;
       const limit = Math.min(100, capPercent ?? 100);
-      return { w, limit, left: limit - w.usedPoints };
+      return { w, limit, capped: capPercent != null, left: limit - w.usedPoints };
     })
     .sort((a, b) => a.left - b.left);
+  const onCredits = !!account.credits && (account.credits.unlimited || account.credits.balance > 0);
   const rejections = (
     account.limits ??
     (account.limitedUntil ? [{ windowId: null, until: account.limitedUntil }] : [])
@@ -184,7 +195,7 @@ export function accountRoom(input: {
     return !window || applies(window);
   });
   const tightest = readings[0];
-  const closed = readings.filter((r) => r.left <= 0);
+  const closed = readings.filter((r) => r.left <= 0 && (r.capped || !onCredits));
   const resetInHours = tightest?.w.resetsAt ? (Date.parse(tightest.w.resetsAt) - now) / HOUR : null;
   if (closed.length || rejections.length) {
     const resets = [...closed.map((r) => r.w.resetsAt), ...rejections.map((r) => r.until)];
@@ -446,6 +457,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         cap,
         goal: goal?.percentPerDay ?? null,
         fableGoal: accountFableGoal(policy, account),
+        creditsPerDollar: policy.creditsPerDollar ?? DEFAULT_CREDITS_PER_DOLLAR,
       });
       projections.set(`${account.environmentId}:${account.instanceId}`, projection);
       const fableLine = projection.windows.find((w) => w.fableGoal);
@@ -611,6 +623,7 @@ export function accountRunways(input: {
       cap: accountCap(input.policy, account, "worker"),
       goal: goal?.percentPerDay ?? null,
       fableGoal,
+      creditsPerDollar: input.policy.creditsPerDollar ?? DEFAULT_CREDITS_PER_DOLLAR,
     });
     const identity = {
       key,
@@ -652,6 +665,10 @@ export function accountRunways(input: {
         : usedUp
           ? `${usedUp.window.label} ${
               usedUp.limit < 100 ? `reached its ${usedUp.limit}% hard cap` : "is used up"
+            }${
+              projection.credits && !usedUp.capped
+                ? `; ${creditsText(projection.credits, "the current load")}`
+                : ""
             }${
               usedUp.resetsAt === null
                 ? ""

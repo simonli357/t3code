@@ -209,6 +209,16 @@ export function allocationInventory(input: {
             scope: "Provider-reported credit; scope not reported. No automatic redemption.",
           }
         : null,
+      // What the account can spend once a window is used up; a spend control stops it.
+      ...(limits?.credits
+        ? {
+            credits: {
+              balance: limits.credits.spendControlReached ? 0 : limits.credits.balance,
+              unlimited: !limits.credits.spendControlReached && limits.credits.unlimited === true,
+              checkedAt: limits.credits.checkedAt ?? limits.checkedAt,
+            },
+          }
+        : {}),
       usageProfiles: measurements.profiles
         .filter((item) => item.instanceId === p.instanceId)
         .slice(0, 40)
