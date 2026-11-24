@@ -923,6 +923,29 @@ describe("active workers", () => {
     expect(workers(decide([account("a")], { reservations: [offline] }))).toBe(1);
   });
 
+  it("drops a lapsed start once its computer no longer shows the session, never one in progress", () => {
+    // A 5-hour window, so other sessions' load shortens how long the account lasts.
+    const busy = account("a", 10, { windows: [fiveHour(50), weekly(10)] });
+    const lapsed = (thread: string) =>
+      held(worker("a", thread), "starting", { expiresAt: inHours(-0.5) });
+    const finished = ["x", "y", "z"].map(lapsed);
+    expect(candidate(decide([busy], { reservations: finished }), "a")).toEqual(
+      candidate(decide([busy]), "a"),
+    );
+    // Still inside its reservation, or listed by its computer (a queued first job): counted once.
+    const slow = { ...worker("a", "slow"), state: "pending" as const };
+    const counted = decide([busy], {
+      demand: [slow],
+      reservations: [...finished, held(worker("a", "new")), lapsed("slow")],
+    });
+    expect(workers(counted)).toBe(2);
+    // Its computer unread or stale: still counted.
+    for (const patch of [{ complete: false }, { observedAt: inHours(-2) }])
+      expect(
+        workers(decide([], { inventories: [inventory([busy], patch)], reservations: finished })),
+      ).toBe(3);
+  });
+
   it("shares a known login's workers across computers but never guesses an unknown one", () => {
     const remote = {
       ...worker("a", "remote"),

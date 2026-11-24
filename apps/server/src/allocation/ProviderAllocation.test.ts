@@ -839,6 +839,7 @@ it.effect(
         // The start that may still be running elsewhere is a worker on the shared login.
         expect(chosen(baseline).workers).toBe(0);
         expect(chosen(result.allocation!.decision).workers).toBe(1);
+        // It was asked about while the computers were read, and its silence left it as it was.
         expect((yield* store.reservations).find((r) => r.assignmentId === "prior")?.state).toBe(
           "starting",
         );
@@ -850,7 +851,7 @@ it.effect(
               "_tag" in call &&
               call._tag === "allocationProbe",
           ),
-        ).toBe(false);
+        ).toBe(true);
         expect(result.allocation!.decision.reasons.join(" ")).not.toContain(
           "coordinator unavailable",
         );
@@ -3473,6 +3474,49 @@ it.effect("a whole snapshot asks every running start's computer at once", () =>
     }).pipe(Effect.provide(f.layer));
   }),
 );
+
+for (const _tag of ["preview", "modelPreview"] as const)
+  it.effect(`a ${_tag} settles another assignment's finished start while it reads`, () =>
+    Effect.gen(function* () {
+      const probed = yield* Deferred.make<void>();
+      const f = fixture({
+        peerCall: (id, input) =>
+          Predicate.isTagged(input, "allocationProbe")
+            ? Deferred.succeed(probed, undefined).pipe(Effect.as({ state: "terminal" }))
+            : // The computer the work runs on answers its read after the probe.
+              Deferred.await(probed).pipe(
+                Effect.as(f.state.peers.find((p) => p.environmentId === id)!),
+              ),
+      });
+      yield* Effect.gen(function* () {
+        const { allocation, store } = yield* f.setup;
+        const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+        yield* startedElsewhere("peer", own);
+        f.state.peers = [
+          {
+            ...own,
+            environmentId: "peer",
+            accounts: own.accounts.map((a) => ({ ...a, environmentId: "peer" })),
+          },
+        ];
+        const request: ModelRoutingRequest = {
+          selection: "automatic",
+          assignmentId: "next",
+          threadId: ThreadId.make("next"),
+          environmentId: "peer",
+          allowedDrivers: [provider.driver],
+          assessment: { difficulty: 3, stakes: 4 },
+        };
+        yield* _tag === "preview"
+          ? allocation.execute({
+              _tag,
+              request: { ...startInput.request, environmentId: "peer" },
+            })
+          : allocation.execute({ _tag, request });
+        expect((yield* store.reservations).map((r) => r.state)).toEqual(["released"]);
+      }).pipe(Effect.provide(f.layer));
+    }),
+  );
 
 it.effect(
   "a learn that cannot read a linked computer's history keeps the stored numbers until it can",

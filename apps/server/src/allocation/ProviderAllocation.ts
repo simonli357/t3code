@@ -31,6 +31,7 @@ import {
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -967,37 +968,53 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const reconcile = Effect.fn("ProviderAllocation.reconcile")(function* (assignmentId?: string) {
+  /**
+   * Settles started reservations from their computers' receipts: every open one without an
+   * `assignmentId`, else that assignment's own. With `until`, a selecting operation settles every
+   * open one too, but only its own probe is awaited: any other still unanswered when `until`
+   * ends is unknown and keeps its demand, so a slow computer never delays a new assignment.
+   */
+  const reconcile = Effect.fn("ProviderAllocation.reconcile")(function* (
+    assignmentId?: string,
+    until?: Effect.Effect<void>,
+  ) {
     yield* store.expireUnused(yield* now);
-    // An unrelated uncertain execution must retain its shared-account demand,
-    // not delay a new assignment. Full inspection still reconciles all receipts.
     const open = (yield* store.reservations).filter(
       (r) =>
-        (assignmentId === undefined || r.assignmentId === assignmentId) &&
+        (assignmentId === undefined || until !== undefined || r.assignmentId === assignmentId) &&
         (r.state === "starting" || r.state === "consumed"),
     );
+    const unknown = { state: "unknown" as const };
     // Asked together, so a slow or unreachable computer costs one deadline, not one per start.
     const states = yield* Effect.forEach(
       open,
-      (r) =>
-        (r.request.environmentId === local.environmentId
-          ? probe(r.request.threadId, r.assignmentId, r.createdAt, r.startIntent ?? undefined)
-          : peers
-              .call(r.request.environmentId, {
-                _tag: "allocationProbe",
-                ...(r.startIntent ? { startIntent: r.startIntent } : {}),
-                threadId: r.request.threadId,
-                assignmentId: r.assignmentId,
-                since: r.createdAt,
-              })
-              .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Probe)), Effect.mapError(unavailable))
-        ).pipe(Effect.catch(() => Effect.succeed({ state: "unknown" as const }))),
-      { concurrency: 8 },
+      (r) => {
+        const asked = (
+          r.request.environmentId === local.environmentId
+            ? probe(r.request.threadId, r.assignmentId, r.createdAt, r.startIntent ?? undefined)
+            : peers
+                .call(r.request.environmentId, {
+                  _tag: "allocationProbe",
+                  ...(r.startIntent ? { startIntent: r.startIntent } : {}),
+                  threadId: r.request.threadId,
+                  assignmentId: r.assignmentId,
+                  since: r.createdAt,
+                })
+                .pipe(
+                  Effect.flatMap(Schema.decodeUnknownEffect(Probe)),
+                  Effect.mapError(unavailable),
+                )
+        ).pipe(Effect.orElseSucceed(() => unknown));
+        return until && r.assignmentId !== assignmentId
+          ? asked.pipe(Effect.raceFirst(until.pipe(Effect.as(unknown))))
+          : asked;
+      },
+      { concurrency: "unbounded" },
     );
     for (const [index, r] of open.entries()) {
       const state = states[index]!;
       if (state.state === "terminal" || (state.state === "running" && r.state === "starting")) {
-        yield* store.lifecycle(
+        const settled = store.lifecycle(
           {
             assignmentId: r.assignmentId,
             environmentId: r.request.environmentId,
@@ -1006,9 +1023,24 @@ const make = Effect.gen(function* () {
           },
           yield* now,
         );
+        // Another operation may have settled someone else's reservation first.
+        yield* r.assignmentId === assignmentId ? settled : Effect.ignore(settled);
       }
     }
   });
+  /** A selecting operation's inventory read, with every started reservation settled meanwhile. */
+  const readSettling = <A, E, R>(read: Effect.Effect<A, E, R>, assignmentId: string) =>
+    Effect.gen(function* () {
+      const done = yield* Deferred.make<void>();
+      const [, value] = yield* Effect.all(
+        [
+          reconcile(assignmentId, Deferred.await(done)),
+          read.pipe(Effect.ensuring(Deferred.succeed(done, undefined))),
+        ],
+        { concurrency: "unbounded" },
+      );
+      return value;
+    });
   const executeLocal = Effect.fn("ProviderAllocation.executeLocal")(function* (
     operation: AllocationOperation,
     /** The coordinator cannot be used: decide here, and let the decision record that. */
@@ -1051,17 +1083,19 @@ const make = Effect.gen(function* () {
       const selecting = operation._tag === "modelPreview" || operation._tag === "modelAllocate";
       // Half a snapshot neither reconciles reservations nor, for settings, asks any computer.
       const part = operation._tag === "modelSnapshot" ? operation.part : undefined;
-      if (part === undefined)
-        yield* reconcile(selecting ? operation.request.assignmentId : undefined);
+      if (part === undefined && !selecting) yield* reconcile();
+      const read = collect(
+        undefined,
+        selecting ? operation.request.environmentId : undefined,
+        undefined,
+        selecting ? policy.maxReadingAgeMinutes : undefined,
+      );
       const inventories =
         part === "settings"
           ? []
-          : yield* collect(
-              undefined,
-              selecting ? operation.request.environmentId : undefined,
-              undefined,
-              selecting ? policy.maxReadingAgeMinutes : undefined,
-            );
+          : selecting
+            ? yield* readSettling(read, operation.request.assignmentId)
+            : yield* read;
       if (operation._tag === "modelSnapshot")
         return {
           modelSnapshot: {
@@ -1165,17 +1199,16 @@ const make = Effect.gen(function* () {
         detail: "Connect must run on the requesting environment.",
       });
     const part = operation._tag === "snapshot" ? operation.part : undefined;
-    if (part === undefined)
-      yield* reconcile(operation._tag === "snapshot" ? undefined : operation.request.assignmentId);
+    if (operation._tag === "snapshot" && part === undefined) yield* reconcile();
     const inventories =
       part === "settings"
         ? []
-        : yield* collect(
-            operation._tag === "snapshot" ? undefined : operation.request,
-            undefined,
-            undefined,
-            operation._tag === "snapshot" ? undefined : policy.maxReadingAgeMinutes,
-          );
+        : operation._tag === "snapshot"
+          ? yield* collect()
+          : yield* readSettling(
+              collect(operation.request, undefined, undefined, policy.maxReadingAgeMinutes),
+              operation.request.assignmentId,
+            );
     const coordinated =
       authorityAvailable &&
       inventories.every((i) => i.coordinatorEnvironmentId === local.environmentId);

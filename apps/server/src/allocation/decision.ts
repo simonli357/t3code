@@ -71,7 +71,8 @@ function activeDemand(
     const request = reservation.request;
     const key = keyFor(request);
     if (bySession.has(key)) continue;
-    // A fresh complete snapshot confirms that a consumed session is now idle.
+    // A fresh complete snapshot confirms that a consumed session, or a start past its
+    // reservation, is now idle: it lists every working session and every queued first job.
     // Missing/stale hosts cannot release this accounting on their own.
     const observedIdle = inventories.some(
       (host) =>
@@ -81,7 +82,12 @@ function activeDemand(
         host.observedAt <= at &&
         Date.parse(at) - Date.parse(host.observedAt) <= maxReadingAgeMinutes * 60_000,
     );
-    if (reservation.state === "consumed" && observedIdle) continue;
+    if (
+      observedIdle &&
+      (reservation.state === "consumed" ||
+        (reservation.state === "starting" && reservation.expiresAt <= at))
+    )
+      continue;
     bySession.set(key, {
       environmentId: request.environmentId,
       threadId: request.threadId,
