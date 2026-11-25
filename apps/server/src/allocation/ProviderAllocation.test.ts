@@ -553,7 +553,7 @@ for (const observation of ["hung", "offline"] as const) {
               explicitInstanceId: provider.instanceId,
             },
           };
-          // The unrelated computer's reading is abandoned as soon as the required ones are in.
+          // The unrelated computer's reading is abandoned after its short bound.
           const started = yield* assignments
             .start(input, ThreadId.make("master"))
             .pipe(Effect.timeout("35 seconds"), Effect.forkChild);
@@ -653,7 +653,9 @@ it.effect(
             .start(input, ThreadId.make("master"))
             .pipe(Effect.forkChild);
           yield* Deferred.await(attempted);
-          yield* TestClock.adjust("15 seconds");
+          // Each read of the computers waits its own short bound for "hung", so the clock
+          // moves in steps: a later read only starts once the one before it has ended.
+          for (let second = 0; second < 15; second++) yield* TestClock.adjust("1 second");
           expect((yield* Fiber.join(started)).state).toBe("submitted");
           expect(yield* client.store.reservations).toEqual([]);
           expect(yield* authority.store.reservations).toHaveLength(1);
@@ -663,8 +665,11 @@ it.effect(
             model: input.request.model,
             options: input.request.options,
           });
-          const retry = yield* client.assignments.start(input, ThreadId.make("master"));
-          expect(retry.state).toBe("submitted");
+          const retried = yield* client.assignments
+            .start(input, ThreadId.make("master"))
+            .pipe(Effect.forkChild);
+          for (let second = 0; second < 15; second++) yield* TestClock.adjust("1 second");
+          expect((yield* Fiber.join(retried)).state).toBe("submitted");
           expect(yield* authority.store.reservations).toHaveLength(1);
           expect((yield* authority.store.reservations)[0]?.request).toEqual(input.request);
           // The remote spawn transport may retry; WorkerControls owns native
@@ -916,13 +921,102 @@ it.effect("model allocation and lifecycle start do not repeat an unrelated peer 
         )
         .pipe(Effect.timeout("35 seconds"), Effect.forkChild);
       yield* Deferred.await(attempted);
-      yield* TestClock.adjust("20 seconds");
+      // The start reads the computers twice; each read waits its own bound for "hung".
+      yield* TestClock.adjust("5 seconds");
+      yield* TestClock.adjust("15 seconds");
       const result = yield* Fiber.join(started);
       expect(result.state).toBe("submitted");
       expect(result.selection?.allocation?.decision.request.model).toBe("astra");
       expect(f.calls).toHaveLength(1);
       expect(yield* store.reservations).toHaveLength(1);
       expect(interrupted).toBe(f.peerCalls.length);
+    }).pipe(Effect.provide(f.layer));
+  }),
+);
+
+it.effect("a start placed on one computer counts sessions working on a slower one", () =>
+  Effect.gen(function* () {
+    const attempted = yield* Deferred.make<void>();
+    const peers = new Map<string, AllocationInventory>();
+    const f = fixture({
+      // The slow computer answers well after this computer and the execution computer have.
+      peerCall: (id) =>
+        id === "slow"
+          ? Deferred.succeed(attempted, undefined).pipe(
+              Effect.andThen(Effect.sleep("5 seconds")),
+              Effect.as(peers.get(id)),
+            )
+          : Effect.succeed(peers.get(id)),
+    });
+    yield* Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+      const on = (environmentId: string, sessions: number): AllocationInventory => ({
+        ...own,
+        environmentId,
+        accounts: own.accounts.map((a) => ({ ...a, environmentId })),
+        demand: Array.from({ length: sessions }, (_, i) => ({
+          environmentId,
+          threadId: ThreadId.make(`${environmentId}-${i}`),
+          instanceId: provider.instanceId,
+          accountKey: own.accounts[0]!.accountKey,
+          model: "astra",
+          options: [],
+          state: "running" as const,
+          worker: true,
+        })),
+      });
+      peers.set("execution", on("execution", 0)).set("slow", on("slow", 2));
+      f.state.peers = [...peers.values()];
+      const preview = yield* allocation
+        .execute({
+          _tag: "preview",
+          request: { ...startInput.request, environmentId: "execution" },
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(attempted);
+      yield* TestClock.adjust("5 seconds");
+      const decision = (yield* Fiber.join(preview)).result!.decision;
+      expect(
+        decision.candidates.find(
+          (c) => c.environmentId === "execution" && c.instanceId === provider.instanceId,
+        )?.workers,
+      ).toBe(2);
+    }).pipe(Effect.provide(f.layer));
+  }),
+);
+
+it.effect("a computer that does not answer in time is named in the selection's notes", () =>
+  Effect.gen(function* () {
+    const attempted = yield* Deferred.make<void>();
+    const f = fixture({
+      peerCall: () => Deferred.succeed(attempted, undefined).pipe(Effect.andThen(Effect.never)),
+    });
+    yield* Effect.gen(function* () {
+      const { allocation } = yield* f.setup;
+      const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+      f.state.peers = [{ ...own, environmentId: "hung", accounts: [] }];
+      const preview = yield* allocation
+        .execute({
+          _tag: "modelPreview",
+          request: {
+            selection: "automatic",
+            assignmentId: "bounded",
+            threadId: ThreadId.make("bounded"),
+            environmentId: "local",
+            allowedDrivers: [provider.driver],
+            assessment: { difficulty: 3, stakes: 4 },
+          },
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(attempted);
+      // The start waits its short bound for the silent computer, and no longer.
+      yield* TestClock.adjust("5 seconds");
+      const selection = (yield* Fiber.join(preview)).selection!;
+      expect(selection.allocation).toBeDefined();
+      expect(selection.notes).toContain(
+        "hung: load unavailable for this decision: no answer within 5 seconds",
+      );
     }).pipe(Effect.provide(f.layer));
   }),
 );

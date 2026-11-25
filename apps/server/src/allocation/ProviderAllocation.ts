@@ -91,6 +91,8 @@ const unavailable = () =>
 const UNREADABLE_PEER_REQUEST = "Invalid allocation peer request";
 /** The longest a decision waits for accounts to report a fresh quota reading. */
 const READING_REFRESH_BUDGET = "3 seconds";
+/** A decision placed on one computer waits this long for the load on each of the others. */
+const OTHER_COMPUTER_READ_BUDGET = "5 seconds";
 /** Decisions probe one slow or failing account at most this often. */
 const READING_REFRESH_RETRY_MS = 60_000;
 /** After the coordinator fails to answer, the rest of that start decides locally without waiting again. */
@@ -926,21 +928,17 @@ const make = Effect.gen(function* () {
             ),
           ];
         }
-        // Inventory on other hosts is advisory. Give it the time spent reading
-        // required hosts, then cancel unfinished reads instead of consuming the
-        // caller's entire peer deadline. Missing load stays explicit, never zero.
-        for (const peer of linked) {
-          if (peer.environmentId === executionEnvironmentId) continue;
-          yield* read(peer.environmentId).pipe(
-            Effect.tap((value) =>
-              Effect.sync(() => {
-                observed.set(peer.environmentId, value);
-              }),
-            ),
-            Effect.ignore,
+        // A decision counts the working sessions on every computer, so the other hosts' reads
+        // get a short bound of their own instead of being cancelled when the required reads
+        // finish. One that is slow or offline costs at most that bound, and its missing load
+        // is stated in a note, never counted as zero silently.
+        const others = linked.filter((peer) => peer.environmentId !== executionEnvironmentId);
+        const pending = yield* Effect.forEach(others, (peer) =>
+          Effect.result(read(peer.environmentId)).pipe(
+            Effect.timeoutOption(OTHER_COMPUTER_READ_BUDGET),
             Effect.forkScoped({ startImmediately: true }),
-          );
-        }
+          ),
+        );
         const [here, target] = yield* Effect.all(
           [
             own,
@@ -959,6 +957,22 @@ const make = Effect.gen(function* () {
           { concurrency: "unbounded" },
         );
         if (target) observed.set(executionEnvironmentId, target);
+        const answers = yield* Effect.forEach(pending, Fiber.join);
+        answers.forEach((answer, index) => {
+          const peer = others[index]!;
+          observed.set(
+            peer.environmentId,
+            Option.isNone(answer)
+              ? unreadInventory(
+                  peer,
+                  here.observedAt,
+                  `no answer within ${OTHER_COMPUTER_READ_BUDGET}`,
+                )
+              : answer.value._tag === "Success"
+                ? answer.value.success
+                : unreadInventory(peer, here.observedAt, answer.value.failure.message),
+          );
+        });
         return [
           here,
           ...linked.map(
@@ -1130,7 +1144,7 @@ const make = Effect.gen(function* () {
           expectedPolicyVersion: policy.version,
           expectedModelVersion: modelPolicy.version,
           learned,
-          notes,
+          notes: [...notes, ...inventories.flatMap((i) => (i.complete ? [] : i.notices))],
           ...standIn,
           ...(effectiveModelPolicy ? { previewPolicy: effectiveModelPolicy } : {}),
         }),
