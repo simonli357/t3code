@@ -300,7 +300,11 @@ export const make = Effect.gen(function* () {
           });
           yield* SubscriptionRef.changes(supervisor.state).pipe(
             Stream.runForEach((state) =>
-              state.phase === "blocked" && state.lastFailure?.reason === "unsupported"
+              // A paired URL has no discovery service to clear an old preflight
+              // rejection. Its supervisor can recheck on wakeup or next launch.
+              entry.target._tag !== "BearerConnectionTarget" &&
+              state.phase === "blocked" &&
+              state.lastFailure?.reason === "unsupported"
                 ? setCompatibility(environmentId, state.lastFailure).pipe(
                     Effect.catch((error) =>
                       Effect.logWarning("Could not disable an unsupported environment.", {

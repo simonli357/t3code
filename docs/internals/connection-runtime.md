@@ -30,6 +30,10 @@ connections by environment. An involuntary disconnect retains the registration
 and cached data. Explicit removal closes the scope and clears credentials,
 projections, and platform-owned state such as drafts. Cloud-account changes apply
 to relay registrations; they must not discard directly paired environments.
+A protocol mismatch blocks a paired URL for the current attempt. The supervisor
+rechecks on wakeup or reload. Only an explicit switch-off persists for that URL.
+Browser catalog writes compare against the stored document inside an IndexedDB
+transaction so concurrent tabs preserve each other's pairings and credentials.
 
 ## HTTP authorization
 

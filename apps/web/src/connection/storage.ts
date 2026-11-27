@@ -37,8 +37,8 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Ref from "effect/Ref";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -186,6 +186,14 @@ function writeDatabaseValue(
   key: IDBValidKey,
   value: unknown,
 ) {
+  return writeDatabaseStore(database, storeName, (store) => store.put(value, key));
+}
+
+function writeDatabaseStore(
+  database: IDBDatabase,
+  storeName: string,
+  write: (store: IDBObjectStore) => void,
+) {
   return Effect.callback<void, ConnectionTransientError>((resume) => {
     const transaction = database.transaction(storeName, "readwrite");
     // Every failed write fires "abort". A failed commit, such as
@@ -198,7 +206,7 @@ function writeDatabaseValue(
     transaction.addEventListener("complete", () => {
       resume(Effect.void);
     });
-    transaction.objectStore(storeName).put(value, key);
+    write(transaction.objectStore(storeName));
   }).pipe(Effect.withSpan("web.connectionStorage.writeDatabaseValue"));
 }
 
@@ -269,7 +277,10 @@ const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function*
 
 export interface CatalogBackend {
   readonly read: Effect.Effect<string | null, ConnectionTransientError>;
-  readonly write: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
+  readonly write: (
+    raw: string,
+    expected: string | null,
+  ) => Effect.Effect<boolean, ConnectionTransientError>;
   readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
 
@@ -288,7 +299,7 @@ export function makeCatalogBackend(database: IDBDatabase): CatalogBackend {
         }).pipe(
           Effect.flatMap((stored) =>
             stored
-              ? Effect.void
+              ? Effect.succeed(true)
               : Effect.fail(
                   catalogError(
                     "save",
@@ -304,7 +315,20 @@ export function makeCatalogBackend(database: IDBDatabase): CatalogBackend {
     read: readDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY).pipe(
       Effect.map((value) => (typeof value === "string" ? value : null)),
     ),
-    write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
+    // A separate tab may have paired another computer since this document was read.
+    write: (raw, expected) =>
+      Effect.suspend(() => {
+        let matched = false;
+        return writeDatabaseStore(database, CATALOG_STORE_NAME, (store) => {
+          const request = store.get(CATALOG_KEY);
+          request.addEventListener("success", () => {
+            if ((typeof request.result === "string" ? request.result : null) === expected) {
+              matched = true;
+              store.put(raw, CATALOG_KEY);
+            }
+          });
+        }).pipe(Effect.map(() => matched));
+      }),
     quarantine: (raw) =>
       writeDatabaseValue(database, CATALOG_STORE_NAME, `${CATALOG_KEY}:corrupt:${Date.now()}`, raw),
   };
@@ -320,63 +344,56 @@ interface CatalogStore {
 export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStore")(function* (
   backend: CatalogBackend,
 ) {
-  const state = yield* Ref.make<Option.Option<ConnectionCatalogDocumentType>>(Option.none());
   const lock = yield* Semaphore.make(1);
-
-  const loadUnlocked = Effect.fn("web.connectionStorage.loadCatalog")(function* () {
-    const cached = yield* Ref.get(state);
-    if (Option.isSome(cached)) {
-      return cached.value;
-    }
-    const raw = yield* backend.read;
-    let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-    if (raw !== null && raw.trim() !== "") {
-      catalog = yield* decodeCatalog(raw).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
-              error: error.message,
-            });
-            if (backend.quarantine !== undefined) {
-              yield* backend.quarantine(raw).pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
-                    error: cause.message,
-                  }),
-                ),
-              );
-            }
-            const encoded = yield* encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT);
-            yield* backend.write(encoded).pipe(
+  const access = Effect.fn("web.connectionStorage.accessCatalog")(function* (
+    transform?: Parameters<CatalogStore["update"]>[0],
+  ) {
+    for (;;) {
+      const raw = yield* backend.read;
+      let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
+      let corrupt = false;
+      if (raw !== null && raw.trim() !== "") {
+        const decoded = yield* decodeCatalog(raw).pipe(Effect.result);
+        if (Result.isSuccess(decoded)) {
+          catalog = decoded.success;
+        } else {
+          corrupt = true;
+          yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
+            error: decoded.failure.message,
+          });
+          if (backend.quarantine !== undefined) {
+            yield* backend.quarantine(raw).pipe(
               Effect.catch((cause) =>
-                Effect.logWarning("Could not persist the recovered web connection catalog.", {
+                Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
                   error: cause.message,
                 }),
               ),
             );
-            return EMPTY_CONNECTION_CATALOG_DOCUMENT;
-          }),
-        ),
-      );
+          }
+        }
+      }
+      if (!transform && !corrupt) return catalog;
+      const next = transform ? transform(catalog) : catalog;
+      const encoded = yield* encodeCatalog(next);
+      if (encoded === raw) return next;
+      const write = backend.write(encoded, raw);
+      const committed = yield* transform
+        ? write
+        : write.pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not persist the recovered web connection catalog.", {
+                error: cause.message,
+              }).pipe(Effect.as(true)),
+            ),
+          );
+      if (committed) return next;
     }
-    yield* Ref.set(state, Option.some(catalog));
-    return catalog;
   });
 
-  const read = lock.withPermits(1)(loadUnlocked());
-  const update: CatalogStore["update"] = Effect.fn("web.connectionStorage.updateCatalog")(
-    function* (transform) {
-      yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          const next = transform(yield* loadUnlocked());
-          yield* backend.write(yield* encodeCatalog(next));
-          yield* Ref.set(state, Option.some(next));
-        }),
-      );
-    },
-  );
-
-  return { read, update } satisfies CatalogStore;
+  return {
+    read: lock.withPermits(1)(access()),
+    update: (transform) => lock.withPermits(1)(access(transform)).pipe(Effect.asVoid),
+  } satisfies CatalogStore;
 });
 
 const GITHUB_ROUTING_KEY_PREFIX = "t3code:github-routing:";

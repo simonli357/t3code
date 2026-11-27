@@ -46,7 +46,7 @@ const BOOTSTRAP: RelayEnvironmentConnectResponse = {
   expiresAt: "2026-06-06T01:00:00.000Z",
 };
 
-function recordedFetch(responses: ReadonlyArray<Response>) {
+function recordedFetch(responses: ReadonlyArray<Response | Promise<Response>>) {
   const calls: Array<readonly [RequestInfo | URL, RequestInit]> = [];
   let responseIndex = 0;
   const fetchFn = ((input, init) => {
@@ -105,7 +105,7 @@ const persistedToken = (
 
 const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (input: {
   readonly initialToken?: TokenStore.RemoteDpopAccessToken;
-  readonly responses: ReadonlyArray<Response>;
+  readonly responses: ReadonlyArray<Response | Promise<Response>>;
   readonly bootstrap?: RelayEnvironmentConnectResponse;
   readonly beforeBootstrap?: Effect.Effect<void, ManagedRelay.ManagedRelayClientError>;
   readonly beforePut?: Effect.Effect<void>;
@@ -230,6 +230,45 @@ const makeHarness = Effect.fn("TestRemoteAuthorization.makeHarness")(function* (
 });
 
 describe("RemoteEnvironmentAuthorization", () => {
+  it.effect("retries direct descriptor and ticket failures with the same bearer credential", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        responses: [
+          new Response(null, { status: 503 }),
+          Response.json(DESCRIPTOR),
+          new Response(null, { status: 502 }),
+          new Promise<Response>(() => {}),
+          Response.json(DESCRIPTOR),
+          websocketTicket("recovered"),
+        ],
+      });
+      yield* Effect.gen(function* () {
+        const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+        const authorize = remote.authorizeBearer({
+          expectedEnvironmentId: ENVIRONMENT_ID,
+          ...ENDPOINT,
+          bearerToken: "saved-bearer",
+          connectionMethod: "direct",
+        });
+        expect(yield* Effect.flip(authorize)).toMatchObject({ _tag: "ConnectionTransientError" });
+        expect(yield* Effect.flip(authorize)).toMatchObject({ _tag: "ConnectionTransientError" });
+        const stalled = yield* Effect.flip(authorize).pipe(Effect.forkChild);
+        yield* TestClock.adjust("10 seconds");
+        expect(yield* Fiber.join(stalled)).toMatchObject({
+          _tag: "ConnectionTransientError",
+          reason: "timeout",
+        });
+        expect((yield* authorize).socketUrl).toContain("wsTicket=recovered");
+        const tickets = harness.fetch.calls.filter(([url]) =>
+          String(url).endsWith("/api/auth/websocket-ticket"),
+        );
+        expect(
+          tickets.map(([, request]) => new Headers(request.headers).get("authorization")),
+        ).toEqual(Array(3).fill("Bearer saved-bearer"));
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
   it.effect("reuses a validated bearer descriptor while issuing fresh websocket tickets", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({

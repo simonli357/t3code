@@ -19,6 +19,7 @@ import * as Scheduler from "effect/Scheduler";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as TokenStore from "../authorization/tokenStore.ts";
@@ -946,6 +947,43 @@ describe("EnvironmentRegistry", () => {
         );
       }).pipe(Effect.provide(harness.layer));
     }),
+  );
+
+  it.effect(
+    "a rejected direct preflight does not switch the saved computer off across reload",
+    () =>
+      Effect.gen(function* () {
+        const options: { prepareError?: ConnectionBlockedError } = {
+          prepareError: new ConnectionBlockedError({
+            reason: "unsupported",
+            detail: "Incompatible protocol.",
+          }),
+        };
+        const harness = yield* makeHarness(
+          [BEARER_TARGET],
+          [BEARER_PROFILE],
+          [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+          options,
+        );
+        const id = BEARER_TARGET.environmentId;
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.start;
+          yield* TestClock.adjust("1 second");
+          expect((yield* registry.state(id)).lastFailure?.reason).toBe("unsupported");
+          expect((yield* Ref.get(harness.storedDisabled)).has(id)).toBe(false);
+        }).pipe(Effect.provide(harness.layer));
+
+        delete options.prepareError;
+        yield* Effect.gen(function* () {
+          const reloaded = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* reloaded.start;
+          yield* awaitConnectionState(reloaded, id, (state) => state.phase === "connected");
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(BEARER_CREDENTIAL);
+        }).pipe(Effect.provide(harness.layer));
+      }),
   );
 
   it.effect("a socket preflight rejection persists the connection as switched off", () =>

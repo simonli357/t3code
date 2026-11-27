@@ -1,11 +1,20 @@
 import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  BearerConnectionRegistration,
+  BearerConnectionTarget,
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId } from "@t3tools/contracts";
-import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
+import {
+  ConnectionCatalogDocument,
+  registerConnectionInCatalog,
+  setConnectionEnabledInCatalog,
+} from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -35,13 +44,77 @@ afterEach(() => {
 });
 
 describe("makeCatalogStore", () => {
+  it.effect("a late write from another tab preserves a direct pairing across reload", () =>
+    Effect.gen(function* () {
+      const pairing = (name: string) => {
+        const environmentId = EnvironmentId.make(name);
+        const connectionId = `bearer:${name}`;
+        return new BearerConnectionRegistration({
+          target: new BearerConnectionTarget({ environmentId, connectionId, label: name }),
+          profile: new BearerConnectionProfile({
+            environmentId,
+            connectionId,
+            label: name,
+            httpBaseUrl: `https://${name}.example.test`,
+            wsBaseUrl: `wss://${name}.example.test`,
+          }),
+          credential: new BearerConnectionCredential({ token: `test-token-${name}` }),
+        });
+      };
+      const first = pairing("first");
+      const second = pairing("second");
+      let raw = encodeCatalog(registerConnectionInCatalog(emptyCatalog, first));
+      const backend = {
+        read: Effect.sync(() => raw),
+        write: (next: string, expected: string | null) =>
+          Effect.sync(() => {
+            if (raw !== expected) return false;
+            raw = next;
+            return true;
+          }),
+      };
+      const writing = yield* Deferred.make<void>();
+      const resumeWrite = yield* Deferred.make<void>();
+      const olderTab = yield* makeCatalogStore({
+        ...backend,
+        write: (next, expected) =>
+          Deferred.succeed(writing, undefined).pipe(
+            Effect.andThen(Deferred.await(resumeWrite)),
+            Effect.andThen(backend.write(next, expected)),
+          ),
+      });
+      yield* olderTab.read;
+      const late = yield* olderTab
+        .update((doc) => setConnectionEnabledInCatalog(doc, first.target.environmentId, false))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(writing);
+      const pairingTab = yield* makeCatalogStore(backend);
+      yield* pairingTab.update((doc) => registerConnectionInCatalog(doc, second));
+      yield* Deferred.succeed(resumeWrite, undefined);
+      yield* Fiber.join(late);
+
+      const reloaded = yield* (yield* makeCatalogStore(backend)).read;
+      expect(reloaded.targets).toEqual([first.target, second.target]);
+      expect(reloaded.profiles).toContainEqual(second.profile);
+      expect(reloaded.credentials).toContainEqual({
+        connectionId: second.target.connectionId,
+        credential: second.credential,
+      });
+      expect(reloaded.disabledEnvironmentIds).toEqual([first.target.environmentId]);
+    }),
+  );
+
   it.effect("quarantines malformed catalogs and starts from an empty document", () =>
     Effect.gen(function* () {
       const writes: string[] = [];
       const quarantined: string[] = [];
       const store = yield* makeCatalogStore({
         read: Effect.succeed("{not-json"),
-        write: (raw) => Effect.sync(() => writes.push(raw)),
+        write: (raw) =>
+          Effect.sync(() => {
+            writes.push(raw);
+            return true;
+          }),
         quarantine: (raw) => Effect.sync(() => quarantined.push(raw)),
       });
 
@@ -60,7 +133,7 @@ describe("makeCatalogStore", () => {
       });
       const store = yield* makeCatalogStore({
         read: Effect.fail(failure),
-        write: () => Effect.void,
+        write: () => Effect.succeed(true),
       });
 
       expect(yield* Effect.flip(store.read)).toBe(failure);
@@ -80,11 +153,34 @@ describe("makeCatalogBackend", () => {
       });
       const backend = makeCatalogBackend({} as IDBDatabase);
 
-      const error = yield* backend.write("{}").pipe(Effect.flip);
+      const error = yield* backend.write("{}", null).pipe(Effect.flip);
 
       expect(error).toBeInstanceOf(ConnectionTransientError);
       expect(error.message).toContain("Desktop secure storage is unavailable");
       expect(setConnectionCatalog).toHaveBeenCalledWith("{}");
+    }),
+  );
+
+  it.effect("a newer IndexedDB document makes a stale writer retry without overwriting it", () =>
+    Effect.gen(function* () {
+      vi.stubGlobal("window", {});
+      const request = Object.assign(new EventTarget(), { result: "newer catalog" });
+      const put = vi.fn();
+      const transaction = Object.assign(new EventTarget(), {
+        objectStore: () => ({
+          get: () => {
+            queueMicrotask(() => {
+              request.dispatchEvent(new Event("success"));
+              transaction.dispatchEvent(new Event("complete"));
+            });
+            return request;
+          },
+          put,
+        }),
+      });
+      const backend = makeCatalogBackend({ transaction: () => transaction } as never);
+      expect(yield* backend.write("replacement", "older catalog")).toBe(false);
+      expect(put).not.toHaveBeenCalled();
     }),
   );
 
@@ -94,6 +190,11 @@ describe("makeCatalogBackend", () => {
       const transaction = Object.assign(new EventTarget(), {
         error: null as DOMException | null,
         objectStore: () => ({
+          get: () => {
+            const request = Object.assign(new EventTarget(), { result: undefined });
+            queueMicrotask(() => request.dispatchEvent(new Event("success")));
+            return request;
+          },
           put: () => {
             // A failed commit aborts the transaction without an "error" event.
             queueMicrotask(() => {
@@ -105,7 +206,7 @@ describe("makeCatalogBackend", () => {
       });
       const backend = makeCatalogBackend({ transaction: () => transaction } as never);
 
-      const error = yield* backend.write("{}").pipe(Effect.flip);
+      const error = yield* backend.write("{}", null).pipe(Effect.flip);
 
       expect(error.message).toContain("QuotaExceededError");
     }),
@@ -161,7 +262,7 @@ describe("browser GitHub routing permissions", () => {
         read: Effect.succeed(
           encodeCatalog({ ...emptyCatalog, githubRoutingPermissions: oldPermissions }),
         ),
-        write: () => Effect.void,
+        write: () => Effect.succeed(true),
       });
       yield* staleCatalog.read;
       const listening = yield* Deferred.make<void>();
