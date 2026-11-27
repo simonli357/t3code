@@ -172,7 +172,7 @@ export function placeWorker(input: {
           : idle !== null && idle >= 1
             ? 0
             : 1;
-    return { numbers, projectId, room, idle, measured, skipped, group, killedMinutesAgo };
+    return { numbers, projectId, room, idle, measured, skipped, group, killed, killedMinutesAgo };
   });
   const describe = (c: (typeof computers)[number]) => c.measured ?? c.skipped ?? "not measured";
   const lines = computers.map((c) => {
@@ -194,12 +194,34 @@ export function placeWorker(input: {
     projectId: c.projectId,
     reason,
   });
+  const eligible = computers
+    .filter((c) => c.skipped === null && c.room !== null)
+    .toSorted(
+      (a, b) =>
+        a.group - b.group ||
+        b.room! - a.room! ||
+        (b.idle ?? -Infinity) - (a.idle ?? -Infinity) ||
+        a.numbers.label.localeCompare(b.numbers.label),
+    );
   if (input.named !== undefined) {
     const name = input.named.toLowerCase();
     const named = computers.find(
       (c) => c.numbers.environmentId === input.named || c.numbers.label.toLowerCase() === name,
     );
     const because = input.namedBecause ?? "named in the request";
+    if (named && (named.killed || (named.room !== null && named.room < minFreeMemoryGiB))) {
+      const pressure = named.killed
+        ? `a session was killed for memory ${named.killedMinutesAgo} min ago`
+        : `${named.room} GiB room is below the ${minFreeMemoryGiB} GiB minimum`;
+      const alternative =
+        input.project?.found === false ? undefined : eligible.find((c) => c.group < 2);
+      notes.unshift(
+        `${named.numbers.label} is short of memory (${pressure}). ` +
+          (alternative
+            ? `${alternative.numbers.label} has ${alternative.room} GiB room.`
+            : "No other computer was confirmed to have room for this project."),
+      );
+    }
     return {
       ranked: [
         named
@@ -226,15 +248,6 @@ export function placeWorker(input: {
       lines,
       notes,
     };
-  const eligible = computers
-    .filter((c) => c.skipped === null && c.room !== null)
-    .toSorted(
-      (a, b) =>
-        a.group - b.group ||
-        b.room! - a.room! ||
-        (b.idle ?? -Infinity) - (a.idle ?? -Infinity) ||
-        a.numbers.label.localeCompare(b.numbers.label),
-    );
   if (!eligible.length)
     return {
       ranked: [],

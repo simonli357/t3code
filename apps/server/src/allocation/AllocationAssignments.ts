@@ -11,6 +11,7 @@ import {
   profileLabel,
   workerChoice,
   workerChoiceRequest,
+  type AllocationDecision,
   type AllocationStart,
   type AllocationStartResult,
   type AllocationRequest,
@@ -221,6 +222,7 @@ const make = Effect.gen(function* () {
     raw: AllocationStart,
     owner: ThreadId | undefined,
     rechosen: boolean,
+    computerSelection?: AllocationDecision["computerSelection"],
   ) {
     if (raw.kind === "worker" && !owner)
       return yield* invalid("Managed allocation requires the authenticated master.");
@@ -240,7 +242,11 @@ const make = Effect.gen(function* () {
     let selectionDecision: ModelRoutingDecision | undefined;
     let request: AllocationRequest;
     if (routed.selection === "automatic") {
-      const response = yield* allocation.execute({ _tag: "modelAllocate", request: routed });
+      const response = yield* allocation.execute({
+        _tag: "modelAllocate",
+        request: routed,
+        computerSelection,
+      });
       selectionDecision = response.selection;
       if (!selectionDecision) return yield* invalid("Model selection returned no decision.");
       if (!selectionDecision.allocation)
@@ -268,7 +274,11 @@ const make = Effect.gen(function* () {
           );
       }
     }
-    const response = yield* allocation.execute({ _tag: "allocate", request: input.request });
+    const response = yield* allocation.execute({
+      _tag: "allocate",
+      request: input.request,
+      computerSelection,
+    });
     const result = response.result;
     if (!result) return yield* invalid("Allocation returned no decision.");
     if (
@@ -448,10 +458,11 @@ const make = Effect.gen(function* () {
   const start = Effect.fn("AllocationAssignments.start")(function* (
     raw: AllocationStart,
     owner?: ThreadId,
+    computerSelection?: AllocationDecision["computerSelection"],
   ) {
-    const first = yield* startOnce(raw, owner, false);
+    const first = yield* startOnce(raw, owner, false, computerSelection);
     if (!("rechoose" in first)) return first;
-    const second = yield* startOnce(raw, owner, true);
+    const second = yield* startOnce(raw, owner, true, computerSelection);
     // The second attempt never asks again.
     if ("rechoose" in second) return yield* invalid("The choice could not be made again.");
     const note = `${first.rechoose} was reserved for this start and then switched off (${first.reason}); its reservation was released and the choice made again.`;
@@ -492,6 +503,7 @@ const make = Effect.gen(function* () {
             }),
           },
           owner,
+          choice.environmentId === undefined ? "automatic" : "named",
         );
         // No worker was created, so it takes no room.
         if (result.state !== "submitted") placed.delete(assignmentId);

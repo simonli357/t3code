@@ -86,6 +86,7 @@ export class AllocationStore extends Context.Service<
       inventories: readonly AllocationInventory[];
       authorityAvailable: boolean;
       reserve: boolean;
+      computerSelection?: AllocationDecision["computerSelection"];
       expectedPolicyVersion: number;
       expectedModelVersion: number;
       previewPolicy?: ModelRoutingPolicy;
@@ -115,6 +116,7 @@ export class AllocationStore extends Context.Service<
       inventories: readonly AllocationInventory[];
       authorityAvailable: boolean;
       reserve: boolean;
+      computerSelection?: AllocationDecision["computerSelection"];
       expectedPolicyVersion?: number;
       previewPolicy?: AllocationPolicy;
       /**
@@ -243,7 +245,10 @@ const make = Effect.gen(function* () {
             });
           }
           const replay = { ...input, policy: effective, reservations: stored };
-          const decision = decideAllocation(replay);
+          const decision = {
+            ...decideAllocation(replay),
+            ...(input.computerSelection ? { computerSelection: input.computerSelection } : {}),
+          };
           const retained = new Set(
             input.inventories.flatMap((i) =>
               i.accounts
@@ -561,6 +566,7 @@ const make = Effect.gen(function* () {
                     reserve: input.reserve,
                     expectedPolicyVersion: input.expectedPolicyVersion,
                     request: chosen,
+                    computerSelection: input.computerSelection,
                     learned: input.learned,
                     ...(input.reserve ? {} : { previewPolicy: allocationPolicy }),
                     ...fallback,

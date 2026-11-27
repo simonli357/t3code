@@ -222,6 +222,23 @@ describe("placeWorker", () => {
     );
   });
 
+  it("reports memory pressure on a named computer using only measured alternatives with a checkout", () => {
+    const killed = { ...myacer, lastMemoryKillAt: minutesAgo(2) };
+    const missing = { ...myalien, projects: [] };
+    const held = place([killed, missing, sliara], { named: "myacer" });
+    expect(order(held)).toEqual(["myacer"]);
+    expect(held.notes).toEqual([
+      "myacer is short of memory (a session was killed for memory 2 min ago). sliara has 18 GiB room.",
+    ]);
+    expect(
+      place([{ ...killed, recentStarts: undefined }, sliara], { named: "myacer" }).notes,
+    ).toEqual(held.notes);
+    expect(place([killed, missing], { named: "myacer" }).notes).toEqual([
+      "myacer is short of memory (a session was killed for memory 2 min ago). No other computer was confirmed to have room for this project.",
+    ]);
+    expect(place(three, { named: "myacer" }).notes).toEqual([]);
+  });
+
   it("uses a named computer as given, by ID or label, whatever its numbers", () => {
     const full = computer("sliara", 31, 0.5, 0, 16, { environmentLabel: "Sliara" });
     const placement = place([myacer, myalien, full], { named: "sliara" });

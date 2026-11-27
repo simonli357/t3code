@@ -3349,7 +3349,7 @@ it.effect(
   () => {
     const f = placementFixture();
     return Effect.gen(function* () {
-      const { allocation, assignments } = yield* f.setup;
+      const { allocation, assignments, store } = yield* f.setup;
       yield* roomy;
       const master = ThreadId.make("master");
       const link = yield* f.link(allocation);
@@ -3362,6 +3362,7 @@ it.effect(
         /^big has the most room, but no account there can start this worker \(.+\); Local is used instead\.$/,
       );
       expect(f.calls[0]?.environment).toBeUndefined();
+      link("big", 15);
       // Named, a computer under the minimum is still the one used.
       const named = yield* assignments.startWorker(
         workerStart("w2", { environmentId: "full" }),
@@ -3371,7 +3372,14 @@ it.effect(
       expect(named.computer?.reason).toBe(
         "full: named in the request; 1 GiB room (1 free of 31), 12 of 16 CPU threads idle, 0 sessions.",
       );
+      expect(named.notes).toContain(
+        "full is short of memory (1 GiB room is below the 4 GiB minimum). big has 15 GiB room.",
+      );
       expect(named.computers).toHaveLength(3);
+      expect((yield* store.history).map((d) => [d.request.threadId, d.computerSelection])).toEqual([
+        ["w2", "named"],
+        ["w1", "automatic"],
+      ]);
       expect(f.calls[1]).toMatchObject({ environment: "full", projectId: "full-project" });
       // A project this computer does not know cannot be placed; nothing starts.
       const unknown = yield* Effect.flip(

@@ -1153,6 +1153,8 @@ const make = Effect.gen(function* () {
           inventories,
           authorityAvailable,
           reserve: operation._tag === "modelAllocate",
+          computerSelection:
+            operation._tag === "modelAllocate" ? operation.computerSelection : undefined,
           expectedPolicyVersion: policy.version,
           expectedModelVersion: modelPolicy.version,
           learned,
@@ -1273,6 +1275,7 @@ const make = Effect.gen(function* () {
         inventories,
         authorityAvailable,
         reserve: operation._tag === "allocate",
+        computerSelection: operation._tag === "allocate" ? operation.computerSelection : undefined,
         expectedPolicyVersion: policy.version,
         learned,
         ...standIn,

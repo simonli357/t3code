@@ -544,7 +544,10 @@ export const AllocationCandidate = Schema.Struct({
   windows: Schema.Array(AllocationWindowDecision),
 });
 export type AllocationCandidate = typeof AllocationCandidate.Type;
+// Absent on older decisions and starts outside worker placement.
+const computerSelection = Schema.optional(Schema.Literals(["named", "automatic"]));
 export const AllocationDecision = Schema.Struct({
+  computerSelection,
   at: IsoDateTime,
   policyVersion: NonNegativeInt,
   request: AllocationRequest,
@@ -992,7 +995,7 @@ export const AllocationOperation = Schema.TaggedUnion({
   modelPolicy: { expectedVersion: NonNegativeInt, policy: ModelRoutingPolicy },
   modelRevert: { expectedVersion: NonNegativeInt, version: NonNegativeInt },
   modelPreview: { request: ModelRoutingRequest, policy: Schema.optional(ModelRoutingPolicy) },
-  modelAllocate: { request: ModelRoutingRequest },
+  modelAllocate: { request: ModelRoutingRequest, computerSelection },
   connections: {},
   /**
    * Policy-only read for background enforcement; it never collects quota or demand. With
@@ -1001,7 +1004,7 @@ export const AllocationOperation = Schema.TaggedUnion({
   caps: { learnedAt: Schema.optional(Schema.String) },
   snapshot: { part: Schema.optional(AllocationSnapshotPart) },
   preview: { request: AllocationRequest, policy: Schema.optional(AllocationPolicy) },
-  allocate: { request: AllocationRequest },
+  allocate: { request: AllocationRequest, computerSelection },
   policy: { input: AllocationPolicyUpdate },
   lifecycle: { input: AllocationLifecycle },
   connect: { coordinatorEnvironmentId: TrimmedNonEmptyString },
