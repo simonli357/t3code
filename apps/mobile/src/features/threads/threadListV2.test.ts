@@ -2290,6 +2290,24 @@ describe("managed worker groups on native lists", () => {
     expect(unsupported.items[0]?.organization?.workers).toMatchObject({ total: 1, unknown: 1 });
   });
 
+  it("keeps the cached master title and computer on a worker when the master goes offline", () => {
+    const localWorker = worker("a", "first", {
+      organization: organization({
+        owner: { environmentId: otherEnvironmentId, threadId: ThreadId.make("first") },
+      }),
+    });
+    const remoteMaster = master("first", [], {
+      environmentId: otherEnvironmentId,
+      organization: organization({ workers: [{ environmentId, threadId: localWorker.id }] }),
+    });
+    const layout = list([remoteMaster, localWorker], {
+      expanded: new Set([`${otherEnvironmentId}:first`]),
+    });
+    expect(ids(layout)).toEqual(["first", "a"]);
+    expect(layout.items[0]?.organization?.disconnectedComputer).toBe("myacer (disconnected)");
+    expect(layout.items[1]?.organization?.ownerText).toBe("Master: first · myacer (disconnected)");
+  });
+
   it("names an owner by title and computer, and says so when the master is unavailable", () => {
     const missingId = "b100c296-4625-440b-a19e-cf296b1f4a77";
     const orphan = makeThread({
@@ -2304,7 +2322,11 @@ describe("managed worker groups on native lists", () => {
     // Nothing is invented or hidden: the worker stays a visible top-level row.
     expect(ids(layout)).toEqual(["orphan"]);
     const row = layout.items[0]?.organization;
-    expect(row).toMatchObject({ groupDepth: 0, ownerText: "Master unavailable · myacer" });
+    expect(row).toMatchObject({
+      groupDepth: 0,
+      ownerText: "Master unavailable · myacer (disconnected)",
+      disconnectedComputer: "myacer (disconnected)",
+    });
     expect(row?.ownerText).not.toContain(missingId);
     expect(row?.ownerDetail).toContain(missingId);
     expect(row?.ownerDetail).toContain("myacer");

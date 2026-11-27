@@ -21,6 +21,11 @@ export const resolveManagedSessionRef = (
     ref.threadId,
   );
 
+export function sessionComputerLabel(name: string | undefined, connected: boolean) {
+  if (!name) return null;
+  return connected ? name : `${name} (disconnected)`;
+}
+
 export function sessionRole(thread: Pick<EnvironmentThreadShell, "organization">) {
   if (thread.organization === undefined) return null;
   if (thread.organization.owner !== null) return "Worker";

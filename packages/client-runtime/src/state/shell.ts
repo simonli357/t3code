@@ -1,5 +1,6 @@
 import {
   ORCHESTRATION_WS_METHODS,
+  OrchestrationGetSnapshotError,
   type EnvironmentId,
   type OrchestrationShellSnapshot,
   type OrchestrationShellStreamItem,
@@ -20,7 +21,7 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
-import { subscribeDynamic } from "../rpc/client.ts";
+import { isRpcClientError, subscribeDynamicMapped } from "../rpc/client.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { ShellSnapshotLoader } from "./shellSnapshotHttp.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
@@ -191,9 +192,8 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
       service.changes.pipe(Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup)),
   });
 
-  yield* setSynchronizing;
   yield* Effect.forkScoped(
-    subscribeDynamic(
+    subscribeDynamicMapped(
       ORCHESTRATION_WS_METHODS.subscribeShell,
       Effect.fn("EnvironmentShellState.makeSubscribeInput")(function* (session) {
         yield* Ref.set(activeSubscriptionSession, session);
@@ -256,9 +256,54 @@ export const makeEnvironmentShellState = Effect.fn("EnvironmentShellState.make")
           ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
         };
       }),
+      (_session, stream) =>
+        stream.pipe(
+          // A healthy socket can outlive a failed request. Keep the retry inside
+          // this session so replacement or unmount cancels the old subscription.
+          Stream.catchCause((cause) => {
+            const failure = cause.reasons.find(Cause.isFailReason)?.error;
+            // Transport closure already wakes the supervisor. Keep its retry
+            // ownership and preserve the server's typed errors for diagnostics.
+            if (
+              failure &&
+              (!isRpcClientError(failure) || failure.reason._tag !== "RpcClientDefect")
+            ) {
+              return Stream.failCause(cause);
+            }
+            return Stream.fail(
+              new OrchestrationGetSnapshotError({
+                message: "Shell subscription failed.",
+                cause: Cause.squash(cause),
+              }),
+            );
+          }),
+          Stream.onEnd(
+            Effect.fail(
+              new OrchestrationGetSnapshotError({
+                message: "Shell subscription ended.",
+              }),
+            ),
+          ),
+          // Only initial synchronization needs a deadline. A live shell on an
+          // idle computer can legitimately go without events indefinitely.
+          Stream.interruptWhen(
+            Effect.sleep("1 minute").pipe(
+              Effect.andThen(SubscriptionRef.get(state)),
+              Effect.flatMap((current) =>
+                current.status === "synchronizing"
+                  ? Effect.fail(
+                      new OrchestrationGetSnapshotError({
+                        message: "Shell synchronization timed out.",
+                      }),
+                    )
+                  : Effect.never,
+              ),
+            ),
+          ),
+        ),
       {
         onExpectedFailure: (cause) => setStreamError(Cause.squash(cause)),
-        retryExpectedFailureAfter: "250 millis",
+        retryExpectedFailureAfter: "1 second",
         resubscribe: foregroundResubscriptions,
       },
     ).pipe(Stream.runForEachArray(applyItems)),

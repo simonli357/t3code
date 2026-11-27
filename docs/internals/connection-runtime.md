@@ -49,10 +49,16 @@ require valid credentials.
 
 A socket opening is insufficient evidence that the environment is usable. The
 [RPC session](../../packages/client-runtime/src/rpc/session.ts) waits for the
-initial server configuration before becoming ready. Shell and thread data then
-have their own synchronization state. A failed shell subscription can coexist
-with a healthy connection; labeling that state "reconnecting" promises a
-transport retry that will never happen.
+initial server configuration before becoming ready. If an attempt is already
+synchronizing at the 15-second setup deadline, it gets another 45 seconds.
+Ending or interrupting the config stream closes the lease even if the socket is
+still open.
+
+Shell and thread data have their own synchronization state. A failed or ended
+shell stream retries on the same session. A one-minute deadline also recovers a
+shell still waiting for its initial snapshot or synchronization marker. A quiet
+live shell has no inactivity deadline. Retries resume from the applied cursor
+when the snapshot is authoritative for that session.
 
 Cached projections remain readable offline. They must neither imply a live
 connection nor overwrite newer live data during a reconnect. Loading and

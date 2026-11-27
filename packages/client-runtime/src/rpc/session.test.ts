@@ -769,6 +769,28 @@ describe("RpcSessionFactory", () => {
     ),
   );
 
+  it.effect("replaces a ready session when the server interrupts its config stream", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const session = yield* factory.connect(PREPARED);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* completeInitialConfig(socket);
+      yield* session.ready;
+      socket.serverMessage(
+        encodeJson({
+          _tag: "Exit",
+          requestId: (yield* awaitRequest(socket)).id,
+          exit: { _tag: "Failure", cause: [{ _tag: "Interrupt", fiberId: 1 }] },
+        }),
+      );
+      expect(yield* Effect.flip(session.closed)).toMatchObject({
+        _tag: "ConnectionTransientError",
+        reason: "remote-unavailable",
+      });
+    }),
+  );
+
   it.effect("closes the session when the config source dies", () =>
     Effect.scoped(
       Effect.gen(function* () {

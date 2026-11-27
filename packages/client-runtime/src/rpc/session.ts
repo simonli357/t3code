@@ -268,14 +268,12 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
         }),
       ),
       Effect.onExit((exit) => {
-        if (Exit.isSuccess(exit)) {
+        // The server can interrupt just this request while the socket stays open.
+        if (Exit.isSuccess(exit) || Cause.hasInterruptsOnly(exit.cause)) {
           return Effect.all([
             Deferred.succeed(serverConfigExit, undefined),
             Deferred.fail(configSubscriptionClosed, configSubscriptionEndedError),
           ]).pipe(Effect.asVoid);
-        }
-        if (Cause.hasInterruptsOnly(exit.cause)) {
-          return Effect.void;
         }
         return Effect.all([
           Deferred.failCause(serverConfigExit, exit.cause),

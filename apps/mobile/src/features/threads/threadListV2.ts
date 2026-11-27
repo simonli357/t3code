@@ -2,6 +2,7 @@ import {
   buildSessionHierarchy,
   describeSessionOwner,
   expandSessionGroups,
+  sessionComputerLabel,
   sessionGroupDepth,
   sessionKey,
   sessionListRoot,
@@ -214,6 +215,7 @@ export interface ThreadListV2Organization {
   /** "Master: <title> · <computer>", or "Master unavailable · <computer>" for
       an owner this client has not loaded. Never a raw identifier. */
   readonly ownerText: string | null;
+  readonly disconnectedComputer: string | null;
   /** The owner's full identity. Phones have no tooltips, so this is the row's
       accessibility description. */
   readonly ownerDetail: string | null;
@@ -372,6 +374,7 @@ function organizationsAreEqual(
   return (
     previous.groupDepth === next.groupDepth &&
     previous.ownerText === next.ownerText &&
+    previous.disconnectedComputer === next.disconnectedComputer &&
     previous.ownerDetail === next.ownerDetail &&
     previous.expanded === next.expanded &&
     previous.finishedCount === next.finishedCount &&
@@ -668,6 +671,11 @@ export function buildThreadListV2Items(input: {
           settled: settledWorkers,
         })
       : roots;
+  const computerLabel = (id: EnvironmentId) =>
+    sessionComputerLabel(
+      groupSettings?.computerLabels.get(id),
+      groupSettings?.connected.has(id) ?? false,
+    );
   const metadata = (thread: EnvironmentThreadShell): ThreadListV2Organization => {
     const key = sessionKey(thread);
     const summary = summarizeSessionWorkers(
@@ -676,13 +684,14 @@ export function buildThreadListV2Items(input: {
       groupSettings?.connected ?? new Set(),
       settledWorkers,
     );
-    const owner = describeSessionOwner(
-      sessionOwnerChain(hierarchy, key),
-      (environmentId) => groupSettings?.computerLabels.get(environmentId) ?? null,
-    );
+    const owner = describeSessionOwner(sessionOwnerChain(hierarchy, key), computerLabel);
     return {
       groupDepth: grouped ? sessionGroupDepth(hierarchy, key, settledWorkers) : 0,
       ownerText: owner?.text ?? null,
+      disconnectedComputer:
+        groupSettings?.connected.has(thread.environmentId) === false
+          ? computerLabel(thread.environmentId)
+          : null,
       ownerDetail: owner?.detail ?? null,
       // Only a group with active workers gets a header; a settled worker heads none.
       workers:

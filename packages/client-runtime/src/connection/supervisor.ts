@@ -549,6 +549,12 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
         })),
       ),
       Effect.sleep(CONNECTION_ESTABLISHMENT_TIMEOUT).pipe(
+        // The socket has its own open timeout. A large initial config on a
+        // busy server can still be making progress after the setup deadline.
+        Effect.andThen(SubscriptionRef.get(state)),
+        Effect.flatMap((current) =>
+          current.stage === "synchronizing" ? Effect.sleep("45 seconds") : Effect.void,
+        ),
         Effect.as<EstablishmentEvent>({ _tag: "TimedOut" }),
       ),
     ]);

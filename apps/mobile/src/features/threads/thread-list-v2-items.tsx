@@ -559,6 +559,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     onSetThreadAutoSettle,
     onMoveThread,
   } = props;
+  const disconnectedComputer = props.organization?.disconnectedComputer;
+  const computerLabel = disconnectedComputer ?? props.environmentLabel;
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
   const dormant = useSwipeRowDormant(props.activationKey);
@@ -995,7 +997,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           >
             {thread.session.lastError}
           </Text>
-        ) : thread.branch || props.environmentLabel ? (
+        ) : thread.branch || computerLabel ? (
           /* "branch · machine" share one truncating line. The machine sits
              last so a tight fit cuts the repetitive label, not the branch —
              and machine-only fills the row for non-git projects. The glyph
@@ -1025,8 +1027,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   {thread.branch}
                 </Text>
               ) : null}
-              {thread.branch && props.environmentLabel ? "  ·  " : null}
-              {props.environmentLabel ? (
+              {thread.branch && computerLabel ? "  ·  " : null}
+              {computerLabel ? (
                 <Text
                   className={cn(
                     "text-xs",
@@ -1035,11 +1037,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                       : rowAppearance.tertiaryForegroundClassName,
                   )}
                 >
-                  {props.environmentLabel}
+                  {computerLabel}
                 </Text>
               ) : null}
             </Text>
-            {props.environmentLabel && props.environmentMachine ? (
+            {computerLabel && props.environmentMachine ? (
               <EnvironmentMachineSymbol
                 kind={props.environmentMachine}
                 size={11}
@@ -1212,7 +1214,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const ownerCaption = groupDepth === 1 ? null : (organization?.ownerText ?? null);
   // A card draws its computer on its last line; a slim row has no such line.
   const captionRest = [
-    variant === "slim" && thread.organization ? props.environmentLabel : null,
+    variant === "slim"
+      ? (disconnectedComputer ?? (thread.organization ? computerLabel : null))
+      : null,
     ownerCaption,
   ]
     .filter((part) => part !== null)
@@ -1223,7 +1227,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       {organizationOpen && (
         <SessionOrganizationSheet thread={thread} onClose={() => setOrganizationOpen(false)} />
       )}
-      {(variant !== "slim" || snoozedRow) && (role !== null || captionRest.length > 0) ? (
+      {(variant !== "slim" || snoozedRow || disconnectedComputer) &&
+      (role !== null || captionRest.length > 0) ? (
         <View className={cn("pt-1", sidebarPane ? "px-3" : "px-5")}>
           <Text
             numberOfLines={1}

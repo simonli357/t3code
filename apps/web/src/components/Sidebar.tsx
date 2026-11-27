@@ -2,6 +2,7 @@ import {
   buildSessionHierarchy,
   describeSessionOwner,
   expandSessionGroups,
+  sessionComputerLabel,
   sessionGroupDepth,
   sessionKey,
   sessionListRoot,
@@ -64,6 +65,7 @@ import {
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentMachineKind,
+  type EnvironmentId,
   type ProjectIconOverride,
   type ScopedThreadRef,
   type ThreadId,
@@ -1094,6 +1096,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   openPullRequestsInRightPanel: boolean;
   jumpLabel: string | null;
   currentEnvironmentId: string | null;
+  disconnected: boolean;
   environmentLabel: string | null;
   environmentMachine: EnvironmentMachineKind;
   project: EnvironmentProject | null;
@@ -1739,11 +1742,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             </span>
             {draftIndicator}
             {title}
-            {variantAction !== "unsettle" && (
-              <>
-                <SessionRoleLabel thread={thread} nested={nested} />
-                <ThreadEnvironmentLabel label={props.environmentLabel ?? thread.environmentId} />
-              </>
+            {variantAction !== "unsettle" && <SessionRoleLabel thread={thread} nested={nested} />}
+            {(variantAction !== "unsettle" || props.disconnected) && (
+              <ThreadEnvironmentLabel label={props.environmentLabel ?? thread.environmentId} />
             )}
             {pinIndicator}
             {terminalStatusIcon}
@@ -2517,14 +2518,13 @@ export default function Sidebar() {
       ),
     [environments],
   );
+  const computerLabel = (id: EnvironmentId) =>
+    sessionComputerLabel(environmentLabelById.get(id), connectedEnvironments.has(id));
   // Rows name their owner by title and computer. An owner this client cannot
   // load reads "Master unavailable" and keeps its identity for the tooltip.
   const describeRowOwnership = (thread: EnvironmentThreadShell) => {
     const key = sessionKey(thread);
-    const owner = describeSessionOwner(
-      sessionOwnerChain(hierarchy, key),
-      (environmentId) => environmentLabelById.get(environmentId) ?? null,
-    );
+    const owner = describeSessionOwner(sessionOwnerChain(hierarchy, key), computerLabel);
     return {
       groupDepth: sessionGroupDepth(hierarchy, key, settledWorkers),
       ownerText: owner?.text ?? null,
@@ -5082,7 +5082,7 @@ export default function Sidebar() {
                             `${thread.environmentId}:${thread.projectId}`,
                           ) ?? null
                         }
-                        environmentLabel={environmentLabelById.get(thread.environmentId) ?? null}
+                        environmentLabel={computerLabel(thread.environmentId)}
                         environmentMachine={
                           environmentMachineById.get(thread.environmentId) ?? "server"
                         }
@@ -5224,10 +5224,9 @@ export default function Sidebar() {
                             jumpLabel={
                               showThreadJumpHints ? (jumpLabelByKey.get(threadKey) ?? null) : null
                             }
+                            disconnected={!connectedEnvironments.has(thread.environmentId)}
                             currentEnvironmentId={primaryEnvironmentId}
-                            environmentLabel={
-                              environmentLabelById.get(thread.environmentId) ?? null
-                            }
+                            environmentLabel={computerLabel(thread.environmentId)}
                             environmentMachine={
                               environmentMachineById.get(thread.environmentId) ?? "server"
                             }
