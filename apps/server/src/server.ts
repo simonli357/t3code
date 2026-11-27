@@ -43,6 +43,7 @@ import {
   httpCompressionLayer,
   untracedRequestsLayer,
 } from "./http.ts";
+import { installBrokenPipeGuard } from "./brokenPipeGuard.ts";
 import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
@@ -1035,4 +1036,8 @@ const makeServerLayer = Layer.unwrap(
 );
 
 // The CLI supplies configuration.
-export const runServer = Layer.launch(makeServerLayer);
+export const runServer = Effect.acquireUseRelease(
+  Effect.sync(installBrokenPipeGuard),
+  () => Layer.launch(makeServerLayer),
+  (remove) => Effect.sync(remove),
+);
