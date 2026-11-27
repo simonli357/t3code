@@ -293,15 +293,23 @@ const make = Effect.gen(function* () {
     const nowMs = yield* Clock.currentTimeMillis;
     const stale = (yield* providers.getProviders).filter((p) => {
       const limits = p.usageLimits;
-      if (!p.enabled || !p.installed || !limits || (driver !== undefined && p.driver !== driver))
-        return false;
+      if (!p.enabled || !p.installed || (driver !== undefined && p.driver !== driver)) return false;
       if (
-        limits.unavailable?.reason === "unsupported" ||
-        limits.unavailable?.reason === "unverified"
+        limits?.unavailable?.reason === "unsupported" ||
+        limits?.unavailable?.reason === "unverified"
       )
         return false;
       if (nowMs - (refreshAttempts.get(p.instanceId) ?? -Infinity) < READING_REFRESH_RETRY_MS)
         return false;
+      if (!limits) {
+        // A failed Claude health check can leave neither quota nor login identity.
+        // Retry a known sign-out at the normal interval so a new login is discovered.
+        return (
+          p.driver === "claudeAgent" &&
+          (p.auth.status !== "unauthenticated" ||
+            nowMs - Date.parse(p.checkedAt) > maxAgeMinutes * 60_000)
+        );
+      }
       const readings = limits.windows.length
         ? limits.windows.map((w) => w.checkedAt ?? limits.checkedAt)
         : [limits.checkedAt];
@@ -903,7 +911,11 @@ const make = Effect.gen(function* () {
               _tag: "allocationInventory",
               ...(request ? { request } : {}),
               ...(placement ? { placement } : {}),
-              ...(refreshOlderThanMinutes === undefined ? {} : { refreshOlderThanMinutes }),
+              // An observer has only five seconds to return its existing account readings
+              // and load. Probing stale accounts first can use up most of that deadline.
+              ...(refreshOlderThanMinutes !== undefined && environmentId === executionEnvironmentId
+                ? { refreshOlderThanMinutes }
+                : {}),
             })
             .pipe(Effect.flatMap(Schema.decodeUnknownEffect(AllocationInventory)));
         const own = inventory(request, placement, refreshOlderThanMinutes);

@@ -314,6 +314,8 @@ export const AllocationWindow = Schema.Struct({
 });
 export type AllocationWindow = typeof AllocationWindow.Type;
 export const AllocationAccount = Schema.Struct({
+  /** Explicit provider sign-out on this computer. Older peers omit this. */
+  signedOut: Schema.optional(Schema.Boolean),
   /** Missing on older environments means available for workers. */
   availableForWorkers: Schema.optional(Schema.Boolean),
   retainHistory: Schema.optional(Schema.Boolean),

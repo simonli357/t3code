@@ -442,6 +442,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         ...(mixed ? [profileLabel(run.driver, run.model, run.options)] : []),
       ];
       runs.set(account.instanceId, own);
+      if (account.signedOut) reasons.push("Signed out on this computer.");
       if (account.enabled === false) reasons.push("Provider is turned off in settings.");
       if (request.kind !== "session" && account.availableForWorkers === false)
         reasons.push(WORKER_ACCOUNT_DISABLED_REASON);

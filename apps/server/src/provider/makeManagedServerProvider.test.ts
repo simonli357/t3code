@@ -570,12 +570,19 @@ describe("makeManagedServerProvider", () => {
         assert.deepStrictEqual(update?.usageLimits, {
           checkedAt: "2026-04-10T00:05:00.000Z",
           windows: [
-            { id: "five_hour", kind: "session", label: "Session", usedPercent: 10 },
+            {
+              id: "five_hour",
+              kind: "session",
+              label: "Session",
+              usedPercent: 10,
+              checkedAt: "2026-04-10T00:00:01.000Z",
+            },
             {
               id: "seven_day",
               kind: "weekly",
               label: "Weekly",
               usedPercent: 25,
+              checkedAt: "2026-04-10T00:05:00.000Z",
               resetsAt: "2026-04-17T00:00:00.000Z",
             },
           ],
@@ -606,6 +613,9 @@ describe("makeManagedServerProvider", () => {
                 ? { ...refreshedSnapshot, usageLimits: probedLimits }
                 : {
                     ...refreshedSnapshotSecond,
+                    ...(count > 2
+                      ? { auth: { status: "authenticated" as const, email: "other@example.test" } }
+                      : {}),
                     usageLimits: {
                       checkedAt: "2026-04-10T00:00:03.000Z",
                       windows: [],
@@ -646,12 +656,17 @@ describe("makeManagedServerProvider", () => {
           Effect.map((chunk) => Array.from(chunk)[0]!),
         );
         assert.deepStrictEqual(enriched.models, enrichedSnapshot.models);
-        assert.deepStrictEqual(enriched.usageLimits?.windows, [liveWindow]);
+        const publishedWindows = [{ ...liveWindow, checkedAt: "2026-04-10T00:00:02.000Z" }];
+        assert.deepStrictEqual(enriched.usageLimits?.windows, publishedWindows);
 
         // A probe that could not read usage keeps the last good windows.
         const refreshed = yield* provider.refresh;
         assert.strictEqual(refreshed.message, refreshedSnapshotSecond.message);
-        assert.deepStrictEqual(refreshed.usageLimits?.windows, [liveWindow]);
+        assert.deepStrictEqual(refreshed.usageLimits?.windows, publishedWindows);
+
+        const changedLogin = yield* provider.refresh;
+        assert.deepStrictEqual(changedLogin.usageLimits?.windows, []);
+        assert.strictEqual(changedLogin.usageLimits?.unavailable?.reason, "probeFailed");
       }),
     ).pipe(Effect.provide(AlwaysRunTestLayer)),
   );

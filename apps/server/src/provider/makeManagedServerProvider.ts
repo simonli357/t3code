@@ -160,7 +160,11 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         const snapshot = withUsageLimits(
           probedSnapshot,
           resolveUsageLimitsAfterProbe({
-            published: state.snapshot.usageLimits,
+            // An auth-only probe may identify a different login before quota is readable.
+            published:
+              state.snapshot.auth.email === probedSnapshot.auth.email
+                ? state.snapshot.usageLimits
+                : undefined,
             probed: probedSnapshot.usageLimits,
           }),
         );

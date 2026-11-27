@@ -117,6 +117,7 @@ export function allocationInventory(input: {
       availableForWorkers: !input.workerDisabledInstanceIds?.includes(p.instanceId),
       retainHistory: measurements.monitoredInstanceIds.includes(p.instanceId),
       enabled: p.enabled,
+      ...(p.auth.status === "unauthenticated" ? { signedOut: true } : {}),
       ...(p.auth.tier || p.auth.label ? { plan: p.auth.tier ?? p.auth.label } : {}),
       environmentId,
       instanceId: p.instanceId,

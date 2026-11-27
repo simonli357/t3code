@@ -11,6 +11,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -329,8 +330,8 @@ function waitForAbortSignal(signal: AbortSignal): Promise<void> {
  * account info and slash commands) but never starts an API request to
  * Anthropic. We read the init data and then abort the subprocess.
  *
- * This is used as a fallback when `claude auth status` does not include
- * subscription type information.
+ * The SDK reports the subscription and quota together. An unidentified first-party
+ * login is checked separately with the CLI.
  */
 const probeClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -420,6 +421,16 @@ const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   return yield* spawnAndCollect(claudeSettings.binaryPath, command);
 });
 
+const decodeClaudeLogin = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      loggedIn: Schema.Boolean,
+      email: Schema.optional(Schema.NullOr(Schema.String)),
+      authMethod: Schema.optional(Schema.String),
+    }),
+  ),
+);
+
 export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(function* (
   claudeSettings: ClaudeSettings,
   resolveCapabilities?: (
@@ -489,26 +500,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  if (Option.isNone(versionProbe.success)) {
-    return buildServerProvider({
-      presentation: CLAUDE_PRESENTATION,
-      enabled: claudeSettings.enabled,
-      checkedAt,
-      models: allModels,
-      probe: {
-        installed: true,
-        version: null,
-        status: "error",
-        auth: { status: "unknown" },
-        message:
-          "Claude Agent CLI is installed but failed to run. Timed out while running command.",
-      },
-    });
-  }
-
-  const version = versionProbe.success.value;
-  const parsedVersion = parseGenericCliVersion(`${version.stdout}\n${version.stderr}`);
-  if (version.code !== 0) {
+  // A slow --version says nothing about the login. The independent SDK probe may
+  // already have its account and quota cached.
+  const version = Option.getOrUndefined(versionProbe.success);
+  const parsedVersion = version
+    ? parseGenericCliVersion(`${version.stdout}\n${version.stderr}`)
+    : null;
+  if (version && version.code !== 0) {
     yield* Effect.logWarning("Claude Agent CLI version probe exited with a non-zero status.", {
       exitCode: version.code,
       stdoutLength: version.stdout.length,
@@ -529,12 +527,16 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
-  const models = providerModelsFromSettings(
-    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
-    claudeSettings.customModels,
-    DEFAULT_CLAUDE_MODEL_CAPABILITIES,
-  );
-  const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
+  const models = !version
+    ? allModels
+    : providerModelsFromSettings(
+        resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+        claudeSettings.customModels,
+        DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+      );
+  const versionUpgradeMessage = parsedVersion
+    ? formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion)
+    : undefined;
 
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
@@ -543,7 +545,26 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const slashCommands = [COMPACT_SLASH_COMMAND, ...(capabilities?.slashCommands ?? [])];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
-  if (!capabilities) {
+  // SDK initialization also succeeds when Claude is signed out. For an unidentified
+  // first-party account ask the CLI in the same config directory for its login state.
+  const needsLogin =
+    !capabilities?.email &&
+    (!capabilities?.apiProvider || capabilities.apiProvider === "firstParty") &&
+    !normalizeClaudeAuthMethod(capabilities?.tokenSource);
+  const login = needsLogin
+    ? yield* runClaudeCommand(claudeSettings, ["auth", "status"], resolvedEnvironment).pipe(
+        Effect.map(({ stdout }) => Option.getOrUndefined(decodeClaudeLogin(stdout))),
+        Effect.timeout(DEFAULT_TIMEOUT_MS),
+        Effect.orElseSucceed(() => undefined),
+      )
+    : undefined;
+  if (
+    login?.loggedIn === false ||
+    (needsLogin &&
+      !login &&
+      !capabilities?.subscriptionType &&
+      !capabilities?.usage?.rate_limits_available)
+  ) {
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -555,22 +576,26 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         installed: true,
         version: parsedVersion,
         status: "warning",
-        auth: { status: "unknown" },
-        message: "Could not verify Claude authentication status from initialization result.",
+        auth: { status: login?.loggedIn === false ? "unauthenticated" : "unknown" },
+        message:
+          login?.loggedIn === false
+            ? "Claude is signed out on this computer."
+            : "Could not verify Claude authentication status.",
       },
     });
   }
 
+  const email = capabilities?.email || login?.email;
   const authMetadata =
     claudeAuthMetadata({
-      subscriptionType: capabilities.subscriptionType,
-      authMethod: capabilities.tokenSource,
-    }) ?? apiProviderAuthMetadata(capabilities.apiProvider);
+      subscriptionType: capabilities?.subscriptionType,
+      authMethod: login?.authMethod ?? capabilities?.tokenSource,
+    }) ?? apiProviderAuthMetadata(capabilities?.apiProvider);
   const tier =
-    capabilities.subscriptionType && authMetadata?.type !== "apiKey"
+    capabilities?.subscriptionType && authMetadata?.type !== "apiKey"
       ? yield* readClaudePlanTier(claudeSettings, resolvedEnvironment)
       : undefined;
-  const usageLimits = !capabilities.usage
+  const usageLimits = !capabilities?.usage
     ? makeUnavailableUsageLimits({ checkedAt, reason: "probeFailed" })
     : scopedLimitNames
       ? yield* recordClaudeUsageResponse(scopedLimitNames, {
@@ -580,7 +605,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       : claudeUsageResponseToLimits({ response: capabilities.usage, checkedAt }).limits;
   const resetCredits =
     resolveResetCredits &&
-    capabilities.subscriptionType &&
+    capabilities?.subscriptionType &&
     !usageLimits.unavailable &&
     parsedVersion
       ? yield* resolveResetCredits(parsedVersion)
@@ -598,7 +623,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       status: "ready",
       auth: {
         status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
+        ...(email ? { email } : {}),
         ...(authMetadata ? authMetadata : {}),
         ...(tier ? { tier } : {}),
       },

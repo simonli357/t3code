@@ -986,6 +986,29 @@ it.effect("a start placed on one computer counts sessions working on a slower on
   }),
 );
 
+it.effect("shares a peer's existing quota without waiting for its provider refresh", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const own = (yield* allocation.execute({ _tag: "snapshot" })).snapshot!.inventories[0]!;
+    f.state.peers = [
+      {
+        ...own,
+        environmentId: "peer",
+        accounts: own.accounts.map((a) => ({ ...a, environmentId: "peer" })),
+      },
+    ];
+    f.state.providers = [{ ...provider, usageLimits: undefined }];
+    const decision = (yield* allocation.execute({ _tag: "preview", request: startInput.request }))
+      .result!.decision;
+    expect(f.peerCalls).toContainEqual({
+      _tag: "allocationInventory",
+      request: startInput.request,
+    });
+    expect(decision.candidates[0]?.roomPoints).toBe(100);
+  }).pipe(Effect.provide(f.layer));
+});
+
 it.effect("a computer that does not answer in time is named in the selection's notes", () =>
   Effect.gen(function* () {
     const attempted = yield* Deferred.make<void>();
@@ -3092,6 +3115,40 @@ it.effect("explicit peer worker starts use the destination's availability settin
     );
     expect(error.detail).toBe("Turned off for workers in Provider allocation settings");
     expect(f.calls).toHaveLength(0);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a worker preview recovers a missing Claude reading without a running session", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    const claude = { ...provider, driver: ProviderDriverKind.make("claudeAgent") };
+    f.state.providers = [{ ...claude, auth: { status: "unknown" }, usageLimits: undefined }];
+    f.state.refresh = () =>
+      Effect.sync(() => {
+        f.state.providers = [claude];
+      });
+    const read = yield* allocation.execute({
+      _tag: "preview",
+      request: { ...startInput.request, driver: claude.driver },
+    });
+    expect(read.result!.decision.candidates[0]!.roomPoints).toBe(100);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("a confirmed local sign-out explains why a worker cannot use the account", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const { allocation } = yield* f.setup;
+    f.state.providers = [
+      { ...provider, auth: { status: "unauthenticated" }, usageLimits: undefined },
+    ];
+    const preview = allocation.execute({ _tag: "preview", request: startInput.request });
+    const out = (yield* preview).result!.decision;
+    expect(out.candidates[0]?.line).toContain("Signed out on this computer");
+    expect(out.selectedInstanceId).toBeNull();
+    f.state.providers = [provider];
+    expect((yield* preview).result!.decision.selectedInstanceId).toBe(provider.instanceId);
   }).pipe(Effect.provide(f.layer));
 });
 

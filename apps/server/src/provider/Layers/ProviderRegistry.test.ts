@@ -863,10 +863,10 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           models: [placeholder],
         } satisfies ServerProvider;
 
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(canonical, startupPlaceholder).models,
-          [flash, pro],
-        );
+        assert.deepStrictEqual(mergeProviderSnapshot(canonical, startupPlaceholder).models, [
+          flash,
+          pro,
+        ]);
       });
 
       it("drops stale OpenCode models missing from a successful refresh", () => {
@@ -2976,7 +2976,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               defaultClaudeSettings,
               () =>
                 Effect.succeed({
-                  email: undefined,
+                  email: overrides.subscriptionType ? "subscriber@example.test" : undefined,
                   subscriptionType: undefined,
                   tokenSource: undefined,
                   apiProvider: undefined,
@@ -3010,6 +3010,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           const status = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
             claudeCapabilities({
+              email: "subscriber@example.test",
               subscriptionType: "Claude Max Subscription",
             }),
           );
@@ -3032,6 +3033,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           const status = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
             claudeCapabilities({
+              email: "subscriber@example.test",
               subscriptionType: "Claude Max",
             }),
           );
@@ -3099,9 +3101,10 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
           );
           assert.strictEqual(status.status, "ready");
           // The home is resolved through the host Path before it reaches the env.
+          const resolved = (yield* Path.Path).resolve(claudeConfigDir);
           assert.deepStrictEqual(
-            recorded.commands.map((command) => command.env?.CLAUDE_CONFIG_DIR),
-            [(yield* Path.Path).resolve(claudeConfigDir)],
+            recorded.commands.map((c) => c.env?.CLAUDE_CONFIG_DIR),
+            [resolved, resolved],
           );
         }).pipe(Effect.provide(recorded.layer));
       });
@@ -3257,35 +3260,58 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         );
       });
 
-      it.effect("returns warning when the Claude initialization result is unavailable", () =>
+      it.effect("reads the SDK account when the CLI version probe times out", () =>
         Effect.gen(function* () {
-          const status = yield* checkClaudeProviderStatus(
+          const fiber = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
-            noClaudeCapabilities,
-          );
-          assert.strictEqual(status.status, "warning");
-          assert.strictEqual(status.installed, true);
-          assert.strictEqual(status.auth.status, "unknown");
-          assert.strictEqual(
-            status.message,
-            "Could not verify Claude authentication status from initialization result.",
-          );
+            claudeCapabilities({ email: "active@example.test" }),
+          ).pipe(Effect.forkChild);
+          yield* TestClock.adjust("5 seconds");
+          const status = yield* Fiber.join(fiber);
+          assert.isNull(status.version);
+          assert.strictEqual(status.auth.email, "active@example.test");
         }).pipe(
           Effect.provide(
-            mockSpawnerLayer((args) => {
-              const joined = args.join(" ");
-              if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
-              if (joined === "auth status")
-                return {
-                  stdout: '{"loggedIn":false}\n',
-                  stderr: "",
-                  code: 1,
-                };
-              throw new Error(`Unexpected args: ${joined}`);
-            }),
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() => Effect.never),
+            ),
           ),
         ),
       );
+
+      for (const [name, stdout, code, expected] of [
+        ["signed out", '{"loggedIn":false}', 1, "unauthenticated"],
+        ["signed in", '{"loggedIn":true,"email":"active@example.test"}', 0, "authenticated"],
+        ["unreadable", "command failed", 1, "unknown"],
+      ] as const) {
+        it.effect(
+          `uses the native Claude login status when SDK account fields are empty: ${name}`,
+          () =>
+            Effect.gen(function* () {
+              for (const probe of [
+                noClaudeCapabilities,
+                claudeCapabilities({ apiProvider: "firstParty" }),
+              ]) {
+                const status = yield* checkClaudeProviderStatus(defaultClaudeSettings, probe);
+                assert.strictEqual(status.auth.status, expected);
+                assert.strictEqual(
+                  status.auth.email,
+                  expected === "authenticated" ? "active@example.test" : undefined,
+                );
+              }
+            }).pipe(
+              Effect.provide(
+                mockSpawnerLayer((args) => {
+                  if (args.join(" ") === "--version")
+                    return { stdout: "2.1.321", stderr: "", code: 0 };
+                  assert.deepEqual(args, ["auth", "status"]);
+                  return { stdout, stderr: "", code };
+                }),
+              ),
+            ),
+        );
+      }
     });
   },
 );
