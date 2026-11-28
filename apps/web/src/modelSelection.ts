@@ -1,4 +1,4 @@
-import { isAllowedDeepseekModel } from "@t3tools/shared/model";
+import { claudePlanExcludesFable, isAllowedDeepseekModel, isFable } from "@t3tools/shared/model";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   DEFAULT_TEXT_GENERATION_MODEL,
@@ -23,7 +23,7 @@ import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import {
   getDefaultServerModel,
-  getProviderModels,
+  getProviderSnapshot,
   resolveSelectableProvider,
 } from "./providerModels";
 import { ModelEsque } from "./components/chat/providerIconUtils";
@@ -186,7 +186,8 @@ function getAppModelOptions(
   provider: ProviderDriverKind,
   selectedModel?: string | null,
 ): AppModelOption[] {
-  const rawModels = getProviderModels(providers, provider);
+  const snapshot = getProviderSnapshot(providers, provider);
+  const rawModels = snapshot?.models ?? [];
   // Server-reported custom rows mirror settings and can lag a removal, so
   // only built-ins are taken from the snapshot; custom rows are rebuilt from
   // settings below.
@@ -195,7 +196,7 @@ function getAppModelOptions(
     .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
-    Arr.filterMap(getProviderModels(providers, provider), (model) =>
+    Arr.filterMap(rawModels, (model) =>
       model.isCustom ? Result.failVoid : Result.succeed(model.slug),
     ),
   );
@@ -205,9 +206,10 @@ function getAppModelOptions(
   // settings and the initial render before the first write both still
   // see the user's authored custom models.
   const defaultInstanceId = defaultInstanceIdForDriver(provider);
+  const excludesFable = claudePlanExcludesFable(snapshot);
   const customModels = readInstanceCustomModels(settings, defaultInstanceId, provider);
   for (const entry of normalizeCustomModelEntries(customModels, builtInModelSlugs)) {
-    if (seen.has(entry.slug)) {
+    if (seen.has(entry.slug) || (excludesFable && isFable(entry.slug))) {
       continue;
     }
 
@@ -255,9 +257,10 @@ export function getAppModelOptionsForInstance(
     ),
   );
 
+  const excludesFable = claudePlanExcludesFable(entry.snapshot);
   const customModels = readInstanceCustomModels(settings, entry.instanceId, entry.driverKind);
   for (const custom of normalizeCustomModelEntries(customModels, builtInModelSlugs)) {
-    if (seen.has(custom.slug)) {
+    if (seen.has(custom.slug) || (excludesFable && isFable(custom.slug))) {
       continue;
     }
 

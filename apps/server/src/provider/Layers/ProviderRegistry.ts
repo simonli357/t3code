@@ -42,6 +42,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ModelManifest from "../ModelManifest.ts";
 import { applyProviderCompatibility } from "../providerCompatibility.ts";
+import { restrictClaudePlanModels } from "../ClaudeModelCatalog.ts";
 import { restrictDeepseekProvider } from "../deepseekPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
@@ -384,7 +385,7 @@ export const ProviderRegistryLive = Layer.effect(
       manifest: ModelManifest.ModelManifestData,
     ) =>
       applyProviderCompatibility(
-        restrictDeepseekProvider(provider),
+        restrictDeepseekProvider(restrictClaudePlanModels(provider)),
         manifest.compatibility,
         ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
       );

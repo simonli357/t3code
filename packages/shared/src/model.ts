@@ -3,6 +3,7 @@ import {
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelCapabilities,
   type ModelSelection,
+  type ServerProvider,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderOptionDescriptor,
@@ -12,6 +13,20 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
+
+export const isFable = (model: string) => /fable/i.test(model);
+
+// Claude Pro lists Fable in SDK initialization, but reports no Fable window and rejected all 12 observed starts.
+export function claudePlanExcludesFable(
+  account:
+    | { driver: string; plan?: string | null | undefined }
+    | Pick<ServerProvider, "auth" | "driver">
+    | undefined,
+) {
+  if (account?.driver !== "claudeAgent") return false;
+  const plan = "auth" in account ? (account.auth.tier ?? account.auth.label) : account.plan;
+  return plan === "Pro" || plan === "Claude Pro Subscription";
+}
 
 /** The custom build permits DeepSeek V4.1 Flash only, across its harnesses. */
 export function isDeepseekModel(driver: string, instanceId: string, model?: string): boolean {

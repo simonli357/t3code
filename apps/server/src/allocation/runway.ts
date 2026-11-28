@@ -103,8 +103,6 @@ export function limitShare(
 export const paced = (w: Pick<AllocationWindow, "kind" | "models">) =>
   w.kind === "weekly" || (w.kind === "monthly" && !w.models?.length);
 
-export const isFable = (model: string) => /fable/i.test(model);
-
 export interface WindowProjection {
   readonly window: AllocationWindow;
   /** The hard cap, or 100. */

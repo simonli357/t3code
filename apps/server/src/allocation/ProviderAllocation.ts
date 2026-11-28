@@ -50,7 +50,8 @@ import { quotaEvidenceInstances, readQuotaEvidenceRows } from "./quotaEvidence.t
 import { allocationIdentity, allocationInventory, windowModels } from "./inventory.ts";
 import { accountCap, accountRoom, accountRunways, decideAllocation } from "./decision.ts";
 import { learnAllocation, replacesLearned } from "./learning.ts";
-import { isFable, span } from "./runway.ts";
+import { isFable } from "@t3tools/shared/model";
+import { span } from "./runway.ts";
 import { allocationPolicyView, editAllocationPolicy, editModelPolicy } from "./policyEdit.ts";
 import { chooseProfile, fableModeAccount } from "./modelDecision.ts";
 import {

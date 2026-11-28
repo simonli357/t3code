@@ -932,3 +932,17 @@ it("keeps disabled DeepSeek custom models out of the picker", () => {
     getAppModelOptionsForInstance(settings, entry, "deepseek-v4-pro").map((option) => option.slug),
   ).toEqual(["deepseek-flash"]);
 });
+
+it("keeps custom Fable settings off a Pro instance's model list", () => {
+  const xl = provider({ instanceId: "claude_xinya", models: ["claude-opus-5-5"] });
+  const settings = {
+    ...DEFAULT_UNIFIED_SETTINGS,
+    providerInstances: {
+      [xl.instanceId]: { driver: xl.driver, config: { customModels: ["claude-fable-5-2"] } },
+    },
+  };
+  const [entry] = deriveProviderInstanceEntries([{ ...xl, auth: { ...xl.auth, tier: "Pro" } }]);
+  expect(getAppModelOptionsForInstance(settings, entry!).map((m) => m.slug)).toEqual([
+    "claude-opus-5-5",
+  ]);
+});

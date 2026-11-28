@@ -1059,6 +1059,32 @@ describe("Fable mode", () => {
     });
   const opusHigh = { model: OPUS, effort: "high" };
 
+  it("excludes Pro from a Fable pin even when an older inventory lists Fable", () => {
+    const pro = claude("XL", [weekly(0)], { plan: "Pro" });
+    const max = claude("Max", [weekly(50)], { plan: "Max 20x" });
+    const profile = { model: FABLE, effort: "low" };
+    const pin = { request: { override: { driver: claudeAgent, model: FABLE } } };
+    expect(picked(choose([pro, max], profile, pin))).toBe(`Max ${FABLE} / low`);
+    expect(picked(choose([pro], profile, pin))).toBeNull();
+    expect(picked(choose([pro, { ...max, windows: [weekly(100)] }], profile, pin))).toBeNull();
+  });
+
+  it.each(["low", "medium", "high"])(
+    "judges Pro on its nearest available rung for Fable %s",
+    (effort) => {
+      const pro = account("XL", claudeAgent, [OPUS], [weekly(0)], { plan: "Pro" });
+      const max = claude("Max", [weekly(50)], { plan: "Max 20x" });
+      const profile = { model: FABLE, effort };
+      expect(picked(choose([pro], profile, fableFor("XL")))).toBe(`XL ${OPUS} / xhigh`);
+      const choice = choose([pro, max], profile);
+      expect(picked(choice)).toBe(`XL ${OPUS} / xhigh`);
+      expect(choice.decision?.request.allowedInstanceIds).toEqual(["XL"]);
+      // When Opus has no room on Pro, the Max account wins at the original effort.
+      const full = { ...pro, windows: [weekly(0), only(OPUS, 100)] };
+      expect(picked(choose([full, max], profile))).toBe(`Max ${FABLE} / ${effort}`);
+    },
+  );
+
   it("starts a worker on a Fable-mode account from the first Fable rung at or above its entry", () => {
     // The default ladder, weakest first, and the Fable rung each entry starts from.
     const expected = ["low", "low", "low", "low", "low", "low", "medium", "medium", "high"];

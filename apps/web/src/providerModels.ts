@@ -30,7 +30,7 @@ export function getProviderModels(
   return getProviderSnapshot(providers, provider)?.models ?? [];
 }
 
-function getProviderSnapshot(
+export function getProviderSnapshot(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): ServerProvider | undefined {

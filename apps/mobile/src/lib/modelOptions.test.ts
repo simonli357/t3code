@@ -417,3 +417,22 @@ it("does not resurrect a saved DeepSeek Pro model absent from the catalog", () =
   };
   expect(buildModelOptions(null, selection)).toEqual([]);
 });
+
+it("drops a saved Fable selection when the Claude account is Pro", () => {
+  const instanceId = ProviderInstanceId.make("claude_xinya");
+  const selection = { instanceId, model: "claude-fable-5-2" };
+  const config = {
+    providers: [
+      {
+        instanceId,
+        driver: "claudeAgent",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated", tier: "Pro" },
+        models: [],
+      },
+    ],
+  } as unknown as ServerConfig;
+  expect(resolveSelectableModelSelection(config, selection)).toBeNull();
+  expect(buildModelOptions(config, selection)).toEqual([]);
+});

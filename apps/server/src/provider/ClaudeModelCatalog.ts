@@ -4,9 +4,12 @@ import {
   type ModelSelection,
   ProviderDriverKind,
   type ServerProviderModel,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import {
+  claudePlanExcludesFable,
+  isFable,
   getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
@@ -28,6 +31,13 @@ import {
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const EMPTY_CAPABILITIES: ModelCapabilities = { optionDescriptors: [] };
+
+/** Apply after cache merging so an older catalog cannot restore Fable on Pro. */
+export function restrictClaudePlanModels(provider: ServerProvider): ServerProvider {
+  return claudePlanExcludesFable(provider)
+    ? { ...provider, models: provider.models.filter((model) => !isFable(model.slug)) }
+    : provider;
+}
 
 export interface ClaudeCatalogModel {
   readonly model: ServerProviderModel;

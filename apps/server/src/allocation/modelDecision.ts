@@ -10,6 +10,7 @@ import {
   modelLadder,
   profileLabel,
   routingEffortOptionId,
+  type AllocationAccount,
   type AllocationDecision,
   type AllocationInventory,
   type AllocationLearned,
@@ -20,9 +21,9 @@ import {
   type ModelRoutingRequest,
   type RoutingProfile,
 } from "@t3tools/contracts";
-import { findCatalogModel } from "@t3tools/shared/model";
+import { claudePlanExcludesFable, findCatalogModel, isFable } from "@t3tools/shared/model";
 import { decideAllocation, fableGoalStandings } from "./decision.ts";
-import { isFable, span } from "./runway.ts";
+import { span } from "./runway.ts";
 
 /**
  * The profile each allowed provider family wants before quota is looked at: the pinned model,
@@ -125,7 +126,11 @@ export function wantedProfiles(
           (!request.allowedInstanceIds || request.allowedInstanceIds.includes(a.instanceId)),
       );
     const index = profiles.findIndex((profile) =>
-      accounts.some((a) => accountSupportsRoutingProfile(a, profile)),
+      accounts.some((a) =>
+        claudePlanExcludesFable(a) && isFable(profile.model)
+          ? proStandIn(a, profile, modelLadder(policy))
+          : accountSupportsRoutingProfile(a, profile),
+      ),
     );
     const profile = profiles[index];
     if (!profile) {
@@ -189,11 +194,12 @@ export function ladderPosition(ladder: readonly RoutingProfile[], profile: Routi
   return below.length ? below.at(-1)!.index + 0.5 : same[0]!.index - 0.5;
 }
 
-/** The other rungs, nearest first; a tie goes to the lower rung. */
+/** The other rungs, nearest first; a tie goes to the lower rung unless the stronger side is preferred. */
 export function nearestRungs(
   ladder: readonly RoutingProfile[],
   profile: RoutingProfile,
   maxDistance = Infinity,
+  preferStronger = false,
 ) {
   const position = ladderPosition(ladder, profile);
   if (position === undefined) return [];
@@ -201,9 +207,21 @@ export function nearestRungs(
     .map((rung, index) => ({ rung, index }))
     .filter(({ index }) => index !== position && Math.abs(index - position) <= maxDistance)
     .sort(
-      (a, b) => Math.abs(a.index - position) - Math.abs(b.index - position) || a.index - b.index,
+      (a, b) =>
+        Math.abs(a.index - position) - Math.abs(b.index - position) ||
+        (preferStronger ? b.index - a.index : a.index - b.index),
     )
     .map(({ rung }) => rung);
+}
+
+function proStandIn(
+  account: AllocationAccount,
+  profile: RoutingProfile,
+  ladder: readonly RoutingProfile[],
+) {
+  return nearestRungs(ladder, profile, Infinity, true).find(
+    (r) => !isFable(r.model) && accountSupportsRoutingProfile(account, r),
+  );
 }
 
 const requestProfile = (request: AllocationRequest): RoutingProfile => ({
@@ -249,10 +267,10 @@ const fits = (decision: AllocationDecision) => {
  * Whether a worker on this account runs in Fable mode by the stored list; never while Fable
  * workers are off. An account's Fable goal can add it for one start (`chooseProfile`).
  */
-export const fableModeAccount = (
-  policy: AllocationPolicy,
-  account: Parameters<typeof allocationFableMode>[1],
-) => policy.fableWorkers !== false && allocationFableMode(policy, account);
+export const fableModeAccount = (policy: AllocationPolicy, account: AllocationAccount) =>
+  policy.fableWorkers !== false &&
+  !claudePlanExcludesFable(account) &&
+  allocationFableMode(policy, account);
 
 /**
  * Picks account, model and effort together. The wanted model on the account furthest behind
@@ -410,8 +428,6 @@ export function chooseProfile(input: {
     ) => {
       const when = (r: AllocationRequest) => (startAt ? { ...r, startAt } : r);
       const mixed = families && others.length ? { others: others.map(when) } : {};
-      if (fable === undefined)
-        return decideAllocation({ ...input, ...mixed, request: when(normal!) });
       // Only Fable-mode accounts take part.
       const only = normal
         ? undefined
@@ -425,7 +441,18 @@ export function chooseProfile(input: {
         ...input,
         ...mixed,
         request: only ?? when(normal!),
-        fableMode: { instanceIds: fableIds, request: only ?? (fable && when(fable)) },
+        accountRung(account) {
+          if (fable !== undefined && fableIds.includes(account.instanceId))
+            return { request: only ?? (fable && when(fable)), fableMode: true };
+          if (normal?.driver !== "claudeAgent" || !claudePlanExcludesFable(account))
+            return undefined;
+          // A Fable pin excludes Pro even when a drained account triggers another ladder step.
+          if (request.override)
+            return isFable(request.override.model) ? { request: when(asked.request) } : undefined;
+          if (!isFable(normal.model)) return undefined;
+          const rung = proStandIn(account, requestProfile(normal), ladder);
+          return rung ? { request: when(onRung(normal, rung)) } : undefined;
+        },
       });
     };
     const start = (startAt?: string) => decide(wanted.request, fableWanted, startAt, true);

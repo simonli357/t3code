@@ -4,6 +4,8 @@ import type {
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
+  claudePlanExcludesFable,
+  isFable,
   isAllowedDeepseekModel,
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
@@ -103,6 +105,7 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
+  if (claudePlanExcludesFable(provider) && isFable(selection.model)) return null;
   if (!isAllowedDeepseekModel(driver ?? "", selection.instanceId, selection.model)) return null;
   if (driver === "antigravity") {
     return selection;
@@ -189,7 +192,13 @@ export function buildModelOptions(
     }
   }
 
-  if (fallbackModelSelection) {
+  const fallbackProvider = config?.providers.find(
+    (p) => p.instanceId === fallbackModelSelection?.instanceId,
+  );
+  if (
+    fallbackModelSelection &&
+    !(claudePlanExcludesFable(fallbackProvider) && isFable(fallbackModelSelection.model))
+  ) {
     const key = `${fallbackModelSelection.instanceId}:${fallbackModelSelection.model}`;
     const existing = options.get(key);
     if (existing) {
@@ -201,9 +210,7 @@ export function buildModelOptions(
             : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities),
       });
     } else {
-      const provider = config?.providers.find(
-        (candidate) => candidate.instanceId === fallbackModelSelection.instanceId,
-      );
+      const provider = fallbackProvider;
       const instanceConfig = config?.settings?.providerInstances[fallbackModelSelection.instanceId];
       const model = provider?.models.find(
         (candidate) => candidate.slug === fallbackModelSelection.model,

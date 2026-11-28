@@ -38,6 +38,7 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
+import { restrictClaudePlanModels } from "../ClaudeModelCatalog.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { AntigravityInstallation } from "../AntigravityInstallation.ts";
@@ -2939,6 +2940,29 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
               throw new Error(`Unexpected args: ${joined}`);
             }),
           ),
+        ),
+      );
+
+      it.effect("offers Fable on Max and Team and only non-Fable models on Pro", () =>
+        Effect.gen(function* () {
+          for (const subscriptionType of ["Claude Pro", "max", "team"]) {
+            const status = yield* checkClaudeProviderStatus(
+              { ...defaultClaudeSettings, homePath: "/missing-claude-home" },
+              claudeCapabilities({ email: "subscriber@example.test", subscriptionType }),
+            );
+            const { models } = restrictClaudePlanModels({
+              ...status,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              instanceId: ProviderInstanceId.make("claude"),
+            });
+            assert.ok(models.some((m) => m.slug.includes("opus")));
+            assert.strictEqual(
+              models.some((m) => m.slug.includes("fable")),
+              subscriptionType !== "Claude Pro",
+            );
+          }
+        }).pipe(
+          Effect.provide(mockSpawnerLayer(() => ({ stdout: "2.1.330", stderr: "", code: 0 }))),
         ),
       );
 

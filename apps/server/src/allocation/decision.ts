@@ -22,7 +22,7 @@ import type {
   AllocationReservation,
   AllocationWindow,
 } from "@t3tools/contracts";
-import { findCatalogModel } from "@t3tools/shared/model";
+import { claudePlanExcludesFable, findCatalogModel, isFable } from "@t3tools/shared/model";
 import {
   creditsText,
   demandLoad,
@@ -41,7 +41,7 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 function compatible(account: AllocationAccount, request: AllocationRequest) {
   const model = findCatalogModel(account.models, request.model);
-  if (!model) return false;
+  if (!model || (claudePlanExcludesFable(account) && isFable(model.slug))) return false;
   return request.options.every((option) => {
     const descriptor = model.capabilities?.optionDescriptors?.find((d) => d.id === option.id);
     return descriptor?.type === "boolean"
@@ -364,13 +364,13 @@ export function decideAllocation(input: {
   policy: AllocationPolicy;
   request: AllocationRequest;
   /**
-   * Accounts in Fable mode and what they run in place of `request`, or null when they are out.
+   * Accounts with their own rung and what they run in place of `request`, or null when they are out.
    * Each account is judged on what it would run. The decision's request is then the selected
    * account's, kept to the accounts that run it, so admission chooses among the same accounts.
    */
-  fableMode?:
-    | { readonly instanceIds: readonly string[]; readonly request: AllocationRequest | null }
-    | undefined;
+  accountRung?: (
+    account: AllocationAccount,
+  ) => { request: AllocationRequest | null; fableMode?: boolean } | undefined;
   /**
    * The requests of other provider families. An account of one of them is a candidate too,
    * judged on its family's request, and every line then names what its account would run.
@@ -433,13 +433,15 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
     .map((local) => {
       const account = { ...local, ...sharedReadings(local, everyAccount) };
       const reasons: string[] = [];
-      const fable = input.fableMode?.instanceIds.includes(account.instanceId) === true;
-      const own = fable ? input.fableMode!.request : familyRequest(account.driver)!;
+      const rung = input.accountRung?.(account);
+      const own = rung ? rung.request : familyRequest(account.driver)!;
       if (own === null) reasons.push("Fable mode: no Fable rung takes this place.");
       const run = own ?? request;
       const tags = [
-        ...(fable ? ["Fable mode"] : []),
-        ...(mixed ? [profileLabel(run.driver, run.model, run.options)] : []),
+        ...(rung?.fableMode ? ["Fable mode"] : []),
+        ...(mixed || (rung && !rung.fableMode)
+          ? [profileLabel(run.driver, run.model, run.options)]
+          : []),
       ];
       runs.set(account.instanceId, own);
       if (account.signedOut) reasons.push("Signed out on this computer.");

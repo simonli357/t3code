@@ -101,8 +101,11 @@ one, the daily goal applies to the Fable limit and only the Fable mode switch tu
 pin that names Fable starts from the nearest ladder model without it, and a running worker never
 moves onto it. The result says so.
 
-**Fable mode** is a switch on each Claude account; switched on, it applies whatever the Fable
-goal says. A worker on an account in Fable mode runs
+Claude Pro accounts run the nearest available ladder rung for a Fable table entry. A tie goes to
+the stronger rung. Pinning a Fable model excludes Pro accounts.
+
+**Fable mode** is a switch on each Claude account. On accounts with Fable access, turning it on
+applies Fable mode regardless of the Fable goal. A worker on an account in Fable mode runs
 Fable low, medium or high: its table entry starts from the first of those at or above it, and
 when it has no room only another of them stands in, never another model or the fallback. When
 that account's Fable limit is used up, it takes no workers until the limit resets. A worker on any
