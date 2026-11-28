@@ -16,6 +16,7 @@ import {
   ModelRoutingRequest,
   ProviderDriverKind,
   ThreadId,
+  type AllocationResponse,
   type AllocationOperation,
   type EnvironmentId,
   type ModelRoutingSnapshot,
@@ -40,6 +41,7 @@ import {
   type ModelDriver,
 } from "@t3tools/client-runtime/state/model-routing";
 import {
+  allocationOfflineMessage,
   allocationSaveFailure,
   createAllocationCommands,
   withModelLadderEdit,
@@ -101,6 +103,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   if (connectionState.phase !== connection)
     setConnectionState({ phase: connection, epoch: connectionState.epoch + 1 });
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
+  const [offline, setOffline] = useState<AllocationResponse["offline"]>();
   const [snapshot, setSnapshot] = useState<ModelRoutingSnapshot | null>(null);
   const [snapshotEpoch, setSnapshotEpoch] = useState<number | null>(null);
   const [failedEpoch, setFailedEpoch] = useState<number | null>(null);
@@ -128,7 +131,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           environmentId,
           input: { _tag: "modelSnapshot", part: "settings" },
         });
-        return result._tag === "Success" ? (result.value.modelSnapshot?.policy ?? null) : null;
+        return result._tag === "Success" && !result.value.offline
+          ? (result.value.modelSnapshot?.policy ?? null)
+          : null;
       },
     }),
   );
@@ -164,7 +169,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     });
     return () => cancelAnimationFrame(frame);
   }, [selected]);
-  const policy = draft.policy;
+  const policy = offline ? (snapshot?.policy ?? null) : draft.policy;
   const request = workerChoiceRequest({
     difficulty: task.difficulty,
     stakes: task.stakes,
@@ -183,7 +188,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     preview?.key === key && connection === "connected" ? workerChoice(preview.decision) : null;
   const ladder = policy ? modelLadder(policy) : [];
   const fallback = policy ? modelFallback(policy) : null;
-  const edit = store.edit;
+  const edit: typeof store.edit = (...args) => {
+    if (!offline) store.edit(...args);
+  };
   const stuck = draft.phase === "failed" || draft.phase === "conflict";
   const ready =
     snapshot?.authorityAvailable &&
@@ -207,6 +214,17 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     [inventories, environmentId, driver],
   );
   const { editedCells } = useMemo(() => summarizeModelDraft(draft), [draft]);
+  const receive = useCallback(
+    (response: AllocationResponse, epoch: number) => {
+      const next = response.modelSnapshot;
+      setOffline(response.offline);
+      setSnapshot(next ?? null);
+      setSnapshotEpoch(epoch);
+      setMessage("");
+      if (next && !response.offline) store.receive(next.policy);
+    },
+    [store, setSnapshotEpoch],
+  );
   /** The accounts every computer reports; a slow computer delays only these. */
   const readAccounts = useCallback(async () => {
     const read = ++accountsRead.current;
@@ -241,12 +259,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       // Only now: the server runs one database query at a time, and this computer's inventory
       // would otherwise hold up the saved values.
       void readAccounts();
-      if (result._tag === "Success" && result.value.modelSnapshot) {
-        const next = result.value.modelSnapshot;
-        setSnapshot(next);
-        setSnapshotEpoch(connectionState.epoch);
-        store.receive(next.policy);
-        setMessage("");
+      if (result._tag === "Success") {
+        receive(result.value, connectionState.epoch);
       } else {
         setFailedEpoch(connectionState.epoch);
         setMessage("The saved table could not be read. Refresh to try again.");
@@ -256,7 +270,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       active = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, store]);
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, receive]);
   const call = async (input: AllocationOperation) => {
     const epoch = generation.current;
     setBusy(true);
@@ -278,11 +292,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
     const epoch = ++generation.current;
     setPreview(null);
     const result = await call({ _tag: "modelSnapshot", part: "settings" });
-    if (epoch !== generation.current || !result?.modelSnapshot) return;
-    const next = result.modelSnapshot;
-    setSnapshot(next);
-    setSnapshotEpoch(connectionState.epoch);
-    store.receive(next.policy);
+    if (epoch !== generation.current) return;
+    if (result) receive(result, connectionState.epoch);
+    else setSnapshotEpoch(null);
   };
   return (
     <ScrollView
@@ -305,7 +317,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             ? "Loading…"
             : connection !== "connected"
               ? `Not connected${draft.saved ? ": showing the last known table" : ""}`
-              : SAVE_STATE[draft.phase]}
+              : offline
+                ? "Read only"
+                : SAVE_STATE[draft.phase]}
           {accounts === "failed" ? " · accounts not read" : ""}
         </Text>
         <Action
@@ -315,7 +329,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         />
       </View>
       {message ? <Text accessibilityRole="alert">{message}</Text> : null}
-      {connection === "connected" && snapshot && !snapshot.authorityAvailable ? (
+      {offline ? <Text accessibilityRole="alert">{allocationOfflineMessage(offline)}</Text> : null}
+      {!offline && connection === "connected" && snapshot && !snapshot.authorityAvailable ? (
         <Text accessibilityRole="alert">The computer that keeps this table is not reachable.</Text>
       ) : null}
       {draft.phase === "failed" && (
@@ -323,7 +338,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <Text className="text-danger-foreground">Not saved</Text>
           <Text>{draft.error}</Text>
           <View className="flex-row gap-4">
-            <Action label="Try again" onPress={store.retry} />
+            <Action label="Try again" disabled={Boolean(offline)} onPress={store.retry} />
             <Action label="Drop my change" onPress={() => store.resolve(false)} />
           </View>
         </View>
@@ -332,7 +347,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         <View accessibilityRole="alert" className="gap-2 rounded border border-warning-border p-3">
           <Text className="text-warning-foreground">Changed elsewhere while you edited</Text>
           <View className="flex-row gap-4">
-            <Action label="Keep mine" onPress={() => store.resolve(true)} />
+            <Action
+              label="Keep mine"
+              disabled={Boolean(offline)}
+              onPress={() => store.resolve(true)}
+            />
             <Action label="Use theirs" onPress={() => store.resolve(false)} />
           </View>
         </View>
@@ -362,7 +381,11 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         ))}
       </View>
       {policy ? (
-        <>
+        <View
+          className="gap-4"
+          pointerEvents={offline ? "none" : "auto"}
+          accessibilityState={{ disabled: Boolean(offline) }}
+        >
           <View
             onLayout={(event) => {
               editorBox.current = {
@@ -521,7 +544,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               </View>
             </>
           )}
-        </>
+        </View>
       ) : null}
       <Action
         label={taskOpen ? "Hide: Try a task" : "Try a task"}

@@ -15,12 +15,14 @@ import {
   type ModelRoutingPolicy,
   type ModelRoutingSnapshot,
   type ModelRoutingDecision,
+  type AllocationResponse,
   type AllocationOperation,
   type RoutingCell,
 } from "@t3tools/contracts";
 import { createAutosave } from "@t3tools/client-runtime/state/autosave";
 import {
   allocationModelChoices,
+  allocationOfflineMessage,
   allocationSaveFailure,
   createAllocationCommands,
   withModelLadderEdit,
@@ -77,6 +79,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const execute = useAtomCommand(commands.execute, { reportFailure: false });
   const environment = useEnvironment(environmentId);
   const connection = environment?.connection.phase ?? "offline";
+  const [offline, setOffline] = useState<AllocationResponse["offline"]>();
   const [snapshot, setSnapshot] = useState<ModelRoutingSnapshot | null>(null);
   // The saved tables to go back to, newest first.
   const [versions, setVersions] = useState<readonly ModelRoutingPolicy[]>([]);
@@ -111,7 +114,9 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           environmentId,
           input: { _tag: "modelSnapshot", part: "settings" },
         });
-        return result._tag === "Success" ? (result.value.modelSnapshot?.policy ?? null) : null;
+        return result._tag === "Success" && !result.value.offline
+          ? (result.value.modelSnapshot?.policy ?? null)
+          : null;
       },
     }),
   );
@@ -146,7 +151,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
   const [failedEpoch, setFailedEpoch] = useState<number | null>(null);
   if (connectionState.phase !== connection)
     setConnectionState({ phase: connection, epoch: connectionState.epoch + 1 });
-  const policy = draft.policy;
+  const policy = offline ? (snapshot?.policy ?? null) : draft.policy;
   const key = modelPreviewKey(
     policy ?? defaultModelRoutingPolicy,
     request,
@@ -208,6 +213,18 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       if (mounted.current && epoch === generation.current) setBusy(false);
     }
   };
+  const receive = useCallback(
+    (response: AllocationResponse, epoch: number) => {
+      const next = response.modelSnapshot;
+      setOffline(response.offline);
+      setSnapshot(next ?? null);
+      setSnapshotEpoch(epoch);
+      setMessage("");
+      if (next && !response.offline) store.receive(next.policy);
+      setVersions(next?.policies ?? []);
+    },
+    [store, setSnapshotEpoch],
+  );
   /** The accounts every computer reports; a slow computer delays only these. */
   const readAccounts = useCallback(async () => {
     const read = ++accountsRead.current;
@@ -222,18 +239,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       setAccounts("loaded");
     } else setAccounts("failed");
   }, [environmentId, execute]);
-  const receive = (next: ModelRoutingSnapshot, epoch: number) => {
-    setSnapshot(next);
-    setVersions(next.policies);
-    setSnapshotEpoch(epoch);
-    store.receive(next.policy);
-  };
   const refresh = async () => {
     const epoch = ++generation.current;
     setPreview(null);
     const response = await call({ _tag: "modelSnapshot", part: "settings" });
-    if (epoch !== generation.current || !response?.modelSnapshot) return;
-    receive(response.modelSnapshot, connectionState.epoch);
+    if (epoch !== generation.current) return;
+    if (response) receive(response, connectionState.epoch);
+    else setSnapshotEpoch(null);
   };
   useEffect(() => {
     mounted.current = true;
@@ -258,12 +270,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       // Only now: the server runs one database query at a time, and this computer's inventory
       // would otherwise hold up the saved values.
       void readAccounts();
-      if (response._tag === "Success" && response.value.modelSnapshot) {
-        const next = response.value.modelSnapshot;
-        setSnapshot(next);
-        setVersions(next.policies);
-        setSnapshotEpoch(connectionState.epoch);
-        store.receive(next.policy);
+      if (response._tag === "Success") {
+        receive(response.value, connectionState.epoch);
       } else {
         setFailedEpoch(connectionState.epoch);
         setMessage("The saved table could not be read. Refresh to try again.");
@@ -274,7 +282,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
       mounted.current = false;
       generation.current++;
     };
-  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, store]);
+  }, [environmentId, execute, connection, connectionState.epoch, readAccounts, receive]);
   const tryTask = async () => {
     if (!policy) return;
     try {
@@ -309,7 +317,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             : "Not connected. The table appears once this computer connects."}
         </p>
       )}
-      {connection === "connected" && snapshot && !snapshot.authorityAvailable && (
+      {offline && <p role="status">{allocationOfflineMessage(offline)}</p>}
+      {!offline && connection === "connected" && snapshot && !snapshot.authorityAvailable && (
         <p role="status" className="text-sm text-muted-foreground">
           The computer that keeps this table is not reachable. Choose it under Provider allocation.
         </p>
@@ -319,7 +328,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
           <AlertTitle>Not saved</AlertTitle>
           <AlertDescription>{draft.error}</AlertDescription>
           <AlertAction>
-            <Button size="xs" variant="outline" onClick={store.retry}>
+            <Button size="xs" variant="outline" disabled={Boolean(offline)} onClick={store.retry}>
               Try again
             </Button>
             <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
@@ -335,7 +344,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             A cell or setting you changed was also changed on another computer or by an agent.
           </AlertDescription>
           <AlertAction>
-            <Button size="xs" onClick={() => store.resolve(true)}>
+            <Button size="xs" disabled={Boolean(offline)} onClick={() => store.resolve(true)}>
               Keep mine
             </Button>
             <Button size="xs" variant="outline" onClick={() => store.resolve(false)}>
@@ -358,11 +367,13 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
         title="Model by difficulty and stakes"
         headerAction={
           <div className="flex items-center gap-2">
-            <SaveState
-              phase={
-                loadingTable ? "loading" : connection !== "connected" ? "offline" : draft.phase
-              }
-            />
+            {!offline && (
+              <SaveState
+                phase={
+                  loadingTable ? "loading" : connection !== "connected" ? "offline" : draft.phase
+                }
+              />
+            )}
             <Button
               size="xs"
               variant="outline"
@@ -394,7 +405,8 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
             ))}
           </div>
           {policy && (
-            <div
+            <fieldset
+              disabled={Boolean(offline)}
               role="tabpanel"
               aria-label={`${modelDriverLabel(driver)} table`}
               className="@container/matrix grid min-w-0 gap-3"
@@ -427,12 +439,12 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
                 onSelect={select}
               />
               <ModelRoutingLegend driver={driver} policy={policy} />
-            </div>
+            </fieldset>
           )}
         </div>
       </SettingsSection>
       {policy && (
-        <>
+        <fieldset disabled={Boolean(offline)} className="contents">
           <SettingsSection
             title="Claude ladder"
             headerAction={
@@ -485,7 +497,7 @@ function ModelEditor({ environmentId }: { environmentId: EnvironmentId }) {
               onChange={(models) => store.edit((p) => setAllowedModels(p, driver, models))}
             />
           </FoldedSettingsSection>
-        </>
+        </fieldset>
       )}
       <FoldedSettingsSection
         id="model-selection-try"

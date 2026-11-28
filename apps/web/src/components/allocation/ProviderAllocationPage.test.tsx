@@ -898,7 +898,8 @@ describe("Provider allocation editor", () => {
     ).toEqual([
       "Close-call marginaccounts this close count as equal",
       "Wait for a resetlonger, and the worker changes model",
-      "Fable workersoff: no worker runs on Fable",
+      "Fable workerson: workers may use Fable",
+      "Keep Fable in step with weeklycompare projected weekly usage",
     ]);
     for (const removed of [
       "Save settings",

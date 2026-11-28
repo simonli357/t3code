@@ -617,6 +617,7 @@ function LearnedNumbers({ learned }: { learned: AllocationLearned }) {
 
 export function AllocationControls({
   policy,
+  copied = false,
   snapshot,
   now,
   accounts,
@@ -629,6 +630,7 @@ export function AllocationControls({
   onWorkersChange,
 }: {
   policy: AllocationPolicy;
+  copied?: boolean;
   snapshot: AllocationSnapshot | null;
   /** When the snapshot was read: reading ages and resets are judged against it. */
   now: number;
@@ -823,7 +825,11 @@ export function AllocationControls({
         </Rule>
         <Rule
           title="Fable workers"
-          hint="off: no worker runs on Fable"
+          hint={
+            policy.fableWorkers === false
+              ? "off: no worker runs on Fable"
+              : "on: workers may use Fable"
+          }
           detail="Off: no worker runs on Fable. One that would starts on the nearest other model."
           failed={notSaved.has("fableWorkers")}
         >
@@ -861,14 +867,18 @@ export function AllocationControls({
         summary={
           learned
             ? `measured ${allocationReadingAge(learned.learnedAt, now)} ago`
-            : "nothing measured yet"
+            : copied && !snapshot?.learned
+              ? "no saved measurements"
+              : "nothing measured yet"
         }
       >
         {learned ? (
           <LearnedNumbers learned={learned} />
         ) : (
           <p className={cn(ITEM_ROW_CLASSNAME, "text-sm text-muted-foreground")}>
-            Nothing measured yet.
+            {copied && !snapshot?.learned
+              ? "No measurements were included in the saved settings."
+              : "Nothing measured yet."}
           </p>
         )}
       </FoldedSettingsSection>

@@ -1015,6 +1015,16 @@ export const AllocationOperation = Schema.TaggedUnion({
 });
 export type AllocationOperation = typeof AllocationOperation.Type;
 export const AllocationResponse = Schema.Struct({
+  /** A settings-page read answered locally after the coordinator failed to respond. */
+  offline: Schema.optional(
+    Schema.Struct({
+      computer: Schema.String,
+      checkedAt: IsoDateTime,
+      syncedAt: Schema.NullOr(IsoDateTime),
+      /** Accounts still report usage even when no settings have ever been copied. */
+      inventories: Schema.optional(Schema.Array(AllocationInventory)),
+    }),
+  ),
   modelSnapshot: Schema.optional(ModelRoutingSnapshot),
   /** Also in a `caps` answer, so a computer can follow the coordinator's ladder. */
   modelPolicy: Schema.optional(ModelRoutingPolicy),

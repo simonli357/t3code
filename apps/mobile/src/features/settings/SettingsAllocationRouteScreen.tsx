@@ -12,6 +12,7 @@ import {
   DEFAULT_WORKER_MEMORY_GIB,
   EnvironmentId,
   PROVIDER_DISPLAY_NAMES,
+  type AllocationResponse,
   type AllocationPolicy,
   type AllocationSnapshot,
 } from "@t3tools/contracts";
@@ -21,6 +22,8 @@ import {
   createAllocationCommands,
   allocationAccountOrder,
   allocationAccountRows,
+  allocationOfflineMessage,
+  allocationUsageLines,
   allocationAutosaveRules,
   allocationPolicyChanges,
   allocationSaveFailure,
@@ -129,7 +132,8 @@ function AllocationEditor({ target }: { target: Target }) {
 
   // The saved settings, then what every computer reports: the settings never wait for it.
   const [settings, setSettings] = useState<AllocationSnapshot | null>(null);
-  const [reported, setReported] = useState<AllocationSnapshot | null>(null);
+  const [offline, setOffline] = useState<AllocationResponse["offline"]>();
+  const [reported, setReported] = useState<AllocationResponse | null>(null);
   const [accounts, setAccounts] = useState<"loading" | "loaded" | "failed">("loading");
   // When the accounts were read: reading ages and resets are judged against it.
   const [now, setNow] = useState(0);
@@ -157,19 +161,21 @@ function AllocationEditor({ target }: { target: Target }) {
           environmentId,
           input: { _tag: "snapshot", part: "settings" },
         });
-        return result._tag === "Success" ? (result.value.snapshot?.policy ?? null) : null;
+        return result._tag === "Success" && !result.value.offline
+          ? (result.value.snapshot?.policy ?? null)
+          : null;
       },
     }),
   );
   const saving = useSyncExternalStore(store.subscribe, store.getState);
   // Leaving the screen stores an edit that is still waiting.
   useEffect(() => () => store.flush(), [store]);
-  const policy = saving.policy;
+  const policy = offline ? settings?.policy : saving.policy;
   const snapshot = settings && {
     ...settings,
-    policy: saving.saved ?? settings.policy,
-    inventories: reported?.inventories ?? [],
-    runways: reported?.runways ?? settings.runways,
+    policy: offline ? settings.policy : (saving.saved ?? settings.policy),
+    inventories: reported?.snapshot?.inventories ?? [],
+    runways: reported?.snapshot?.runways ?? settings.runways,
   };
 
   /**
@@ -180,17 +186,26 @@ function AllocationEditor({ target }: { target: Target }) {
     (isActive: () => boolean) =>
       execute({ environmentId, input: { _tag: "snapshot", part: "settings" } }).then((result) => {
         if (!isActive()) return;
-        if (result._tag === "Success" && result.value.snapshot) {
-          setSettings(result.value.snapshot);
-          store.receive(result.value.snapshot.policy);
+        if (result._tag === "Success") {
+          setOffline(result.value.offline);
+          setSettings(result.value.snapshot ?? null);
+          if (!result.value.offline && result.value.snapshot)
+            store.receive(result.value.snapshot.policy);
           setNow((current) => current || Date.now());
           setMessage("");
-        } else setMessage("The computer that keeps these settings did not answer.");
+        } else {
+          setSettings(null);
+          setOffline(undefined);
+          setMessage("The computer that keeps these settings did not answer.");
+        }
         void execute({ environmentId, input: { _tag: "snapshot", part: "accounts" } }).then(
           (accounts) => {
             if (!isActive()) return;
-            if (accounts._tag === "Success" && accounts.value.snapshot) {
-              setReported(accounts.value.snapshot);
+            if (
+              accounts._tag === "Success" &&
+              (accounts.value.snapshot || accounts.value.offline)
+            ) {
+              setReported(accounts.value);
               setNow(Date.now());
               setAccounts("loaded");
             } else setAccounts("failed");
@@ -259,7 +274,7 @@ function AllocationEditor({ target }: { target: Target }) {
       editable={input.editable === true}
       placeholder={input.placeholder}
       value={
-        typed[input.id] ??
+        (!offline ? typed[input.id] : undefined) ??
         (input.value === undefined || Number.isNaN(input.value) ? "" : String(input.value))
       }
       onChangeText={(text) => {
@@ -347,7 +362,7 @@ function AllocationEditor({ target }: { target: Target }) {
           <ThemedSwitch
             accessibilityLabel={`Available for workers: ${row.label} on ${instance.computer}`}
             value={instance.workersEnabled}
-            disabled={busy}
+            disabled={busy || !editable}
             onValueChange={async (checked) => {
               setBusy(true);
               const result = await updateSettings({
@@ -450,14 +465,26 @@ function AllocationEditor({ target }: { target: Target }) {
           accessibilityRole="summary"
           className={stuck ? "text-danger-foreground" : "text-foreground-muted"}
         >
-          {snapshot ? SAVE_STATE[saving.phase] : message ? "Not loaded" : "Loading…"}
+          {offline
+            ? "Read only"
+            : snapshot
+              ? SAVE_STATE[saving.phase]
+              : message
+                ? "Not loaded"
+                : "Loading…"}
         </Text>
         <Pressable disabled={busy} accessibilityRole="button" onPress={() => void refresh()}>
           <Text className="text-primary">Refresh</Text>
         </Pressable>
       </View>
       {message ? <Text accessibilityRole="alert">{message}</Text> : null}
-      {snapshot && !snapshot.authorityAvailable ? (
+      {offline ? <Text accessibilityRole="alert">{allocationOfflineMessage(offline)}</Text> : null}
+      {offline && !snapshot
+        ? allocationUsageLines(
+            reported?.snapshot?.inventories ?? reported?.offline?.inventories ?? [],
+          ).map((row) => <Text key={row.key}>{row.text}</Text>)
+        : null}
+      {!offline && snapshot && !snapshot.authorityAvailable ? (
         <Text accessibilityRole="alert">
           The computer that keeps these settings is not reachable.
         </Text>
@@ -467,7 +494,7 @@ function AllocationEditor({ target }: { target: Target }) {
           <Text className="text-danger-foreground">Not saved</Text>
           <Text>{saving.error}</Text>
           <View className="flex-row gap-4">
-            <Pressable accessibilityRole="button" onPress={store.retry}>
+            <Pressable accessibilityRole="button" disabled={Boolean(offline)} onPress={store.retry}>
               <Text className="text-primary">Try again</Text>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => store.resolve(false)}>
@@ -480,7 +507,11 @@ function AllocationEditor({ target }: { target: Target }) {
         <View accessibilityRole="alert" className="gap-2 rounded border border-border p-3">
           <Text className="text-warning-foreground">Changed elsewhere while you edited</Text>
           <View className="flex-row gap-4">
-            <Pressable accessibilityRole="button" onPress={() => store.resolve(true)}>
+            <Pressable
+              accessibilityRole="button"
+              disabled={Boolean(offline)}
+              onPress={() => store.resolve(true)}
+            >
               <Text className="text-primary">Keep mine</Text>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => store.resolve(false)}>

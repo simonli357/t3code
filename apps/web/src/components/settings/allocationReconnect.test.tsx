@@ -469,3 +469,52 @@ it(
   },
   WHOLE_SHELL_MS,
 );
+
+it(
+  "shows reported accounts without defaults, then the saved rules, then the live policy",
+  async () => {
+    const live = state.execute.getMockImplementation()!;
+    let copy = false;
+    state.execute.mockImplementation(async (arg: { input: AllocationOperation }) => {
+      if (arg.input._tag !== "snapshot") return live(arg);
+      const offline = {
+        computer: "myalien",
+        checkedAt: inventory.observedAt,
+        syncedAt: copy ? inventory.observedAt : null,
+      };
+      const inventories = arg.input.part === "accounts" ? [inventory] : [];
+      return {
+        _tag: "Success",
+        value: copy
+          ? {
+              offline,
+              snapshot: {
+                ...allocationSnapshot,
+                policy: { ...stored.host!.allocation, closeMarginPoints: 37 },
+                inventories,
+                authorityAvailable: false,
+              },
+            }
+          : { offline: { ...offline, inventories } },
+      };
+    });
+    await mount("allocation");
+    expect(container.textContent).toContain("myalien did not answer");
+    expect(container.textContent).toContain("No saved copy");
+    expect(container.textContent).toContain("AD");
+    expect(container.textContent).not.toContain("Loading accounts");
+    expect(named("Fable workers")).toBeNull();
+    copy = true;
+    await click(button("Refresh"));
+    const margin = () => named("Close-call margin") as HTMLInputElement;
+    expect(margin().value).toBe("37");
+    expect(margin().disabled).toBe(true);
+    expect(container.textContent).toContain("Showing the settings it last sent");
+    state.execute.mockImplementation(live);
+    await click(button("Refresh"));
+    expect(container.textContent).not.toContain("did not answer");
+    expect(margin().value).toBe("10");
+    expect(margin().disabled).toBe(false);
+  },
+  WHOLE_SHELL_MS,
+);

@@ -11,6 +11,7 @@ import {
   type AllocationAccount,
   type AllocationAccountCap,
   type AllocationInventory,
+  type AllocationResponse,
   type AllocationPolicy,
   type AllocationSnapshot,
   type ModelRoutingPolicy,
@@ -31,6 +32,39 @@ export function createAllocationCommands<R, E>(
       tag: WS_METHODS.providerAllocation,
     }),
   };
+}
+
+export function allocationOfflineMessage(offline: NonNullable<AllocationResponse["offline"]>) {
+  const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+  const day = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const time = (iso: string) => {
+    const at = Date.parse(iso);
+    return day.format(at) === day.format()
+      ? clock.format(at)
+      : `${clock.format(at)} on ${day.format(at)}`;
+  };
+  const copy = offline.syncedAt
+    ? `Showing the settings it last sent at ${time(offline.syncedAt)}.`
+    : "No saved copy is available.";
+  return `${offline.computer} did not answer at ${time(offline.checkedAt)}. ${copy} Editing resumes when it reconnects.`;
+}
+
+/** Only the reported readings can be shown when there is no policy to rank accounts by. */
+export function allocationUsageLines(inventories: readonly AllocationInventory[]) {
+  return inventories.flatMap((host) =>
+    host.accounts.map((account) => ({
+      key: JSON.stringify([host.environmentId, account.instanceId]),
+      text: [
+        host.environmentLabel ?? host.environmentId,
+        account.label,
+        ...account.windows.map((w) => `${w.label} ${w.usedPoints}%`),
+      ].join(" · "),
+    })),
+  );
 }
 
 export function allocationAccountCap(

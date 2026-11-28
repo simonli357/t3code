@@ -251,15 +251,15 @@ const make = Effect.gen(function* () {
   ) {
     const policy = response.policy ?? response.snapshot?.policy;
     const modelPolicy = response.modelPolicy ?? response.modelSnapshot?.policy;
-    if (!policy && !modelPolicy && !response.learned) return;
+    const learned = response.learned ?? response.snapshot?.learned;
+    if (!policy && !modelPolicy && !learned) return;
     const changed =
       (policy !== undefined && policy.version !== coordinatorPolicy?.version) ||
       (modelPolicy !== undefined && modelPolicy.version !== coordinatorModelPolicy?.version) ||
-      (response.learned !== undefined &&
-        response.learned.learnedAt !== coordinatorLearned?.learnedAt);
+      (learned !== undefined && learned.learnedAt !== coordinatorLearned?.learnedAt);
     coordinatorPolicy = policy ?? coordinatorPolicy;
     coordinatorModelPolicy = modelPolicy ?? coordinatorModelPolicy;
-    coordinatorLearned = response.learned ?? coordinatorLearned;
+    coordinatorLearned = learned ?? coordinatorLearned;
     const at = yield* Clock.currentTimeMillis;
     copySyncedAt = at;
     if (!coordinatorPolicy || (!changed && at - copyWrittenAt < COPY_WRITE_INTERVAL_MS)) return;
@@ -1349,6 +1349,53 @@ const make = Effect.gen(function* () {
       notes: [...(placement.refusal && !read.found ? [] : read.notes), ...placement.notes],
     };
   });
+  const offlineSnapshot = Effect.fn("ProviderAllocation.offlineSnapshot")(function* (
+    id: string,
+    operation: Extract<AllocationOperation, { _tag: "snapshot" | "modelSnapshot" }>,
+  ): Effect.fn.Return<AllocationResponse, AllocationError> {
+    const checkedAt = yield* now;
+    const stored = yield* store.copy;
+    const copy = stored?.coordinatorEnvironmentId === id ? stored : undefined;
+    const inventories = operation.part === "accounts" ? yield* collect() : [];
+    const offline = {
+      computer: (yield* peers.list).find((peer) => peer.environmentId === id)?.label ?? id,
+      checkedAt,
+      syncedAt: copy?.syncedAt ?? null,
+    };
+    if (operation._tag === "modelSnapshot" && copy?.modelPolicy)
+      return {
+        offline,
+        modelSnapshot: {
+          policy: copy.modelPolicy,
+          inventories,
+          authorityAvailable: false,
+          policies: [],
+          history: [],
+        },
+      };
+    if (operation._tag === "snapshot" && copy)
+      return {
+        offline,
+        snapshot: {
+          accountCapsSupported: true,
+          accountOrderSupported: true,
+          authorityAvailable: false,
+          policy: copy.policy,
+          inventories,
+          reservations: [],
+          history: [],
+          notices: inventories.flatMap((i) => i.notices),
+          ...(copy.learned && operation.part === "settings" ? { learned: copy.learned } : {}),
+          runways: accountRunways({
+            at: checkedAt,
+            policy: copy.policy,
+            inventories,
+            learned: copy.learned,
+          }),
+        },
+      };
+    return { offline: { ...offline, syncedAt: null, inventories } };
+  });
   const execute = Effect.fn("ProviderAllocation.execute")(function* (
     operation: AllocationOperation,
   ): Effect.fn.Return<AllocationResponse, AllocationError> {
@@ -1478,6 +1525,12 @@ const make = Effect.gen(function* () {
           // not fail a start. A deliberate refusal still does.
           const refused =
             cause._tag === "PeerRejected" && !cause.message.includes(UNREADABLE_PEER_REQUEST);
+          if (
+            cause._tag === "PeerUnavailable" &&
+            (operation._tag === "snapshot" || operation._tag === "modelSnapshot") &&
+            operation.part
+          )
+            return offlineSnapshot(id, operation);
           // Checks outside a start read the policy; an unreachable coordinator's last copy answers.
           if (operation._tag === "caps" && !refused && coordinatorPolicy)
             return Effect.succeed({

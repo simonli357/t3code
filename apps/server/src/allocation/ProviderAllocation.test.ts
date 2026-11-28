@@ -2236,6 +2236,81 @@ it.effect(
 );
 
 it.effect(
+  "settings pages use only this coordinator's copy and still read reachable accounts",
+  () => {
+    let reachable = false;
+    const policy = {
+      ...defaultAllocationPolicy,
+      coordinatorEnvironmentId: "remote",
+      fableWorkers: true,
+    };
+    let observer = linkedInventory("observer");
+    const f = fixture({
+      remote: true,
+      peerCall: (id) =>
+        id === observer.environmentId
+          ? Effect.succeed(observer)
+          : reachable
+            ? Effect.succeed({
+                snapshot: {
+                  authorityAvailable: true,
+                  policy,
+                  history: [],
+                  reservations: [],
+                  inventories: [],
+                  notices: [],
+                },
+              })
+            : Effect.fail(new PeerUnavailable({ environmentId: id, message: "offline" })),
+    });
+    return Effect.gen(function* () {
+      const { allocation, store } = yield* f.setup;
+      const local = (yield* allocation.receive("observer", {
+        _tag: "allocationInventory",
+      })) as AllocationInventory;
+      observer = linkedInventory("observer", {
+        accounts: local.accounts.map((a) => ({ ...a, environmentId: "observer" })),
+      });
+      f.state.peers = [linkedInventory("remote"), observer];
+      const read = () => allocation.execute({ _tag: "snapshot", part: "settings" });
+      const accounts = () => allocation.execute({ _tag: "snapshot", part: "accounts" });
+      const copy = {
+        coordinatorEnvironmentId: "remote",
+        syncedAt: at,
+        policy,
+        modelPolicy: defaultModelRoutingPolicy,
+        learned: { learnedAt: at, costs: [], limits: [], workerHours: 3, notes: ["saved"] },
+      };
+      yield* store.saveCopy({ ...copy, coordinatorEnvironmentId: "other" });
+      expect(yield* read()).toMatchObject({ offline: { computer: "remote", syncedAt: null } });
+      expect((yield* read()).snapshot).toBeUndefined();
+      expect(
+        (yield* accounts()).offline?.inventories?.[0]?.accounts[0]?.windows.length,
+      ).toBeGreaterThan(0);
+      yield* store.saveCopy(copy);
+      expect(yield* read()).toMatchObject({
+        offline: { syncedAt: at },
+        snapshot: { policy, learned: copy.learned, authorityAvailable: false, inventories: [] },
+      });
+      const inventories = (yield* accounts()).snapshot?.inventories;
+      expect(inventories?.map((i) => [i.environmentId, i.complete])).toEqual([
+        ["local", true],
+        ["remote", false],
+        ["observer", true],
+      ]);
+      expect(inventories?.[2]?.accounts[0]?.windows).toEqual(observer.accounts[0]?.windows);
+      expect(yield* allocation.execute({ _tag: "modelSnapshot", part: "settings" })).toMatchObject({
+        modelSnapshot: { policy: copy.modelPolicy, authorityAvailable: false },
+      });
+      reachable = true;
+      const live = yield* read();
+      expect(live.offline).toBeUndefined();
+      expect(live.snapshot?.authorityAvailable).toBe(true);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
   "a computer that cannot reach the coordinator decides with the copy it stored, after a restart too, and says how old it is",
   () => {
     const coordinator = fixture({ localId: "remote", label: "Remote" });
