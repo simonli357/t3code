@@ -184,6 +184,8 @@ export const AllocationPolicy = Schema.Struct({
   ),
   /** False: no worker starts on or moves to a Fable model. Absent means allowed. */
   fableWorkers: Schema.optional(Schema.Boolean),
+  /** Pace unpinned Claude worker starts against the account-wide weekly window. Absent means off. */
+  fableInStep: Schema.optional(Schema.Boolean),
   /**
    * Fable mode, by `allocationPreferenceKey`: a worker on one of these Claude accounts runs on a
    * Fable rung of the ladder unless its model is pinned.
@@ -901,6 +903,7 @@ export const AllocationPolicyEdit = Schema.Struct({
   /** Back to the account's goal on the Fable window, without automatic Fable mode. */
   clearFableGoals: Schema.optional(Schema.Array(AccountRef)),
   fableWorkers: AllocationPolicy.fields.fableWorkers,
+  fableInStep: AllocationPolicy.fields.fableInStep,
   /** Every account in Fable mode; the rest are not. Only Claude accounts can be. */
   fableAccounts: Schema.optional(Schema.Array(AccountRef).check(Schema.isMaxLength(100))),
   /** The whole Claude ladder, weakest first. */
@@ -951,6 +954,7 @@ export const AllocationPolicyView = Schema.Struct({
     ),
   ),
   fableWorkers: Schema.optional(Schema.Boolean),
+  fableInStep: Schema.optional(Schema.Boolean),
   /** The accounts in Fable mode. */
   fableAccounts: Schema.optional(Schema.Array(Schema.String)),
   /** Each account's Fable goal in percent of its Fable weekly window. */

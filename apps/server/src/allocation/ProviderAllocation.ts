@@ -1539,6 +1539,7 @@ const make = Effect.gen(function* () {
       changes.setFableGoals,
       changes.clearFableGoals,
       changes.fableWorkers,
+      changes.fableInStep,
       changes.fableAccounts,
     ];
     const modelEdit = [changes.ladder, changes.fallback, changes.setCells];

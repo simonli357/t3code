@@ -111,6 +111,7 @@ export function allocationPolicyView(
       })),
     ),
     fableWorkers: policy.fableWorkers !== false,
+    fableInStep: policy.fableInStep === true,
     fableAccounts: policy.fableAccounts
       ? once(policy.fableAccounts.map(label))
       : once(
@@ -248,6 +249,7 @@ export const editAllocationPolicy = Effect.fn("editAllocationPolicy")(function* 
     ...(policy.accountGoals || edit.setGoals || edit.clearGoals ? { accountGoals: goals } : {}),
     ...(policy.fableGoals || edit.setFableGoals || edit.clearFableGoals ? { fableGoals } : {}),
     ...(edit.fableWorkers === undefined ? {} : { fableWorkers: edit.fableWorkers }),
+    ...(edit.fableInStep === undefined ? {} : { fableInStep: edit.fableInStep }),
     ...(fableAccounts ? { fableAccounts } : {}),
     ...(accountOrder ? { accountOrder } : {}),
     ...(edit.closeMarginPoints === undefined ? {} : { closeMarginPoints: edit.closeMarginPoints }),

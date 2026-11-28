@@ -273,7 +273,10 @@ export const accountFableGoal = (
   policy: AllocationPolicy,
   account: Pick<AllocationAccount, "driver" | "accountKey" | "environmentId" | "instanceId">,
 ) =>
-  policy.fableGoals?.find((g) => g.key === allocationPreferenceKey(account))?.percentPerDay ?? null;
+  policy.fableInStep
+    ? null
+    : (policy.fableGoals?.find((g) => g.key === allocationPreferenceKey(account))?.percentPerDay ??
+      null);
 
 /**
  * A candidate with the points left on its tightest limit at the job's end and, with a Fable
@@ -370,7 +373,7 @@ export function decideAllocation(input: {
    */
   accountRung?: (
     account: AllocationAccount,
-  ) => { request: AllocationRequest | null; fableMode?: boolean } | undefined;
+  ) => { request: AllocationRequest | null; fableMode?: boolean; pacing?: string } | undefined;
   /**
    * The requests of other provider families. An account of one of them is a candidate too,
    * judged on its family's request, and every line then names what its account would run.
@@ -402,6 +405,17 @@ export const fableGoalStandings = (input: Parameters<typeof decideAllocation>[0]
           },
         ],
   );
+
+/** Compare both windows under the same hypothetical Fable start, including existing demand. */
+export function fableWeeklyStandings(input: Parameters<typeof decideAllocation>[0]) {
+  const standings = new Map<string, { fable: number; weekly: number }>();
+  for (const [id, { windows }] of judge(input).projections) {
+    const fable = windows.find((w) => allocationFableWindow(w.window));
+    const weekly = windows.find((w) => w.window.kind === "weekly" && !w.window.models?.length);
+    if (fable && weekly) standings.set(id, { fable: fable.atEnd, weekly: weekly.atEnd });
+  }
+  return standings;
+}
 
 /** The decision, and every candidate with the numbers it was ranked on. */
 function judge(input: Parameters<typeof decideAllocation>[0]) {
@@ -435,11 +449,11 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
       const reasons: string[] = [];
       const rung = input.accountRung?.(account);
       const own = rung ? rung.request : familyRequest(account.driver)!;
-      if (own === null) reasons.push("Fable mode: no Fable rung takes this place.");
+      if (own === null) reasons.push(rung?.pacing ?? "Fable mode: no Fable rung takes this place.");
       const run = own ?? request;
       const tags = [
         ...(rung?.fableMode ? ["Fable mode"] : []),
-        ...(mixed || (rung && !rung.fableMode)
+        ...(!rung?.pacing && (mixed || (rung && !rung.fableMode))
           ? [profileLabel(run.driver, run.model, run.options)]
           : []),
       ];
@@ -479,7 +493,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         fableGoal: accountFableGoal(policy, account),
         creditsPerDollar: policy.creditsPerDollar ?? DEFAULT_CREDITS_PER_DOLLAR,
       });
-      projections.set(`${account.environmentId}:${account.instanceId}`, projection);
+      projections.set(account.instanceId, projection);
       const fableLine = projection.windows.find((w) => w.fableGoal);
       // It pays for part of the job with the provider's credits.
       const credits = projection.fits ? projection.credits : undefined;
@@ -519,7 +533,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
             : room.drainedUntil !== undefined
               ? room.text
               : runwayText(projection, Date.parse(at))
-        }, ${workers} worker${workers === 1 ? "" : "s"}`,
+        }, ${workers} worker${workers === 1 ? "" : "s"}${own && rung?.pacing ? `; ${rung.pacing}` : ""}`,
         ...legacyAllocationCandidateFields,
       };
     })
@@ -617,7 +631,7 @@ function judge(input: Parameters<typeof decideAllocation>[0]) {
         ],
     waitUntil: selected || !reason ? null : (resets[0] ?? null),
   };
-  return { decision, candidates };
+  return { decision, candidates, projections };
 }
 
 /**

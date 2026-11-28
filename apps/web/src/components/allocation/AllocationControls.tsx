@@ -834,6 +834,19 @@ export function AllocationControls({
             onCheckedChange={(fableWorkers) => onEdit((current) => ({ ...current, fableWorkers }))}
           />
         </Rule>
+        <Rule
+          title="Keep Fable in step with weekly"
+          hint="compare projected weekly usage"
+          detail="Use Fable when its projected usage is at or below Weekly. When Fable is ahead, use the nearest non-Fable rung for a Fable table entry."
+          failed={notSaved.has("fableInStep")}
+        >
+          <Switch
+            aria-label="Keep Fable in step with weekly"
+            checked={policy.fableInStep === true}
+            disabled={disabled || snapshot?.runways === undefined}
+            onCheckedChange={(fableInStep) => onEdit((current) => ({ ...current, fableInStep }))}
+          />
+        </Rule>
       </SettingsSection>
       <FoldedSettingsSection
         id="allocation-computer"

@@ -1266,6 +1266,61 @@ describe("Fable goal", () => {
     })),
   });
 
+  it("paces each unpinned account on the Fable rung's projected weekly bars", () => {
+    const table = { model: FABLE, effort: "low" };
+    const ahead = fableUsed("A", 60);
+    const policy = { fableInStep: true, ...fableGoals(14, "A") };
+    const choice = choose([ahead], table, { policy });
+    expect(picked(choice)).toBe(`A ${OPUS} / xhigh`);
+    expect(choice.accounts[0]).toContain(`Fable 60% ahead of Weekly 20%, so ${OPUS} / xhigh`);
+    expect(picked(choose([ahead], opusHigh, { policy }))).toBe(`A ${OPUS} / high`);
+    for (const usage of [10, 20]) {
+      const behind = choose([fableUsed("B", usage)], opusHigh, { policy });
+      expect(picked(behind)).toBe(`B ${FABLE} / low`);
+      expect(behind.accounts[0]).toContain(`Fable ${usage}% at or below Weekly 20%`);
+    }
+    // Both meters start equal, but Fable would consume more points by the end.
+    const equal = fableUsed("A", 20);
+    const rates = learned([equal]);
+    expect(
+      picked(
+        choose([equal], table, {
+          policy,
+          learned: {
+            ...rates,
+            limits: rates.limits.map((l) => ({
+              ...l,
+              percentPerDollar: l.windowId.includes(FABLE) ? 0.1 : 0.01,
+            })),
+          },
+        }),
+      ),
+    ).toBe(`A ${OPUS} / xhigh`);
+    expect(picked(choose([ahead], table, { policy: { ...policy, fableInStep: false } }))).toBe(
+      `A ${FABLE} / low`,
+    );
+  });
+
+  it("keeps pins, Fable workers off, Pro and accounts without a Fable reading on their usual rules", () => {
+    const table = { model: FABLE, effort: "low" };
+    const ahead = fableUsed("A", 60);
+    const policy = { fableInStep: true };
+    for (const pin of [
+      { explicitInstanceId: ahead.instanceId },
+      {
+        override: { driver: claudeAgent, model: FABLE, options: [{ id: "effort", value: "low" }] },
+      },
+    ])
+      expect(picked(choose([ahead], table, { policy, request: pin }))).toBe(`A ${FABLE} / low`);
+    for (const a of [fableUsed("P", 10, { plan: "Pro" }), claude("M", [weekly(20)])]) {
+      expect(choose([a], table, { policy })).toEqual(choose([a], table));
+    }
+    const disabled = { fableWorkers: false };
+    expect(choose([ahead], table, { policy: { ...policy, ...disabled } })).toEqual(
+      choose([ahead], table, { policy: disabled }),
+    );
+  });
+
   it("changes nothing while unset: the daily goal paces the Fable window and no account switches", () => {
     const accounts = [
       fableUsed("A", 10),

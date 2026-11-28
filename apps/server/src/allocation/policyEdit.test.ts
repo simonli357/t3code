@@ -208,6 +208,7 @@ it("reads both policies with accounts by label", () => {
     fableGoals: [],
     fableWorkers: true,
     fableAccounts: [],
+    fableInStep: false,
     ladder: defaultModelLadder.map(({ model, effort }) => `${model} / ${effort}`),
     fallback: "deepseek-flash / max when the wanted rung is below claude-sonnet-5-5 / xhigh",
     accounts: [
@@ -325,6 +326,15 @@ it.effect("sets and clears Fable goals by label, only on Claude accounts", () =>
     expect(
       allocationPolicyView({ ...withCodex, policy: set }, defaultModelRoutingPolicy).fableGoals,
     ).toEqual([{ account: "ES", percentPerDay: 14 }]);
+    for (const fableInStep of [true, false]) {
+      const edited = yield* change({ fableInStep }, set);
+      expect(
+        allocationPolicyView({ ...withCodex, policy: edited }, defaultModelRoutingPolicy),
+      ).toMatchObject({
+        fableInStep,
+        fableGoals: [{ account: "ES", percentPerDay: 14 }],
+      });
+    }
     // An edit that does not name them keeps them; clearing one leaves the others.
     const both = yield* change({ setFableGoals: [{ account: "XL", percentPerDay: 10 }] }, set);
     expect((yield* change({ closeMarginPoints: 4 }, both)).fableGoals).toEqual(both.fableGoals);

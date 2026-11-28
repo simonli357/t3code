@@ -528,6 +528,20 @@ function AllocationEditor({ target }: { target: Target }) {
             </View>
             {notSaved.has("fableWorkers") ? unsaved : null}
           </View>
+          <View className="gap-1">
+            <View className="flex-row items-center justify-between">
+              <Text>Keep Fable in step with weekly</Text>
+              <ThemedSwitch
+                accessibilityLabel="Keep Fable in step with weekly"
+                value={policy.fableInStep === true}
+                disabled={!goalsEditable}
+                onValueChange={(fableInStep) =>
+                  store.edit((current) => ({ ...current, fableInStep }))
+                }
+              />
+            </View>
+            {notSaved.has("fableInStep") ? unsaved : null}
+          </View>
           {fold("computer", "Computer for a new worker", () => COMPUTER_RULES.map(rule))}
           {snapshot.learned
             ? fold("learned", "Learned numbers", () => (

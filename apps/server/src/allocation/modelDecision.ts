@@ -22,7 +22,7 @@ import {
   type RoutingProfile,
 } from "@t3tools/contracts";
 import { claudePlanExcludesFable, findCatalogModel, isFable } from "@t3tools/shared/model";
-import { decideAllocation, fableGoalStandings } from "./decision.ts";
+import { decideAllocation, fableGoalStandings, fableWeeklyStandings } from "./decision.ts";
 import { span } from "./runway.ts";
 
 /**
@@ -128,7 +128,7 @@ export function wantedProfiles(
     const index = profiles.findIndex((profile) =>
       accounts.some((a) =>
         claudePlanExcludesFable(a) && isFable(profile.model)
-          ? proStandIn(a, profile, modelLadder(policy))
+          ? nonFableStandIn(a, profile, modelLadder(policy))
           : accountSupportsRoutingProfile(a, profile),
       ),
     );
@@ -214,7 +214,7 @@ export function nearestRungs(
     .map(({ rung }) => rung);
 }
 
-function proStandIn(
+function nonFableStandIn(
   account: AllocationAccount,
   profile: RoutingProfile,
   ladder: readonly RoutingProfile[],
@@ -321,8 +321,6 @@ export function chooseProfile(input: {
   const here = inventories
     .flatMap((i) => i.accounts)
     .filter((a) => a.environmentId === request.environmentId);
-  // Workers on these Claude accounts run in Fable mode.
-  const listed = workers ? here.filter((a) => fableModeAccount(policy, a)) : [];
   const notes: string[] = [];
   const tried: { request: AllocationRequest; reason: string; chosen: boolean }[] = [];
   let refusal: { reason: string; drainedUntil: string | null; accounts: string[] } | undefined;
@@ -335,23 +333,37 @@ export function chooseProfile(input: {
     const rest = together ? resolved.candidates.slice(index + 1) : [];
     const others = together ? [...rest.map((c) => c.request), ...resolved.unoffered] : [];
     const profile = requestProfile(asked.request);
-    // Accounts with a Fable goal, judged on the Fable rung their table entry would start from.
+    // Judge both pacing policies on the Fable rung the account would run.
+    const pace = policy.fableInStep && !request.explicitInstanceId && !request.nativeInstanceId;
     const goalRung =
       asked.request.driver === "claudeAgent" &&
       workers &&
       !fableOff &&
       !request.override &&
-      policy.fableGoals?.length
+      (pace || (!policy.fableInStep && policy.fableGoals?.length))
         ? fableRung(profile)
         : undefined;
-    const standings = goalRung
-      ? fableGoalStandings({ ...input, request: onRung(asked.request, goalRung) }).filter(
-          (s) => !listed.some((a) => a.instanceId === s.instanceId),
-        )
+    const projected =
+      goalRung && pace
+        ? fableWeeklyStandings({ ...input, request: onRung(asked.request, goalRung) })
+        : undefined;
+    const mode = workers
+      ? here.filter((a) => {
+          const bars = projected?.get(a.instanceId);
+          return bars && !claudePlanExcludesFable(a)
+            ? bars.fable <= bars.weekly
+            : fableModeAccount(policy, a);
+        })
       : [];
+    const standings =
+      goalRung && !pace
+        ? fableGoalStandings({ ...input, request: onRung(asked.request, goalRung) }).filter(
+            (s) => !mode.some((a) => a.instanceId === s.instanceId),
+          )
+        : [];
     const behind = standings.filter((s) => s.fits && s.slack >= 0);
-    const fableIds = [...listed, ...behind].map((a) => a.instanceId);
-    const fableNames = [...new Set([...listed, ...behind].map((a) => a.label))].join(", ");
+    const fableIds = [...mode, ...behind].map((a) => a.instanceId);
+    const fableNames = [...new Set([...mode, ...behind].map((a) => a.label))].join(", ");
     /** Where an account stands against its Fable goal, then what it runs: `rung` or `table`. */
     const goalText = (s: (typeof standings)[number], rung: string, table: string) => {
       const points = `${Math.round(Math.abs(s.slack))} points`;
@@ -442,6 +454,17 @@ export function chooseProfile(input: {
         ...mixed,
         request: only ?? when(normal!),
         accountRung(account) {
+          const bars = !claudePlanExcludesFable(account) && projected?.get(account.instanceId);
+          if (bars) {
+            const ahead = bars.fable > bars.weekly;
+            let run = ahead ? normal : fable;
+            if (ahead && run && isFable(run.model)) {
+              const rung = nonFableStandIn(account, requestProfile(run), ladder);
+              run = rung ? onRung(run, rung) : null;
+            }
+            const pacing = `Fable ${Math.round(bars.fable)}% ${ahead ? "ahead of" : "at or below"} Weekly ${Math.round(bars.weekly)}%, so ${run ? rungLabel(run) : "no eligible rung"}`;
+            return { request: run ? when(run) : null, fableMode: !ahead, pacing };
+          }
           if (fable !== undefined && fableIds.includes(account.instanceId))
             return { request: only ?? (fable && when(fable)), fableMode: true };
           if (normal?.driver !== "claudeAgent" || !claudePlanExcludesFable(account))
@@ -450,7 +473,7 @@ export function chooseProfile(input: {
           if (request.override)
             return isFable(request.override.model) ? { request: when(asked.request) } : undefined;
           if (!isFable(normal.model)) return undefined;
-          const rung = proStandIn(account, requestProfile(normal), ladder);
+          const rung = nonFableStandIn(account, requestProfile(normal), ladder);
           return rung ? { request: when(onRung(normal, rung)) } : undefined;
         },
       });
