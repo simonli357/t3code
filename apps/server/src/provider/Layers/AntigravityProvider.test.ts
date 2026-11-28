@@ -173,6 +173,37 @@ describe("Antigravity model catalog", () => {
     expect(models.every((model) => !model.isCustom)).toBe(true);
   });
 
+  it("uses the 1.5.2 model families when legacy IDs include thinking levels", () => {
+    const models = buildAntigravityModelsFromSession({
+      configOptions: [
+        {
+          ...modelConfig,
+          currentValue: "gemini-3.8-flash",
+          options: [
+            { value: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+            { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+          ],
+        },
+        {
+          id: "thinking_level",
+          name: "Thinking Level",
+          type: "select",
+          currentValue: "high",
+          options: [{ value: "high", name: "High" }],
+        },
+      ],
+      models: {
+        currentModelId: "gemini-3.8-flash-high",
+        availableModels: [
+          { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
+          { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+        ],
+      },
+    });
+    expect(models.map((model) => model.slug)).toEqual(["gemini-4-hydrogen", "gemini-3.8-flash"]);
+    expect(models.find((model) => model.isDefault)?.slug).toBe("gemini-3.8-flash");
+  });
+
   it("uses legacy session models only when model config is absent", () => {
     const fromLegacy = buildAntigravityModelsFromSession({
       models: sessionSetupResult.models,
